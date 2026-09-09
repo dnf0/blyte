@@ -1,0 +1,17 @@
+[workspace]
+publish = false
+release = false
+changelog_update = true
+git_release_enable = false
+git_tag_enable = true
+
+[changelog]
+sort_commits = "oldest"
+header = """
+# Changelog
+
+All notable changes to Superstate will be documented in this file.
+This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+and [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+"""
+trim = true

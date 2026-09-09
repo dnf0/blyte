@@ -1,0 +1,24 @@
+[workspace]
+members = []
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Climate X Engineering"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/climate-x-org/superstate"
+homepage = "https://github.com/climate-x-org/superstate"
+readme = "README.md"
+keywords = ["agent", "state-machine", "mcp", "workflow", "developer-tools"]
+categories = ["development-tools", "command-line-utilities"]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0"
+fd-lock = "4.0"
+tempfile = "3.17"
+minijinja = "2.7"
+clap = { version = "4.5", features = ["derive"] }
