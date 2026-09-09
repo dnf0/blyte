@@ -63,25 +63,25 @@ jobs:
             "superstate"
           )
 
-          EXTRA_FLAGS=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            EXTRA_FLAGS="--dry-run"
-          fi
-
           for crate in "${TOPOLOGICAL_CRATES[@]}"; do
             echo "=================================================="
-            echo "Processing crate: $crate (Flags: ${EXTRA_FLAGS:-<live-upload>})"
+            echo "Processing crate: $crate"
             echo "=================================================="
 
             if [ "${{ inputs.dry_run }}" = "true" ]; then
-              cargo package -p "$crate"
               if [ "$crate" = "superstate-core" ] || [ "$crate" = "superstate-syntax" ] || [ "$crate" = "superstate-review" ] || [ "$crate" = "superstate-rules" ]; then
+                echo "Testing dry-run publish for leaf crate: $crate"
                 cargo publish --dry-run -p "$crate"
+              else
+                echo "Dependent crate '$crate' requires upstream crates on crates.io before packaging resolution."
+                echo "Verifying local compilation and type integrity for '$crate'..."
+                cargo check -p "$crate" --all-targets
               fi
             else
+              echo "Publishing $crate to crates.io..."
               cargo publish -p "$crate"
-              echo "Waiting 20 seconds for crates.io index propagation..."
-              sleep 20
+              echo "Waiting 25 seconds for crates.io index propagation..."
+              sleep 25
             fi
 
             echo "[✓] Crate $crate processed successfully."
