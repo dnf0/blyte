@@ -72,6 +72,14 @@ enum StateCommands {
         #[arg(long)]
         verify_git_clean: bool,
     },
+    /// Display tasks whose dependencies are satisfied and may run now
+    Ready {
+        #[arg(short, long, default_value = ".agent-state/state.json")]
+        state: PathBuf,
+        /// Emit a JSON array of task titles, for programmatic consumers
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate prompt for active task
     Prompt {
         #[arg(short, long, default_value = ".agent-state/state.json")]
@@ -109,6 +117,7 @@ fn main() {
                 verify_cmd,
                 verify_git_clean,
             } => commands::state::cmd_next(&state, verify_cmd, verify_git_clean),
+            StateCommands::Ready { state, json } => commands::state::cmd_ready(&state, json),
             StateCommands::Prompt { state } => commands::state::cmd_prompt(&state),
             StateCommands::Note {
                 note,

@@ -15,6 +15,39 @@ pub fn cmd_init(plan: PathBuf, state_path: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// Print tasks whose dependencies are satisfied and may therefore run now.
+///
+/// `--json` emits an array of titles, which is the form a runner consumes when
+/// deciding what to dispatch next.
+pub fn cmd_ready(state_path: &Path, as_json: bool) -> Result<(), String> {
+    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let ready = superstate_core::state_machine::ready_tasks(&state);
+
+    if as_json {
+        // "Task 1: Title" -- the same form the reference implementation emits, and
+        // the form a runner feeds back to `state prompt --task`. Emitting the bare
+        // title would look right and fail to match.
+        let titles: Vec<String> = ready
+            .iter()
+            .map(|t| format!("{}: {}", t.id, t.title))
+            .collect();
+        let rendered = serde_json::to_string_pretty(&titles)
+            .map_err(|e| format!("Failed to serialize ready tasks: {}", e))?;
+        println!("{}", rendered);
+        return Ok(());
+    }
+
+    if ready.is_empty() {
+        println!("No unblocked tasks: every pending task is waiting on an incomplete dependency.");
+        return Ok(());
+    }
+    println!("Unblocked tasks ({}):", ready.len());
+    for task in ready {
+        println!("  {}: {}", task.id, task.title);
+    }
+    Ok(())
+}
+
 pub fn cmd_status(state_path: &Path) -> Result<(), String> {
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     println!("State Status: {:?}", state.status);

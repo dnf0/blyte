@@ -1,4 +1,4 @@
-use crate::models::{ExecutionState, ExecutionStatus};
+use crate::models::{ExecutionState, ExecutionStatus, TaskSpec};
 use fd_lock::RwLock;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -77,4 +77,44 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
     }
 
     Ok(())
+}
+
+/// Tasks whose dependencies are all satisfied, and which may therefore run now.
+///
+/// A pending task is unblocked when every entry in `depends_on` names a completed
+/// task. Dependencies are written as they appear in the plan (`**Depends on:** Task 1`),
+/// so they are matched against both id and title, and the conventional `none`
+/// placeholder is treated as no dependency at all.
+///
+/// This is what makes the plan a DAG rather than a list: without it a runner can
+/// only walk milestones in file order, which is not the same thing.
+pub fn ready_tasks(state: &ExecutionState) -> Vec<&TaskSpec> {
+    let completed: Vec<&str> = state
+        .completed_tasks
+        .iter()
+        .flat_map(|t| [t.id.as_str(), t.title.as_str()])
+        .collect();
+
+    let is_satisfied = |dep: &String| -> bool {
+        let dep = dep.trim();
+        if dep.is_empty() || dep.eq_ignore_ascii_case("none") {
+            return true;
+        }
+        completed
+            .iter()
+            .any(|done| done.eq_ignore_ascii_case(dep) || dep.starts_with(*done))
+    };
+
+    let mut ready: Vec<&TaskSpec> = Vec::new();
+    if let Some(active) = state.active_task.as_ref() {
+        if active.depends_on.iter().all(is_satisfied) {
+            ready.push(active);
+        }
+    }
+    for task in state.pending_tasks.iter() {
+        if task.depends_on.iter().all(is_satisfied) {
+            ready.push(task);
+        }
+    }
+    ready
 }
