@@ -51,11 +51,15 @@ pub fn create_checkpoint(repo_root: &Path, step: usize) -> Result<String, Checkp
 
 /// Reset the working tree to a checkpoint and remove untracked files.
 ///
-/// `reference` defaults to the checkpoint for `step`.
+/// `reference` defaults to the checkpoint for `step`. `preserve` names paths that
+/// must survive the clean -- above all the state file itself, which is untracked
+/// in most task repositories and would otherwise be deleted by the very command
+/// meant to recover from a failure, taking the record of that failure with it.
 pub fn rollback_to(
     repo_root: &Path,
     step: usize,
     reference: Option<&str>,
+    preserve: &[&str],
 ) -> Result<String, CheckpointError> {
     let target = reference
         .map(str::to_string)
@@ -71,6 +75,13 @@ pub fn rollback_to(
     })?;
 
     git(repo_root, &["reset", "--hard", &target])?;
-    git(repo_root, &["clean", "-fd"])?;
+
+    let mut clean_args: Vec<String> = vec!["clean".into(), "-fd".into()];
+    for path in preserve {
+        clean_args.push("-e".into());
+        clean_args.push((*path).to_string());
+    }
+    let clean_refs: Vec<&str> = clean_args.iter().map(String::as_str).collect();
+    git(repo_root, &clean_refs)?;
     Ok(target)
 }

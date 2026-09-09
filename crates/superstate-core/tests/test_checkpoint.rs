@@ -41,7 +41,7 @@ fn rollback_restores_tracked_files_and_removes_untracked_debris() {
     std::fs::write(p.join("f.txt"), "modified").unwrap();
     std::fs::write(p.join("junk.txt"), "debris").unwrap();
 
-    rollback_to(p, 1, None).expect("rollback");
+    rollback_to(p, 1, None, &[]).expect("rollback");
 
     assert_eq!(
         std::fs::read_to_string(p.join("f.txt")).unwrap(),
@@ -60,7 +60,7 @@ fn rollback_refuses_an_unknown_reference_without_touching_the_tree() {
     let p = dir.path();
     std::fs::write(p.join("wip.txt"), "uncommitted work").unwrap();
 
-    let err = rollback_to(p, 1, Some("no-such-tag")).unwrap_err();
+    let err = rollback_to(p, 1, Some("no-such-tag"), &[]).unwrap_err();
 
     assert!(err.to_string().contains("does not exist"), "{}", err);
     assert!(
@@ -82,10 +82,33 @@ fn recheckpointing_a_step_moves_the_tag_to_the_current_commit() {
     create_checkpoint(p, 1).expect("re-checkpoint must not fail");
 
     std::fs::write(p.join("f.txt"), "dirty").unwrap();
-    rollback_to(p, 1, None).expect("rollback");
+    rollback_to(p, 1, None, &[]).expect("rollback");
     assert_eq!(
         std::fs::read_to_string(p.join("f.txt")).unwrap(),
         "second commit",
         "the tag should guard the newer commit"
+    );
+}
+
+#[test]
+fn rollback_does_not_delete_the_state_file_it_depends_on() {
+    // The state file is untracked in most task repositories, so `git clean -fd`
+    // would delete it -- the command meant to recover from a failure destroying
+    // the record of that failure.
+    let dir = repo();
+    let p = dir.path();
+    std::fs::write(p.join("state.json"), "{\"step\":1}").unwrap();
+    create_checkpoint(p, 1).expect("checkpoint");
+    std::fs::write(p.join("junk.txt"), "debris").unwrap();
+
+    rollback_to(p, 1, None, &["state.json", ".agent-state"]).expect("rollback");
+
+    assert!(
+        p.join("state.json").exists(),
+        "state file must survive rollback"
+    );
+    assert!(
+        !p.join("junk.txt").exists(),
+        "other debris must still be removed"
     );
 }

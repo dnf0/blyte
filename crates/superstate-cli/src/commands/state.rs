@@ -87,10 +87,24 @@ pub fn cmd_checkpoint(state_path: &Path) -> Result<(), String> {
 pub fn cmd_rollback(state_path: &Path, reference: Option<&str>) -> Result<(), String> {
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let root = repo_root_for(state_path);
-    let target = superstate_core::checkpoint::rollback_to(&root, state.step, reference)
-        .map_err(|e| format!("Failed to roll back: {}", e))?;
+    let target = superstate_core::checkpoint::rollback_to(
+        &root,
+        state.step,
+        reference,
+        &preserved(state_path),
+    )
+    .map_err(|e| format!("Failed to roll back: {}", e))?;
     println!("Working tree cleanly rolled back to {}", target);
     Ok(())
+}
+
+/// Paths a rollback must never delete: the state file and its directory.
+fn preserved(state_path: &Path) -> Vec<&str> {
+    let mut keep = vec![".agent-state"];
+    if let Some(name) = state_path.file_name().and_then(|n| n.to_str()) {
+        keep.push(name);
+    }
+    keep
 }
 
 /// The repository the state file belongs to (.agent-state/state.json -> root).
@@ -299,4 +313,333 @@ pub fn cmd_note(state_path: &Path, note: &str, author: &str) -> Result<(), Strin
     append_ledger_note(state_path, entry).map_err(|e| format!("Failed to append note: {}", e))?;
     println!("Note recorded into epistemic ledger.");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation, diagnostics and patching
+// ---------------------------------------------------------------------------
+
+fn read_json(path: &Path) -> Result<serde_json::Value, String> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    serde_json::from_str(&body).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+        }
+    }
+    let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    std::fs::write(path, body).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+/// Reconcile the state with a revised plan, preserving completed work.
+pub fn cmd_sync(state_path: &Path, plan_path: &Path, out: Option<&Path>) -> Result<(), String> {
+    let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let plan = std::fs::read_to_string(plan_path)
+        .map_err(|e| format!("Failed to read plan {}: {}", plan_path.display(), e))?;
+
+    let report = superstate_core::maintenance::sync_with_plan(&mut state, &plan)?;
+    state.plan_path = Some(plan_path.to_path_buf());
+    write_json(
+        out.unwrap_or(state_path),
+        &superstate_core::patching::state_to_value(&state)?,
+    )?;
+
+    println!(
+        "State synced with plan '{}': active_task={} (pending={})",
+        plan_path.display(),
+        report.active_task.as_deref().unwrap_or("none"),
+        report.pending
+    );
+    for added in &report.added {
+        println!("  + {}", added);
+    }
+    for removed in &report.removed {
+        println!("  - {}", removed);
+    }
+    if report.preserved_completed > 0 {
+        println!(
+            "  {} completed task(s) preserved.",
+            report.preserved_completed
+        );
+    }
+    Ok(())
+}
+
+/// Diagnose plan/state drift, optionally repairing what can be repaired.
+pub fn cmd_doctor(
+    state_path: &Path,
+    plan_path: Option<&Path>,
+    repair: bool,
+    as_json: bool,
+) -> Result<(), String> {
+    let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let plan = match plan_path {
+        Some(p) => {
+            Some(std::fs::read_to_string(p).map_err(|e| format!("Failed to read plan: {}", e))?)
+        }
+        None => None,
+    };
+
+    let report = superstate_core::maintenance::diagnose(&state, plan.as_deref());
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!("Healthy: {}", report.is_healthy);
+        for i in &report.issues {
+            println!("  issue:   {}", i);
+        }
+        for w in &report.warnings {
+            println!("  warning: {}", w);
+        }
+    }
+
+    if repair {
+        let actions = superstate_core::maintenance::repair(&mut state);
+        if actions.is_empty() {
+            println!("Nothing to repair.");
+        } else {
+            write_json(
+                state_path,
+                &superstate_core::patching::state_to_value(&state)?,
+            )?;
+            for a in actions {
+                println!("  repaired: {}", a);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a state document against the execution schema.
+pub fn cmd_validate(state_path: &Path) -> Result<(), String> {
+    let raw = read_json(state_path)?;
+    let errors = superstate_core::patching::validate_state(&raw);
+    if errors.is_empty() {
+        println!("State is valid.");
+        return Ok(());
+    }
+    // Report every problem at once: one at a time turns this into a guessing game.
+    for e in &errors {
+        eprintln!("  invalid: {}", e);
+    }
+    Err(format!("State is invalid ({} problem(s)).", errors.len()))
+}
+
+/// Apply a JSON patch to the state, and/or append a note.
+pub fn cmd_apply(
+    state_path: &Path,
+    patch_path: Option<&Path>,
+    note: Option<&str>,
+    out: Option<&Path>,
+) -> Result<(), String> {
+    if patch_path.is_none() && note.is_none() {
+        return Err("Nothing to apply: pass --patch and/or --note.".to_string());
+    }
+    let mut state = read_json(state_path)?;
+
+    if let Some(patch_path) = patch_path {
+        let patch = read_json(patch_path)?;
+        superstate_core::patching::apply_patch(&mut state, &patch);
+    }
+    if let Some(note) = note {
+        superstate_core::patching::append_note(&mut state, "agent", note);
+    }
+
+    // Refuse to write a state we would not accept on read.
+    let errors = superstate_core::patching::validate_state(&state);
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("  invalid: {}", e);
+        }
+        return Err("Patch would produce an invalid state; nothing written.".to_string());
+    }
+
+    write_json(out.unwrap_or(state_path), &state)?;
+    println!("State patch applied.");
+    Ok(())
+}
+
+/// Executive briefing for resuming after context loss.
+pub fn cmd_resume(state_path: &Path) -> Result<(), String> {
+    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let root = repo_root_for(state_path);
+    let commits = std::process::Command::new("git")
+        .args(["log", "--oneline", "-5"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    println!(
+        "{}",
+        superstate_core::maintenance::resume_briefing(&state, &commits)
+    );
+    Ok(())
+}
+
+/// Task telemetry and efficiency metrics.
+pub fn cmd_metrics(state_path: &Path, as_json: bool) -> Result<(), String> {
+    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let m = superstate_core::maintenance::metrics(&state);
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!("Step:            {}", m.step);
+        println!("Status:          {}", m.status);
+        println!(
+            "Tasks:           {}/{} complete ({}%)",
+            m.tasks_completed, m.tasks_total, m.completion_pct
+        );
+        println!("Remaining:       {}", m.tasks_remaining);
+        println!("Notes recorded:  {}", m.notes_recorded);
+        println!("Errors recorded: {}", m.errors_recorded);
+    }
+    Ok(())
+}
+
+/// Decompose coarse plan tasks into atomic child micro-tasks.
+pub fn cmd_decompose(plan_path: &Path, out: Option<&Path>, in_place: bool) -> Result<(), String> {
+    let plan = std::fs::read_to_string(plan_path)
+        .map_err(|e| format!("Failed to read plan {}: {}", plan_path.display(), e))?;
+    let decomposed = superstate_core::patching::decompose_plan(&plan)?;
+
+    match (in_place, out) {
+        (true, _) => {
+            std::fs::write(plan_path, &decomposed).map_err(|e| e.to_string())?;
+            println!("Plan decomposed in place: {}", plan_path.display());
+        }
+        (false, Some(dest)) => {
+            std::fs::write(dest, &decomposed).map_err(|e| e.to_string())?;
+            println!("Decomposed plan written to {}", dest.display());
+        }
+        (false, None) => print!("{}", decomposed),
+    }
+    Ok(())
+}
+
+/// Run a verification command and atomically advance, or record the failure.
+///
+/// This collapses checkpoint -> verify -> advance-or-rollback into one operation,
+/// so a run cannot end up half-advanced: either the gate passed and the state
+/// moved on, or it failed and the state records why. Optionally restores the
+/// checkpoint on failure, leaving no debris for the next attempt.
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_exec(
+    state_path: &Path,
+    verify_cmd: &str,
+    verify_git_clean: bool,
+    checkpoint: bool,
+    rollback_on_fail: bool,
+    advance: bool,
+    as_json: bool,
+) -> Result<(), String> {
+    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let root = repo_root_for(state_path);
+    let step = state.step;
+
+    if checkpoint {
+        superstate_core::checkpoint::create_checkpoint(&root, step)
+            .map_err(|e| format!("Failed to checkpoint before exec: {}", e))?;
+    }
+
+    let gate = superstate_core::verifier::run_verification_cmd(verify_cmd, &root, 600)
+        .map_err(|e| format!("Verification could not run: {}", e))?;
+
+    let mut git_clean_passed = true;
+    if gate.passed && verify_git_clean {
+        let clean = superstate_core::verifier::verify_git_clean(&root)
+            .map_err(|e| format!("git clean check failed: {}", e))?;
+        git_clean_passed = clean.passed;
+    }
+
+    let passed = gate.passed && git_clean_passed;
+    let mut rolled_back = false;
+    let mut advanced = false;
+
+    if passed && advance {
+        cmd_next(state_path, Some(verify_cmd.to_string()), verify_git_clean)?;
+        advanced = true;
+    } else if !passed {
+        // Record why, so the failure survives in the state rather than only in
+        // whatever scrollback the caller happens to keep.
+        let mut failed_state =
+            load_state(state_path).map_err(|e| format!("Failed to reload state: {}", e))?;
+        failed_state.errors.push(format!(
+            "step {}: verification failed for `{}`: {}",
+            step,
+            verify_cmd,
+            gate.failure_reason.clone().unwrap_or_else(|| {
+                if git_clean_passed {
+                    "non-zero exit".into()
+                } else {
+                    "working tree not clean".into()
+                }
+            })
+        ));
+        let value = superstate_core::patching::state_to_value(&failed_state)?;
+        write_json(state_path, &value)?;
+
+        if rollback_on_fail {
+            superstate_core::checkpoint::rollback_to(&root, step, None, &preserved(state_path))
+                .map_err(|e| format!("Failed to roll back after failure: {}", e))?;
+            rolled_back = true;
+        }
+    }
+
+    if as_json {
+        let report = serde_json::json!({
+            "passed": passed,
+            "advanced": advanced,
+            "rolled_back": rolled_back,
+            "step": step,
+            "verify_cmd": verify_cmd,
+            "output": gate.output,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else if passed {
+        println!(
+            "Verification passed{}",
+            if advanced {
+                " and state advanced."
+            } else {
+                "."
+            }
+        );
+    } else {
+        println!(
+            "Verification failed{}",
+            if rolled_back {
+                "; working tree rolled back."
+            } else {
+                "; failure recorded in state."
+            }
+        );
+    }
+
+    if passed {
+        Ok(())
+    } else {
+        Err("verification failed".to_string())
+    }
 }
