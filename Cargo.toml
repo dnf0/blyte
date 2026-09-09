@@ -2,6 +2,7 @@
 members = [
     "crates/superstate-core",
     "crates/superstate-syntax",
+    "crates/superstate-review",
 ]
 resolver = "2"
 
