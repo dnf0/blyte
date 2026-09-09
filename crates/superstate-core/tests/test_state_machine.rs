@@ -1,0 +1,75 @@
+use std::path::PathBuf;
+use superstate_core::models::{ExecutionState, ExecutionStatus, TaskSpec};
+use superstate_core::state_machine::{advance_step, load_state, save_state_atomic};
+use tempfile::tempdir;
+
+#[test]
+fn test_state_atomic_save_and_load() {
+    let dir = tempdir().unwrap();
+    let state_file = dir.path().join(".agent-state").join("state.json");
+
+    let state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(TaskSpec {
+            id: "task-1".to_string(),
+            title: "Initial Task".to_string(),
+            depends_on: vec![],
+            files_modify: vec![PathBuf::from("src/lib.rs")],
+            interfaces_produces: vec![],
+            verification_cmd: Some("cargo test".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    save_state_atomic(&state_file, &state).expect("Atomic save failed");
+    assert!(state_file.exists());
+
+    let loaded = load_state(&state_file).expect("Failed to load state");
+    assert_eq!(loaded.step, 1);
+    assert_eq!(loaded.active_task.unwrap().title, "Initial Task");
+}
+
+#[test]
+fn test_advance_step_lifecycle() {
+    let task1 = TaskSpec {
+        id: "task-1".to_string(),
+        title: "Task 1".to_string(),
+        depends_on: vec![],
+        files_modify: vec![],
+        interfaces_produces: vec![],
+        verification_cmd: None,
+    };
+    let task2 = TaskSpec {
+        id: "task-2".to_string(),
+        title: "Task 2".to_string(),
+        depends_on: vec!["task-1".to_string()],
+        files_modify: vec![],
+        interfaces_produces: vec![],
+        verification_cmd: None,
+    };
+
+    let mut state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(task1),
+        pending_tasks: vec![task2],
+        ..Default::default()
+    };
+
+    advance_step(&mut state).expect("Advance step failed");
+
+    assert_eq!(state.step, 2);
+    assert_eq!(state.completed_tasks.len(), 1);
+    assert_eq!(state.completed_tasks[0].id, "task-1");
+    assert_eq!(state.active_task.as_ref().unwrap().id, "task-2");
+    assert_eq!(state.pending_tasks.len(), 0);
+    assert_eq!(state.status, ExecutionStatus::InProgress);
+
+    // Advance again to complete the final task
+    advance_step(&mut state).expect("Advance step failed");
+    assert_eq!(state.step, 3);
+    assert_eq!(state.completed_tasks.len(), 2);
+    assert!(state.active_task.is_none());
+    assert_eq!(state.status, ExecutionStatus::Completed);
+}
