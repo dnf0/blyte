@@ -1,11 +1,11 @@
 [package]
-name = "superstate-cli"
+name = "superstate"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "README.md"
+readme = "../../README.md"
 description = "Superstate unified CLI and state engine runner."
 
 [lib]
@@ -21,11 +21,11 @@ name = "state"
 path = "src/state_main.rs"
 
 [dependencies]
-superstate-core = { path = "../superstate-core" }
-superstate-syntax = { path = "../superstate-syntax" }
-superstate-review = { path = "../superstate-review" }
-superstate-rules = { path = "../superstate-rules" }
-superstate-mcp = { path = "../superstate-mcp" }
+superstate-core = { path = "../superstate-core", version = "0.1.0" }
+superstate-syntax = { path = "../superstate-syntax", version = "0.1.0" }
+superstate-review = { path = "../superstate-review", version = "0.1.0" }
+superstate-rules = { path = "../superstate-rules", version = "0.1.0" }
+superstate-mcp = { path = "../superstate-mcp", version = "0.1.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

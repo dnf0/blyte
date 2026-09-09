@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "README.md"
+readme = "../../README.md"
 description = "Native tree-sitter AST polyglot code intelligence for Rust, Python, TypeScript, and Go."
 
 [dependencies]

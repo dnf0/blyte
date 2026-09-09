@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "README.md"
+readme = "../../README.md"
 description = "Deterministic DFA state engine, atomic persistence, and multi-gate verification for agents."
 
 [dependencies]
