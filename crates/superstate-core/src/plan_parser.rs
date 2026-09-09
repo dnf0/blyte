@@ -25,13 +25,26 @@ pub fn parse_plan_markdown(content: &str) -> Result<Vec<TaskSpec>, ParseError> {
     for line in content.lines() {
         let trimmed = line.trim();
 
-        if trimmed.starts_with("### Task ") {
+        // Two plan dialects are accepted: markdown headings ("### Task 1: Title")
+        // and checkbox lists ("- [ ] Task 1: Title"). The reference implementation
+        // parses both, and rejecting one meant a plan that worked there failed
+        // here with "No tasks found".
+        let heading = trimmed
+            .strip_prefix("### Task ")
+            .or_else(|| trimmed.strip_prefix("## Task "))
+            .or_else(|| {
+                trimmed
+                    .strip_prefix("- [ ] Task ")
+                    .or_else(|| trimmed.strip_prefix("- [x] Task "))
+                    .or_else(|| trimmed.strip_prefix("* [ ] Task "))
+            });
+
+        if let Some(after_prefix) = heading {
             if let Some(task) = current_task.take() {
                 tasks.push(task);
             }
 
-            // Example header: "### Task 1: Scaffolding" or "### Task 1"
-            let after_prefix = trimmed.trim_start_matches("### Task ").trim();
+            let after_prefix = after_prefix.trim();
             let (id, title) = if let Some((num_part, title_part)) = after_prefix.split_once(':') {
                 (
                     format!("Task {}", num_part.trim()),

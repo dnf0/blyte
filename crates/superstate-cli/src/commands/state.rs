@@ -177,10 +177,20 @@ pub fn cmd_next(
 
     for res in &results {
         if !res.passed {
+            // Record why the gate refused, in the state rather than only in the
+            // caller's scrollback. A run resumed after context loss has nothing
+            // but this file to explain why it stopped here.
+            let reason = res
+                .failure_reason
+                .clone()
+                .unwrap_or_else(|| res.output.clone());
+            state.errors.push(reason.clone());
+            save_state_atomic(state_path, &state)
+                .map_err(|e| format!("Failed to record gate failure: {}", e))?;
+
             return Err(format!(
                 "Verification gate '{}' FAILED:\n{}",
-                res.gate_name,
-                res.failure_reason.as_deref().unwrap_or(&res.output)
+                res.gate_name, reason
             ));
         }
     }
