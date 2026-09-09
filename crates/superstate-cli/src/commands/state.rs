@@ -48,8 +48,39 @@ pub fn cmd_ready(state_path: &Path, as_json: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn cmd_status(state_path: &Path) -> Result<(), String> {
+/// Find a task by id or title across the active and pending sets.
+///
+/// Matching is case-insensitive and accepts either the bare id ("Task 2"), the
+/// bare title, or the combined "Task 2: Title" form that `state ready` emits --
+/// a runner should be able to feed `ready` output straight back in.
+fn select_task<'a>(
+    state: &'a superstate_core::models::ExecutionState,
+    wanted: Option<&str>,
+) -> Option<&'a superstate_core::models::TaskSpec> {
+    let wanted = match wanted {
+        Some(w) => w.trim(),
+        None => return state.active_task.as_ref(),
+    };
+    state
+        .active_task
+        .iter()
+        .chain(state.pending_tasks.iter())
+        .find(|t| {
+            let combined = format!("{}: {}", t.id, t.title);
+            t.id.eq_ignore_ascii_case(wanted)
+                || t.title.eq_ignore_ascii_case(wanted)
+                || combined.eq_ignore_ascii_case(wanted)
+        })
+}
+
+pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    if as_json {
+        let rendered = serde_json::to_string_pretty(&state)
+            .map_err(|e| format!("Failed to serialize state: {}", e))?;
+        println!("{}", rendered);
+        return Ok(());
+    }
     println!("State Status: {:?}", state.status);
     println!("Step: {}", state.step);
     if let Some(ref task) = state.active_task {
@@ -122,13 +153,26 @@ pub fn cmd_next(
     Ok(())
 }
 
-pub fn cmd_prompt(state_path: &Path) -> Result<(), String> {
+/// Generate the turnkey prompt for a task.
+///
+/// `task` selects a specific task by id or title -- without it only the active
+/// task is reachable, which makes `state ready` a query with nowhere to go: a
+/// runner can learn which tasks are unblocked but cannot ask for any of them.
+pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Result<(), String> {
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
 
-    let active = match state.active_task {
+    let active = match select_task(&state, task) {
         Some(t) => t,
         None => {
-            println!("All tasks completed.");
+            match task {
+                Some(wanted) => {
+                    return Err(format!(
+                        "No task matching '{}' in the active or pending set.",
+                        wanted
+                    ))
+                }
+                None => println!("All tasks completed."),
+            }
             return Ok(());
         }
     };
@@ -152,11 +196,70 @@ pub fn cmd_prompt(state_path: &Path) -> Result<(), String> {
     if let Some(ref cmd) = active.verification_cmd {
         println!("Verification command: `{}`", cmd);
     }
+
+    // Completed milestones and the epistemic ledger. This is the whole point of
+    // recording notes: without replaying them here, each milestone starts blind
+    // and `state note` writes to something nothing ever reads. Carrying findings
+    // forward -- rather than the whole conversation -- is what keeps the context
+    // footprint flat while preserving what was learned.
+    if !state.completed_tasks.is_empty() {
+        println!("\n## Completed Milestones");
+        for done in &state.completed_tasks {
+            println!("- {}: {}", done.id, done.title);
+        }
+    }
+
+    if !state.notes.is_empty() {
+        println!("\n## Epistemic Ledger (findings from earlier milestones)");
+        for entry in &state.notes {
+            println!("- [{}] {}", entry.author, entry.note);
+        }
+    }
+
+    if with_graph {
+        let graph = find_graph_context(state_path);
+        match graph {
+            Some((path, body)) => {
+                println!("\n## Architecture Context ({})", path.display());
+                println!("{}", body);
+            }
+            None => {
+                // Say so rather than accept the flag and silently ignore it.
+                eprintln!(
+                    "warning: --with-graph requested but no knowledge graph was found \
+                     (looked for graphify-out/GRAPH_REPORT.md); prompt omits graph context"
+                );
+            }
+        }
+    }
+
+    println!("\n## Instructions");
+    println!("1. Implement the requested task following Test-Driven Development (TDD).");
+    println!("2. Run the targeted verification command to confirm your fix.");
+    println!("3. Commit your changes with a conventional commit message.");
+    println!("4. Return a summary with commit SHA and verification output.");
     Ok(())
 }
 
-pub fn cmd_note(state_path: &Path, note: String, author: String) -> Result<(), String> {
-    let entry = LedgerEntry::new(author, note);
+/// Locate a knowledge-graph report near the workspace, if one has been generated.
+fn find_graph_context(state_path: &Path) -> Option<(std::path::PathBuf, String)> {
+    // .agent-state/state.json -> workspace root is two levels up.
+    let root = state_path.parent().and_then(|p| p.parent())?;
+    for candidate in [
+        root.join("graphify-out/GRAPH_REPORT.md"),
+        root.join("GRAPH_REPORT.md"),
+    ] {
+        if let Ok(body) = std::fs::read_to_string(&candidate) {
+            // Keep the prompt bounded: a graph report can be very large.
+            let clipped: String = body.chars().take(8000).collect();
+            return Some((candidate, clipped));
+        }
+    }
+    None
+}
+
+pub fn cmd_note(state_path: &Path, note: &str, author: &str) -> Result<(), String> {
+    let entry = LedgerEntry::new(author.to_string(), note.to_string());
     append_ledger_note(state_path, entry).map_err(|e| format!("Failed to append note: {}", e))?;
     println!("Note recorded into epistemic ledger.");
     Ok(())
