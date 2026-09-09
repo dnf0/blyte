@@ -168,11 +168,8 @@ pub fn cmd_next(
         task_to_verify.verification_cmd = Some(cmd);
     }
 
-    let repo_root = state_path
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or_else(|| Path::new("."));
-    let results = execute_all_gates(repo_root, &task_to_verify, verify_git_clean)
+    let repo_root = repo_root_for(state_path);
+    let results = execute_all_gates(&repo_root, &task_to_verify, verify_git_clean)
         .map_err(|e| format!("Gate execution error: {}", e))?;
 
     for res in &results {
@@ -303,8 +300,7 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
 
 /// Locate a knowledge-graph report near the workspace, if one has been generated.
 fn find_graph_context(state_path: &Path) -> Option<(std::path::PathBuf, String)> {
-    // .agent-state/state.json -> workspace root is two levels up.
-    let root = state_path.parent().and_then(|p| p.parent())?;
+    let root = repo_root_for(state_path);
     for candidate in [
         root.join("graphify-out/GRAPH_REPORT.md"),
         root.join("GRAPH_REPORT.md"),
