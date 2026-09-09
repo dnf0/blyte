@@ -5,12 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "README.md"
+readme = "../../README.md"
 description = "Native Model Context Protocol (MCP) server for Superstate state and review tools."
 
 [dependencies]
-superstate-core = { path = "../superstate-core" }
-superstate-review = { path = "../superstate-review" }
+superstate-core = { path = "../superstate-core", version = "0.1.0" }
+superstate-review = { path = "../superstate-review", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

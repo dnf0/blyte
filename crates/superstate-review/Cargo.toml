@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "README.md"
+readme = "../../README.md"
 description = "Daemon-less zero-noise adversarial code reviewer and diff analyzer."
 
 [dependencies]

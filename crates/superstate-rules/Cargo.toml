@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "README.md"
+readme = "../../README.md"
 description = "Deterministic prompt and guidance generator for Universal AGENTS.md, Claude, and Cursor rules."
 
 [dependencies]
