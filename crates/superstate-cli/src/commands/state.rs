@@ -73,6 +73,42 @@ fn select_task<'a>(
         })
 }
 
+/// Tag the current commit as the checkpoint guarding this step.
+pub fn cmd_checkpoint(state_path: &Path) -> Result<(), String> {
+    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let root = repo_root_for(state_path);
+    let tag = superstate_core::checkpoint::create_checkpoint(&root, state.step)
+        .map_err(|e| format!("Failed to create checkpoint: {}", e))?;
+    println!("Checkpoint created: {}", tag);
+    Ok(())
+}
+
+/// Restore the working tree to a checkpoint, discarding untracked files with it.
+pub fn cmd_rollback(state_path: &Path, reference: Option<&str>) -> Result<(), String> {
+    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let root = repo_root_for(state_path);
+    let target = superstate_core::checkpoint::rollback_to(&root, state.step, reference)
+        .map_err(|e| format!("Failed to roll back: {}", e))?;
+    println!("Working tree cleanly rolled back to {}", target);
+    Ok(())
+}
+
+/// The repository the state file belongs to (.agent-state/state.json -> root).
+///
+/// A relative state path such as `.agent-state/state.json` walks up to an empty
+/// path, which is not a usable working directory, so an empty result means "here".
+fn repo_root_for(state_path: &Path) -> std::path::PathBuf {
+    let root = state_path
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| Path::new(""));
+    if root.as_os_str().is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        root.to_path_buf()
+    }
+}
+
 pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     if as_json {

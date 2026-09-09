@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod ledger;
 pub mod models;
 pub mod plan_parser;

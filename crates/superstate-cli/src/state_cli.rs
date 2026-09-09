@@ -48,6 +48,19 @@ pub enum StateCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Create a git checkpoint guarding the current step
+    Checkpoint {
+        #[arg(short, long, default_value = DEFAULT_STATE)]
+        state: PathBuf,
+    },
+    /// Reset the working tree and untracked files to a checkpoint
+    Rollback {
+        #[arg(short, long, default_value = DEFAULT_STATE)]
+        state: PathBuf,
+        /// Checkpoint to restore. Defaults to the current step's checkpoint.
+        #[arg(short = 'r', long)]
+        reference: Option<String>,
+    },
     /// Generate prompt for a task
     Prompt {
         #[arg(short, long, default_value = DEFAULT_STATE)]
@@ -80,6 +93,10 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             verify_git_clean,
         } => commands::state::cmd_next(&state, verify_cmd, verify_git_clean),
         StateCommands::Ready { state, json } => commands::state::cmd_ready(&state, json),
+        StateCommands::Checkpoint { state } => commands::state::cmd_checkpoint(&state),
+        StateCommands::Rollback { state, reference } => {
+            commands::state::cmd_rollback(&state, reference.as_deref())
+        }
         StateCommands::Prompt {
             state,
             task,
