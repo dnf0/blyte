@@ -3,3 +3,6 @@ Cargo.lock
 **/*.rs.bk
 *.tmp
 .DS_Store
+
+# Ephemeral agent execution state & file locks
+.agent-state/
