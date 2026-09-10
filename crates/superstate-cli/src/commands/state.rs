@@ -163,6 +163,10 @@ pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
         println!("Active Task: None");
     }
     println!("Completed Tasks: {}", state.completed_tasks.len());
+    println!(
+        "Ledger Entries: {}",
+        superstate_core::ledger::read_ledger(state_path).len()
+    );
     for task in &state.completed_tasks {
         println!("  ✓ {}: {}", task.id, task.title);
     }
@@ -290,9 +294,13 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
         }
     }
 
-    if !state.notes.is_empty() {
+    // A state written before the ledger was split still carries its notes
+    // inline; move them across rather than silently reading an empty ledger.
+    migrate_ledger_if_needed(state_path);
+    let ledger = superstate_core::ledger::read_ledger(state_path);
+    if !ledger.is_empty() {
         println!("\n## Epistemic Ledger (findings from earlier milestones)");
-        for entry in &state.notes {
+        for entry in &ledger {
             println!("- [{}] {}", entry.author, entry.note);
         }
     }
@@ -338,7 +346,27 @@ fn find_graph_context(state_path: &Path) -> Option<(std::path::PathBuf, String)>
     None
 }
 
+/// Move notes out of a pre-split state document, once, on first touch.
+fn migrate_ledger_if_needed(state_path: &Path) {
+    match superstate_core::ledger::migrate_inline_notes(state_path) {
+        Ok(0) => {}
+        Ok(n) => log_migration(n, state_path),
+        Err(err) => eprintln!("warning: could not migrate inline ledger notes: {}", err),
+    }
+}
+
+fn log_migration(count: usize, state_path: &Path) {
+    eprintln!(
+        "note: moved {} ledger entr{} out of {} into {}",
+        count,
+        if count == 1 { "y" } else { "ies" },
+        state_path.display(),
+        superstate_core::ledger::ledger_path(state_path).display(),
+    );
+}
+
 pub fn cmd_note(state_path: &Path, note: &str, author: &str) -> Result<(), String> {
+    migrate_ledger_if_needed(state_path);
     let entry = LedgerEntry::new(author.to_string(), note.to_string());
     append_ledger_note(state_path, entry).map_err(|e| format!("Failed to append note: {}", e))?;
     println!("Note recorded into epistemic ledger.");
@@ -515,9 +543,11 @@ pub fn cmd_resume(state_path: &Path) -> Result<(), String> {
         })
         .unwrap_or_default();
 
+    migrate_ledger_if_needed(state_path);
+    let notes = superstate_core::ledger::read_ledger(state_path);
     println!(
         "{}",
-        superstate_core::maintenance::resume_briefing(&state, &commits)
+        superstate_core::maintenance::resume_briefing(&state, &notes, &commits)
     );
     Ok(())
 }
@@ -525,7 +555,9 @@ pub fn cmd_resume(state_path: &Path) -> Result<(), String> {
 /// Task telemetry and efficiency metrics.
 pub fn cmd_metrics(state_path: &Path, as_json: bool) -> Result<(), String> {
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-    let m = superstate_core::maintenance::metrics(&state);
+    migrate_ledger_if_needed(state_path);
+    let notes = superstate_core::ledger::read_ledger(state_path);
+    let m = superstate_core::maintenance::metrics(&state, notes.len());
     if as_json {
         println!(
             "{}",

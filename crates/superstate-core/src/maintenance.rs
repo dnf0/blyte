@@ -223,7 +223,7 @@ pub struct Metrics {
     pub files_modified: usize,
 }
 
-pub fn metrics(state: &ExecutionState) -> Metrics {
+pub fn metrics(state: &ExecutionState, notes_recorded: usize) -> Metrics {
     let completed = state.completed_tasks.len();
     let remaining = state.pending_tasks.len() + usize::from(state.active_task.is_some());
     let total = completed + remaining;
@@ -238,7 +238,7 @@ pub fn metrics(state: &ExecutionState) -> Metrics {
         } else {
             (completed as f64 / total as f64 * 1000.0).round() / 10.0
         },
-        notes_recorded: state.notes.len(),
+        notes_recorded,
         errors_recorded: state.errors.len(),
         files_modified: state.modified_files.len(),
     }
@@ -249,7 +249,11 @@ pub fn metrics(state: &ExecutionState) -> Metrics {
 /// This exists because the context that produced the current state is gone after
 /// compaction; the state file is the only thing that survives, so it has to be
 /// readable on its own.
-pub fn resume_briefing(state: &ExecutionState, recent_commits: &[String]) -> String {
+pub fn resume_briefing(
+    state: &ExecutionState,
+    notes: &[crate::models::LedgerEntry],
+    recent_commits: &[String],
+) -> String {
     let mut out = String::from("# Agent Execution Resume Briefing\n\n");
     out.push_str(&format!(
         "- **Current Status:** `{:?}` (Step {})\n",
@@ -268,9 +272,9 @@ pub fn resume_briefing(state: &ExecutionState, recent_commits: &[String]) -> Str
         state.pending_tasks.len() + usize::from(state.active_task.is_some())
     ));
 
-    if !state.notes.is_empty() {
+    if !notes.is_empty() {
         out.push_str("\n## Recorded Findings\n");
-        for n in state.notes.iter().rev().take(5) {
+        for n in notes.iter().rev().take(5) {
             out.push_str(&format!("- [{}] {}\n", n.author, n.note));
         }
     }

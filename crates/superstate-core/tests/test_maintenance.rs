@@ -85,7 +85,7 @@ fn metrics_report_progress() {
     state.completed_tasks.push(done);
     state.active_task = Some(state.pending_tasks.remove(0));
 
-    let m = metrics(&state);
+    let m = metrics(&state, 0);
     assert_eq!(m.tasks_total, 2);
     assert_eq!(m.tasks_completed, 1);
     assert_eq!(m.completion_pct, 50.0);

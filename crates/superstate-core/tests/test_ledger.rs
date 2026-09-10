@@ -1,31 +1,120 @@
-use superstate_core::ledger::append_ledger_note;
+//! The epistemic ledger as an append-only file beside the state.
+
+use std::fs;
+use superstate_core::ledger::{append_ledger_note, ledger_path, migrate_inline_notes, read_ledger};
 use superstate_core::models::{ExecutionState, ExecutionStatus, LedgerEntry};
-use superstate_core::state_machine::{load_state, save_state_atomic};
-use tempfile::tempdir;
+use superstate_core::state_machine::save_state_atomic;
 
-#[test]
-fn test_append_ledger_note() {
-    let dir = tempdir().unwrap();
-    let state_file = dir.path().join(".agent-state").join("state.json");
-
+fn project() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join(".agent-state").join("state.json");
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     let state = ExecutionState {
         status: ExecutionStatus::InProgress,
-        ..Default::default()
+        step: 1,
+        active_task: None,
+        pending_tasks: Vec::new(),
+        completed_tasks: Vec::new(),
+        modified_files: Vec::new(),
+        errors: Vec::new(),
+        plan_path: None,
+        notes: Vec::new(),
     };
-    save_state_atomic(&state_file, &state).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+    (dir, state_path)
+}
 
-    let entry1 = LedgerEntry::new("agent", "[discovery] API returned 200 OK");
-    append_ledger_note(&state_file, entry1).expect("Failed to append note");
+#[test]
+fn notes_are_appended_to_the_ledger_not_the_state() {
+    let (_d, state_path) = project();
+    append_ledger_note(&state_path, LedgerEntry::new("agent", "a finding")).unwrap();
 
-    let entry2 = LedgerEntry::new("human", "[constraint] Do not touch legacy parser");
-    append_ledger_note(&state_file, entry2).expect("Failed to append note 2");
-
-    let loaded = load_state(&state_file).unwrap();
-    assert_eq!(loaded.notes.len(), 2);
-    assert_eq!(loaded.notes[0].note, "[discovery] API returned 200 OK");
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
     assert_eq!(
-        loaded.notes[1].note,
-        "[constraint] Do not touch legacy parser"
+        state["notes"].as_array().map(Vec::len),
+        Some(0),
+        "prose must not live in the document rewritten on every transition"
     );
-    assert_eq!(loaded.notes[1].author, "human");
+    assert_eq!(read_ledger(&state_path).len(), 1);
+}
+
+#[test]
+fn multiline_prose_survives_a_round_trip() {
+    // Markdown with quotes and backticks is exactly what a milestone summary
+    // looks like, and what JSON string escaping mangled.
+    let (_d, state_path) = project();
+    let note = "### Finding\n\nNeeds a `lookahead` token. See \"parser.go\".";
+    append_ledger_note(&state_path, LedgerEntry::new("agent", note)).unwrap();
+
+    assert_eq!(read_ledger(&state_path)[0].note, note);
+}
+
+#[test]
+fn a_torn_final_line_costs_one_entry_not_the_ledger() {
+    // An interrupted append should not make every earlier finding unreadable.
+    let (_d, state_path) = project();
+    for i in 0..3 {
+        append_ledger_note(
+            &state_path,
+            LedgerEntry::new("agent", format!("note {}", i)),
+        )
+        .unwrap();
+    }
+    fs::write(
+        ledger_path(&state_path),
+        format!(
+            "{}{}",
+            fs::read_to_string(ledger_path(&state_path)).unwrap(),
+            "{\"timestamp\":\"x\",\"author\":\"a\",\"note\":\"trunc"
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(read_ledger(&state_path).len(), 3);
+}
+
+#[test]
+fn appending_does_not_rewrite_earlier_entries() {
+    // The whole point of the split: cost per append must not grow with the
+    // number of findings already recorded.
+    let (_d, state_path) = project();
+    append_ledger_note(&state_path, LedgerEntry::new("agent", "first")).unwrap();
+    let first_line = fs::read_to_string(ledger_path(&state_path)).unwrap();
+
+    append_ledger_note(&state_path, LedgerEntry::new("agent", "second")).unwrap();
+    let both = fs::read_to_string(ledger_path(&state_path)).unwrap();
+
+    assert!(
+        both.starts_with(&first_line),
+        "the earlier entry was rewritten"
+    );
+}
+
+#[test]
+fn inline_notes_are_migrated_once_and_lose_nothing() {
+    let (_d, state_path) = project();
+    let mut state = superstate_core::state_machine::load_state(&state_path).unwrap();
+    state.notes = vec![
+        LedgerEntry::new("agent", "legacy one"),
+        LedgerEntry::new("agent", "legacy two"),
+    ];
+    save_state_atomic(&state_path, &state).unwrap();
+
+    assert_eq!(migrate_inline_notes(&state_path).unwrap(), 2);
+    assert_eq!(read_ledger(&state_path).len(), 2);
+    assert!(superstate_core::state_machine::load_state(&state_path)
+        .unwrap()
+        .notes
+        .is_empty());
+
+    // Idempotent: a state with nothing inline is left alone.
+    assert_eq!(migrate_inline_notes(&state_path).unwrap(), 0);
+    assert_eq!(read_ledger(&state_path).len(), 2);
+}
+
+#[test]
+fn an_absent_ledger_reads_as_empty_rather_than_failing() {
+    let (_d, state_path) = project();
+    assert!(read_ledger(&state_path).is_empty());
 }
