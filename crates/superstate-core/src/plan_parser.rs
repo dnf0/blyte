@@ -142,6 +142,8 @@ pub fn init_state_from_plan(
         errors: Vec::new(),
         plan_path: Some(plan_path.to_path_buf()),
         notes: Vec::new(),
+        active_worktree: None,
+        active_branch: None,
     };
 
     save_state_atomic(state_path, &state)?;

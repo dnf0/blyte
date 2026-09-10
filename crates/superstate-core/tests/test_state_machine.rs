@@ -73,3 +73,63 @@ fn test_advance_step_lifecycle() {
     assert!(state.active_task.is_none());
     assert_eq!(state.status, ExecutionStatus::Completed);
 }
+
+#[test]
+fn test_worktree_tracking_serialization_and_advance_reset() {
+    let task1 = TaskSpec {
+        id: "task-1".to_string(),
+        title: "Task 1".to_string(),
+        depends_on: vec![],
+        files_modify: vec![],
+        interfaces_produces: vec![],
+        verification_cmd: None,
+    };
+    let task2 = TaskSpec {
+        id: "task-2".to_string(),
+        title: "Task 2".to_string(),
+        depends_on: vec!["task-1".to_string()],
+        files_modify: vec![],
+        interfaces_produces: vec![],
+        verification_cmd: None,
+    };
+
+    let mut state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(task1),
+        pending_tasks: vec![task2],
+        active_worktree: Some(PathBuf::from(".wt/task-1")),
+        active_branch: Some("superstate/task-1".to_string()),
+        ..Default::default()
+    };
+
+    // Assert serialization and deserialization preserves active_worktree and active_branch
+    let serialized = serde_json::to_string(&state).expect("Failed to serialize state");
+    let deserialized: ExecutionState =
+        serde_json::from_str(&serialized).expect("Failed to deserialize state");
+    assert_eq!(
+        deserialized.active_worktree,
+        Some(PathBuf::from(".wt/task-1"))
+    );
+    assert_eq!(
+        deserialized.active_branch,
+        Some("superstate/task-1".to_string())
+    );
+
+    // Assert backward compatibility: missing active_worktree/active_branch deserialize as None
+    let json_without_worktree = r#"{
+        "status": "in_progress",
+        "step": 1
+    }"#;
+    let legacy_state: ExecutionState =
+        serde_json::from_str(json_without_worktree).expect("Failed to deserialize legacy state");
+    assert_eq!(legacy_state.active_worktree, None);
+    assert_eq!(legacy_state.active_branch, None);
+
+    // Assert advance_step resets active_worktree and active_branch to None
+    advance_step(&mut state).expect("Advance step failed");
+    assert_eq!(state.step, 2);
+    assert_eq!(state.active_task.as_ref().unwrap().id, "task-2");
+    assert_eq!(state.active_worktree, None);
+    assert_eq!(state.active_branch, None);
+}

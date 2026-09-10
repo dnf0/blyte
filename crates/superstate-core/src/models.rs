@@ -143,6 +143,12 @@ pub struct ExecutionState {
     pub plan_path: Option<PathBuf>,
     #[serde(default)]
     pub notes: Vec<LedgerEntry>,
+    /// Path to the isolated Git worktree active for the current task, if any.
+    #[serde(default)]
+    pub active_worktree: Option<PathBuf>,
+    /// Branch name associated with the active worktree, if any.
+    #[serde(default)]
+    pub active_branch: Option<String>,
 }
 
 impl Default for ExecutionState {
@@ -157,6 +163,8 @@ impl Default for ExecutionState {
             errors: Vec::new(),
             plan_path: None,
             notes: Vec::new(),
+            active_worktree: None,
+            active_branch: None,
         }
     }
 }
