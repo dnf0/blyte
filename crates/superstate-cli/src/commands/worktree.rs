@@ -1,8 +1,8 @@
 //! CLI command definitions and handlers for Git worktree operations.
 
 use clap::Subcommand;
-use std::path::PathBuf;
-use superstate_worktree::manager::WorktreeManager;
+use std::path::{Path, PathBuf};
+use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
 use superstate_worktree::types::WorktreeConfig;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -21,7 +21,7 @@ pub enum WorktreeCommands {
         #[arg(short, long, value_delimiter = ',', num_args = 1..)]
         caches: Vec<String>,
         /// Disable auto-detection and copying of cache directories
-        #[arg(long)]
+        #[arg(long, conflicts_with = "caches")]
         no_cache: bool,
         /// Base repository root (defaults to current dir)
         #[arg(short, long, default_value = ".")]
@@ -58,6 +58,52 @@ pub enum WorktreeCommands {
         #[arg(short, long, default_value = ".")]
         repo: PathBuf,
     },
+}
+
+fn resolve_worktree_for_action(
+    repo: &Path,
+    branch: &str,
+    action: &str,
+    expected_base: Option<&str>,
+) -> Result<IsolatedWorktree, String> {
+    let manager = WorktreeManager::new(repo).map_err(|e| e.to_string())?;
+    let list = manager.list().map_err(|e| e.to_string())?;
+
+    let primary_wt = list
+        .iter()
+        .find(|w| w.is_main)
+        .cloned()
+        .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
+
+    let wt = list
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some(branch))
+        .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
+
+    if wt.is_main {
+        return Err(format!("Cannot {} primary worktree branch '{}'", action, branch));
+    }
+
+    let base_branch = expected_base
+        .map(|s| s.to_string())
+        .or_else(|| primary_wt.branch.clone())
+        .unwrap_or_else(|| "main".to_string());
+
+    if let Some(target) = expected_base {
+        if primary_wt.branch.as_deref() != Some(target) {
+            return Err(format!(
+                "Primary worktree is checked out to {:?}, expected target base branch '{}'",
+                primary_wt.branch, target
+            ));
+        }
+    }
+
+    Ok(IsolatedWorktree {
+        branch: branch.to_string(),
+        path: wt.path,
+        base_branch,
+        repo_root: primary_wt.path,
+    })
 }
 
 pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
@@ -133,35 +179,7 @@ pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
             message,
             repo,
         } => {
-            let manager = WorktreeManager::new(&repo).map_err(|e| e.to_string())?;
-            let list = manager.list().map_err(|e| e.to_string())?;
-
-            let primary_wt = list
-                .iter()
-                .find(|w| w.is_main)
-                .cloned()
-                .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
-
-            let wt = list
-                .into_iter()
-                .find(|w| w.branch.as_deref() == Some(&branch))
-                .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
-
-            if wt.is_main {
-                return Err(format!("Cannot merge primary worktree branch '{}' into itself", branch));
-            }
-
-            let base_branch = base
-                .or_else(|| primary_wt.branch.clone())
-                .unwrap_or_else(|| "main".to_string());
-
-            let isolated = superstate_worktree::manager::IsolatedWorktree {
-                branch: branch.clone(),
-                path: wt.path,
-                base_branch,
-                repo_root: primary_wt.path.clone(),
-            };
-
+            let isolated = resolve_worktree_for_action(&repo, &branch, "merge", base.as_deref())?;
             isolated.merge_into_base(&message).map_err(|e| e.to_string())?;
             println!("Merged worktree branch '{}' into base", branch);
             Ok(())
@@ -171,33 +189,7 @@ pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
             force,
             repo,
         } => {
-            let manager = WorktreeManager::new(&repo).map_err(|e| e.to_string())?;
-            let list = manager.list().map_err(|e| e.to_string())?;
-
-            let primary_wt = list
-                .iter()
-                .find(|w| w.is_main)
-                .cloned()
-                .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
-
-            let wt = list
-                .into_iter()
-                .find(|w| w.branch.as_deref() == Some(&branch))
-                .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
-
-            if wt.is_main {
-                return Err(format!("Cannot remove primary worktree branch '{}'", branch));
-            }
-
-            let base_branch = primary_wt.branch.clone().unwrap_or_else(|| "main".to_string());
-
-            let isolated = superstate_worktree::manager::IsolatedWorktree {
-                branch: branch.clone(),
-                path: wt.path,
-                base_branch,
-                repo_root: primary_wt.path.clone(),
-            };
-
+            let isolated = resolve_worktree_for_action(&repo, &branch, "remove", None)?;
             isolated.destroy(force).map_err(|e| e.to_string())?;
             println!("Removed worktree branch '{}'", branch);
             Ok(())

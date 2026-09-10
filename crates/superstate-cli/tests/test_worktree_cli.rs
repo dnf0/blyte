@@ -155,3 +155,92 @@ fn test_cli_no_cache_flag_prevents_cache_copy() {
     assert!(wt_path.exists());
     assert!(!wt_path.join(".venv").exists(), ".venv should not have been copied due to --no-cache");
 }
+
+#[test]
+fn test_cli_operations_from_inside_worktree() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // 1. Create worktree
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/inner-branch"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create_out.status.success());
+
+    let wt_path = dir.path().join(".wt").join("wt-inner-branch");
+    assert!(wt_path.exists());
+
+    // 2. Commit inside worktree
+    fs::write(wt_path.join("inner.txt"), b"inner content").unwrap();
+    Command::new("git").args(["add", "inner.txt"]).current_dir(&wt_path).status().unwrap();
+    Command::new("git").args(["commit", "-m", "feat: inner"]).current_dir(&wt_path).status().unwrap();
+
+    // 3. Merge *from inside* the worktree directory
+    let merge_out = Command::new(bin())
+        .args(["worktree", "merge", "wt/inner-branch"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    assert!(merge_out.status.success(), "merge from inside worktree failed: {:?}", merge_out);
+    assert!(dir.path().join("inner.txt").exists(), "inner.txt should exist in main repo root");
+
+    // 4. Remove *from main dir* (since removing the worktree while CWD is inside it is an OS lock issue)
+    let remove_out = Command::new(bin())
+        .args(["worktree", "remove", "wt/inner-branch"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(remove_out.status.success(), "remove failed: {:?}", remove_out);
+    assert!(!wt_path.exists());
+}
+
+#[test]
+fn test_cli_merge_base_mismatch_error() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Create worktree
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/mismatch-branch"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create_out.status.success());
+
+    // Try to merge with non-matching --base
+    let merge_out = Command::new(bin())
+        .args(["worktree", "merge", "wt/mismatch-branch", "--base", "release-2.0"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!merge_out.status.success());
+    let err_str = String::from_utf8_lossy(&merge_out.stderr);
+    assert!(err_str.contains("expected target base branch 'release-2.0'"), "Expected mismatch error, got: {}", err_str);
+}
+
+#[test]
+fn test_cli_multiple_caches_copied() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Setup multiple mock cache dirs
+    let c1 = dir.path().join("cache1");
+    let c2 = dir.path().join("cache2");
+    fs::create_dir_all(&c1).unwrap();
+    fs::create_dir_all(&c2).unwrap();
+    fs::write(c1.join("c1.txt"), b"c1").unwrap();
+    fs::write(c2.join("c2.txt"), b"c2").unwrap();
+
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/multi-cache-branch", "--caches", "cache1,cache2"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create_out.status.success(), "create failed: {:?}", create_out);
+
+    let wt_path = dir.path().join(".wt").join("wt-multi-cache-branch");
+    assert!(wt_path.join("cache1").join("c1.txt").exists());
+    assert!(wt_path.join("cache2").join("c2.txt").exists());
+}
