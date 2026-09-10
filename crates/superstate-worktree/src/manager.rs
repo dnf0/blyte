@@ -271,6 +271,7 @@ fn sanitize_slug(slug: &str) -> String {
 
     // Traverse characters, collapsing whitespace, slashes, and hyphens into single hyphens.
     for c in trimmed.chars() {
+        let c = c.to_ascii_lowercase();
         if c.is_whitespace() || c == '/' || c == '\\' || c == '-' {
             if !prev_dash && !result.is_empty() {
                 result.push('-');
@@ -301,6 +302,7 @@ mod tests {
     #[test]
     fn test_sanitize_slug() {
         assert_eq!(sanitize_slug("task-1"), "task-1");
+        assert_eq!(sanitize_slug("Task 1"), "task-1");
         assert_eq!(sanitize_slug("task/1"), "task-1");
         assert_eq!(sanitize_slug("task 1"), "task-1");
         assert_eq!(sanitize_slug("  task / 1  "), "task-1");

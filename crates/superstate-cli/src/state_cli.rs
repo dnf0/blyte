@@ -71,6 +71,9 @@ pub enum StateCommands {
         /// Include knowledge-graph context in the prompt
         #[arg(long)]
         with_graph: bool,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Reconcile state with a revised plan, preserving completed tasks
     Sync {
@@ -189,7 +192,8 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             state,
             task,
             with_graph,
-        } => commands::state::cmd_prompt(&resolve(state), task.as_deref(), with_graph),
+            json,
+        } => commands::state::cmd_prompt(&resolve(state), task.as_deref(), with_graph, json),
         StateCommands::Sync { plan, state, out } => {
             commands::state::cmd_sync(&resolve(state), &plan, out.as_deref())
         }

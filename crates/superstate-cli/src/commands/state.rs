@@ -4,6 +4,7 @@ use superstate_core::models::LedgerEntry;
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::state_machine::{advance_step, load_state, save_state_atomic};
 use superstate_core::verifier::execute_all_gates;
+use superstate_worktree::manager::WorktreeManager;
 
 /// Refuse to create a second state inside a project that already has one.
 ///
@@ -231,6 +232,20 @@ fn preserved(state_path: &Path) -> Vec<&str> {
 /// A relative state path such as `.agent-state/state.json` walks up to an empty
 /// path, which is not a usable working directory, so an empty result means "here".
 fn repo_root_for(state_path: &Path) -> std::path::PathBuf {
+    if let Some(parent) = state_path.parent() {
+        if parent.file_name().and_then(|s| s.to_str())
+            == Some(superstate_core::state_machine::STATE_DIR)
+        {
+            if let Some(grandparent) = parent.parent() {
+                if grandparent.as_os_str().is_empty() {
+                    return std::path::PathBuf::from(".");
+                }
+                return grandparent.to_path_buf();
+            }
+        } else if parent.join(".git").exists() {
+            return parent.to_path_buf();
+        }
+    }
     let root = state_path
         .parent()
         .and_then(|p| p.parent())
@@ -338,10 +353,15 @@ pub fn cmd_next(
 /// `task` selects a specific task by id or title -- without it only the active
 /// task is reachable, which makes `state ready` a query with nowhere to go: a
 /// runner can learn which tasks are unblocked but cannot ask for any of them.
-pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Result<(), String> {
-    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+pub fn cmd_prompt(
+    state_path: &Path,
+    task: Option<&str>,
+    with_graph: bool,
+    json_output: bool,
+) -> Result<(), String> {
+    let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
 
-    let active = match select_task(&state, task) {
+    let active = match select_task(&state, task).cloned() {
         Some(t) => t,
         None => {
             match task {
@@ -351,30 +371,67 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
                         wanted
                     ))
                 }
-                None => println!("All tasks completed."),
+                None => {
+                    if json_output {
+                        let json = serde_json::json!({
+                            "task": serde_json::Value::Null,
+                            "active_worktree": serde_json::Value::Null,
+                            "active_branch": serde_json::Value::Null,
+                            "prompt": "All tasks completed."
+                        });
+                        let rendered = serde_json::to_string_pretty(&json)
+                            .map_err(|e| format!("Failed to serialize state: {}", e))?;
+                        println!("{}", rendered);
+                    } else {
+                        println!("All tasks completed.");
+                    }
+                }
             }
             return Ok(());
         }
     };
 
-    println!(
-        "You are an Implementer Subagent working on **{}: {}**.\n",
+    let repo_root = repo_root_for(state_path);
+    if repo_root.join(".git").exists() {
+        let manager = WorktreeManager::new(&repo_root)
+            .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+        let wt = manager
+            .ensure_task_worktree(&active.id, None)
+            .map_err(|e| format!("Failed to ensure worktree for task {}: {}", active.id, e))?;
+        state.active_worktree = Some(wt.path.clone());
+        state.active_branch = Some(wt.branch.clone());
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
+    }
+
+    let mut rendered_prompt = String::new();
+
+    rendered_prompt.push_str(&format!(
+        "You are an Implementer Subagent working on **{}: {}**.\n\n",
         active.id, active.title
-    );
-    println!("## Task Specification");
-    println!("- ID: {}", active.id);
-    println!("- Title: {}", active.title);
+    ));
+    rendered_prompt.push_str("## Task Specification\n");
+    rendered_prompt.push_str(&format!("- ID: {}\n", active.id));
+    rendered_prompt.push_str(&format!("- Title: {}\n", active.title));
     if !active.depends_on.is_empty() {
-        println!("- Depends on: {}", active.depends_on.join(", "));
+        rendered_prompt.push_str(&format!("- Depends on: {}\n", active.depends_on.join(", ")));
     }
     if !active.files_modify.is_empty() {
-        println!("Files to modify:");
+        rendered_prompt.push_str("Files to modify:\n");
         for f in &active.files_modify {
-            println!("- {}", f.display());
+            rendered_prompt.push_str(&format!("- {}\n", f.display()));
         }
     }
     if let Some(ref cmd) = active.verification_cmd {
-        println!("Verification command: `{}`", cmd);
+        rendered_prompt.push_str(&format!("Verification command: `{}`\n", cmd));
+    }
+
+    if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch) {
+        rendered_prompt.push_str(&format!(
+            "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree!\n",
+            wt_path.display(),
+            wt_branch
+        ));
     }
 
     // Completed milestones and the epistemic ledger. This is the whole point of
@@ -383,17 +440,17 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
     // forward -- rather than the whole conversation -- is what keeps the context
     // footprint flat while preserving what was learned.
     if !state.completed_tasks.is_empty() {
-        println!("\n## Completed Milestones");
+        rendered_prompt.push_str("\n## Completed Milestones\n");
         for done in &state.completed_tasks {
-            println!("- {}: {}", done.id, done.title);
+            rendered_prompt.push_str(&format!("- {}: {}\n", done.id, done.title));
         }
     }
 
     let ledger = superstate_core::ledger::read_ledger(state_path);
     if !ledger.is_empty() {
-        println!("\n## Epistemic Ledger (findings from earlier milestones)");
+        rendered_prompt.push_str("\n## Epistemic Ledger (findings from earlier milestones)\n");
         for entry in &ledger {
-            println!("- [{}] {}", entry.author, entry.note);
+            rendered_prompt.push_str(&format!("- [{}] {}\n", entry.author, entry.note));
         }
     }
 
@@ -401,8 +458,11 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
         let graph = find_graph_context(state_path);
         match graph {
             Some((path, body)) => {
-                println!("\n## Architecture Context ({})", path.display());
-                println!("{}", body);
+                rendered_prompt.push_str(&format!(
+                    "\n## Architecture Context ({})\n{}\n",
+                    path.display(),
+                    body
+                ));
             }
             None => {
                 // Say so rather than accept the flag and silently ignore it.
@@ -414,11 +474,26 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
         }
     }
 
-    println!("\n## Instructions");
-    println!("1. Implement the requested task following Test-Driven Development (TDD).");
-    println!("2. Run the targeted verification command to confirm your fix.");
-    println!("3. Commit your changes with a conventional commit message.");
-    println!("4. Return a summary with commit SHA and verification output.");
+    rendered_prompt.push_str("\n## Instructions\n");
+    rendered_prompt.push_str("1. Implement the requested task following Test-Driven Development (TDD).\n");
+    rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
+    rendered_prompt.push_str("3. Commit your changes with a conventional commit message.\n");
+    rendered_prompt.push_str("4. Return a summary with commit SHA and verification output.\n");
+
+    if json_output {
+        let json_value = serde_json::json!({
+            "task": active,
+            "active_worktree": state.active_worktree,
+            "active_branch": state.active_branch,
+            "prompt": rendered_prompt,
+        });
+        let serialized = serde_json::to_string_pretty(&json_value)
+            .map_err(|e| format!("Failed to serialize prompt JSON: {}", e))?;
+        println!("{}", serialized);
+    } else {
+        print!("{}", rendered_prompt);
+    }
+
     Ok(())
 }
 
