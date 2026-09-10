@@ -513,7 +513,7 @@ pub fn cmd_prompt(
     if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch)
     {
         rendered_prompt.push_str(&format!(
-            "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to merge or delete this worktree. Simply commit your changes inside this worktree with a conventional commit. The orchestrator will automatically verify your work and merge this worktree into the base branch after your turn completes.\n",
+            "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to merge or delete this worktree. Simply commit your changes inside this worktree with a conventional commit. The orchestrator will automatically verify your work and merge this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree. Committed changes in this worktree will be merged to the root upon turn completion.\n",
             wt_path.display(),
             wt_branch
         ));

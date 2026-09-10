@@ -66,41 +66,42 @@ pub fn parse_plan_markdown(content: &str) -> Result<Vec<TaskSpec>, ParseError> {
         }
 
         if let Some(ref mut task) = current_task {
-            if trimmed.starts_with("- **Depends on:**") || trimmed.starts_with("**Depends on:**") {
-                let deps_str = if let Some(after) = trimmed.split_once("**Depends on:**") {
-                    after.1.trim()
-                } else {
-                    ""
-                };
-                if deps_str != "none" && !deps_str.is_empty() {
-                    for dep in deps_str.split(',') {
-                        let clean_dep = dep.trim().trim_matches('`').trim();
-                        if !clean_dep.is_empty() {
-                            task.depends_on.push(clean_dep.to_string());
+            let lower = trimmed.to_lowercase();
+            if lower.contains("depends on:") {
+                if let Some((_, after)) = trimmed.split_once(':') {
+                    let deps_str = after.trim().trim_matches('*').trim();
+                    if deps_str.to_lowercase() != "none" && !deps_str.is_empty() {
+                        for dep in deps_str.split(',') {
+                            let clean_dep = dep.trim().trim_matches('`').trim();
+                            if !clean_dep.is_empty() {
+                                task.depends_on.push(clean_dep.to_string());
+                            }
                         }
                     }
                 }
-            } else if trimmed.starts_with("- **Verification Command:**")
-                || trimmed.starts_with("**Verification Command:**")
+            } else if lower.contains("verification command:")
+                || lower.contains("verification:")
+                || lower.contains("verify command:")
+                || lower.starts_with("- verify:")
             {
-                if let Some(after) = trimmed.split_once("**Verification Command:**") {
-                    let cmd = after.1.trim().trim_matches('`').trim();
+                if let Some((_, after)) = trimmed.split_once(':') {
+                    let cmd = after.trim().trim_matches('*').trim().trim_matches('`').trim();
                     if !cmd.is_empty() {
                         task.verification_cmd = Some(cmd.to_string());
                     }
                 }
-            } else if trimmed.starts_with("- Create:")
-                || trimmed.starts_with("- Modify:")
-                || trimmed.starts_with("- Test:")
+            } else if lower.starts_with("- create:")
+                || lower.starts_with("- modify:")
+                || lower.starts_with("- test:")
+                || lower.starts_with("- **create:**")
+                || lower.starts_with("- **modify:**")
+                || lower.starts_with("- **test:**")
             {
-                let file_part = trimmed
-                    .split_once(':')
-                    .map(|x| x.1.trim())
-                    .unwrap_or("")
-                    .trim_matches('`')
-                    .trim();
-                if !file_part.is_empty() {
-                    task.files_modify.push(PathBuf::from(file_part));
+                if let Some((_, after)) = trimmed.split_once(':') {
+                    let file_part = after.trim().trim_matches('*').trim().trim_matches('`').trim();
+                    if !file_part.is_empty() {
+                        task.files_modify.push(PathBuf::from(file_part));
+                    }
                 }
             }
         }
