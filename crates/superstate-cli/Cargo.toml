@@ -21,6 +21,7 @@ name = "state"
 path = "src/state_main.rs"
 
 [dependencies]
+libc = "0.2"
 superstate-core = { path = "../superstate-core", version = "0.1.0" }
 superstate-syntax = { path = "../superstate-syntax", version = "0.1.0" }
 superstate-review = { path = "../superstate-review", version = "0.1.0" }

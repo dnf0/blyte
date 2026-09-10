@@ -1,8 +1,8 @@
-use crate::models::{ExecutionState, ExecutionStatus};
+use crate::models::{ExecutionState, ExecutionStatus, TaskSpec};
 use fd_lock::RwLock;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -77,4 +77,88 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
     }
 
     Ok(())
+}
+
+/// Tasks whose dependencies are all satisfied, and which may therefore run now.
+///
+/// A pending task is unblocked when every entry in `depends_on` names a completed
+/// task. Dependencies are written as they appear in the plan (`**Depends on:** Task 1`),
+/// so they are matched against both id and title, and the conventional `none`
+/// placeholder is treated as no dependency at all.
+///
+/// This is what makes the plan a DAG rather than a list: without it a runner can
+/// only walk milestones in file order, which is not the same thing.
+pub fn ready_tasks(state: &ExecutionState) -> Vec<&TaskSpec> {
+    let completed: Vec<&str> = state
+        .completed_tasks
+        .iter()
+        .flat_map(|t| [t.id.as_str(), t.title.as_str()])
+        .collect();
+
+    let is_satisfied = |dep: &String| -> bool {
+        let dep = dep.trim();
+        if dep.is_empty() || dep.eq_ignore_ascii_case("none") {
+            return true;
+        }
+        completed
+            .iter()
+            .any(|done| done.eq_ignore_ascii_case(dep) || dep.starts_with(*done))
+    };
+
+    let mut ready: Vec<&TaskSpec> = Vec::new();
+    if let Some(active) = state.active_task.as_ref() {
+        if active.depends_on.iter().all(is_satisfied) {
+            ready.push(active);
+        }
+    }
+    for task in state.pending_tasks.iter() {
+        if task.depends_on.iter().all(is_satisfied) {
+            ready.push(task);
+        }
+    }
+    ready
+}
+
+/// Directory holding a project's execution state.
+pub const STATE_DIR: &str = ".agent-state";
+
+/// Resolve a state path by searching upward for the project's state, as git does
+/// for `.git`.
+///
+/// Without this an agent that changes into a subdirectory either loses the state
+/// or, worse, creates a second one there: two states for one project, diverging
+/// silently. Resolution rules:
+///
+/// * an absolute path, or a relative path that exists as given, is used as-is;
+/// * otherwise the same relative path is sought in each ancestor of `start`,
+///   and the first hit wins;
+/// * if none is found the original is returned, so `init` still creates state in
+///   the current directory.
+pub fn resolve_state_path(path: &Path, start: &Path) -> PathBuf {
+    if path.is_absolute() || path.exists() {
+        return path.to_path_buf();
+    }
+    let mut dir = Some(start);
+    while let Some(current) = dir {
+        let candidate = current.join(path);
+        if candidate.exists() {
+            return candidate;
+        }
+        dir = current.parent();
+    }
+    path.to_path_buf()
+}
+
+/// The nearest ancestor of `start` that already holds project state, if any.
+///
+/// Used to refuse creating a nested second state inside an existing project.
+pub fn enclosing_state_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(current) = dir {
+        if current.join(STATE_DIR).join("state.json").exists() {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
 }

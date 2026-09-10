@@ -1,5 +1,8 @@
+pub mod checkpoint;
 pub mod ledger;
+pub mod maintenance;
 pub mod models;
+pub mod patching;
 pub mod plan_parser;
 pub mod state_machine;
 pub mod verifier;
