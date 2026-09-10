@@ -117,6 +117,61 @@ impl WorktreeManager {
             repo_root: self.repo_root.clone(),
         })
     }
+
+    /// Provision or reuse an isolated worktree for a specific milestone task.
+    ///
+    /// # Parameters
+    /// - `task_slug`: Identifier for the task (sanitized to remove slashes and whitespace).
+    /// - `base_branch`: Optional base branch to spawn from; defaults to repo default branch.
+    ///
+    /// # Returns
+    /// An `IsolatedWorktree` handle pointing to the task worktree.
+    ///
+    /// # Errors
+    /// Returns `WorktreeError` if repo discovery or git worktree creation fails.
+    pub fn ensure_task_worktree(
+        &self,
+        task_slug: &str,
+        base_branch: Option<&str>,
+    ) -> Result<IsolatedWorktree, WorktreeError> {
+        // Sanitize task_slug by trimming and replacing slashes/whitespace with hyphens.
+        let sanitized_slug = sanitize_slug(task_slug);
+        let target_branch = format!("superstate/{}", sanitized_slug);
+        let target_path = self.repo_root.join(".wt").join(&sanitized_slug);
+
+        // If path already exists, return the worktree handle idempotently.
+        if target_path.exists() {
+            let repo = self.repo()?;
+            let base_branch_name = match base_branch {
+                Some(b) => b.to_string(),
+                None => repo.default_branch().unwrap_or_else(|| "main".to_string()),
+            };
+
+            return Ok(IsolatedWorktree {
+                branch: target_branch,
+                path: target_path,
+                base_branch: base_branch_name,
+                repo_root: self.repo_root.clone(),
+            });
+        }
+
+        // Configure default cache directories for copy-on-write sharing.
+        let default_cache_dirs = vec![
+            ".venv".to_string(),
+            "target".to_string(),
+            "node_modules".to_string(),
+        ];
+
+        let config = WorktreeConfig {
+            base_path: self.repo_root.clone(),
+            branch: target_branch,
+            base_branch: base_branch.map(|s| s.to_string()),
+            worktree_path: Some(target_path),
+            cache_dirs: default_cache_dirs,
+        };
+
+        self.create(&config)
+    }
 }
 
 /// An active, isolated working tree.
@@ -140,6 +195,40 @@ impl IsolatedWorktree {
 
         repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch])
             .map_err(|e| WorktreeError::MergeConflict(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Merge commits from this worktree branch into the base branch, then remove worktree.
+    ///
+    /// # Parameters
+    /// - `commit_msg`: Commit message used when merging into the base branch.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful merge and cleanup.
+    ///
+    /// # Errors
+    /// Returns `WorktreeError` if merge conflict arises or worktree deletion fails.
+    pub fn merge_and_cleanup(self, commit_msg: &str) -> Result<(), WorktreeError> {
+        // Merge worktree branch into base branch in the primary repo.
+        self.merge_into_base(commit_msg)?;
+
+        // Tear down worktree checkout and branch safely without forcing.
+        self.destroy(false)?;
+
+        Ok(())
+    }
+
+    /// Abort task worktree without merging, force-deleting worktree and branch.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful deletion.
+    ///
+    /// # Errors
+    /// Returns `WorktreeError` if worktree teardown fails.
+    pub fn abort(self) -> Result<(), WorktreeError> {
+        // Force-delete worktree checkout and branch, discarding unmerged changes.
+        self.destroy(true)?;
 
         Ok(())
     }
@@ -171,5 +260,50 @@ impl IsolatedWorktree {
         }
 
         Ok(())
+    }
+}
+
+/// Sanitize task slug by replacing slashes and whitespace with hyphens and trimming.
+fn sanitize_slug(slug: &str) -> String {
+    let trimmed = slug.trim();
+    let mut result = String::new();
+    let mut prev_dash = false;
+
+    // Traverse characters, collapsing whitespace, slashes, and hyphens into single hyphens.
+    for c in trimmed.chars() {
+        if c.is_whitespace() || c == '/' || c == '\\' || c == '-' {
+            if !prev_dash && !result.is_empty() {
+                result.push('-');
+                prev_dash = true;
+            }
+        } else {
+            result.push(c);
+            prev_dash = false;
+        }
+    }
+
+    // Strip trailing hyphen if present after sanitization.
+    if result.ends_with('-') {
+        result.pop();
+    }
+
+    if result.is_empty() {
+        "task".to_string()
+    } else {
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_slug() {
+        assert_eq!(sanitize_slug("task-1"), "task-1");
+        assert_eq!(sanitize_slug("task/1"), "task-1");
+        assert_eq!(sanitize_slug("task 1"), "task-1");
+        assert_eq!(sanitize_slug("  task / 1  "), "task-1");
+        assert_eq!(sanitize_slug(""), "task");
     }
 }

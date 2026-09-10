@@ -100,3 +100,83 @@ fn test_worktree_lifecycle_full() {
     let list_after = manager.list().unwrap();
     assert!(!list_after.iter().any(|w| w.branch.as_deref() == Some("wt/milestone-1")), "list should not contain wt/milestone-1");
 }
+
+#[test]
+fn test_ensure_task_worktree_and_lifecycle() {
+    let repo_dir = init_test_git_repo();
+    let repo_root = repo_dir.path();
+
+    let manager = WorktreeManager::new(repo_root).unwrap();
+
+    // 1. Ensure task worktree creates .wt/task-1 and superstate/task-1 branch
+    let wt1 = manager.ensure_task_worktree("task-1", None).unwrap();
+    assert!(wt1.path.exists(), "worktree directory .wt/task-1 should exist");
+    assert_eq!(wt1.path, repo_root.join(".wt").join("task-1"));
+    assert_eq!(wt1.branch, "superstate/task-1");
+
+    // 2. Calling ensure_task_worktree idempotently returns existing worktree
+    let wt1_again = manager.ensure_task_worktree("task-1", None).unwrap();
+    assert_eq!(wt1_again.path, wt1.path);
+    assert_eq!(wt1_again.branch, wt1.branch);
+
+    // 3. Make a file and commit inside .wt/task-1
+    fs::write(wt1.path.join("task1.txt"), b"task 1 content").unwrap();
+    let add_status = Command::new("git")
+        .args(["add", "task1.txt"])
+        .current_dir(&wt1.path)
+        .status()
+        .unwrap();
+    assert!(add_status.success());
+    let commit_status = Command::new("git")
+        .args(["commit", "-m", "feat: complete task 1"])
+        .current_dir(&wt1.path)
+        .status()
+        .unwrap();
+    assert!(commit_status.success());
+
+    // 4. Merge and cleanup
+    let wt1_path = wt1.path.clone();
+    wt1.merge_and_cleanup("feat: complete task 1").unwrap();
+
+    // Asserts commit is merged into main and .wt/task-1 is deleted
+    assert!(
+        repo_root.join("task1.txt").exists(),
+        "task1.txt should exist in main repo after merge"
+    );
+    assert!(
+        !wt1_path.exists(),
+        "worktree directory .wt/task-1 should be deleted"
+    );
+
+    // 5. Test abort: creates task-2, commits a change, calls abort()
+    let wt2 = manager.ensure_task_worktree("task-2", None).unwrap();
+    assert!(wt2.path.exists());
+    assert_eq!(wt2.branch, "superstate/task-2");
+
+    fs::write(wt2.path.join("task2.txt"), b"task 2 content").unwrap();
+    let add2_status = Command::new("git")
+        .args(["add", "task2.txt"])
+        .current_dir(&wt2.path)
+        .status()
+        .unwrap();
+    assert!(add2_status.success());
+    let commit2_status = Command::new("git")
+        .args(["commit", "-m", "feat: incomplete task 2"])
+        .current_dir(&wt2.path)
+        .status()
+        .unwrap();
+    assert!(commit2_status.success());
+
+    let wt2_path = wt2.path.clone();
+    wt2.abort().unwrap();
+
+    // Asserts not merged into main and worktree deleted
+    assert!(
+        !repo_root.join("task2.txt").exists(),
+        "task2.txt should NOT be merged into main repo"
+    );
+    assert!(
+        !wt2_path.exists(),
+        "worktree directory .wt/task-2 should be deleted"
+    );
+}
