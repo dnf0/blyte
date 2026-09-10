@@ -71,7 +71,7 @@ fn test_state_next_worktree_merge_and_advance() {
     assert_eq!(state_before.active_worktree, Some(expected_wt_path.clone()));
     assert_eq!(
         state_before.active_branch,
-        Some("superstate/task-1".to_string())
+        Some("wt/task-1".to_string())
     );
 
     // 2. Modify a file and commit inside .wt/task-1

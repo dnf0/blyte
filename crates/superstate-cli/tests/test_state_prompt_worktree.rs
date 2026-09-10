@@ -80,8 +80,8 @@ fn test_state_prompt_provisions_worktree_and_contract() {
     );
     assert_eq!(
         state.active_branch,
-        Some("superstate/task-1".to_string()),
-        "state.active_branch should be superstate/task-1"
+        Some("wt/task-1".to_string()),
+        "state.active_branch should be wt/task-1"
     );
 
     // Test CLI invocation with --json flag
@@ -112,7 +112,7 @@ fn test_state_prompt_provisions_worktree_and_contract() {
         json["active_worktree"].as_str(),
         Some(expected_wt_path.to_str().unwrap())
     );
-    assert_eq!(json["active_branch"], "superstate/task-1");
+    assert_eq!(json["active_branch"], "wt/task-1");
 
     let prompt_text = json["prompt"]
         .as_str()
@@ -128,7 +128,7 @@ fn test_state_prompt_provisions_worktree_and_contract() {
         prompt_text
     );
     assert!(
-        prompt_text.contains("- Branch: superstate/task-1"),
+        prompt_text.contains("- Branch: wt/task-1"),
         "Prompt should contain active branch: {}",
         prompt_text
     );
@@ -190,7 +190,7 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
     assert_eq!(reloaded.active_worktree, Some(expected_wt_path.clone()));
     assert_eq!(
         reloaded.active_branch,
-        Some("superstate/task-1".to_string())
+        Some("wt/task-1".to_string())
     );
 
     // Test --json flag via CLI
@@ -215,7 +215,7 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
         json["active_worktree"].as_str(),
         Some(expected_wt_path.to_str().unwrap())
     );
-    assert_eq!(json["active_branch"], "superstate/task-1");
+    assert_eq!(json["active_branch"], "wt/task-1");
 }
 
 #[test]

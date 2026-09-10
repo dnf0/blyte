@@ -142,7 +142,7 @@ impl WorktreeManager {
     ) -> Result<IsolatedWorktree, WorktreeError> {
         // Sanitize task_slug by trimming and replacing slashes/whitespace with hyphens.
         let sanitized_slug = sanitize_slug(task_slug);
-        let target_branch = format!("superstate/{}", sanitized_slug);
+        let target_branch = format!("wt/{}", sanitized_slug);
         let target_path = self.repo_root.join(".wt").join(&sanitized_slug);
 
         // If path already exists, return the worktree handle idempotently.

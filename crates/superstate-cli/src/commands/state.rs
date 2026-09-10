@@ -230,7 +230,7 @@ pub fn cmd_rollback(state_path: &Path, reference: Option<&str>) -> Result<(), St
             let branch = state
                 .active_branch
                 .clone()
-                .unwrap_or_else(|| "superstate/task".to_string());
+                .unwrap_or_else(|| "wt/task".to_string());
             let wt = IsolatedWorktree {
                 branch,
                 path: wt_path.clone(),
@@ -395,7 +395,7 @@ pub fn cmd_next(
                 .clone()
                 .unwrap_or_else(|| {
                     format!(
-                        "superstate/{}",
+                        "wt/{}",
                         superstate_worktree::manager::sanitize_slug(&active_task.id)
                     )
                 });
@@ -565,6 +565,7 @@ pub fn cmd_prompt(
     rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
     rendered_prompt.push_str("3. Commit your changes with a conventional commit message.\n");
     rendered_prompt.push_str("4. Return a summary with commit SHA and verification output.\n");
+    rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the active worktree directory or project container. Do not inspect parent directories, host processes, or external repositories.\n");
 
     if json_output {
         let json_value = serde_json::json!({
@@ -914,13 +915,13 @@ pub fn cmd_exec(
                         .clone()
                         .unwrap_or_else(|| {
                             format!(
-                                "superstate/{}",
+                                "wt/{}",
                                 superstate_worktree::manager::sanitize_slug(
-                                    &failed_state
+                                    failed_state
                                         .active_task
                                         .as_ref()
                                         .map(|t| t.id.as_str())
-                                        .unwrap_or("task")
+                                        .unwrap_or("task"),
                                 )
                             )
                         });

@@ -130,14 +130,14 @@ fn test_ensure_task_worktree_and_lifecycle() {
 
     let manager = WorktreeManager::new(repo_root).unwrap();
 
-    // 1. Ensure task worktree creates .wt/task-1 and superstate/task-1 branch
+    // 1. Ensure task worktree creates .wt/task-1 and wt/task-1 branch
     let wt1 = manager.ensure_task_worktree("task-1", None).unwrap();
     assert!(
         wt1.path.exists(),
         "worktree directory .wt/task-1 should exist"
     );
     assert_eq!(wt1.path, repo_root.join(".wt").join("task-1"));
-    assert_eq!(wt1.branch, "superstate/task-1");
+    assert_eq!(wt1.branch, "wt/task-1");
 
     // 2. Calling ensure_task_worktree idempotently returns existing worktree
     let wt1_again = manager.ensure_task_worktree("task-1", None).unwrap();
@@ -176,7 +176,7 @@ fn test_ensure_task_worktree_and_lifecycle() {
     // 5. Test abort: creates task-2, commits a change, calls abort()
     let wt2 = manager.ensure_task_worktree("task-2", None).unwrap();
     assert!(wt2.path.exists());
-    assert_eq!(wt2.branch, "superstate/task-2");
+    assert_eq!(wt2.branch, "wt/task-2");
 
     fs::write(wt2.path.join("task2.txt"), b"task 2 content").unwrap();
     let add2_status = Command::new("git")

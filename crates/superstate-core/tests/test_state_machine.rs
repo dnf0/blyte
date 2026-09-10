@@ -99,7 +99,7 @@ fn test_worktree_tracking_serialization_and_advance_reset() {
         active_task: Some(task1),
         pending_tasks: vec![task2],
         active_worktree: Some(PathBuf::from(".wt/task-1")),
-        active_branch: Some("superstate/task-1".to_string()),
+        active_branch: Some("wt/task-1".to_string()),
         ..Default::default()
     };
 
@@ -113,7 +113,7 @@ fn test_worktree_tracking_serialization_and_advance_reset() {
     );
     assert_eq!(
         deserialized.active_branch,
-        Some("superstate/task-1".to_string())
+        Some("wt/task-1".to_string())
     );
 
     // Assert backward compatibility: missing active_worktree/active_branch deserialize as None
