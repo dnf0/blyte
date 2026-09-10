@@ -272,11 +272,42 @@ impl IsolatedWorktree {
     /// - `commit_msg`: Commit message used when merging into the base branch.
     ///
     /// # Returns
+    /// Automatically stage and commit any dirty changes remaining in the worktree.
+    ///
+    /// # Returns
+    /// `Ok(true)` if changes were committed, `Ok(false)` if working tree was already clean.
+    pub fn auto_commit_if_dirty(&self, commit_msg: &str) -> Result<bool, WorktreeError> {
+        let repo = Repository::at(&self.path)
+            .map_err(|e| WorktreeError::Repository(e.to_string()))?;
+        let status = repo
+            .run_command(&["status", "--porcelain"])
+            .map_err(|e| WorktreeError::Git(e.to_string()))?;
+        if !status.trim().is_empty() {
+            repo.run_command(&["add", "-A"])
+                .map_err(|e| WorktreeError::Git(e.to_string()))?;
+            repo.run_command(&["commit", "-m", commit_msg])
+                .map_err(|e| WorktreeError::Git(e.to_string()))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Merge commits from this worktree branch into the base branch, then remove worktree.
+    /// Automatically stages and commits any remaining uncommitted changes before merging.
+    ///
+    /// # Parameters
+    /// - `commit_msg`: Commit message used when merging into the base branch.
+    ///
+    /// # Returns
     /// `Ok(())` on successful merge and cleanup.
     ///
     /// # Errors
     /// Returns `WorktreeError` if merge conflict arises or worktree deletion fails.
     pub fn merge_and_cleanup(self, commit_msg: &str) -> Result<(), WorktreeError> {
+        // Automatically stage and commit any uncommitted changes left by the agent
+        let _ = self.auto_commit_if_dirty(commit_msg);
+
         // Merge worktree branch into base branch in the primary repo.
         self.merge_into_base(commit_msg)?;
 

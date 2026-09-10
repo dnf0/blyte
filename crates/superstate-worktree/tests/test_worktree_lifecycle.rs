@@ -213,3 +213,33 @@ fn test_ensure_task_worktree_and_lifecycle() {
         "worktree directory .wt/task-2 should be deleted"
     );
 }
+
+#[test]
+fn test_worktree_auto_commit_uncommitted_changes_on_merge() {
+    let repo_dir = init_test_git_repo();
+    let repo_root = repo_dir.path();
+
+    let manager = WorktreeManager::new(repo_root).unwrap();
+
+    let wt = manager.ensure_task_worktree("task-auto", None).unwrap();
+    let wt_path = wt.path.clone();
+
+    // Write file directly into worktree WITHOUT running git add or git commit
+    fs::write(wt.path.join("uncommitted.txt"), b"uncommitted content").unwrap();
+
+    // Calling merge_and_cleanup should auto-commit and merge cleanly into main
+    wt.merge_and_cleanup("feat: auto commit test").unwrap();
+
+    assert!(
+        repo_root.join("uncommitted.txt").exists(),
+        "uncommitted.txt should be committed and merged into main repo"
+    );
+    assert_eq!(
+        fs::read(repo_root.join("uncommitted.txt")).unwrap(),
+        b"uncommitted content"
+    );
+    assert!(
+        !wt_path.exists(),
+        "worktree directory should be deleted after merge"
+    );
+}

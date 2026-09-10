@@ -517,8 +517,11 @@ pub fn cmd_prompt(
     }
     if !active.files_modify.is_empty() {
         rendered_prompt.push_str("Files to modify:\n");
+        let mut seen = std::collections::HashSet::new();
         for f in &active.files_modify {
-            rendered_prompt.push_str(&format!("- {}\n", f.display()));
+            if seen.insert(f) {
+                rendered_prompt.push_str(&format!("- {}\n", f.display()));
+            }
         }
     }
     if let Some(ref cmd) = active.verification_cmd {
@@ -529,7 +532,7 @@ pub fn cmd_prompt(
         if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch)
         {
             rendered_prompt.push_str(&format!(
-                "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to merge or delete this worktree. Simply commit your changes inside this worktree with a conventional commit. The orchestrator will automatically verify your work and merge this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree. Committed changes in this worktree will be merged to the root upon turn completion.\n",
+                "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits and test runs MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to commit, merge, or delete this worktree. Simply implement the task and verify it. The orchestrator automatically snapshots your changes, verifies your work, and merges this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree.\n",
                 wt_path.display(),
                 wt_branch
             ));
@@ -580,11 +583,7 @@ pub fn cmd_prompt(
     rendered_prompt
         .push_str("1. Implement the requested task following Test-Driven Development (TDD).\n");
     rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
-    if is_in_place {
-        rendered_prompt.push_str("3. When the verification command passes, finish your turn immediately.\n");
-    } else {
-        rendered_prompt.push_str("3. Commit your changes inside the worktree with a conventional commit message. Do NOT merge or delete the worktree.\n");
-    }
+    rendered_prompt.push_str("3. When the verification command passes, finish your turn immediately.\n");
     rendered_prompt.push_str("4. Return a summary with verification output.\n");
     rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the project container or workspace directory. Do not inspect parent directories, host processes, or external repositories.\n");
 

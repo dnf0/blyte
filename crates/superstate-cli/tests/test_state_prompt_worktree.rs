@@ -134,7 +134,7 @@ fn test_state_prompt_provisions_worktree_and_contract() {
     );
     assert!(
         prompt_text.contains(
-            "- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree!"
+            "- Working Directory Contract: All code edits and test runs MUST be performed inside this worktree!"
         ),
         "Prompt should contain working directory contract: {}",
         prompt_text
