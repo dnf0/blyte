@@ -116,7 +116,7 @@ pub fn ensure_git_exclude(repo_root: &Path) {
     if let Ok(mut current) = std::fs::read_to_string(&exclude_path) {
         let mut appended = false;
         for entry in &entries {
-            if !current.contains(entry) {
+            if !current.lines().any(|l| l.trim() == *entry) {
                 if !current.ends_with('\n') && !current.is_empty() {
                     current.push('\n');
                 }
@@ -393,7 +393,12 @@ pub fn cmd_next(
             let branch = state
                 .active_branch
                 .clone()
-                .unwrap_or_else(|| format!("superstate/{}", active_task.id));
+                .unwrap_or_else(|| {
+                    format!(
+                        "superstate/{}",
+                        superstate_worktree::manager::sanitize_slug(&active_task.id)
+                    )
+                });
             let wt = IsolatedWorktree {
                 branch,
                 path: wt_path.clone(),
@@ -899,6 +904,38 @@ pub fn cmd_exec(
         write_json(state_path, &value)?;
 
         if rollback_on_fail {
+            if let Some(ref wt_path) = failed_state.active_worktree {
+                if wt_path.exists() {
+                    let base_branch = WorktreeManager::new(&root)
+                        .map(|m| m.default_branch())
+                        .unwrap_or_else(|_| "main".to_string());
+                    let branch = failed_state
+                        .active_branch
+                        .clone()
+                        .unwrap_or_else(|| {
+                            format!(
+                                "superstate/{}",
+                                superstate_worktree::manager::sanitize_slug(
+                                    &failed_state
+                                        .active_task
+                                        .as_ref()
+                                        .map(|t| t.id.as_str())
+                                        .unwrap_or("task")
+                                )
+                            )
+                        });
+                    let wt = IsolatedWorktree {
+                        branch,
+                        path: wt_path.clone(),
+                        base_branch,
+                        repo_root: root.clone(),
+                    };
+                    let _ = wt.abort();
+                    failed_state.active_worktree = None;
+                    failed_state.active_branch = None;
+                    let _ = save_state_atomic(state_path, &failed_state);
+                }
+            }
             superstate_core::checkpoint::rollback_to(&root, step, None, &preserved(state_path))
                 .map_err(|e| format!("Failed to roll back after failure: {}", e))?;
             rolled_back = true;

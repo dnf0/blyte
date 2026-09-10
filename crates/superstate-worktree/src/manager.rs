@@ -199,8 +199,25 @@ impl IsolatedWorktree {
         let repo = Repository::at(&self.repo_root)
             .map_err(|e| WorktreeError::Repository(e.to_string()))?;
 
-        repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch])
-            .map_err(|e| WorktreeError::MergeConflict(e.to_string()))?;
+        // Ensure primary repo is on base_branch before merging
+        let current_branch = repo
+            .require_current_branch("merge")
+            .map_err(|e| WorktreeError::Repository(e.to_string()))?;
+        if current_branch != self.base_branch {
+            repo.run_command(&["checkout", &self.base_branch])
+                .map_err(|e| {
+                    WorktreeError::Repository(format!(
+                        "Primary repo is on branch '{}', failed checking out base '{}': {}",
+                        current_branch, self.base_branch, e
+                    ))
+                })?;
+        }
+
+        if let Err(e) = repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch]) {
+            // Clean up any conflicted merge state so primary repo is not left dirty
+            let _ = repo.run_command(&["merge", "--abort"]);
+            return Err(WorktreeError::MergeConflict(e.to_string()));
+        }
 
         Ok(())
     }
@@ -219,8 +236,11 @@ impl IsolatedWorktree {
         // Merge worktree branch into base branch in the primary repo.
         self.merge_into_base(commit_msg)?;
 
-        // Tear down worktree checkout and branch safely without forcing.
-        self.destroy(false)?;
+        // Tear down worktree checkout and branch. All committed changes are
+        // now safely merged into the base branch, so force removal of the
+        // worktree directory to ensure untracked test/build artifacts do not
+        // wedge the state machine.
+        self.destroy(true)?;
 
         Ok(())
     }
@@ -270,7 +290,7 @@ impl IsolatedWorktree {
 }
 
 /// Sanitize task slug by replacing slashes and whitespace with hyphens and trimming.
-fn sanitize_slug(slug: &str) -> String {
+pub fn sanitize_slug(slug: &str) -> String {
     let trimmed = slug.trim();
     let mut result = String::new();
     let mut prev_dash = false;
