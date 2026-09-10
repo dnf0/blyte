@@ -18,8 +18,11 @@ pub enum WorktreeCommands {
         #[arg(short, long)]
         path: Option<PathBuf>,
         /// Cache directory names to reflink-copy (e.g. .venv target node_modules)
-        #[arg(short, long, value_delimiter = ' ')]
+        #[arg(short, long, value_delimiter = ',', num_args = 1..)]
         caches: Vec<String>,
+        /// Disable auto-detection and copying of cache directories
+        #[arg(long)]
+        no_cache: bool,
         /// Base repository root (defaults to current dir)
         #[arg(short, long, default_value = ".")]
         repo: PathBuf,
@@ -34,6 +37,9 @@ pub enum WorktreeCommands {
     Merge {
         /// Branch name to merge
         branch: String,
+        /// Base branch to merge into (defaults to the default/primary branch)
+        #[arg(short, long)]
+        base: Option<String>,
         /// Commit message for the merge
         #[arg(short, long, default_value = "chore: merge milestone worktree")]
         message: String,
@@ -61,11 +67,12 @@ pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
             base,
             path,
             caches,
+            no_cache,
             repo,
         } => {
             let manager = WorktreeManager::new(&repo).map_err(|e| e.to_string())?;
             let mut cache_dirs = caches;
-            if cache_dirs.is_empty() {
+            if !no_cache && cache_dirs.is_empty() {
                 // Auto-detect common cache dirs
                 for candidate in &[".venv", "node_modules", "target"] {
                     if repo.join(candidate).exists() {
@@ -122,21 +129,37 @@ pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
         }
         WorktreeCommands::Merge {
             branch,
+            base,
             message,
             repo,
         } => {
             let manager = WorktreeManager::new(&repo).map_err(|e| e.to_string())?;
             let list = manager.list().map_err(|e| e.to_string())?;
+
+            let primary_wt = list
+                .iter()
+                .find(|w| w.is_main)
+                .cloned()
+                .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
+
             let wt = list
                 .into_iter()
                 .find(|w| w.branch.as_deref() == Some(&branch))
                 .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
 
+            if wt.is_main {
+                return Err(format!("Cannot merge primary worktree branch '{}' into itself", branch));
+            }
+
+            let base_branch = base
+                .or_else(|| primary_wt.branch.clone())
+                .unwrap_or_else(|| "main".to_string());
+
             let isolated = superstate_worktree::manager::IsolatedWorktree {
                 branch: branch.clone(),
                 path: wt.path,
-                base_branch: "main".to_string(),
-                repo_root: repo,
+                base_branch,
+                repo_root: primary_wt.path.clone(),
             };
 
             isolated.merge_into_base(&message).map_err(|e| e.to_string())?;
@@ -150,16 +173,29 @@ pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
         } => {
             let manager = WorktreeManager::new(&repo).map_err(|e| e.to_string())?;
             let list = manager.list().map_err(|e| e.to_string())?;
+
+            let primary_wt = list
+                .iter()
+                .find(|w| w.is_main)
+                .cloned()
+                .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
+
             let wt = list
                 .into_iter()
                 .find(|w| w.branch.as_deref() == Some(&branch))
                 .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
 
+            if wt.is_main {
+                return Err(format!("Cannot remove primary worktree branch '{}'", branch));
+            }
+
+            let base_branch = primary_wt.branch.clone().unwrap_or_else(|| "main".to_string());
+
             let isolated = superstate_worktree::manager::IsolatedWorktree {
                 branch: branch.clone(),
                 path: wt.path,
-                base_branch: "main".to_string(),
-                repo_root: repo,
+                base_branch,
+                repo_root: primary_wt.path.clone(),
             };
 
             isolated.destroy(force).map_err(|e| e.to_string())?;

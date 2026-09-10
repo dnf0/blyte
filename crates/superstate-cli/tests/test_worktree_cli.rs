@@ -106,3 +106,52 @@ fn test_cli_worktree_lifecycle() {
     let list_after_str = String::from_utf8_lossy(&list_after_out.stdout);
     assert!(!list_after_str.contains("wt/cli-branch"), "list should no longer contain wt/cli-branch");
 }
+
+#[test]
+fn test_cli_cannot_remove_or_merge_primary_worktree() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Attempting to remove main worktree must fail
+    let remove_main = Command::new(bin())
+        .args(["worktree", "remove", "main"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!remove_main.status.success());
+    let err_str = String::from_utf8_lossy(&remove_main.stderr);
+    assert!(err_str.contains("Cannot remove primary worktree"), "Expected guard against removing primary worktree, got: {}", err_str);
+
+    // Attempting to merge main into itself must fail
+    let merge_main = Command::new(bin())
+        .args(["worktree", "merge", "main"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!merge_main.status.success());
+    let err_str = String::from_utf8_lossy(&merge_main.stderr);
+    assert!(err_str.contains("Cannot merge primary worktree"), "Expected guard against merging primary worktree, got: {}", err_str);
+}
+
+#[test]
+fn test_cli_no_cache_flag_prevents_cache_copy() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Create a mock .venv cache
+    let venv = dir.path().join(".venv");
+    fs::create_dir_all(&venv).unwrap();
+    fs::write(venv.join("marker.txt"), b"cache").unwrap();
+
+    // Create worktree with --no-cache
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/no-cache-branch", "--no-cache"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create_out.status.success(), "create failed: {:?}", create_out);
+
+    let wt_path = dir.path().join(".wt").join("wt-no-cache-branch");
+    assert!(wt_path.exists());
+    assert!(!wt_path.join(".venv").exists(), ".venv should not have been copied due to --no-cache");
+}
