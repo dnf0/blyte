@@ -27,6 +27,7 @@ superstate-syntax = { path = "../superstate-syntax", version = "0.1.0" }
 superstate-review = { path = "../superstate-review", version = "0.1.0" }
 superstate-rules = { path = "../superstate-rules", version = "0.1.0" }
 superstate-mcp = { path = "../superstate-mcp", version = "0.1.0" }
+superstate-worktree = { path = "../superstate-worktree", version = "0.1.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

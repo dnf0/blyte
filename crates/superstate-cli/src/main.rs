@@ -46,6 +46,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: StateCommands,
     },
+    /// Git worktree and COW cache operations
+    Worktree {
+        #[command(subcommand)]
+        cmd: commands::worktree::WorktreeCommands,
+    },
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -78,6 +83,7 @@ fn main() {
             strictness,
         } => commands::init::cmd_init_rules(&dest, &language, &strictness),
         Commands::State { cmd } => superstate_cli::state_cli::dispatch(cmd),
+        Commands::Worktree { cmd } => commands::worktree::dispatch_worktree(cmd),
     };
 
     if let Err(e) = result {
