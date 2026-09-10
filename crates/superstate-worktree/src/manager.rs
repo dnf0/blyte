@@ -2,9 +2,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use worktrunk::git::{
-    remove_worktree_with_cleanup, BranchDeletionMode, RemoveOptions, Repository,
-};
+use worktrunk::git::{remove_worktree_with_cleanup, BranchDeletionMode, RemoveOptions, Repository};
 
 use crate::cache::reflink_cache_dirs;
 use crate::error::WorktreeError;
@@ -26,6 +24,14 @@ impl WorktreeManager {
     /// Open repository via worktrunk.
     fn repo(&self) -> Result<Repository, WorktreeError> {
         Repository::at(&self.repo_root).map_err(|e| WorktreeError::Repository(e.to_string()))
+    }
+
+    /// Get the default or base branch name for the repository.
+    pub fn default_branch(&self) -> String {
+        self.repo()
+            .ok()
+            .and_then(|r| r.default_branch())
+            .unwrap_or_else(|| "main".to_string())
     }
 
     /// List all registered worktrees in the repository.

@@ -1,7 +1,7 @@
 //! Worktree domain types and configurations.
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuration options for creating a new isolated worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]

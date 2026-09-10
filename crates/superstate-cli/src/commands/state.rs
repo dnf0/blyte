@@ -4,7 +4,7 @@ use superstate_core::models::LedgerEntry;
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::state_machine::{advance_step, load_state, save_state_atomic};
 use superstate_core::verifier::execute_all_gates;
-use superstate_worktree::manager::WorktreeManager;
+use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
 
 /// Refuse to create a second state inside a project that already has one.
 ///
@@ -31,7 +31,9 @@ fn reject_nested_state(state_path: &Path) -> Result<(), String> {
 
 fn resolve_project_root(state_path: &Path) -> PathBuf {
     if let Some(parent) = state_path.parent() {
-        if parent.file_name().and_then(|s| s.to_str()) == Some(superstate_core::state_machine::STATE_DIR) {
+        if parent.file_name().and_then(|s| s.to_str())
+            == Some(superstate_core::state_machine::STATE_DIR)
+        {
             if let Some(grandparent) = parent.parent() {
                 if grandparent.as_os_str().is_empty() {
                     return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -95,13 +97,23 @@ fn ensure_git_baseline(repo_root: &Path) {
         }
     }
 
-    // Exclude harness / superstate metadata from git dirty tree check
+    ensure_git_exclude(repo_root);
+}
+
+pub fn ensure_git_exclude(repo_root: &Path) {
     let exclude_path = repo_root.join(".git").join("info").join("exclude");
     if let Some(parent) = exclude_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let entries = [
+        ".agent-state/",
+        ".wt/",
+        ".wt",
+        "plan.md",
+        "plan.normalized.md",
+        "run-in-container",
+    ];
     if let Ok(mut current) = std::fs::read_to_string(&exclude_path) {
-        let entries = [".agent-state/", "plan.md", "plan.normalized.md", "run-in-container"];
         let mut appended = false;
         for entry in &entries {
             if !current.contains(entry) {
@@ -117,7 +129,7 @@ fn ensure_git_baseline(repo_root: &Path) {
             let _ = std::fs::write(&exclude_path, current);
         }
     } else {
-        let initial = ".agent-state/\nplan.md\nplan.normalized.md\nrun-in-container\n";
+        let initial = ".agent-state/\n.wt/\n.wt\nplan.md\nplan.normalized.md\nrun-in-container\n";
         let _ = std::fs::write(&exclude_path, initial);
     }
 }
@@ -205,8 +217,35 @@ pub fn cmd_checkpoint(state_path: &Path) -> Result<(), String> {
 
 /// Restore the working tree to a checkpoint, discarding untracked files with it.
 pub fn cmd_rollback(state_path: &Path, reference: Option<&str>) -> Result<(), String> {
-    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let root = repo_root_for(state_path);
+
+    // If an isolated worktree was active for this step, abort it cleanly before restoring
+    // the git checkpoint, preventing dangling branches or worktrees.
+    if let Some(ref wt_path) = state.active_worktree.clone() {
+        if wt_path.exists() {
+            let base_branch = WorktreeManager::new(&root)
+                .map(|m| m.default_branch())
+                .unwrap_or_else(|_| "main".to_string());
+            let branch = state
+                .active_branch
+                .clone()
+                .unwrap_or_else(|| "superstate/task".to_string());
+            let wt = IsolatedWorktree {
+                branch,
+                path: wt_path.clone(),
+                base_branch,
+                repo_root: root.clone(),
+            };
+            wt.abort()
+                .map_err(|e| format!("Failed to abort worktree on rollback: {}", e))?;
+        }
+        state.active_worktree = None;
+        state.active_branch = None;
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to update state after worktree abort: {}", e))?;
+    }
+
     let target = superstate_core::checkpoint::rollback_to(
         &root,
         state.step,
@@ -304,13 +343,24 @@ pub fn cmd_next(
         None => return Err("No active task to advance".to_string()),
     };
 
-    let mut task_to_verify = active_task;
+    let mut task_to_verify = active_task.clone();
     if let Some(cmd) = verify_cmd {
         task_to_verify.verification_cmd = Some(cmd);
     }
 
     let repo_root = repo_root_for(state_path);
-    let results = execute_all_gates(&repo_root, &task_to_verify, verify_git_clean)
+    ensure_git_exclude(&repo_root);
+
+    // When an isolated worktree is active, gates must run within that worktree checkout
+    // where task changes were staged and committed, rather than the primary repo root.
+    let target_dir = state
+        .active_worktree
+        .as_ref()
+        .filter(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| repo_root.clone());
+
+    let results = execute_all_gates(&target_dir, &task_to_verify, verify_git_clean)
         .map_err(|e| format!("Gate execution error: {}", e))?;
 
     for res in &results {
@@ -330,6 +380,31 @@ pub fn cmd_next(
                 "Verification gate '{}' FAILED:\n{}",
                 res.gate_name, reason
             ));
+        }
+    }
+
+    // Merge verified worktree back into base branch and destroy the temporary checkout.
+    // If merge fails, state is preserved without advancement so work is not lost.
+    if let Some(ref wt_path) = state.active_worktree.clone() {
+        if wt_path.exists() {
+            let base_branch = WorktreeManager::new(&repo_root)
+                .map(|m| m.default_branch())
+                .unwrap_or_else(|_| "main".to_string());
+            let branch = state
+                .active_branch
+                .clone()
+                .unwrap_or_else(|| format!("superstate/{}", active_task.id));
+            let wt = IsolatedWorktree {
+                branch,
+                path: wt_path.clone(),
+                base_branch,
+                repo_root: repo_root.clone(),
+            };
+            let commit_msg = format!("feat({}): {}", active_task.id, active_task.title);
+            wt.merge_and_cleanup(&commit_msg)
+                .map_err(|e| format!("Failed to merge and cleanup worktree: {}", e))?;
+            state.active_worktree = None;
+            state.active_branch = None;
         }
     }
 
@@ -396,6 +471,7 @@ pub fn cmd_prompt(
 
     let repo_root = repo_root_for(state_path);
     if repo_root.join(".git").exists() {
+        ensure_git_exclude(&repo_root);
         let manager = WorktreeManager::new(&repo_root)
             .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
         let wt = manager
@@ -429,7 +505,8 @@ pub fn cmd_prompt(
         rendered_prompt.push_str(&format!("Verification command: `{}`\n", cmd));
     }
 
-    if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch) {
+    if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch)
+    {
         rendered_prompt.push_str(&format!(
             "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree!\n",
             wt_path.display(),
@@ -478,7 +555,8 @@ pub fn cmd_prompt(
     }
 
     rendered_prompt.push_str("\n## Instructions\n");
-    rendered_prompt.push_str("1. Implement the requested task following Test-Driven Development (TDD).\n");
+    rendered_prompt
+        .push_str("1. Implement the requested task following Test-Driven Development (TDD).\n");
     rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
     rendered_prompt.push_str("3. Commit your changes with a conventional commit message.\n");
     rendered_prompt.push_str("4. Return a summary with commit SHA and verification output.\n");
@@ -776,12 +854,19 @@ pub fn cmd_exec(
             .map_err(|e| format!("Failed to checkpoint before exec: {}", e))?;
     }
 
-    let gate = superstate_core::verifier::run_verification_cmd(verify_cmd, &root, 600)
+    let target_dir = state
+        .active_worktree
+        .as_ref()
+        .filter(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| root.clone());
+
+    let gate = superstate_core::verifier::run_verification_cmd(verify_cmd, &target_dir, 600)
         .map_err(|e| format!("Verification could not run: {}", e))?;
 
     let mut git_clean_passed = true;
     if gate.passed && verify_git_clean {
-        let clean = superstate_core::verifier::verify_git_clean(&root)
+        let clean = superstate_core::verifier::verify_git_clean(&target_dir)
             .map_err(|e| format!("git clean check failed: {}", e))?;
         git_clean_passed = clean.passed;
     }

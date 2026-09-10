@@ -1,8 +1,8 @@
 use std::fs;
 use std::process::Command;
-use tempfile::TempDir;
 use superstate_worktree::manager::WorktreeManager;
 use superstate_worktree::types::WorktreeConfig;
+use tempfile::TempDir;
 
 fn init_test_git_repo() -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -67,11 +67,23 @@ fn test_worktree_lifecycle_full() {
     // 1. Create worktree
     let isolated = manager.create(&config).unwrap();
     assert!(isolated.path.exists(), "worktree path should exist");
-    assert!(isolated.path.join(".venv").join("bin").join("python").exists(), "cache should be copied");
+    assert!(
+        isolated
+            .path
+            .join(".venv")
+            .join("bin")
+            .join("python")
+            .exists(),
+        "cache should be copied"
+    );
 
     // 2. List worktrees
     let list = manager.list().unwrap();
-    assert!(list.iter().any(|w| w.branch.as_deref() == Some("wt/milestone-1")), "list should contain wt/milestone-1");
+    assert!(
+        list.iter()
+            .any(|w| w.branch.as_deref() == Some("wt/milestone-1")),
+        "list should contain wt/milestone-1"
+    );
 
     // 3. Make changes in worktree
     fs::write(isolated.path.join("new_file.txt"), b"milestone completed").unwrap();
@@ -89,8 +101,13 @@ fn test_worktree_lifecycle_full() {
     assert!(commit_status.success());
 
     // 4. Merge into base
-    isolated.merge_into_base("feat: squash milestone 1").unwrap();
-    assert!(repo_root.join("new_file.txt").exists(), "new_file.txt should exist in main repo after merge");
+    isolated
+        .merge_into_base("feat: squash milestone 1")
+        .unwrap();
+    assert!(
+        repo_root.join("new_file.txt").exists(),
+        "new_file.txt should exist in main repo after merge"
+    );
 
     // 5. Destroy worktree
     let wt_path = isolated.path.clone();
@@ -98,7 +115,12 @@ fn test_worktree_lifecycle_full() {
     assert!(!wt_path.exists(), "worktree directory should be removed");
 
     let list_after = manager.list().unwrap();
-    assert!(!list_after.iter().any(|w| w.branch.as_deref() == Some("wt/milestone-1")), "list should not contain wt/milestone-1");
+    assert!(
+        !list_after
+            .iter()
+            .any(|w| w.branch.as_deref() == Some("wt/milestone-1")),
+        "list should not contain wt/milestone-1"
+    );
 }
 
 #[test]
@@ -110,7 +132,10 @@ fn test_ensure_task_worktree_and_lifecycle() {
 
     // 1. Ensure task worktree creates .wt/task-1 and superstate/task-1 branch
     let wt1 = manager.ensure_task_worktree("task-1", None).unwrap();
-    assert!(wt1.path.exists(), "worktree directory .wt/task-1 should exist");
+    assert!(
+        wt1.path.exists(),
+        "worktree directory .wt/task-1 should exist"
+    );
     assert_eq!(wt1.path, repo_root.join(".wt").join("task-1"));
     assert_eq!(wt1.branch, "superstate/task-1");
 

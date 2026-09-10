@@ -20,15 +20,10 @@ pub enum WorktreeError {
     Repository(String),
 
     #[error("Worktree '{branch}' already exists at {path}")]
-    AlreadyExists {
-        branch: String,
-        path: PathBuf,
-    },
+    AlreadyExists { branch: String, path: PathBuf },
 
     #[error("Worktree '{branch}' not found")]
-    NotFound {
-        branch: String,
-    },
+    NotFound { branch: String },
 
     #[error("Failed to copy cache directory from {src_path} to {dst_path}: {details}")]
     CacheCopy {

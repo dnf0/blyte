@@ -188,7 +188,10 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
 
     let reloaded = load_state(&state_file).unwrap();
     assert_eq!(reloaded.active_worktree, Some(expected_wt_path.clone()));
-    assert_eq!(reloaded.active_branch, Some("superstate/task-1".to_string()));
+    assert_eq!(
+        reloaded.active_branch,
+        Some("superstate/task-1".to_string())
+    );
 
     // Test --json flag via CLI
     let output = Command::new(bin())
@@ -245,7 +248,8 @@ fn test_state_prompt_non_git_json_fallback() {
     superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
 
     // Call cmd_prompt directly
-    cmd_prompt(&state_file, None, false, false).expect("cmd_prompt should succeed in non-git directory");
+    cmd_prompt(&state_file, None, false, false)
+        .expect("cmd_prompt should succeed in non-git directory");
 
     // Call state prompt with --json flag
     let output = Command::new(bin())
@@ -260,9 +264,14 @@ fn test_state_prompt_non_git_json_fallback() {
         .output()
         .expect("Failed to run superstate state prompt --json");
 
-    assert!(output.status.success(), "superstate state prompt --json failed: {:?}", output);
+    assert!(
+        output.status.success(),
+        "superstate state prompt --json failed: {:?}",
+        output
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(&stdout).expect("Failed to parse JSON output");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Failed to parse JSON output");
 
     assert!(
         json["active_worktree"].is_null(),
@@ -280,4 +289,3 @@ fn test_state_prompt_non_git_json_fallback() {
         prompt_text
     );
 }
-
