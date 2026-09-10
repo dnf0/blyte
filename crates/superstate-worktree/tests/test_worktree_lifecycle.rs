@@ -159,6 +159,9 @@ fn test_ensure_task_worktree_and_lifecycle() {
         .unwrap();
     assert!(commit_status.success());
 
+    // Simulate an untracked conflicting file in repo_root (e.g. from container bind mount)
+    fs::write(repo_root.join("task1.txt"), b"stale untracked content").unwrap();
+
     // 4. Merge and cleanup
     let wt1_path = wt1.path.clone();
     wt1.merge_and_cleanup("feat: complete task 1").unwrap();
@@ -167,6 +170,11 @@ fn test_ensure_task_worktree_and_lifecycle() {
     assert!(
         repo_root.join("task1.txt").exists(),
         "task1.txt should exist in main repo after merge"
+    );
+    assert_eq!(
+        fs::read(repo_root.join("task1.txt")).unwrap(),
+        b"task 1 content",
+        "task1.txt should have the authoritative committed worktree content"
     );
     assert!(
         !wt1_path.exists(),

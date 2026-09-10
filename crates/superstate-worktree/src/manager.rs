@@ -214,9 +214,53 @@ impl IsolatedWorktree {
         }
 
         if let Err(e) = repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch]) {
+            let err_msg = e.to_string();
+            // Git exit code 2 indicates conflicting untracked files or dirty working tree.
+            // Check if untracked files in the primary working tree conflict with files
+            // committed in the branch being merged. The worktree's committed version is authoritative.
+            if err_msg.contains("exit 2") {
+                let status_output = repo.run_command(&["status", "--porcelain"]).unwrap_or_default();
+                let untracked_files: Vec<String> = status_output
+                    .lines()
+                    .filter(|l| l.starts_with("?? "))
+                    .map(|l| l[3..].trim().to_string())
+                    .collect();
+
+                let diff_cmd = format!("{}...{}", self.base_branch, self.branch);
+                let branch_files_output = repo
+                    .run_command(&["diff", "--name-only", &diff_cmd])
+                    .unwrap_or_default();
+                let branch_files: Vec<&str> = branch_files_output.lines().map(|l| l.trim()).collect();
+
+                let mut cleaned_any = false;
+                for u in &untracked_files {
+                    if branch_files.contains(&u.as_str()) {
+                        let target = self.repo_root.join(u);
+                        if target.is_file() {
+                            let _ = fs::remove_file(&target);
+                            cleaned_any = true;
+                        } else if target.is_dir() {
+                            let _ = fs::remove_dir_all(&target);
+                            cleaned_any = true;
+                        }
+                    }
+                }
+
+                if cleaned_any {
+                    if let Err(retry_err) =
+                        repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch])
+                    {
+                        let _ = repo.run_command(&["merge", "--abort"]);
+                        return Err(WorktreeError::MergeConflict(retry_err.to_string()));
+                    } else {
+                        return Ok(());
+                    }
+                }
+            }
+
             // Clean up any conflicted merge state so primary repo is not left dirty
             let _ = repo.run_command(&["merge", "--abort"]);
-            return Err(WorktreeError::MergeConflict(e.to_string()));
+            return Err(WorktreeError::MergeConflict(err_msg));
         }
 
         Ok(())

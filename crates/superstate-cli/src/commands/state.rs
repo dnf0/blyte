@@ -513,7 +513,7 @@ pub fn cmd_prompt(
     if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch)
     {
         rendered_prompt.push_str(&format!(
-            "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree!\n",
+            "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to merge or delete this worktree. Simply commit your changes inside this worktree with a conventional commit. The orchestrator will automatically verify your work and merge this worktree into the base branch after your turn completes.\n",
             wt_path.display(),
             wt_branch
         ));
@@ -563,7 +563,7 @@ pub fn cmd_prompt(
     rendered_prompt
         .push_str("1. Implement the requested task following Test-Driven Development (TDD).\n");
     rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
-    rendered_prompt.push_str("3. Commit your changes with a conventional commit message.\n");
+    rendered_prompt.push_str("3. Commit your changes inside the worktree with a conventional commit message. Do NOT merge or delete the worktree.\n");
     rendered_prompt.push_str("4. Return a summary with commit SHA and verification output.\n");
     rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the active worktree directory or project container. Do not inspect parent directories, host processes, or external repositories.\n");
 
