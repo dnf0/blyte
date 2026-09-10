@@ -348,3 +348,37 @@ fn test_cli_no_cache_conflicts_with_caches() {
     let err_str = String::from_utf8_lossy(&create_out.stderr);
     assert!(err_str.contains("cannot be used with"), "Expected Clap conflict error, got: {}", err_str);
 }
+
+#[test]
+fn test_cli_merge_fails_on_detached_head_primary_worktree() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/detached-test"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create_out.status.success());
+
+    // Detach HEAD in primary repo
+    Command::new("git")
+        .args(["checkout", "--detach"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    // Attempting to merge wt/detached-test while primary repo is detached must fail
+    let merge_out = Command::new(bin())
+        .args(["worktree", "merge", "wt/detached-test"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!merge_out.status.success());
+    let err_str = String::from_utf8_lossy(&merge_out.stderr);
+    assert!(
+        err_str.contains("primary repository worktree is in a detached HEAD state"),
+        "Expected detached HEAD error, got: {}",
+        err_str
+    );
+}

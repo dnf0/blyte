@@ -86,13 +86,15 @@ fn resolve_worktree_for_action(
 
     if action == "remove" {
         if let Ok(cwd) = std::env::current_dir() {
-            if let (Ok(canonical_cwd), Ok(canonical_wt)) = (cwd.canonicalize(), wt.path.canonicalize()) {
-                if canonical_cwd.starts_with(&canonical_wt) {
-                    return Err(format!(
-                        "Cannot remove worktree '{}' while current working directory is inside it",
-                        branch
-                    ));
-                }
+            let is_inside = match (cwd.canonicalize(), wt.path.canonicalize()) {
+                (Ok(c), Ok(w)) => c.starts_with(&w),
+                _ => cwd.starts_with(&wt.path),
+            };
+            if is_inside {
+                return Err(format!(
+                    "Cannot remove worktree '{}' while current working directory is inside it",
+                    branch
+                ));
             }
         }
     }
