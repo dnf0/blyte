@@ -243,6 +243,9 @@ fn repo_root_for(state_path: &Path) -> std::path::PathBuf {
                 return grandparent.to_path_buf();
             }
         } else if parent.join(".git").exists() {
+            if parent.as_os_str().is_empty() {
+                return std::path::PathBuf::from(".");
+            }
             return parent.to_path_buf();
         }
     }

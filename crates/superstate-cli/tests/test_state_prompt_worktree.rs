@@ -215,3 +215,69 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
     assert_eq!(json["active_branch"], "superstate/task-1");
 }
 
+#[test]
+fn test_state_prompt_non_git_json_fallback() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".agent-state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_file = state_dir.join("state.json");
+
+    let initial_state = superstate_core::models::ExecutionState {
+        status: superstate_core::models::ExecutionStatus::InProgress,
+        step: 0,
+        active_task: Some(superstate_core::models::TaskSpec {
+            id: "task-1".to_string(),
+            title: "Non-git task".to_string(),
+            depends_on: vec![],
+            files_modify: vec![std::path::PathBuf::from("src/task1.rs")],
+            interfaces_produces: vec![],
+            verification_cmd: Some("cargo test".to_string()),
+        }),
+        active_worktree: None,
+        active_branch: None,
+        pending_tasks: vec![],
+        completed_tasks: vec![],
+        modified_files: vec![],
+        errors: vec![],
+        plan_path: None,
+        notes: vec![],
+    };
+    superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
+
+    // Call cmd_prompt directly
+    cmd_prompt(&state_file, None, false, false).expect("cmd_prompt should succeed in non-git directory");
+
+    // Call state prompt with --json flag
+    let output = Command::new(bin())
+        .args([
+            "state",
+            "prompt",
+            "--state",
+            state_file.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run superstate state prompt --json");
+
+    assert!(output.status.success(), "superstate state prompt --json failed: {:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("Failed to parse JSON output");
+
+    assert!(
+        json["active_worktree"].is_null(),
+        "active_worktree should be null in non-git directory"
+    );
+    assert!(
+        json["active_branch"].is_null(),
+        "active_branch should be null in non-git directory"
+    );
+
+    let prompt_text = json["prompt"].as_str().expect("prompt must be a string");
+    assert!(
+        !prompt_text.contains("Active Isolated Worktree"),
+        "Prompt should not include worktree section in non-git directory: {}",
+        prompt_text
+    );
+}
+
