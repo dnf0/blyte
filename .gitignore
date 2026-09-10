@@ -6,3 +6,6 @@ Cargo.lock
 
 # Ephemeral agent execution state & file locks
 .agent-state/
+
+# Graphify knowledge graph outputs
+graphify-out/

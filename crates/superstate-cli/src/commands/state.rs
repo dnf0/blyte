@@ -28,8 +28,103 @@ fn reject_nested_state(state_path: &Path) -> Result<(), String> {
     }
 }
 
+fn resolve_project_root(state_path: &Path) -> PathBuf {
+    if let Some(parent) = state_path.parent() {
+        if parent.file_name().and_then(|s| s.to_str()) == Some(superstate_core::state_machine::STATE_DIR) {
+            if let Some(grandparent) = parent.parent() {
+                if grandparent.as_os_str().is_empty() {
+                    return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                }
+                return grandparent.to_path_buf();
+            }
+        }
+        if !parent.as_os_str().is_empty() {
+            return parent.to_path_buf();
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn ensure_git_baseline(repo_root: &Path) {
+    let check = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo_root)
+        .output();
+
+    let inside_git = match check {
+        Ok(out) => out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true",
+        Err(_) => false,
+    };
+
+    if !inside_git {
+        let init_status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo_root)
+            .status();
+
+        let ok = match init_status {
+            Ok(s) if s.success() => true,
+            _ => std::process::Command::new("git")
+                .args(["init"])
+                .current_dir(repo_root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+        };
+
+        if ok {
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.name", "Superstate"])
+                .current_dir(repo_root)
+                .status();
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.email", "superstate@local"])
+                .current_dir(repo_root)
+                .status();
+            let _ = std::process::Command::new("git")
+                .args([
+                    "commit",
+                    "--allow-empty",
+                    "--no-gpg-sign",
+                    "-m",
+                    "chore(superstate): initialize tracking baseline",
+                ])
+                .current_dir(repo_root)
+                .status();
+        }
+    }
+
+    // Exclude harness / superstate metadata from git dirty tree check
+    let exclude_path = repo_root.join(".git").join("info").join("exclude");
+    if let Some(parent) = exclude_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut current) = std::fs::read_to_string(&exclude_path) {
+        let entries = [".agent-state/", "plan.md", "plan.normalized.md", "run-in-container"];
+        let mut appended = false;
+        for entry in &entries {
+            if !current.contains(entry) {
+                if !current.ends_with('\n') && !current.is_empty() {
+                    current.push('\n');
+                }
+                current.push_str(entry);
+                current.push('\n');
+                appended = true;
+            }
+        }
+        if appended {
+            let _ = std::fs::write(&exclude_path, current);
+        }
+    } else {
+        let initial = ".agent-state/\nplan.md\nplan.normalized.md\nrun-in-container\n";
+        let _ = std::fs::write(&exclude_path, initial);
+    }
+}
+
 pub fn cmd_init(plan: PathBuf, state_path: PathBuf) -> Result<(), String> {
     reject_nested_state(&state_path)?;
+    let root = resolve_project_root(&state_path);
+    ensure_git_baseline(&root);
     let state = init_state_from_plan(&plan, &state_path)
         .map_err(|e| format!("Failed to initialize state from plan: {}", e))?;
     println!("State initialized at {}", state_path.display());
