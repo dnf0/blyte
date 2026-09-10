@@ -5,7 +5,31 @@ use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::state_machine::{advance_step, load_state, save_state_atomic};
 use superstate_core::verifier::execute_all_gates;
 
+/// Refuse to create a second state inside a project that already has one.
+///
+/// Two states for one project diverge silently: one records the work, the other
+/// is consulted, and neither is obviously wrong when read on its own.
+fn reject_nested_state(state_path: &Path) -> Result<(), String> {
+    if state_path.is_absolute() || state_path.exists() {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match superstate_core::state_machine::enclosing_state_root(&cwd) {
+        Some(root) if root != cwd => Err(format!(
+            "This project already has state at {}. Creating another here would give \
+             one project two diverging states. Run from {} to reinitialise it, or \
+             pass an explicit --state path if a second one is genuinely intended.",
+            root.join(superstate_core::state_machine::STATE_DIR)
+                .join("state.json")
+                .display(),
+            root.display(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub fn cmd_init(plan: PathBuf, state_path: PathBuf) -> Result<(), String> {
+    reject_nested_state(&state_path)?;
     let state = init_state_from_plan(&plan, &state_path)
         .map_err(|e| format!("Failed to initialize state from plan: {}", e))?;
     println!("State initialized at {}", state_path.display());

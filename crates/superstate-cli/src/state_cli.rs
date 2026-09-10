@@ -160,28 +160,38 @@ pub enum StateCommands {
     },
 }
 
+/// Find the project's state, searching upward from the working directory.
+///
+/// A default relative path is resolved against the nearest ancestor that has one,
+/// so running from a subdirectory acts on the project's state rather than failing
+/// or creating a second one beside it.
+fn resolve(state: PathBuf) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    superstate_core::state_machine::resolve_state_path(&state, &cwd)
+}
+
 /// Dispatch a `state` subcommand. Shared by both binaries.
 pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
     match cmd {
         StateCommands::Init { plan, state } => commands::state::cmd_init(plan, state),
-        StateCommands::Status { state, json } => commands::state::cmd_status(&state, json),
+        StateCommands::Status { state, json } => commands::state::cmd_status(&resolve(state), json),
         StateCommands::Next {
             state,
             verify_cmd,
             verify_git_clean,
-        } => commands::state::cmd_next(&state, verify_cmd, verify_git_clean),
-        StateCommands::Ready { state, json } => commands::state::cmd_ready(&state, json),
-        StateCommands::Checkpoint { state } => commands::state::cmd_checkpoint(&state),
+        } => commands::state::cmd_next(&resolve(state), verify_cmd, verify_git_clean),
+        StateCommands::Ready { state, json } => commands::state::cmd_ready(&resolve(state), json),
+        StateCommands::Checkpoint { state } => commands::state::cmd_checkpoint(&resolve(state)),
         StateCommands::Rollback { state, reference } => {
-            commands::state::cmd_rollback(&state, reference.as_deref())
+            commands::state::cmd_rollback(&resolve(state), reference.as_deref())
         }
         StateCommands::Prompt {
             state,
             task,
             with_graph,
-        } => commands::state::cmd_prompt(&state, task.as_deref(), with_graph),
+        } => commands::state::cmd_prompt(&resolve(state), task.as_deref(), with_graph),
         StateCommands::Sync { plan, state, out } => {
-            commands::state::cmd_sync(&state, &plan, out.as_deref())
+            commands::state::cmd_sync(&resolve(state), &plan, out.as_deref())
         }
         StateCommands::Exec {
             verify_cmd,
@@ -192,7 +202,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             no_advance,
             json,
         } => commands::state::cmd_exec(
-            &state,
+            &resolve(state),
             &verify_cmd,
             verify_git_clean,
             checkpoint,
@@ -205,16 +215,23 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             plan,
             repair,
             json,
-        } => commands::state::cmd_doctor(&state, plan.as_deref(), repair, json),
-        StateCommands::Validate { state } => commands::state::cmd_validate(&state),
+        } => commands::state::cmd_doctor(&resolve(state), plan.as_deref(), repair, json),
+        StateCommands::Validate { state } => commands::state::cmd_validate(&resolve(state)),
         StateCommands::Apply {
             state,
             patch,
             note,
             out,
-        } => commands::state::cmd_apply(&state, patch.as_deref(), note.as_deref(), out.as_deref()),
-        StateCommands::Resume { state } => commands::state::cmd_resume(&state),
-        StateCommands::Metrics { state, json } => commands::state::cmd_metrics(&state, json),
+        } => commands::state::cmd_apply(
+            &resolve(state),
+            patch.as_deref(),
+            note.as_deref(),
+            out.as_deref(),
+        ),
+        StateCommands::Resume { state } => commands::state::cmd_resume(&resolve(state)),
+        StateCommands::Metrics { state, json } => {
+            commands::state::cmd_metrics(&resolve(state), json)
+        }
         StateCommands::Decompose {
             plan,
             out,
@@ -224,6 +241,6 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             note,
             state,
             author,
-        } => commands::state::cmd_note(&state, &note, &author),
+        } => commands::state::cmd_note(&resolve(state), &note, &author),
     }
 }

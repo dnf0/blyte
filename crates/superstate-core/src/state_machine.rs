@@ -2,7 +2,7 @@ use crate::models::{ExecutionState, ExecutionStatus, TaskSpec};
 use fd_lock::RwLock;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -117,4 +117,48 @@ pub fn ready_tasks(state: &ExecutionState) -> Vec<&TaskSpec> {
         }
     }
     ready
+}
+
+/// Directory holding a project's execution state.
+pub const STATE_DIR: &str = ".agent-state";
+
+/// Resolve a state path by searching upward for the project's state, as git does
+/// for `.git`.
+///
+/// Without this an agent that changes into a subdirectory either loses the state
+/// or, worse, creates a second one there: two states for one project, diverging
+/// silently. Resolution rules:
+///
+/// * an absolute path, or a relative path that exists as given, is used as-is;
+/// * otherwise the same relative path is sought in each ancestor of `start`,
+///   and the first hit wins;
+/// * if none is found the original is returned, so `init` still creates state in
+///   the current directory.
+pub fn resolve_state_path(path: &Path, start: &Path) -> PathBuf {
+    if path.is_absolute() || path.exists() {
+        return path.to_path_buf();
+    }
+    let mut dir = Some(start);
+    while let Some(current) = dir {
+        let candidate = current.join(path);
+        if candidate.exists() {
+            return candidate;
+        }
+        dir = current.parent();
+    }
+    path.to_path_buf()
+}
+
+/// The nearest ancestor of `start` that already holds project state, if any.
+///
+/// Used to refuse creating a nested second state inside an existing project.
+pub fn enclosing_state_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(current) = dir {
+        if current.join(STATE_DIR).join("state.json").exists() {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
 }
