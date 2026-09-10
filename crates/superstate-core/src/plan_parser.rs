@@ -145,6 +145,7 @@ pub fn init_state_from_plan(
         notes: Vec::new(),
         active_worktree: None,
         active_branch: None,
+        no_worktree: false,
     };
 
     save_state_atomic(state_path, &state)?;

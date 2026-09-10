@@ -134,12 +134,17 @@ pub fn ensure_git_exclude(repo_root: &Path) {
     }
 }
 
-pub fn cmd_init(plan: PathBuf, state_path: PathBuf) -> Result<(), String> {
+pub fn cmd_init(plan: PathBuf, state_path: PathBuf, no_worktree: bool) -> Result<(), String> {
     reject_nested_state(&state_path)?;
     let root = resolve_project_root(&state_path);
     ensure_git_baseline(&root);
-    let state = init_state_from_plan(&plan, &state_path)
+    let mut state = init_state_from_plan(&plan, &state_path)
         .map_err(|e| format!("Failed to initialize state from plan: {}", e))?;
+    if no_worktree {
+        state.no_worktree = true;
+        save_state_atomic(&state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
+    }
     println!("State initialized at {}", state_path.display());
     if let Some(task) = state.active_task {
         println!("Active Task: {}: {}", task.id, task.title);
@@ -441,8 +446,11 @@ pub fn cmd_prompt(
     task: Option<&str>,
     with_graph: bool,
     json_output: bool,
+    no_worktree: bool,
 ) -> Result<(), String> {
     let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+
+    let is_in_place = no_worktree || state.no_worktree;
 
     let active = match select_task(&state, task).cloned() {
         Some(t) => t,
@@ -475,7 +483,7 @@ pub fn cmd_prompt(
     };
 
     let repo_root = repo_root_for(state_path);
-    if repo_root.join(".git").exists() {
+    if !is_in_place && repo_root.join(".git").exists() {
         ensure_git_exclude(&repo_root);
         let manager = WorktreeManager::new(&repo_root)
             .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
@@ -486,6 +494,13 @@ pub fn cmd_prompt(
         state.active_branch = Some(wt.branch.clone());
         save_state_atomic(state_path, &state)
             .map_err(|e| format!("Failed to save state: {}", e))?;
+    } else if is_in_place {
+        if state.active_worktree.is_some() || state.active_branch.is_some() {
+            state.active_worktree = None;
+            state.active_branch = None;
+            save_state_atomic(state_path, &state)
+                .map_err(|e| format!("Failed to save state: {}", e))?;
+        }
     }
 
     let mut rendered_prompt = String::new();
@@ -510,13 +525,15 @@ pub fn cmd_prompt(
         rendered_prompt.push_str(&format!("Verification command: `{}`\n", cmd));
     }
 
-    if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch)
-    {
-        rendered_prompt.push_str(&format!(
-            "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to merge or delete this worktree. Simply commit your changes inside this worktree with a conventional commit. The orchestrator will automatically verify your work and merge this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree. Committed changes in this worktree will be merged to the root upon turn completion.\n",
-            wt_path.display(),
-            wt_branch
-        ));
+    if !is_in_place {
+        if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch)
+        {
+            rendered_prompt.push_str(&format!(
+                "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits, test runs, and git commits MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to merge or delete this worktree. Simply commit your changes inside this worktree with a conventional commit. The orchestrator will automatically verify your work and merge this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree. Committed changes in this worktree will be merged to the root upon turn completion.\n",
+                wt_path.display(),
+                wt_branch
+            ));
+        }
     }
 
     // Completed milestones and the epistemic ledger. This is the whole point of
@@ -563,15 +580,19 @@ pub fn cmd_prompt(
     rendered_prompt
         .push_str("1. Implement the requested task following Test-Driven Development (TDD).\n");
     rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
-    rendered_prompt.push_str("3. Commit your changes inside the worktree with a conventional commit message. Do NOT merge or delete the worktree.\n");
-    rendered_prompt.push_str("4. Return a summary with commit SHA and verification output.\n");
-    rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the active worktree directory or project container. Do not inspect parent directories, host processes, or external repositories.\n");
+    if is_in_place {
+        rendered_prompt.push_str("3. When the verification command passes, finish your turn immediately.\n");
+    } else {
+        rendered_prompt.push_str("3. Commit your changes inside the worktree with a conventional commit message. Do NOT merge or delete the worktree.\n");
+    }
+    rendered_prompt.push_str("4. Return a summary with verification output.\n");
+    rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the project container or workspace directory. Do not inspect parent directories, host processes, or external repositories.\n");
 
     if json_output {
         let json_value = serde_json::json!({
             "task": active,
-            "active_worktree": state.active_worktree,
-            "active_branch": state.active_branch,
+            "active_worktree": if is_in_place { serde_json::Value::Null } else { serde_json::to_value(&state.active_worktree).unwrap_or(serde_json::Value::Null) },
+            "active_branch": if is_in_place { serde_json::Value::Null } else { serde_json::to_value(&state.active_branch).unwrap_or(serde_json::Value::Null) },
             "prompt": rendered_prompt,
         });
         let serialized = serde_json::to_string_pretty(&json_value)

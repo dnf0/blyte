@@ -56,10 +56,10 @@ fn test_state_prompt_provisions_worktree_and_contract() {
     .unwrap();
 
     let state_file = dir.path().join(".agent-state").join("state.json");
-    cmd_init(plan_file, state_file.clone()).expect("Failed to initialize state");
+    cmd_init(plan_file, state_file.clone(), false).expect("Failed to initialize state");
 
-    // Call cmd_prompt with 4 arguments: (state_path, task, with_graph, json_output)
-    cmd_prompt(&state_file, None, false, false).expect("cmd_prompt failed");
+    // Call cmd_prompt with 5 arguments: (state_path, task, with_graph, json_output, no_worktree)
+    cmd_prompt(&state_file, None, false, false, false).expect("cmd_prompt failed");
 
     let expected_wt_path = dir.path().join(".wt").join("task-1");
     assert!(
@@ -176,11 +176,12 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
         errors: vec![],
         plan_path: None,
         notes: vec![],
+        no_worktree: false,
     };
     superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
 
     // Call cmd_prompt
-    cmd_prompt(&state_file, None, false, false).expect("cmd_prompt failed");
+    cmd_prompt(&state_file, None, false, false, false).expect("cmd_prompt failed");
 
     let expected_wt_path = dir.path().join(".wt").join("task-1");
     assert!(expected_wt_path.exists());
@@ -244,11 +245,12 @@ fn test_state_prompt_non_git_json_fallback() {
         errors: vec![],
         plan_path: None,
         notes: vec![],
+        no_worktree: false,
     };
     superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
 
     // Call cmd_prompt directly
-    cmd_prompt(&state_file, None, false, false)
+    cmd_prompt(&state_file, None, false, false, false)
         .expect("cmd_prompt should succeed in non-git directory");
 
     // Call state prompt with --json flag
@@ -289,3 +291,73 @@ fn test_state_prompt_non_git_json_fallback() {
         prompt_text
     );
 }
+
+#[test]
+fn test_state_prompt_no_worktree_flag() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let plan_content = r#"# Sample Plan
+### Task 1: First In-Place Task
+- Depends on: none
+Files to modify:
+- `src/task1.rs`
+Verification command: `cargo test`
+
+Implement the first task.
+"#;
+    let plan_file = dir.path().join("plan.md");
+    fs::write(&plan_file, plan_content).unwrap();
+
+    let state_file = dir.path().join(".agent-state/state.json");
+    cmd_init(plan_file, state_file.clone(), false).expect("Failed to initialize state");
+
+    // Call state prompt with --no-worktree and --json flag
+    let output = Command::new(bin())
+        .args([
+            "state",
+            "prompt",
+            "--state",
+            state_file.to_str().unwrap(),
+            "--no-worktree",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run superstate state prompt --no-worktree --json");
+
+    assert!(
+        output.status.success(),
+        "superstate state prompt --no-worktree --json failed: {:?}",
+        output
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Failed to parse JSON output");
+
+    assert!(
+        json["active_worktree"].is_null(),
+        "active_worktree must be null when --no-worktree is passed"
+    );
+    assert!(
+        json["active_branch"].is_null(),
+        "active_branch must be null when --no-worktree is passed"
+    );
+
+    let wt_dir = dir.path().join(".wt");
+    assert!(
+        !wt_dir.exists(),
+        ".wt directory must NOT be created when --no-worktree is passed"
+    );
+
+    let prompt_text = json["prompt"].as_str().expect("prompt must be a string");
+    assert!(
+        !prompt_text.contains("Active Isolated Worktree"),
+        "Prompt should not include worktree section when --no-worktree is passed"
+    );
+    assert!(
+        !prompt_text.contains("inside this worktree"),
+        "Prompt should not mention committing inside worktree when in-place"
+    );
+}
+

@@ -149,6 +149,9 @@ pub struct ExecutionState {
     /// Branch name associated with the active worktree, if any.
     #[serde(default)]
     pub active_branch: Option<String>,
+    /// Whether to disable worktrees and operate directly in the workspace root.
+    #[serde(default)]
+    pub no_worktree: bool,
 }
 
 impl Default for ExecutionState {
@@ -165,6 +168,7 @@ impl Default for ExecutionState {
             notes: Vec::new(),
             active_worktree: None,
             active_branch: None,
+            no_worktree: false,
         }
     }
 }

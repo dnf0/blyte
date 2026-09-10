@@ -22,6 +22,9 @@ pub enum StateCommands {
         /// Path to state JSON file (`--out` is accepted for reference parity)
         #[arg(short, long, alias = "out", default_value = DEFAULT_STATE)]
         state: PathBuf,
+        /// Disable git worktree creation; operate in-place in workspace root
+        #[arg(long)]
+        no_worktree: bool,
     },
     /// Display state status
     Status {
@@ -74,6 +77,9 @@ pub enum StateCommands {
         /// Emit machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Disable git worktree creation; operate in-place in workspace root
+        #[arg(long)]
+        no_worktree: bool,
     },
     /// Reconcile state with a revised plan, preserving completed tasks
     Sync {
@@ -176,7 +182,11 @@ fn resolve(state: PathBuf) -> PathBuf {
 /// Dispatch a `state` subcommand. Shared by both binaries.
 pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
     match cmd {
-        StateCommands::Init { plan, state } => commands::state::cmd_init(plan, state),
+        StateCommands::Init {
+            plan,
+            state,
+            no_worktree,
+        } => commands::state::cmd_init(plan, state, no_worktree),
         StateCommands::Status { state, json } => commands::state::cmd_status(&resolve(state), json),
         StateCommands::Next {
             state,
@@ -193,7 +203,14 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             task,
             with_graph,
             json,
-        } => commands::state::cmd_prompt(&resolve(state), task.as_deref(), with_graph, json),
+            no_worktree,
+        } => commands::state::cmd_prompt(
+            &resolve(state),
+            task.as_deref(),
+            with_graph,
+            json,
+            no_worktree,
+        ),
         StateCommands::Sync { plan, state, out } => {
             commands::state::cmd_sync(&resolve(state), &plan, out.as_deref())
         }
