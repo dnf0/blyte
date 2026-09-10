@@ -1,7 +1,7 @@
 //! The epistemic ledger as an append-only file beside the state.
 
 use std::fs;
-use superstate_core::ledger::{append_ledger_note, ledger_path, migrate_inline_notes, read_ledger};
+use superstate_core::ledger::{append_ledger_note, ledger_path, read_ledger};
 use superstate_core::models::{ExecutionState, ExecutionStatus, LedgerEntry};
 use superstate_core::state_machine::save_state_atomic;
 
@@ -92,29 +92,49 @@ fn appending_does_not_rewrite_earlier_entries() {
 }
 
 #[test]
-fn inline_notes_are_migrated_once_and_lose_nothing() {
-    let (_d, state_path) = project();
-    let mut state = superstate_core::state_machine::load_state(&state_path).unwrap();
-    state.notes = vec![
-        LedgerEntry::new("agent", "legacy one"),
-        LedgerEntry::new("agent", "legacy two"),
-    ];
-    save_state_atomic(&state_path, &state).unwrap();
-
-    assert_eq!(migrate_inline_notes(&state_path).unwrap(), 2);
-    assert_eq!(read_ledger(&state_path).len(), 2);
-    assert!(superstate_core::state_machine::load_state(&state_path)
-        .unwrap()
-        .notes
-        .is_empty());
-
-    // Idempotent: a state with nothing inline is left alone.
-    assert_eq!(migrate_inline_notes(&state_path).unwrap(), 0);
-    assert_eq!(read_ledger(&state_path).len(), 2);
-}
-
-#[test]
 fn an_absent_ledger_reads_as_empty_rather_than_failing() {
     let (_d, state_path) = project();
     assert!(read_ledger(&state_path).is_empty());
+}
+
+#[test]
+fn legacy_inline_notes_are_read_without_being_rewritten() {
+    // States written before the split keep their notes inline. Reading them must
+    // not mutate the document: a read that writes fails on a read-only checkout
+    // and races a concurrent writer, for no benefit beyond tidiness.
+    let (_d, state_path) = project();
+    let mut state = superstate_core::state_machine::load_state(&state_path).unwrap();
+    state.notes = vec![LedgerEntry::new("agent", "legacy finding")];
+    save_state_atomic(&state_path, &state).unwrap();
+    let before = fs::read_to_string(&state_path).unwrap();
+
+    let entries = read_ledger(&state_path);
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].note, "legacy finding");
+    assert_eq!(
+        fs::read_to_string(&state_path).unwrap(),
+        before,
+        "reading findings must not rewrite the state"
+    );
+}
+
+#[test]
+fn legacy_and_new_findings_are_returned_in_order() {
+    let (_d, state_path) = project();
+    let mut state = superstate_core::state_machine::load_state(&state_path).unwrap();
+    state.notes = vec![LedgerEntry::new("agent", "older, held inline")];
+    save_state_atomic(&state_path, &state).unwrap();
+
+    append_ledger_note(
+        &state_path,
+        LedgerEntry::new("agent", "newer, in the ledger"),
+    )
+    .unwrap();
+
+    let notes: Vec<String> = read_ledger(&state_path)
+        .into_iter()
+        .map(|e| e.note)
+        .collect();
+    assert_eq!(notes, vec!["older, held inline", "newer, in the ledger"]);
 }

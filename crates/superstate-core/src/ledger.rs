@@ -16,9 +16,16 @@
 //! One JSON object per line fixes all three. Appends are a single write with no
 //! read-modify-write, a torn append loses one line instead of the state, and the
 //! file stays machine readable.
+//!
+//! States written before the split kept their notes inline. Rather than migrating
+//! them, readers accept both: `read_ledger` merges any inline notes with the file,
+//! and every writer appends to the file. The old field is inert and stays where it
+//! is. This avoids a migration that would have to mutate a state document during a
+//! read, which would make `prompt` fail on a read-only checkout and race with a
+//! concurrent writer, for no benefit beyond tidiness.
 
 use crate::models::LedgerEntry;
-use crate::state_machine::{load_state, save_state_atomic, StateError};
+use crate::state_machine::{load_state, StateError};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -50,44 +57,28 @@ pub fn append_ledger_note(state_path: &Path, entry: LedgerEntry) -> Result<(), S
     Ok(())
 }
 
-/// Read the ledger, skipping any line that cannot be parsed.
+/// Read every recorded finding: inline notes first, then the ledger file.
 ///
-/// A torn final line from an interrupted write should cost that entry and no
-/// more; refusing to read the whole ledger over one bad line would lose every
-/// finding recorded before it.
+/// Inline notes come from states written before the ledger was split out. They
+/// are read but never written, so they stay in chronological order ahead of
+/// anything appended since.
+///
+/// A line that cannot be parsed is skipped rather than failing the read: a torn
+/// final line from an interrupted write should cost that entry and no more, not
+/// every finding recorded before it.
 pub fn read_ledger(state_path: &Path) -> Vec<LedgerEntry> {
-    let path = ledger_path(state_path);
-    let file = match std::fs::File::open(&path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<LedgerEntry>(&l).ok())
-        .collect()
-}
+    let mut entries = load_state(state_path)
+        .map(|state| state.notes)
+        .unwrap_or_default();
 
-/// Move notes held inside an existing state document into the ledger file.
-///
-/// Returns how many were migrated. Idempotent: a state with no inline notes is
-/// left alone, so this can run on every load without a version flag.
-pub fn migrate_inline_notes(state_path: &Path) -> Result<usize, StateError> {
-    let mut state = load_state(state_path)?;
-    if state.notes.is_empty() {
-        return Ok(0);
+    if let Ok(file) = std::fs::File::open(ledger_path(state_path)) {
+        entries.extend(
+            BufReader::new(file)
+                .lines()
+                .map_while(Result::ok)
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<LedgerEntry>(&l).ok()),
+        );
     }
-    let migrated = state.notes.len();
-    let path = ledger_path(state_path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    for entry in &state.notes {
-        writeln!(file, "{}", serde_json::to_string(entry)?)?;
-    }
-    state.notes.clear();
-    save_state_atomic(state_path, &state)?;
-    Ok(migrated)
+    entries
 }
