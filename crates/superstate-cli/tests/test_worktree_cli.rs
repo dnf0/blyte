@@ -244,3 +244,107 @@ fn test_cli_multiple_caches_copied() {
     assert!(wt_path.join("cache1").join("c1.txt").exists());
     assert!(wt_path.join("cache2").join("c2.txt").exists());
 }
+
+#[test]
+fn test_cli_cannot_remove_worktree_containing_cwd() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/cwd-branch"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create_out.status.success());
+
+    let wt_path = dir.path().join(".wt").join("wt-cwd-branch");
+    assert!(wt_path.exists());
+
+    // Attempting to remove wt/cwd-branch while CWD is inside wt_path must fail
+    let remove_out = Command::new(bin())
+        .args(["worktree", "remove", "wt/cwd-branch"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    assert!(!remove_out.status.success());
+    let err_str = String::from_utf8_lossy(&remove_out.stderr);
+    assert!(
+        err_str.contains("while current working directory is inside it"),
+        "Expected CWD containment error, got: {}",
+        err_str
+    );
+}
+
+#[test]
+fn test_cli_remove_sibling_from_inside_worktree() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Create wt1 and wt2
+    Command::new(bin())
+        .args(["worktree", "create", "wt/tree-1"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new(bin())
+        .args(["worktree", "create", "wt/tree-2"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let wt1_path = dir.path().join(".wt").join("wt-tree-1");
+    let wt2_path = dir.path().join(".wt").join("wt-tree-2");
+    assert!(wt1_path.exists());
+    assert!(wt2_path.exists());
+
+    // From inside wt1, remove wt2!
+    let remove_out = Command::new(bin())
+        .args(["worktree", "remove", "wt/tree-2"])
+        .current_dir(&wt1_path)
+        .output()
+        .unwrap();
+    assert!(remove_out.status.success(), "remove sibling failed: {:?}", remove_out);
+    assert!(!wt2_path.exists());
+}
+
+#[test]
+fn test_cli_merge_explicit_base_matches() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/explicit-base"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(create_out.status.success());
+
+    let wt_path = dir.path().join(".wt").join("wt-explicit-base");
+    fs::write(wt_path.join("exp.txt"), b"explicit").unwrap();
+    Command::new("git").args(["add", "exp.txt"]).current_dir(&wt_path).status().unwrap();
+    Command::new("git").args(["commit", "-m", "feat: explicit"]).current_dir(&wt_path).status().unwrap();
+
+    // Merge with explicit matching --base main
+    let merge_out = Command::new(bin())
+        .args(["worktree", "merge", "wt/explicit-base", "--base", "main"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(merge_out.status.success(), "merge with explicit base failed: {:?}", merge_out);
+    assert!(dir.path().join("exp.txt").exists());
+}
+
+#[test]
+fn test_cli_no_cache_conflicts_with_caches() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let create_out = Command::new(bin())
+        .args(["worktree", "create", "wt/conflict", "--no-cache", "--caches", ".venv"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!create_out.status.success(), "Expected Clap conflict error");
+    let err_str = String::from_utf8_lossy(&create_out.stderr);
+    assert!(err_str.contains("cannot be used with"), "Expected Clap conflict error, got: {}", err_str);
+}

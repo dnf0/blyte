@@ -84,16 +84,32 @@ fn resolve_worktree_for_action(
         return Err(format!("Cannot {} primary worktree branch '{}'", action, branch));
     }
 
+    if action == "remove" {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let (Ok(canonical_cwd), Ok(canonical_wt)) = (cwd.canonicalize(), wt.path.canonicalize()) {
+                if canonical_cwd.starts_with(&canonical_wt) {
+                    return Err(format!(
+                        "Cannot remove worktree '{}' while current working directory is inside it",
+                        branch
+                    ));
+                }
+            }
+        }
+    }
+
     let base_branch = expected_base
         .map(|s| s.to_string())
         .or_else(|| primary_wt.branch.clone())
         .unwrap_or_else(|| "main".to_string());
 
-    if let Some(target) = expected_base {
-        if primary_wt.branch.as_deref() != Some(target) {
+    if action == "merge" {
+        if primary_wt.branch.is_none() {
+            return Err("Cannot merge: primary repository worktree is in a detached HEAD state".to_string());
+        }
+        if primary_wt.branch.as_deref() != Some(&base_branch) {
             return Err(format!(
                 "Primary worktree is checked out to {:?}, expected target base branch '{}'",
-                primary_wt.branch, target
+                primary_wt.branch, base_branch
             ));
         }
     }
