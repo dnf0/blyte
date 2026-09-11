@@ -532,7 +532,7 @@ pub fn ensure_git_baseline(repo_root: &Path) {
             .current_dir(repo_root)
             .status();
 
-        let ok = match init_status {
+        let _ = match init_status {
             Ok(s) if s.success() => true,
             _ => std::process::Command::new("git")
                 .args(["init"])
@@ -541,30 +541,43 @@ pub fn ensure_git_baseline(repo_root: &Path) {
                 .map(|s| s.success())
                 .unwrap_or(false),
         };
-
-        if ok {
-            let _ = std::process::Command::new("git")
-                .args(["config", "user.name", "Superstate"])
-                .current_dir(repo_root)
-                .status();
-            let _ = std::process::Command::new("git")
-                .args(["config", "user.email", "superstate@local"])
-                .current_dir(repo_root)
-                .status();
-            let _ = std::process::Command::new("git")
-                .args([
-                    "commit",
-                    "--allow-empty",
-                    "--no-gpg-sign",
-                    "-m",
-                    "chore(superstate): initialize tracking baseline",
-                ])
-                .current_dir(repo_root)
-                .status();
-        }
     }
 
+    // Ensure harness and state artifacts are excluded before checking HEAD or staging
     ensure_git_exclude(repo_root);
+
+    let has_head = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !has_head {
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Superstate"])
+            .current_dir(repo_root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "superstate@local"])
+            .current_dir(repo_root)
+            .status();
+        // Stage all pre-existing project files so newly provisioned worktrees check them out
+        let _ = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo_root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args([
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "chore(superstate): initialize tracking baseline",
+            ])
+            .current_dir(repo_root)
+            .status();
+    }
 }
 
 #[cfg(test)]
