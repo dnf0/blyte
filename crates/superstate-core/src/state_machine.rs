@@ -152,7 +152,12 @@ pub fn init_state_milestones(
 
     // Deconstruct milestones into the initial active task (task-1) and pending sequential tasks (task-2..N)
     let mut iter = milestones.into_iter();
-    let first = iter.next().expect("guaranteed non-empty by validation");
+    // Guard against empty iterator; safely return an error rather than panicking if empty
+    let Some(first) = iter.next() else {
+        return Err(StateError::InvalidTransition(
+            "milestones cannot be empty".to_string(),
+        ));
+    };
 
     let task_1 = TaskSpec {
         id: "task-1".to_string(),

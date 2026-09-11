@@ -179,6 +179,7 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
         plan_path: None,
         notes: vec![],
         no_worktree: false,
+        base_branch: None,
     };
     superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
 
@@ -245,6 +246,7 @@ fn test_state_prompt_non_git_json_fallback() {
         plan_path: None,
         notes: vec![],
         no_worktree: false,
+        base_branch: None,
     };
     superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
 
