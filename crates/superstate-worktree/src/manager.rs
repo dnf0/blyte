@@ -1,7 +1,7 @@
 //! Worktree lifecycle manager and isolated execution environment.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use worktrunk::git::{remove_worktree_with_cleanup, BranchDeletionMode, RemoveOptions, Repository};
 
 use crate::cache::reflink_cache_dirs;
@@ -397,6 +397,94 @@ pub fn sanitize_slug(slug: &str) -> String {
     } else {
         result
     }
+}
+
+/// Ensure essential Superstate internal paths are added to .git/info/exclude.
+pub fn ensure_git_exclude(repo_root: &Path) {
+    let exclude_path = repo_root.join(".git").join("info").join("exclude");
+    if let Some(parent) = exclude_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let entries = [
+        ".agent-state/",
+        ".wt/",
+        ".wt",
+        "plan.md",
+        "plan.normalized.md",
+        "run-in-container",
+    ];
+    if let Ok(mut current) = fs::read_to_string(&exclude_path) {
+        let mut appended = false;
+        for entry in &entries {
+            if !current.lines().any(|l| l.trim() == *entry) {
+                if !current.ends_with('\n') && !current.is_empty() {
+                    current.push('\n');
+                }
+                current.push_str(entry);
+                current.push('\n');
+                appended = true;
+            }
+        }
+        if appended {
+            let _ = fs::write(&exclude_path, current);
+        }
+    } else {
+        let initial = ".agent-state/\n.wt/\n.wt\nplan.md\nplan.normalized.md\nrun-in-container\n";
+        let _ = fs::write(&exclude_path, initial);
+    }
+}
+
+/// Ensure a baseline git repository exists for worktree and change tracking.
+pub fn ensure_git_baseline(repo_root: &Path) {
+    let check = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo_root)
+        .output();
+
+    let inside_git = match check {
+        Ok(out) => out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true",
+        Err(_) => false,
+    };
+
+    if !inside_git {
+        let init_status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo_root)
+            .status();
+
+        let ok = match init_status {
+            Ok(s) if s.success() => true,
+            _ => std::process::Command::new("git")
+                .args(["init"])
+                .current_dir(repo_root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+        };
+
+        if ok {
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.name", "Superstate"])
+                .current_dir(repo_root)
+                .status();
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.email", "superstate@local"])
+                .current_dir(repo_root)
+                .status();
+            let _ = std::process::Command::new("git")
+                .args([
+                    "commit",
+                    "--allow-empty",
+                    "--no-gpg-sign",
+                    "-m",
+                    "chore(superstate): initialize tracking baseline",
+                ])
+                .current_dir(repo_root)
+                .status();
+        }
+    }
+
+    ensure_git_exclude(repo_root);
 }
 
 #[cfg(test)]

@@ -28,20 +28,20 @@ pub fn compact_ledger_note(note: &str) -> String {
 
 /// Select a task from active or pending tasks matching the requested ID or title.
 pub fn select_task<'a>(state: &'a ExecutionState, task: Option<&str>) -> Option<&'a TaskSpec> {
-    match task {
-        None => state.active_task.as_ref(),
-        Some(wanted) => {
-            if let Some(ref t) = state.active_task {
-                if t.id == wanted || t.title == wanted {
-                    return Some(t);
-                }
-            }
-            state
-                .pending_tasks
-                .iter()
-                .find(|t| t.id == wanted || t.title == wanted)
-        }
-    }
+    let wanted = match task {
+        Some(w) => w.trim(),
+        None => return state.active_task.as_ref(),
+    };
+    state
+        .active_task
+        .iter()
+        .chain(state.pending_tasks.iter())
+        .find(|t| {
+            let combined = format!("{}: {}", t.id, t.title);
+            t.id.eq_ignore_ascii_case(wanted)
+                || t.title.eq_ignore_ascii_case(wanted)
+                || combined.eq_ignore_ascii_case(wanted)
+        })
 }
 
 /// Resolve repository root given a state path.
@@ -161,12 +161,20 @@ pub fn render_turnkey_prompt(
     }
 
     if with_graph {
-        if let Some((path, body)) = find_graph_context(state_path) {
-            rendered.push_str(&format!(
-                "\n## Architecture Context ({})\n{}\n",
-                path.display(),
-                body
-            ));
+        match find_graph_context(state_path) {
+            Some((path, body)) => {
+                rendered.push_str(&format!(
+                    "\n## Architecture Context ({})\n{}\n",
+                    path.display(),
+                    body
+                ));
+            }
+            None => {
+                eprintln!(
+                    "warning: --with-graph requested but no knowledge graph was found \
+                     (looked for graphify-out/GRAPH_REPORT.md); prompt omits graph context"
+                );
+            }
         }
     }
 

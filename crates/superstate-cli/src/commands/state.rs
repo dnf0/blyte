@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use superstate_core::ledger::append_ledger_note;
 use superstate_core::models::LedgerEntry;
 use superstate_core::plan_parser::init_state_from_plan;
+use superstate_core::prompt::{render_turnkey_prompt, select_task};
 use superstate_core::state_machine::{
     advance_step, init_state_direct, load_state, save_state_atomic,
 };
 use superstate_core::verifier::execute_all_gates;
-use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
+pub use superstate_worktree::manager::ensure_git_exclude;
+use superstate_worktree::manager::{ensure_git_baseline, IsolatedWorktree, WorktreeManager};
 
 /// Refuse to create a second state inside a project that already has one.
 ///
@@ -49,92 +51,6 @@ fn resolve_project_root(state_path: &Path) -> PathBuf {
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
-fn ensure_git_baseline(repo_root: &Path) {
-    let check = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(repo_root)
-        .output();
-
-    let inside_git = match check {
-        Ok(out) => out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true",
-        Err(_) => false,
-    };
-
-    if !inside_git {
-        let init_status = std::process::Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(repo_root)
-            .status();
-
-        let ok = match init_status {
-            Ok(s) if s.success() => true,
-            _ => std::process::Command::new("git")
-                .args(["init"])
-                .current_dir(repo_root)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false),
-        };
-
-        if ok {
-            let _ = std::process::Command::new("git")
-                .args(["config", "user.name", "Superstate"])
-                .current_dir(repo_root)
-                .status();
-            let _ = std::process::Command::new("git")
-                .args(["config", "user.email", "superstate@local"])
-                .current_dir(repo_root)
-                .status();
-            let _ = std::process::Command::new("git")
-                .args([
-                    "commit",
-                    "--allow-empty",
-                    "--no-gpg-sign",
-                    "-m",
-                    "chore(superstate): initialize tracking baseline",
-                ])
-                .current_dir(repo_root)
-                .status();
-        }
-    }
-
-    ensure_git_exclude(repo_root);
-}
-
-pub fn ensure_git_exclude(repo_root: &Path) {
-    let exclude_path = repo_root.join(".git").join("info").join("exclude");
-    if let Some(parent) = exclude_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let entries = [
-        ".agent-state/",
-        ".wt/",
-        ".wt",
-        "plan.md",
-        "plan.normalized.md",
-        "run-in-container",
-    ];
-    if let Ok(mut current) = std::fs::read_to_string(&exclude_path) {
-        let mut appended = false;
-        for entry in &entries {
-            if !current.lines().any(|l| l.trim() == *entry) {
-                if !current.ends_with('\n') && !current.is_empty() {
-                    current.push('\n');
-                }
-                current.push_str(entry);
-                current.push('\n');
-                appended = true;
-            }
-        }
-        if appended {
-            let _ = std::fs::write(&exclude_path, current);
-        }
-    } else {
-        let initial = ".agent-state/\n.wt/\n.wt\nplan.md\nplan.normalized.md\nrun-in-container\n";
-        let _ = std::fs::write(&exclude_path, initial);
-    }
 }
 
 /// Initialize project execution state either from plan markdown or directly from a goal.
@@ -265,31 +181,6 @@ pub fn cmd_ready(state_path: &Path, as_json: bool) -> Result<(), String> {
         println!("  {}: {}", task.id, task.title);
     }
     Ok(())
-}
-
-/// Find a task by id or title across the active and pending sets.
-///
-/// Matching is case-insensitive and accepts either the bare id ("Task 2"), the
-/// bare title, or the combined "Task 2: Title" form that `state ready` emits --
-/// a runner should be able to feed `ready` output straight back in.
-fn select_task<'a>(
-    state: &'a superstate_core::models::ExecutionState,
-    wanted: Option<&str>,
-) -> Option<&'a superstate_core::models::TaskSpec> {
-    let wanted = match wanted {
-        Some(w) => w.trim(),
-        None => return state.active_task.as_ref(),
-    };
-    state
-        .active_task
-        .iter()
-        .chain(state.pending_tasks.iter())
-        .find(|t| {
-            let combined = format!("{}: {}", t.id, t.title);
-            t.id.eq_ignore_ascii_case(wanted)
-                || t.title.eq_ignore_ascii_case(wanted)
-                || combined.eq_ignore_ascii_case(wanted)
-        })
 }
 
 /// Tag the current commit as the checkpoint guarding this step.
@@ -627,98 +518,7 @@ pub fn cmd_prompt(
         save_state_atomic(state_path, &state)
             .map_err(|e| format!("Failed to save state: {}", e))?;
     }
-
-    let mut rendered_prompt = String::new();
-
-    rendered_prompt.push_str(&format!(
-        "You are an Implementer Subagent working on **{}: {}**.\n\n",
-        active.id, active.title
-    ));
-    rendered_prompt.push_str("## Task Specification\n");
-    rendered_prompt.push_str(&format!("- ID: {}\n", active.id));
-    rendered_prompt.push_str(&format!("- Title: {}\n", active.title));
-    if !active.depends_on.is_empty() {
-        rendered_prompt.push_str(&format!("- Depends on: {}\n", active.depends_on.join(", ")));
-    }
-    if !active.files_modify.is_empty() {
-        rendered_prompt.push_str("Files to modify:\n");
-        let mut seen = std::collections::HashSet::new();
-        for f in &active.files_modify {
-            if seen.insert(f) {
-                rendered_prompt.push_str(&format!("- {}\n", f.display()));
-            }
-        }
-    }
-    if let Some(ref cmd) = active.verification_cmd {
-        rendered_prompt.push_str(&format!("Verification command: `{}`\n", cmd));
-    }
-
-    if !is_in_place {
-        if let (Some(ref wt_path), Some(ref wt_branch)) =
-            (&state.active_worktree, &state.active_branch)
-        {
-            rendered_prompt.push_str(&format!(
-                "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits and test runs MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to commit, merge, or delete this worktree. Simply implement the task and verify it. The orchestrator automatically snapshots your changes, verifies your work, and merges this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree.\n",
-                wt_path.display(),
-                wt_branch
-            ));
-        }
-    }
-
-    // Completed milestones and the epistemic ledger. This is the whole point of
-    // recording notes: without replaying them here, each milestone starts blind
-    // and `state note` writes to something nothing ever reads. Carrying findings
-    // forward -- rather than the whole conversation -- is what keeps the context
-    // footprint flat while preserving what was learned.
-    if !state.completed_tasks.is_empty() {
-        rendered_prompt.push_str("\n## Completed Milestones\n");
-        for done in &state.completed_tasks {
-            rendered_prompt.push_str(&format!("- {}: {}\n", done.id, done.title));
-        }
-    }
-
-    let ledger = superstate_core::ledger::read_ledger(state_path);
-    if !ledger.is_empty() {
-        rendered_prompt.push_str("\n## Epistemic Ledger (findings from earlier milestones)\n");
-        // Limit to the most recent 4 entries to keep prompt context bounded
-        let start_idx = ledger.len().saturating_sub(4);
-        for entry in &ledger[start_idx..] {
-            rendered_prompt.push_str(&format!(
-                "- [{}] {}\n",
-                entry.author,
-                compact_ledger_note(&entry.note)
-            ));
-        }
-    }
-
-    if with_graph {
-        let graph = find_graph_context(state_path);
-        match graph {
-            Some((path, body)) => {
-                rendered_prompt.push_str(&format!(
-                    "\n## Architecture Context ({})\n{}\n",
-                    path.display(),
-                    body
-                ));
-            }
-            None => {
-                // Say so rather than accept the flag and silently ignore it.
-                eprintln!(
-                    "warning: --with-graph requested but no knowledge graph was found \
-                     (looked for graphify-out/GRAPH_REPORT.md); prompt omits graph context"
-                );
-            }
-        }
-    }
-
-    rendered_prompt.push_str("\n## Instructions\n");
-    rendered_prompt.push_str(
-        "1. Implement the minimal direct fix required to satisfy the task specification.\n",
-    );
-    rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
-    rendered_prompt.push_str("3. HARD STOP UPON PASSING: The moment the verification command passes with exit code 0, finish your turn immediately. Do NOT run extra tests, alternative scripts, or exploratory commands.\n");
-    rendered_prompt.push_str("4. Return a concise summary with verification output.\n");
-    rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the project container or workspace directory. Do not inspect parent directories, host processes, or external repositories.\n");
+    let rendered_prompt = render_turnkey_prompt(&state, state_path, task, is_in_place, with_graph)?;
 
     if json_output {
         let json_value = serde_json::json!({
@@ -735,45 +535,6 @@ pub fn cmd_prompt(
     }
 
     Ok(())
-}
-
-/// Locate a knowledge-graph report near the workspace, if one has been generated.
-fn find_graph_context(state_path: &Path) -> Option<(std::path::PathBuf, String)> {
-    let root = repo_root_for(state_path);
-    for candidate in [
-        root.join("graphify-out/GRAPH_REPORT.md"),
-        root.join("GRAPH_REPORT.md"),
-    ] {
-        if let Ok(body) = std::fs::read_to_string(&candidate) {
-            // Keep the prompt bounded: a graph report can be very large.
-            let clipped: String = body.chars().take(8000).collect();
-            return Some((candidate, clipped));
-        }
-    }
-    None
-}
-
-/// Compact a raw epistemic ledger note to keep turnkey prompts bounded and fast.
-fn compact_ledger_note(note: &str) -> String {
-    let clean = note.trim();
-    // If multiline, take up to the first double-newline paragraph break
-    let paragraph = if let Some(idx) = clean.find("\n\n") {
-        clean[..idx].trim()
-    } else {
-        clean
-    };
-    // Replace embedded newlines with spaces
-    let single_line = paragraph.replace('\n', " ");
-    let max_len = 250;
-    if single_line.len() > max_len {
-        let mut end = max_len;
-        while !single_line.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        format!("{}...", single_line[..end].trim_end())
-    } else {
-        single_line
-    }
 }
 
 pub fn cmd_note(state_path: &Path, note: &str, author: &str) -> Result<(), String> {

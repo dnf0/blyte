@@ -15,7 +15,10 @@ use superstate_core::prompt::render_turnkey_prompt;
 use superstate_core::state_machine::{
     advance_step, init_state_direct, load_state, save_state_atomic,
 };
-use superstate_worktree::manager::WorktreeManager;
+use superstate_core::verifier::execute_all_gates;
+use superstate_worktree::manager::{
+    ensure_git_baseline, ensure_git_exclude, IsolatedWorktree, WorktreeManager,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -70,7 +73,12 @@ fn clip_string(s: &str, max_len: usize) -> String {
 /// # Arguments
 /// * `verify_cmd` - Shell command to execute.
 /// * `cwd` - Working directory to run the command in.
-pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> PreflightResult {
+/// * `timeout` - Maximum duration to allow before timing out.
+pub fn execute_preflight_with_timeout(
+    verify_cmd: &str,
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> Result<PreflightResult, String> {
     #[cfg(not(windows))]
     let mut cmd = std::process::Command::new("sh");
     #[cfg(not(windows))]
@@ -82,114 +90,95 @@ pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> PreflightResult {
     cmd.args(["/C", verify_cmd]);
 
     cmd.current_dir(cwd);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    match cmd.output() {
-        Ok(output) => {
-            let exit_code = output.status.code().unwrap_or(-1);
-            let executable = output.status.success();
-            let stdout_raw = String::from_utf8_lossy(&output.stdout);
-            let stderr_raw = String::from_utf8_lossy(&output.stderr);
-            PreflightResult {
-                executable,
-                exit_code,
-                stdout: clip_string(&stdout_raw, 500),
-                stderr: clip_string(&stderr_raw, 500),
-            }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return Ok(PreflightResult {
+                executable: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: clip_string(&e.to_string(), 500),
+            });
         }
-        Err(e) => PreflightResult {
-            executable: false,
-            exit_code: -1,
-            stdout: String::new(),
-            stderr: clip_string(&e.to_string(), 500),
-        },
-    }
-}
-
-/// Ensure essential Superstate internal paths are added to .git/info/exclude.
-fn ensure_git_exclude(repo_root: &Path) {
-    let exclude_path = repo_root.join(".git").join("info").join("exclude");
-    if let Some(parent) = exclude_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let entries = [
-        ".agent-state/",
-        ".wt/",
-        ".wt",
-        "plan.md",
-        "plan.normalized.md",
-        "run-in-container",
-    ];
-    if let Ok(mut current) = std::fs::read_to_string(&exclude_path) {
-        let mut appended = false;
-        for entry in &entries {
-            if !current.lines().any(|l| l.trim() == *entry) {
-                if !current.ends_with('\n') && !current.is_empty() {
-                    current.push('\n');
-                }
-                current.push_str(entry);
-                current.push('\n');
-                appended = true;
-            }
-        }
-        if appended {
-            let _ = std::fs::write(&exclude_path, current);
-        }
-    } else {
-        let initial = ".agent-state/\n.wt/\n.wt\nplan.md\nplan.normalized.md\nrun-in-container\n";
-        let _ = std::fs::write(&exclude_path, initial);
-    }
-}
-
-/// Ensure a baseline git repository exists for worktree and change tracking.
-fn ensure_git_baseline(repo_root: &Path) {
-    let check = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(repo_root)
-        .output();
-
-    let inside_git = match check {
-        Ok(out) => out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true",
-        Err(_) => false,
     };
 
-    if !inside_git {
-        let init_status = std::process::Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(repo_root)
-            .status();
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
 
-        let ok = match init_status {
-            Ok(s) if s.success() => true,
-            _ => std::process::Command::new("git")
-                .args(["init"])
-                .current_dir(repo_root)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false),
-        };
-
-        if ok {
-            let _ = std::process::Command::new("git")
-                .args(["config", "user.name", "Superstate"])
-                .current_dir(repo_root)
-                .status();
-            let _ = std::process::Command::new("git")
-                .args(["config", "user.email", "superstate@local"])
-                .current_dir(repo_root)
-                .status();
-            let _ = std::process::Command::new("git")
-                .args([
-                    "commit",
-                    "--allow-empty",
-                    "--no-gpg-sign",
-                    "-m",
-                    "chore(superstate): initialize tracking baseline",
-                ])
-                .current_dir(repo_root)
-                .status();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut pipe) = stdout_pipe {
+            use std::io::Read;
+            let _ = pipe.read_to_end(&mut buf);
         }
-    }
-    ensure_git_exclude(repo_root);
+        buf
+    });
+
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut pipe) = stderr_pipe {
+            use std::io::Read;
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(10);
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    return Err(format!(
+                        "Preflight command timed out after {} seconds: {}",
+                        timeout.as_secs(),
+                        verify_cmd
+                    ));
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Ok(PreflightResult {
+                    executable: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: clip_string(&e.to_string(), 500),
+                });
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_thread.join().unwrap_or_default();
+    let stderr_bytes = stderr_thread.join().unwrap_or_default();
+
+    let exit_code = status.code().unwrap_or(-1);
+    let stdout_raw = String::from_utf8_lossy(&stdout_bytes);
+    let stderr_raw = String::from_utf8_lossy(&stderr_bytes);
+
+    Ok(PreflightResult {
+        executable: true,
+        exit_code,
+        stdout: clip_string(&stdout_raw, 500),
+        stderr: clip_string(&stderr_raw, 500),
+    })
+}
+
+/// Execute a shell command in a dry-run fashion with a 15-second timeout.
+pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> Result<PreflightResult, String> {
+    execute_preflight_with_timeout(verify_cmd, cwd, std::time::Duration::from_secs(15))
 }
 
 /// Dispatch a tool execution by name and arguments.
@@ -215,7 +204,7 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let res = execute_preflight(verify_cmd, &cwd);
+            let res = execute_preflight(verify_cmd, &cwd)?;
 
             Ok(serde_json::json!({
                 "executable": res.executable,
@@ -274,7 +263,7 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             ensure_git_baseline(&repo_root);
 
             // Execute dry-run validation of the verify_cmd
-            let _preflight = execute_preflight(verify_cmd, &repo_root);
+            let _preflight = execute_preflight(verify_cmd, &repo_root)?;
 
             // Directly construct ExecutionState from goal and invariant without plan.md
             let mut state = init_state_direct(goal, verify_cmd, files_modify, no_worktree);
@@ -282,13 +271,16 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             // Provision isolated git worktree if isolation is enabled and git repository exists
             if !no_worktree && repo_root.join(".git").exists() {
                 ensure_git_exclude(&repo_root);
-                if let Ok(manager) = WorktreeManager::new(&repo_root) {
-                    if let Some(ref active) = state.active_task {
-                        if let Ok(wt) = manager.ensure_task_worktree(&active.id, None) {
-                            state.active_worktree = Some(wt.path.clone());
-                            state.active_branch = Some(wt.branch.clone());
-                        }
-                    }
+                let manager = WorktreeManager::new(&repo_root)
+                    .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+                if let Some(ref active) = state.active_task {
+                    let wt = manager
+                        .ensure_task_worktree(&active.id, None)
+                        .map_err(|e| {
+                            format!("Failed to ensure worktree for task {}: {}", active.id, e)
+                        })?;
+                    state.active_worktree = Some(wt.path.clone());
+                    state.active_branch = Some(wt.branch.clone());
                 }
             }
 
@@ -351,8 +343,19 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             }))
         }
         "state_next" => {
+            let verify_cmd = args
+                .get("verify_cmd")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+
+            let verify_git_clean = args
+                .get("verify_git_clean")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
             let repo_root = args
                 .get("repo_root")
+                .or_else(|| args.get("cwd"))
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -365,6 +368,70 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
 
             let mut state =
                 load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
+
+            let active_task = match state.active_task.clone() {
+                Some(t) => t,
+                None => return Err("No active task to advance".to_string()),
+            };
+
+            let mut task_to_verify = active_task.clone();
+            if let Some(cmd) = verify_cmd {
+                task_to_verify.verification_cmd = Some(cmd);
+            }
+
+            ensure_git_exclude(&repo_root);
+
+            let target_dir = state
+                .active_worktree
+                .as_ref()
+                .filter(|p| p.exists())
+                .cloned()
+                .unwrap_or_else(|| repo_root.clone());
+
+            let results = execute_all_gates(&target_dir, &task_to_verify, verify_git_clean)
+                .map_err(|e| format!("Gate execution error: {}", e))?;
+
+            for res in &results {
+                if !res.passed {
+                    let reason = res
+                        .failure_reason
+                        .clone()
+                        .unwrap_or_else(|| res.output.clone());
+                    state.errors.push(reason.clone());
+                    let _ = save_state_atomic(&state_path, &state);
+
+                    return Err(format!(
+                        "Verification gate '{}' FAILED:\n{}",
+                        res.gate_name, reason
+                    ));
+                }
+            }
+
+            if let Some(ref wt_path) = state.active_worktree.clone() {
+                if wt_path.exists() {
+                    let base_branch = WorktreeManager::new(&repo_root)
+                        .map(|m| m.default_branch())
+                        .unwrap_or_else(|_| "main".to_string());
+                    let branch = state.active_branch.clone().unwrap_or_else(|| {
+                        format!(
+                            "wt/{}",
+                            superstate_worktree::manager::sanitize_slug(&active_task.id)
+                        )
+                    });
+                    let wt = IsolatedWorktree {
+                        branch,
+                        path: wt_path.clone(),
+                        base_branch,
+                        repo_root: repo_root.clone(),
+                    };
+                    let commit_msg = format!("feat({}): {}", active_task.id, active_task.title);
+                    wt.merge_and_cleanup(&commit_msg)
+                        .map_err(|e| format!("Failed to merge and cleanup worktree: {}", e))?;
+                    state.active_worktree = None;
+                    state.active_branch = None;
+                }
+            }
+
             advance_step(&mut state).map_err(|e| format!("Advance step error: {}", e))?;
             save_state_atomic(&state_path, &state)
                 .map_err(|e| format!("Save state error: {}", e))?;
