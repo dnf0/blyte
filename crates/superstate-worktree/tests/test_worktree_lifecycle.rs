@@ -243,3 +243,46 @@ fn test_worktree_auto_commit_uncommitted_changes_on_merge() {
         "worktree directory should be deleted after merge"
     );
 }
+
+#[test]
+fn test_ensure_git_baseline_stages_preexisting_files() {
+    use superstate_worktree::manager::ensure_git_baseline;
+
+    let dir = TempDir::new().unwrap();
+    let repo_root = dir.path();
+
+    // Create preexisting files before git initialization
+    fs::write(repo_root.join("main.db"), b"sqlite database content").unwrap();
+    fs::write(repo_root.join("main.db-wal"), b"wal content").unwrap();
+
+    // Call ensure_git_baseline
+    ensure_git_baseline(repo_root);
+
+    // Verify git repo initialized
+    assert!(repo_root.join(".git").exists());
+
+    // Create a worktree using WorktreeManager
+    let manager = WorktreeManager::new(repo_root).unwrap();
+    let wt = manager.ensure_task_worktree("task-1", None).unwrap();
+
+    // Preexisting files MUST be present in the newly provisioned worktree!
+    assert!(
+        wt.path.join("main.db").exists(),
+        "main.db must be checked out in worktree"
+    );
+    assert!(
+        wt.path.join("main.db-wal").exists(),
+        "main.db-wal must be checked out in worktree"
+    );
+    assert_eq!(
+        fs::read(wt.path.join("main.db")).unwrap(),
+        b"sqlite database content"
+    );
+    assert_eq!(
+        fs::read(wt.path.join("main.db-wal")).unwrap(),
+        b"wal content"
+    );
+
+    wt.abort().unwrap();
+}
+
