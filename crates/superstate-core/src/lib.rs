@@ -17,5 +17,6 @@ pub use state_machine::{
     init_state_milestones, load_state, sanitize_branch_slug, save_state_atomic, StateError,
 };
 pub use verifier::{
-    execute_all_gates, run_verification_cmd, verify_git_clean, GateError, GateResult,
+    execute_all_gates, execute_all_gates_filtered, run_verification_cmd, verify_git_clean,
+    verify_git_clean_filtered, GateError, GateResult,
 };

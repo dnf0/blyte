@@ -103,7 +103,7 @@ fn test_state_next_worktree_merge_and_advance() {
 
     // 3. Call cmd_next with verify_cmd checking feature.txt and verify_git_clean = true
     // This asserts that verification runs inside the worktree (where feature.txt exists).
-    cmd_next(&state_file, Some("test -f feature.txt".to_string()), true)
+    cmd_next(&state_file, Some("test -f feature.txt".to_string()), true, None)
         .expect("cmd_next should succeed and merge worktree");
 
     // 4. Assert worktree changes were merged into main
@@ -184,7 +184,7 @@ fn test_state_next_preserves_worktree_on_failure() {
     assert!(commit_status.success());
 
     // Call cmd_next with a failing verify_cmd
-    let res = cmd_next(&state_file, Some("exit 1".to_string()), true);
+    let res = cmd_next(&state_file, Some("exit 1".to_string()), true, None);
     assert!(res.is_err(), "cmd_next must return Err when gate fails");
 
     // Assert .wt/task-1 STILL exists

@@ -123,6 +123,8 @@ pub enum StateCommands {
         verify_cmd: Option<String>,
         #[arg(long)]
         verify_git_clean: bool,
+        #[arg(long)]
+        ignore_untracked_glob: Option<String>,
     },
     /// Display tasks whose dependencies are satisfied and may run now
     Ready {
@@ -274,7 +276,8 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             state,
             verify_cmd,
             verify_git_clean,
-        } => commands::state::cmd_next(&resolve(state), verify_cmd, verify_git_clean),
+            ignore_untracked_glob,
+        } => commands::state::cmd_next(&resolve(state), verify_cmd, verify_git_clean, ignore_untracked_glob.as_deref()),
         StateCommands::Ready { state, json } => commands::state::cmd_ready(&resolve(state), json),
         StateCommands::Checkpoint { state } => commands::state::cmd_checkpoint(&resolve(state)),
         StateCommands::Rollback { state, reference } => {
