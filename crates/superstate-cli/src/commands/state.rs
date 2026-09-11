@@ -586,11 +586,10 @@ pub fn cmd_prompt(
     }
 
     rendered_prompt.push_str("\n## Instructions\n");
-    rendered_prompt
-        .push_str("1. Implement the requested task following Test-Driven Development (TDD).\n");
+    rendered_prompt.push_str("1. Implement the minimal direct fix required to satisfy the task specification.\n");
     rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
-    rendered_prompt.push_str("3. When the verification command passes, finish your turn immediately.\n");
-    rendered_prompt.push_str("4. Return a summary with verification output.\n");
+    rendered_prompt.push_str("3. HARD STOP UPON PASSING: The moment the verification command passes with exit code 0, finish your turn immediately. Do NOT run extra tests, alternative scripts, or exploratory commands.\n");
+    rendered_prompt.push_str("4. Return a concise summary with verification output.\n");
     rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the project container or workspace directory. Do not inspect parent directories, host processes, or external repositories.\n");
 
     if json_output {
