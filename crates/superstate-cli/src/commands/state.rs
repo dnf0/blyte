@@ -395,15 +395,12 @@ pub fn cmd_next(
             let base_branch = WorktreeManager::new(&repo_root)
                 .map(|m| m.default_branch())
                 .unwrap_or_else(|_| "main".to_string());
-            let branch = state
-                .active_branch
-                .clone()
-                .unwrap_or_else(|| {
-                    format!(
-                        "wt/{}",
-                        superstate_worktree::manager::sanitize_slug(&active_task.id)
-                    )
-                });
+            let branch = state.active_branch.clone().unwrap_or_else(|| {
+                format!(
+                    "wt/{}",
+                    superstate_worktree::manager::sanitize_slug(&active_task.id)
+                )
+            });
             let wt = IsolatedWorktree {
                 branch,
                 path: wt_path.clone(),
@@ -494,13 +491,13 @@ pub fn cmd_prompt(
         state.active_branch = Some(wt.branch.clone());
         save_state_atomic(state_path, &state)
             .map_err(|e| format!("Failed to save state: {}", e))?;
-    } else if is_in_place {
-        if state.active_worktree.is_some() || state.active_branch.is_some() {
-            state.active_worktree = None;
-            state.active_branch = None;
-            save_state_atomic(state_path, &state)
-                .map_err(|e| format!("Failed to save state: {}", e))?;
-        }
+    } else if is_in_place
+        && (state.active_worktree.is_some() || state.active_branch.is_some())
+    {
+        state.active_worktree = None;
+        state.active_branch = None;
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
     }
 
     let mut rendered_prompt = String::new();
@@ -529,7 +526,8 @@ pub fn cmd_prompt(
     }
 
     if !is_in_place {
-        if let (Some(ref wt_path), Some(ref wt_branch)) = (&state.active_worktree, &state.active_branch)
+        if let (Some(ref wt_path), Some(ref wt_branch)) =
+            (&state.active_worktree, &state.active_branch)
         {
             rendered_prompt.push_str(&format!(
                 "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits and test runs MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to commit, merge, or delete this worktree. Simply implement the task and verify it. The orchestrator automatically snapshots your changes, verifies your work, and merges this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree.\n",
@@ -586,7 +584,9 @@ pub fn cmd_prompt(
     }
 
     rendered_prompt.push_str("\n## Instructions\n");
-    rendered_prompt.push_str("1. Implement the minimal direct fix required to satisfy the task specification.\n");
+    rendered_prompt.push_str(
+        "1. Implement the minimal direct fix required to satisfy the task specification.\n",
+    );
     rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
     rendered_prompt.push_str("3. HARD STOP UPON PASSING: The moment the verification command passes with exit code 0, finish your turn immediately. Do NOT run extra tests, alternative scripts, or exploratory commands.\n");
     rendered_prompt.push_str("4. Return a concise summary with verification output.\n");
@@ -958,21 +958,18 @@ pub fn cmd_exec(
                     let base_branch = WorktreeManager::new(&root)
                         .map(|m| m.default_branch())
                         .unwrap_or_else(|_| "main".to_string());
-                    let branch = failed_state
-                        .active_branch
-                        .clone()
-                        .unwrap_or_else(|| {
-                            format!(
-                                "wt/{}",
-                                superstate_worktree::manager::sanitize_slug(
-                                    failed_state
-                                        .active_task
-                                        .as_ref()
-                                        .map(|t| t.id.as_str())
-                                        .unwrap_or("task"),
-                                )
+                    let branch = failed_state.active_branch.clone().unwrap_or_else(|| {
+                        format!(
+                            "wt/{}",
+                            superstate_worktree::manager::sanitize_slug(
+                                failed_state
+                                    .active_task
+                                    .as_ref()
+                                    .map(|t| t.id.as_str())
+                                    .unwrap_or("task"),
                             )
-                        });
+                        )
+                    });
                     let wt = IsolatedWorktree {
                         branch,
                         path: wt_path.clone(),

@@ -111,10 +111,7 @@ fn test_worktree_tracking_serialization_and_advance_reset() {
         deserialized.active_worktree,
         Some(PathBuf::from(".wt/task-1"))
     );
-    assert_eq!(
-        deserialized.active_branch,
-        Some("wt/task-1".to_string())
-    );
+    assert_eq!(deserialized.active_branch, Some("wt/task-1".to_string()));
 
     // Assert backward compatibility: missing active_worktree/active_branch deserialize as None
     let json_without_worktree = r#"{

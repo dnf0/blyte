@@ -85,7 +85,12 @@ pub fn parse_plan_markdown(content: &str) -> Result<Vec<TaskSpec>, ParseError> {
                 || lower.starts_with("- verify:")
             {
                 if let Some((_, after)) = trimmed.split_once(':') {
-                    let cmd = after.trim().trim_matches('*').trim().trim_matches('`').trim();
+                    let cmd = after
+                        .trim()
+                        .trim_matches('*')
+                        .trim()
+                        .trim_matches('`')
+                        .trim();
                     if !cmd.is_empty() {
                         task.verification_cmd = Some(cmd.to_string());
                     }
@@ -98,7 +103,12 @@ pub fn parse_plan_markdown(content: &str) -> Result<Vec<TaskSpec>, ParseError> {
                 || lower.starts_with("- **test:**")
             {
                 if let Some((_, after)) = trimmed.split_once(':') {
-                    let file_part = after.trim().trim_matches('*').trim().trim_matches('`').trim();
+                    let file_part = after
+                        .trim()
+                        .trim_matches('*')
+                        .trim()
+                        .trim_matches('`')
+                        .trim();
                     if !file_part.is_empty() {
                         task.files_modify.push(PathBuf::from(file_part));
                     }

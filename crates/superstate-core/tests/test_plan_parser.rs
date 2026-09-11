@@ -49,7 +49,8 @@ Files:
 - Modify: `/app/repo/.git`
 - Verification: `test -z "$(git -C /app/repo reflog)"`
 "#;
-    let tasks = parse_plan_markdown(markdown).expect("Failed to parse plan with unbolded variations");
+    let tasks =
+        parse_plan_markdown(markdown).expect("Failed to parse plan with unbolded variations");
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].id, "Task 1");
     assert_eq!(

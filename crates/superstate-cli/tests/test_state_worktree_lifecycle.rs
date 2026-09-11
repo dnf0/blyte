@@ -69,10 +69,7 @@ fn test_state_next_worktree_merge_and_advance() {
 
     let state_before = load_state(&state_file).expect("Failed to load state before next");
     assert_eq!(state_before.active_worktree, Some(expected_wt_path.clone()));
-    assert_eq!(
-        state_before.active_branch,
-        Some("wt/task-1".to_string())
-    );
+    assert_eq!(state_before.active_branch, Some("wt/task-1".to_string()));
 
     // 2. Modify a file and commit inside .wt/task-1
     let feature_file_in_wt = expected_wt_path.join("feature.txt");

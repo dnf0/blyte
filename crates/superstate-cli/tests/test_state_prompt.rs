@@ -156,7 +156,11 @@ fn prompt_compacts_overly_long_ledger_entries() {
     assert!(ok);
     assert!(stdout.contains("Epistemic Ledger"), "{}", stdout);
     // The prompt should NOT contain the full 500-char repeat or the trailing excessive detail
-    assert!(!stdout.contains("Excessive detail that should not bloat the prompt"), "{}", stdout);
+    assert!(
+        !stdout.contains("Excessive detail that should not bloat the prompt"),
+        "{}",
+        stdout
+    );
 }
 
 #[test]

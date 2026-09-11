@@ -219,7 +219,9 @@ impl IsolatedWorktree {
             // Check if untracked files in the primary working tree conflict with files
             // committed in the branch being merged. The worktree's committed version is authoritative.
             if err_msg.contains("exit 2") {
-                let status_output = repo.run_command(&["status", "--porcelain"]).unwrap_or_default();
+                let status_output = repo
+                    .run_command(&["status", "--porcelain"])
+                    .unwrap_or_default();
                 let untracked_files: Vec<String> = status_output
                     .lines()
                     .filter(|l| l.starts_with("?? "))
@@ -230,7 +232,8 @@ impl IsolatedWorktree {
                 let branch_files_output = repo
                     .run_command(&["diff", "--name-only", &diff_cmd])
                     .unwrap_or_default();
-                let branch_files: Vec<&str> = branch_files_output.lines().map(|l| l.trim()).collect();
+                let branch_files: Vec<&str> =
+                    branch_files_output.lines().map(|l| l.trim()).collect();
 
                 let mut cleaned_any = false;
                 for u in &untracked_files {
@@ -277,8 +280,8 @@ impl IsolatedWorktree {
     /// # Returns
     /// `Ok(true)` if changes were committed, `Ok(false)` if working tree was already clean.
     pub fn auto_commit_if_dirty(&self, commit_msg: &str) -> Result<bool, WorktreeError> {
-        let repo = Repository::at(&self.path)
-            .map_err(|e| WorktreeError::Repository(e.to_string()))?;
+        let repo =
+            Repository::at(&self.path).map_err(|e| WorktreeError::Repository(e.to_string()))?;
         let status = repo
             .run_command(&["status", "--porcelain"])
             .map_err(|e| WorktreeError::Git(e.to_string()))?;

@@ -189,10 +189,7 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
 
     let reloaded = load_state(&state_file).unwrap();
     assert_eq!(reloaded.active_worktree, Some(expected_wt_path.clone()));
-    assert_eq!(
-        reloaded.active_branch,
-        Some("wt/task-1".to_string())
-    );
+    assert_eq!(reloaded.active_branch, Some("wt/task-1".to_string()));
 
     // Test --json flag via CLI
     let output = Command::new(bin())
@@ -360,4 +357,3 @@ Implement the first task.
         "Prompt should not mention committing inside worktree when in-place"
     );
 }
-
