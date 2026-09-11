@@ -57,8 +57,14 @@ fn test_cli_init_milestones_from_json_string() {
 
     assert!(output.status.success(), "init failed: {:?}", output);
 
-    let state_file = repo_root.join(".agent-state").join("state.json");
-    assert!(state_file.exists(), ".agent-state/state.json must exist");
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-cli-feature.json");
+    assert!(
+        state_file.exists(),
+        ".agent-state/branches/feat-cli-feature.json must exist"
+    );
 
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
@@ -132,7 +138,10 @@ fn test_cli_init_milestones_from_stdin() {
         output
     );
 
-    let state_file = repo_root.join(".agent-state").join("state.json");
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-cli-feature.json");
     assert!(state_file.exists());
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
@@ -274,7 +283,10 @@ fn test_cli_milestones_sequential_progression() {
         ".wt/task-2 must be automatically provisioned"
     );
 
-    let state_file = repo_root.join(".agent-state").join("state.json");
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-cli-feature.json");
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
 

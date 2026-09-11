@@ -1,15 +1,28 @@
 use crate::state_cli::InitArgs;
 use std::path::{Path, PathBuf};
 use superstate_core::ledger::append_ledger_note;
-use superstate_core::models::{LedgerEntry, MilestoneSpec};
+use superstate_core::models::{ExecutionStatus, LedgerEntry, MilestoneSpec};
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::prompt::{render_turnkey_prompt, select_task};
 use superstate_core::state_machine::{
-    advance_step, init_state_direct, init_state_milestones, load_state, save_state_atomic,
+    advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
+    init_state_milestones, load_state, resolve_state_path, save_state_atomic, STATE_DIR,
 };
 use superstate_core::verifier::execute_all_gates;
 pub use superstate_worktree::manager::ensure_git_exclude;
 use superstate_worktree::manager::{ensure_git_baseline, IsolatedWorktree, WorktreeManager};
+
+/// Summary representation for listing branch execution states.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct BranchStateSummary {
+    pub branch: String,
+    pub status: ExecutionStatus,
+    pub active_task: Option<String>,
+    pub step: usize,
+    pub total_steps: usize,
+    pub base_branch: Option<String>,
+    pub state_file: PathBuf,
+}
 
 /// Refuse to create a second state inside a project that already has one.
 ///
@@ -34,23 +47,225 @@ fn reject_nested_state(state_path: &Path) -> Result<(), String> {
     }
 }
 
-fn resolve_project_root(state_path: &Path) -> PathBuf {
-    if let Some(parent) = state_path.parent() {
-        if parent.file_name().and_then(|s| s.to_str())
-            == Some(superstate_core::state_machine::STATE_DIR)
-        {
-            if let Some(grandparent) = parent.parent() {
-                if grandparent.as_os_str().is_empty() {
+/// Resolve the project root for a given state path.
+///
+/// Walks upward through directory components of `state_path` until finding `STATE_DIR`
+/// (`.agent-state`), returning its parent as the project root. If `STATE_DIR` is not found,
+/// falls back to the state path's parent or current working directory.
+pub fn resolve_project_root(state_path: &Path) -> PathBuf {
+    let mut current = state_path.parent();
+    while let Some(dir) = current {
+        if dir.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
+            if let Some(parent) = dir.parent() {
+                if parent.as_os_str().is_empty() {
                     return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 }
-                return grandparent.to_path_buf();
+                return parent.to_path_buf();
             }
         }
+        current = dir.parent();
+    }
+    if let Some(parent) = state_path.parent() {
         if !parent.as_os_str().is_empty() {
             return parent.to_path_buf();
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Dynamically resolve effective state path based on branch-scoped isolation rules.
+///
+/// 1. If `state_arg` is explicitly provided (not default `.agent-state/state.json`),
+///    resolves via standard ancestor search.
+/// 2. If inside a worktree, searches ancestors for `.agent-state/branches/` and calls
+///    `find_branch_state_for_worktree`.
+/// 3. If in a git repository on a feature branch (not `main`, `master`, and not starting
+///    with `wt/` or `superstate/`), returns `branch_scoped_state_path(&repo_root, &branch)`.
+/// 4. Fallback: returns standard ancestor resolution of `state_arg`.
+pub fn resolve_effective_state_path(state_arg: &Path, cwd: &Path) -> PathBuf {
+    let default_path = Path::new(crate::state_cli::DEFAULT_STATE);
+    if state_arg != default_path && state_arg.as_os_str() != crate::state_cli::DEFAULT_STATE {
+        return resolve_state_path(state_arg, cwd);
+    }
+
+    // 2. Check if cwd is inside an active worktree
+    let wt_branch = WorktreeManager::new(cwd)
+        .ok()
+        .and_then(|m| m.current_branch().ok());
+
+    let mut ancestor = Some(cwd);
+    while let Some(current) = ancestor {
+        let branches_dir = current.join(STATE_DIR).join("branches");
+        if branches_dir.is_dir() {
+            let mut wt_cand = Some(cwd);
+            while let Some(p) = wt_cand {
+                if p == current {
+                    break;
+                }
+                if let Some(matched) =
+                    find_branch_state_for_worktree(current, p, wt_branch.as_deref())
+                {
+                    return matched;
+                }
+                wt_cand = p.parent();
+            }
+        }
+        ancestor = current.parent();
+    }
+
+    // 3. Check if cwd is in a repository on a feature branch
+    if let Ok(manager) = WorktreeManager::new(cwd) {
+        if let Ok(branch) = manager.current_branch() {
+            let is_feature_branch = branch != "main"
+                && branch != "master"
+                && !branch.starts_with("wt/")
+                && !branch.starts_with("superstate/");
+            if is_feature_branch {
+                let repo_root = superstate_core::state_machine::enclosing_state_root(cwd)
+                    .or_else(|| {
+                        let mut d = Some(cwd);
+                        while let Some(cur) = d {
+                            if cur.join(".git").exists() {
+                                return Some(cur.to_path_buf());
+                            }
+                            d = cur.parent();
+                        }
+                        None
+                    })
+                    .unwrap_or_else(|| cwd.to_path_buf());
+                return branch_scoped_state_path(&repo_root, &branch);
+            }
+        }
+    }
+
+    // 4. Fallback to default state path resolution
+    resolve_state_path(state_arg, cwd)
+}
+
+/// List active and completed branch-scoped states.
+pub fn cmd_list(
+    state_arg: Option<&Path>,
+    as_json: bool,
+    cwd: &Path,
+) -> Result<(), String> {
+    let repo_root = if let Some(arg) = state_arg {
+        let p = resolve_state_path(arg, cwd);
+        if p.is_dir() {
+            p
+        } else {
+            resolve_project_root(&p)
+        }
+    } else {
+        superstate_core::state_machine::enclosing_state_root(cwd)
+            .or_else(|| {
+                let mut d = Some(cwd);
+                while let Some(cur) = d {
+                    if cur.join(".git").exists() {
+                        return Some(cur.to_path_buf());
+                    }
+                    d = cur.parent();
+                }
+                None
+            })
+            .unwrap_or_else(|| cwd.to_path_buf())
+    };
+
+    let state_dir = repo_root.join(STATE_DIR);
+    let mut summaries = Vec::new();
+
+    // 1. Scan .agent-state/branches/*.json
+    let branches_dir = state_dir.join("branches");
+    if branches_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&branches_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    if let Ok(state) = load_state(&path) {
+                        let slug = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let total_steps = state.completed_tasks.len()
+                            + if state.active_task.is_some() { 1 } else { 0 }
+                            + state.pending_tasks.len();
+                        let active_task = state
+                            .active_task
+                            .as_ref()
+                            .map(|t| format!("{}: {}", t.id, t.title));
+                        summaries.push(BranchStateSummary {
+                            branch: slug,
+                            status: state.status,
+                            active_task,
+                            step: state.step,
+                            total_steps,
+                            base_branch: state.base_branch,
+                            state_file: path,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Also check .agent-state/state.json if present
+    let default_state_file = state_dir.join("state.json");
+    if default_state_file.is_file() {
+        if let Ok(state) = load_state(&default_state_file) {
+            let total_steps = state.completed_tasks.len()
+                + if state.active_task.is_some() { 1 } else { 0 }
+                + state.pending_tasks.len();
+            let active_task = state
+                .active_task
+                .as_ref()
+                .map(|t| format!("{}: {}", t.id, t.title));
+            summaries.push(BranchStateSummary {
+                branch: "main (default)".to_string(),
+                status: state.status,
+                active_task,
+                step: state.step,
+                total_steps,
+                base_branch: state.base_branch.or_else(|| Some("main".to_string())),
+                state_file: default_state_file,
+            });
+        }
+    }
+
+    summaries.sort_by(|a, b| a.branch.cmp(&b.branch));
+
+    if as_json {
+        let serialized = serde_json::to_string_pretty(&summaries)
+            .map_err(|e| format!("Failed to serialize summaries: {}", e))?;
+        println!("{}", serialized);
+    } else {
+        if summaries.is_empty() {
+            println!("No branch execution states found.");
+            return Ok(());
+        }
+        println!("Active & Completed Branches:");
+        println!(
+            "  {:<26} {:<12} {:<24} {:<6} {:<20}",
+            "Branch", "Status", "Active Task", "Step", "Base Branch"
+        );
+        for s in &summaries {
+            let status_str = match s.status {
+                ExecutionStatus::NotStarted => "NotStarted",
+                ExecutionStatus::InProgress => "InProgress",
+                ExecutionStatus::Completed => "Completed",
+                ExecutionStatus::Failed => "Failed",
+                ExecutionStatus::Blocked => "Blocked",
+            };
+            let task_str = s.active_task.as_deref().unwrap_or("-");
+            let step_str = format!("{}/{}", s.step, s.total_steps);
+            let base_str = s.base_branch.as_deref().unwrap_or("-");
+            println!(
+                "  {:<26} {:<12} {:<24} {:<6} {:<20}",
+                s.branch, status_str, task_str, step_str, base_str
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Initialize project execution state either from plan markdown, directly from a goal, or from milestones.
@@ -92,13 +307,24 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
         return Err("--verify-cmd is required when initializing with --goal".to_string());
     }
 
-    let state_path = &args.state;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Guard against creating a divergent nested state inside an existing state hierarchy
-    reject_nested_state(state_path)?;
+    reject_nested_state(&args.state)?;
+    let effective_state_path = resolve_effective_state_path(&args.state, &cwd);
+    let state_path = &effective_state_path;
 
     // Ensure baseline git repository is present before initializing state
     let root = resolve_project_root(state_path);
     ensure_git_baseline(&root);
+
+    // Detect active feature branch from git repository if available
+    let base_branch = if root.join(".git").exists() {
+        WorktreeManager::new(&root)
+            .ok()
+            .and_then(|m| m.current_branch().ok())
+    } else {
+        None
+    };
 
     // Direct milestones array initialization branch: constructs sequential DAG in-memory
     if let Some(ref raw_milestones) = args.milestones {
@@ -117,15 +343,6 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
         // Parse JSON array into strongly-typed MilestoneSpec list
         let parsed: Vec<MilestoneSpec> = serde_json::from_str(&raw_json)
             .map_err(|e| format!("Failed to parse milestones JSON: {}", e))?;
-
-        // Detect active feature branch from git repository if available
-        let base_branch = if root.join(".git").exists() {
-            WorktreeManager::new(&root)
-                .ok()
-                .and_then(|m| m.current_branch().ok())
-        } else {
-            None
-        };
 
         // Initialize multi-milestone DAG with base branch propagation
         let mut state = init_state_milestones(
@@ -180,14 +397,6 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
             })
             .unwrap_or_default();
 
-        let base_branch = if root.join(".git").exists() {
-            WorktreeManager::new(&root)
-                .and_then(|m| m.current_branch())
-                .ok()
-        } else {
-            None
-        };
-
         let mut state = init_state_direct(goal, verify_cmd, files_modify, args.no_worktree);
         state.base_branch = base_branch.clone();
 
@@ -221,11 +430,14 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
     if let Some(ref plan) = args.plan {
         let mut state = init_state_from_plan(plan, state_path)
             .map_err(|e| format!("Failed to initialize state from plan: {}", e))?;
+        if state.base_branch.is_none() {
+            state.base_branch = base_branch.clone();
+        }
         if args.no_worktree {
             state.no_worktree = true;
-            save_state_atomic(state_path, &state)
-                .map_err(|e| format!("Failed to save state: {}", e))?;
         }
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
         println!("State initialized at {}", state_path.display());
         if let Some(ref task) = state.active_task {
             println!("Active Task: {}: {}", task.id, task.title);
@@ -241,6 +453,9 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
 /// `--json` emits an array of titles, which is the form a runner consumes when
 /// deciding what to dispatch next.
 pub fn cmd_ready(state_path: &Path, as_json: bool) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let ready = superstate_core::state_machine::ready_tasks(&state);
 
@@ -271,6 +486,9 @@ pub fn cmd_ready(state_path: &Path, as_json: bool) -> Result<(), String> {
 
 /// Tag the current commit as the checkpoint guarding this step.
 pub fn cmd_checkpoint(state_path: &Path) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let root = repo_root_for(state_path);
     let tag = superstate_core::checkpoint::create_checkpoint(&root, state.step)
@@ -281,6 +499,9 @@ pub fn cmd_checkpoint(state_path: &Path) -> Result<(), String> {
 
 /// Restore the working tree to a checkpoint, discarding untracked files with it.
 pub fn cmd_rollback(state_path: &Path, reference: Option<&str>) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let root = repo_root_for(state_path);
 
@@ -331,39 +552,14 @@ fn preserved(state_path: &Path) -> Vec<&str> {
 }
 
 /// The repository the state file belongs to (.agent-state/state.json -> root).
-///
-/// A relative state path such as `.agent-state/state.json` walks up to an empty
-/// path, which is not a usable working directory, so an empty result means "here".
 fn repo_root_for(state_path: &Path) -> std::path::PathBuf {
-    if let Some(parent) = state_path.parent() {
-        if parent.file_name().and_then(|s| s.to_str())
-            == Some(superstate_core::state_machine::STATE_DIR)
-        {
-            if let Some(grandparent) = parent.parent() {
-                if grandparent.as_os_str().is_empty() {
-                    return std::path::PathBuf::from(".");
-                }
-                return grandparent.to_path_buf();
-            }
-        } else if parent.join(".git").exists() {
-            if parent.as_os_str().is_empty() {
-                return std::path::PathBuf::from(".");
-            }
-            return parent.to_path_buf();
-        }
-    }
-    let root = state_path
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or_else(|| Path::new(""));
-    if root.as_os_str().is_empty() {
-        std::path::PathBuf::from(".")
-    } else {
-        root.to_path_buf()
-    }
+    resolve_project_root(state_path)
 }
 
 pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     if as_json {
         let rendered = serde_json::to_string_pretty(&state)
@@ -405,6 +601,9 @@ pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
 /// # Errors
 /// Returns an error if the state file cannot be loaded or serialized.
 pub fn cmd_show(state_path: &Path, _markdown: bool, as_json: bool) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
 
     // Machine-readable JSON output requested
@@ -451,6 +650,9 @@ pub fn cmd_next(
     verify_cmd: Option<String>,
     verify_git_clean: bool,
 ) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
 
     let active_task = match state.active_task.clone() {
@@ -575,6 +777,9 @@ pub fn cmd_prompt(
     json_output: bool,
     no_worktree: bool,
 ) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
 
     let is_in_place = no_worktree || state.no_worktree;
@@ -615,7 +820,7 @@ pub fn cmd_prompt(
         let manager = WorktreeManager::new(&repo_root)
             .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
         let wt = manager
-            .ensure_task_worktree(&active.id, None)
+            .ensure_task_worktree(&active.id, state.base_branch.as_deref())
             .map_err(|e| format!("Failed to ensure worktree for task {}: {}", active.id, e))?;
         state.active_worktree = Some(wt.path.clone());
         state.active_branch = Some(wt.branch.clone());
@@ -627,7 +832,29 @@ pub fn cmd_prompt(
         save_state_atomic(state_path, &state)
             .map_err(|e| format!("Failed to save state: {}", e))?;
     }
-    let rendered_prompt = render_turnkey_prompt(&state, state_path, task, is_in_place, with_graph)?;
+    let mut rendered_prompt =
+        render_turnkey_prompt(&state, state_path, task, is_in_place, with_graph)?;
+
+    let state_display = state_path.display();
+    let contract_additions = format!(
+        "- **State File:** `{}`\n- **Next Gate Command:** `superstate state next --state {}`\n",
+        state_display, state_display
+    );
+    if let Some(pos) = rendered_prompt.find("## 🌲 Active Isolated Worktree") {
+        if let Some(newline_pos) = rendered_prompt[pos..].find("\n\n") {
+            rendered_prompt.insert_str(
+                pos + newline_pos,
+                &format!("\n{}", contract_additions.trim_end()),
+            );
+        } else {
+            rendered_prompt.push_str(&format!("\n{}", contract_additions));
+        }
+    } else if let Some(pos) = rendered_prompt.find("## Instructions\n") {
+        let insert_idx = pos + "## Instructions\n".len();
+        rendered_prompt.insert_str(insert_idx, &contract_additions);
+    } else {
+        rendered_prompt.push_str(&format!("\n{}", contract_additions));
+    }
 
     if json_output {
         let json_value = serde_json::json!({
@@ -647,6 +874,9 @@ pub fn cmd_prompt(
 }
 
 pub fn cmd_note(state_path: &Path, note: &str, author: &str) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let entry = LedgerEntry::new(author.to_string(), note.to_string());
     append_ledger_note(state_path, entry).map_err(|e| format!("Failed to append note: {}", e))?;
     println!("Note recorded into epistemic ledger.");
@@ -676,6 +906,9 @@ fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
 
 /// Reconcile the state with a revised plan, preserving completed work.
 pub fn cmd_sync(state_path: &Path, plan_path: &Path, out: Option<&Path>) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let plan = std::fs::read_to_string(plan_path)
         .map_err(|e| format!("Failed to read plan {}: {}", plan_path.display(), e))?;
@@ -715,6 +948,9 @@ pub fn cmd_doctor(
     repair: bool,
     as_json: bool,
 ) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let plan = match plan_path {
         Some(p) => {
@@ -758,6 +994,9 @@ pub fn cmd_doctor(
 
 /// Validate a state document against the execution schema.
 pub fn cmd_validate(state_path: &Path) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let raw = read_json(state_path)?;
     let errors = superstate_core::patching::validate_state(&raw);
     if errors.is_empty() {
@@ -778,6 +1017,9 @@ pub fn cmd_apply(
     note: Option<&str>,
     out: Option<&Path>,
 ) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     if patch_path.is_none() && note.is_none() {
         return Err("Nothing to apply: pass --patch and/or --note.".to_string());
     }
@@ -813,6 +1055,9 @@ pub fn cmd_apply(
 
 /// Executive briefing for resuming after context loss.
 pub fn cmd_resume(state_path: &Path) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let root = repo_root_for(state_path);
     let commits = std::process::Command::new("git")
@@ -839,6 +1084,9 @@ pub fn cmd_resume(state_path: &Path) -> Result<(), String> {
 
 /// Task telemetry and efficiency metrics.
 pub fn cmd_metrics(state_path: &Path, as_json: bool) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let notes = superstate_core::ledger::read_ledger(state_path);
     let m = superstate_core::maintenance::metrics(&state, notes.len());
@@ -897,6 +1145,9 @@ pub fn cmd_exec(
     advance: bool,
     as_json: bool,
 ) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let effective = resolve_effective_state_path(state_path, &cwd);
+    let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let root = repo_root_for(state_path);
     let step = state.step;
