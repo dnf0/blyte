@@ -54,6 +54,13 @@ pub fn run_verification_cmd(
 }
 
 pub fn verify_git_clean(repo_root: &Path) -> Result<GateResult, GateError> {
+    verify_git_clean_filtered(repo_root, None)
+}
+
+pub fn verify_git_clean_filtered(
+    repo_root: &Path,
+    ignore_patterns: Option<&str>,
+) -> Result<GateResult, GateError> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(repo_root)
@@ -71,10 +78,24 @@ pub fn verify_git_clean(repo_root: &Path) -> Result<GateResult, GateError> {
         });
     }
 
+    let patterns: Vec<&str> = ignore_patterns
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     let dirty_entries: Vec<&str> = stdout
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
+        .filter(|l| {
+            if patterns.is_empty() {
+                return true;
+            }
+            let filename = l.split_whitespace().nth(1).unwrap_or(l);
+            !patterns.iter().any(|pat| filename.contains(pat) || filename == *pat)
+        })
         .collect();
 
     let passed = dirty_entries.is_empty();
@@ -101,10 +122,19 @@ pub fn execute_all_gates(
     task: &TaskSpec,
     check_clean: bool,
 ) -> Result<Vec<GateResult>, GateError> {
+    execute_all_gates_filtered(repo_root, task, check_clean, None)
+}
+
+pub fn execute_all_gates_filtered(
+    repo_root: &Path,
+    task: &TaskSpec,
+    check_clean: bool,
+    ignore_patterns: Option<&str>,
+) -> Result<Vec<GateResult>, GateError> {
     let mut results = Vec::new();
 
     if check_clean {
-        results.push(verify_git_clean(repo_root)?);
+        results.push(verify_git_clean_filtered(repo_root, ignore_patterns)?);
     }
 
     if let Some(ref cmd) = task.verification_cmd {

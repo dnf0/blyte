@@ -8,7 +8,7 @@ use superstate_core::state_machine::{
     advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
     init_state_milestones, load_state, resolve_state_path, save_state_atomic, STATE_DIR,
 };
-use superstate_core::verifier::execute_all_gates;
+use superstate_core::verifier::execute_all_gates_filtered;
 pub use superstate_worktree::manager::ensure_git_exclude;
 use superstate_worktree::manager::{ensure_git_baseline, IsolatedWorktree, WorktreeManager};
 
@@ -660,6 +660,7 @@ pub fn cmd_next(
     state_path: &Path,
     verify_cmd: Option<String>,
     verify_git_clean: bool,
+    ignore_untracked_glob: Option<&str>,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let effective = resolve_effective_state_path(state_path, &cwd);
@@ -688,8 +689,13 @@ pub fn cmd_next(
         .cloned()
         .unwrap_or_else(|| repo_root.clone());
 
-    let results = execute_all_gates(&target_dir, &task_to_verify, verify_git_clean)
-        .map_err(|e| format!("Gate execution error: {}", e))?;
+    let results = execute_all_gates_filtered(
+        &target_dir,
+        &task_to_verify,
+        verify_git_clean,
+        ignore_untracked_glob,
+    )
+    .map_err(|e| format!("Gate execution error: {}", e))?;
 
     for res in &results {
         if !res.passed {
@@ -1185,7 +1191,7 @@ pub fn cmd_exec(
     let mut advanced = false;
 
     if passed && advance {
-        cmd_next(state_path, Some(verify_cmd.to_string()), verify_git_clean)?;
+        cmd_next(state_path, Some(verify_cmd.to_string()), verify_git_clean, None)?;
         advanced = true;
     } else if !passed {
         // Record why, so the failure survives in the state rather than only in
