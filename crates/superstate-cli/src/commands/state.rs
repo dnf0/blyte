@@ -491,9 +491,7 @@ pub fn cmd_prompt(
         state.active_branch = Some(wt.branch.clone());
         save_state_atomic(state_path, &state)
             .map_err(|e| format!("Failed to save state: {}", e))?;
-    } else if is_in_place
-        && (state.active_worktree.is_some() || state.active_branch.is_some())
-    {
+    } else if is_in_place && (state.active_worktree.is_some() || state.active_branch.is_some()) {
         state.active_worktree = None;
         state.active_branch = None;
         save_state_atomic(state_path, &state)
