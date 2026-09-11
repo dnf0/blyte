@@ -12,20 +12,85 @@ use crate::commands;
 
 const DEFAULT_STATE: &str = ".agent-state/state.json";
 
+/// Arguments for initializing state from a plan or direct goal.
+#[derive(clap::Args, Clone, Debug)]
+pub struct InitArgs {
+    /// Path to plan markdown (`--from-plan` is accepted for reference parity)
+    #[arg(short, long, alias = "from-plan")]
+    pub plan: Option<PathBuf>,
+    /// Path to state JSON file (`--out` is accepted for reference parity)
+    #[arg(short, long, alias = "out", default_value = DEFAULT_STATE)]
+    pub state: PathBuf,
+    /// Disable git worktree creation; operate in-place in workspace root
+    #[arg(long)]
+    pub no_worktree: bool,
+    /// Goal description for direct initialization without a plan
+    #[arg(long)]
+    pub goal: Option<String>,
+    /// Verification command required when --goal is provided
+    #[arg(long)]
+    pub verify_cmd: Option<String>,
+    /// Comma-separated list of files to modify
+    #[arg(long)]
+    pub files: Option<String>,
+}
+
+impl Default for InitArgs {
+    fn default() -> Self {
+        Self {
+            plan: None,
+            state: PathBuf::from(DEFAULT_STATE),
+            no_worktree: false,
+            goal: None,
+            verify_cmd: None,
+            files: None,
+        }
+    }
+}
+
+impl InitArgs {
+    /// Helper to construct InitArgs from a plan path.
+    pub fn for_plan(plan: PathBuf, state: PathBuf, no_worktree: bool) -> Self {
+        Self {
+            plan: Some(plan),
+            state,
+            no_worktree,
+            goal: None,
+            verify_cmd: None,
+            files: None,
+        }
+    }
+}
+
+/// Arguments for showing execution state in markdown or JSON format.
+#[derive(clap::Args, Clone, Debug)]
+pub struct ShowArgs {
+    #[arg(short, long, default_value = DEFAULT_STATE)]
+    pub state: PathBuf,
+    /// Emit machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Emit formatted markdown view
+    #[arg(long)]
+    pub markdown: bool,
+}
+
+impl Default for ShowArgs {
+    fn default() -> Self {
+        Self {
+            state: PathBuf::from(DEFAULT_STATE),
+            json: false,
+            markdown: false,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum StateCommands {
-    /// Initialize state from plan markdown
-    Init {
-        /// Path to plan markdown (`--from-plan` is accepted for reference parity)
-        #[arg(short, long, alias = "from-plan")]
-        plan: PathBuf,
-        /// Path to state JSON file (`--out` is accepted for reference parity)
-        #[arg(short, long, alias = "out", default_value = DEFAULT_STATE)]
-        state: PathBuf,
-        /// Disable git worktree creation; operate in-place in workspace root
-        #[arg(long)]
-        no_worktree: bool,
-    },
+    /// Initialize state from plan markdown or direct goal
+    Init(InitArgs),
+    /// Show execution state (markdown or JSON)
+    Show(ShowArgs),
     /// Display state status
     Status {
         #[arg(short, long, default_value = DEFAULT_STATE)]
@@ -182,11 +247,10 @@ fn resolve(state: PathBuf) -> PathBuf {
 /// Dispatch a `state` subcommand. Shared by both binaries.
 pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
     match cmd {
-        StateCommands::Init {
-            plan,
-            state,
-            no_worktree,
-        } => commands::state::cmd_init(plan, state, no_worktree),
+        StateCommands::Init(args) => commands::state::cmd_init(&args),
+        StateCommands::Show(args) => {
+            commands::state::cmd_show(&resolve(args.state), args.markdown, args.json)
+        }
         StateCommands::Status { state, json } => commands::state::cmd_status(&resolve(state), json),
         StateCommands::Next {
             state,

@@ -78,5 +78,46 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 required: vec![],
             },
         },
+        McpTool {
+            name: "superstate_preflight".to_string(),
+            description: "Validate a verification command on the OS in a dry-run without modifying state or code".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "verify_cmd": {
+                        "type": "string",
+                        "description": "Shell command to execute in dry-run validation"
+                    }
+                }),
+                required: vec!["verify_cmd".to_string()],
+            },
+        },
+        McpTool {
+            name: "superstate_handoff".to_string(),
+            description: "Directly initialize state and provision turnkey prompt from a goal and verification invariant without plan.md".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "goal": {
+                        "type": "string",
+                        "description": "Concise statement of capability delivered"
+                    },
+                    "verify_cmd": {
+                        "type": "string",
+                        "description": "Shell command that must exit 0 to pass"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional target files to modify"
+                    },
+                    "no_worktree": {
+                        "type": "boolean",
+                        "description": "If true, execute in-place without creating a worktree"
+                    }
+                }),
+                required: vec!["goal".to_string(), "verify_cmd".to_string()],
+            },
+        },
     ]
 }

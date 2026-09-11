@@ -6,6 +6,7 @@ use std::process::Command;
 use superstate_cli::commands::state::{
     cmd_checkpoint, cmd_init, cmd_next, cmd_prompt, cmd_rollback,
 };
+use superstate_cli::state_cli::InitArgs;
 use superstate_core::state_machine::load_state;
 use tempfile::tempdir;
 
@@ -56,7 +57,8 @@ fn test_state_next_worktree_merge_and_advance() {
     .unwrap();
 
     let state_file = repo_root.join(".agent-state").join("state.json");
-    cmd_init(plan_file, state_file.clone(), false).expect("Failed to initialize state");
+    cmd_init(&InitArgs::for_plan(plan_file, state_file.clone(), false))
+        .expect("Failed to initialize state");
 
     // 1. Call cmd_prompt to provision worktree for Task 1
     cmd_prompt(&state_file, None, false, false, false).expect("cmd_prompt failed");
@@ -151,7 +153,8 @@ fn test_state_next_preserves_worktree_on_failure() {
     .unwrap();
 
     let state_file = repo_root.join(".agent-state").join("state.json");
-    cmd_init(plan_file, state_file.clone(), false).expect("Failed to initialize state");
+    cmd_init(&InitArgs::for_plan(plan_file, state_file.clone(), false))
+        .expect("Failed to initialize state");
     cmd_prompt(&state_file, None, false, false, false).expect("cmd_prompt failed");
 
     let expected_wt_path = repo_root.join(".wt").join("task-1");
@@ -230,7 +233,8 @@ fn test_state_rollback_cleans_up_worktree() {
     .unwrap();
 
     let state_file = repo_root.join(".agent-state").join("state.json");
-    cmd_init(plan_file, state_file.clone(), false).expect("Failed to initialize state");
+    cmd_init(&InitArgs::for_plan(plan_file, state_file.clone(), false))
+        .expect("Failed to initialize state");
     cmd_checkpoint(&state_file).expect("Failed to create checkpoint");
 
     // Provision worktree for Task 1

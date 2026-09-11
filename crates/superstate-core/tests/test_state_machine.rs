@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use superstate_core::models::{ExecutionState, ExecutionStatus, TaskSpec};
-use superstate_core::state_machine::{advance_step, load_state, save_state_atomic};
+use superstate_core::state_machine::{
+    advance_step, init_state_direct, load_state, save_state_atomic,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -129,4 +131,30 @@ fn test_worktree_tracking_serialization_and_advance_reset() {
     assert_eq!(state.active_task.as_ref().unwrap().id, "task-2");
     assert_eq!(state.active_worktree, None);
     assert_eq!(state.active_branch, None);
+}
+
+#[test]
+fn test_init_state_direct() {
+    let state = init_state_direct(
+        "Build parser",
+        "cargo test -p parser",
+        vec![PathBuf::from("src/parser.rs")],
+        true,
+    );
+
+    assert_eq!(state.status, ExecutionStatus::InProgress);
+    assert_eq!(state.step, 1);
+    assert!(state.plan_path.is_none());
+    assert!(state.no_worktree);
+    assert!(state.pending_tasks.is_empty());
+    assert!(state.completed_tasks.is_empty());
+
+    let task = state.active_task.expect("active_task must be Some");
+    assert_eq!(task.id, "task-1");
+    assert_eq!(task.title, "Build parser");
+    assert_eq!(
+        task.verification_cmd,
+        Some("cargo test -p parser".to_string())
+    );
+    assert_eq!(task.files_modify, vec![PathBuf::from("src/parser.rs")]);
 }
