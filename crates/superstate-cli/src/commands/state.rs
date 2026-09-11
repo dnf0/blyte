@@ -151,7 +151,21 @@ pub fn cmd_list(
     let repo_root = if let Some(arg) = state_arg {
         let p = resolve_state_path(arg, cwd);
         if p.is_dir() {
-            p
+            if p.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
+                p.parent().unwrap_or(&p).to_path_buf()
+            } else if p.file_name().and_then(|s| s.to_str()) == Some("branches")
+                && p.parent()
+                    .and_then(|pp| pp.file_name())
+                    .and_then(|s| s.to_str())
+                    == Some(STATE_DIR)
+            {
+                p.parent()
+                    .and_then(|pp| pp.parent())
+                    .unwrap_or(&p)
+                    .to_path_buf()
+            } else {
+                p
+            }
         } else {
             resolve_project_root(&p)
         }
@@ -193,11 +207,16 @@ pub fn cmd_list(
                             .active_task
                             .as_ref()
                             .map(|t| format!("{}: {}", t.id, t.title));
+                        let display_step = if state.status == ExecutionStatus::Completed {
+                            total_steps
+                        } else {
+                            state.step.min(total_steps)
+                        };
                         summaries.push(BranchStateSummary {
                             branch: slug,
                             status: state.status,
                             active_task,
-                            step: state.step,
+                            step: display_step,
                             total_steps,
                             base_branch: state.base_branch,
                             state_file: path,
@@ -219,13 +238,22 @@ pub fn cmd_list(
                 .active_task
                 .as_ref()
                 .map(|t| format!("{}: {}", t.id, t.title));
+            let default_branch_name = WorktreeManager::new(&repo_root)
+                .map(|m| m.default_branch())
+                .unwrap_or_else(|_| "main".to_string());
+            let branch_display = format!("{} (default)", default_branch_name);
+            let display_step = if state.status == ExecutionStatus::Completed {
+                total_steps
+            } else {
+                state.step.min(total_steps)
+            };
             summaries.push(BranchStateSummary {
-                branch: "main (default)".to_string(),
+                branch: branch_display,
                 status: state.status,
                 active_task,
-                step: state.step,
+                step: display_step,
                 total_steps,
-                base_branch: state.base_branch.or_else(|| Some("main".to_string())),
+                base_branch: state.base_branch.or(Some(default_branch_name)),
                 state_file: default_state_file,
             });
         }
@@ -837,7 +865,7 @@ pub fn cmd_prompt(
 
     let state_display = state_path.display();
     let contract_additions = format!(
-        "- **State File:** `{}`\n- **Next Gate Command:** `superstate state next --state {}`\n",
+        "- **State File:** `{}`\n- **Next Gate Command:** `superstate state next --state \"{}\"`\n",
         state_display, state_display
     );
     if let Some(pos) = rendered_prompt.find("## 🌲 Active Isolated Worktree") {
