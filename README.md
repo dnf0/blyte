@@ -87,6 +87,7 @@ terminal output, so a session resumed later can still explain why it stopped.
 
 - ⚡ **Deterministic State Engine (`superstate-core`)**: Mathematical DFA execution engine backed by `fd-lock` atomic file locks, checkpointing, and an append-only epistemic ledger.
 - 🌳 **Polyglot Code Intelligence (`superstate-syntax`)**: High-speed symbol and AST hierarchy extraction powered by Tree-sitter across Rust, Python, TypeScript, and Go.
+- 🌿 **Isolated Milestone Worktrees (`superstate-worktree`)**: Automated git worktree lifecycle management targeting active feature branches with copy-on-write cache directory reflink support.
 - 🛡️ **Zero-Noise Code Review (`superstate-review`)**: Daemon-less, git diff-driven adversarial code review system returning structured JSON findings.
 - 📜 **Guidance & Rule Engine (`superstate-rules`)**: Deterministic Minijinja templates for generating universal agent guidance (`AGENTS.md`, `.cursor/rules`).
 - 🔌 **Native Stdio MCP Server (`superstate-mcp`)**: Lightweight JSON-RPC 2.0 stdio server connecting state engine tools directly into Cursor, Claude Code, and Antigravity.
@@ -110,7 +111,32 @@ cargo install --path crates/superstate-cli
 superstate doctor
 ```
 
-### 2. Initialise state from a plan
+### 2. Initialise state
+
+Superstate supports multiple initialization workflows:
+
+#### Direct multi-milestone handoff (0 markdown disk artifacts)
+
+Initialise structured multi-milestone task DAGs directly in memory using `--milestones` with a JSON string or from stdin (`-`):
+
+```bash
+# Pass JSON directly
+superstate state init --milestones '[
+  {"title": "Implement models", "verify_cmd": "cargo test -p my-core", "files": ["src/models.rs"]},
+  {"title": "Implement CLI commands", "verify_cmd": "cargo test -p my-cli"}
+]'
+
+# Or stream JSON via stdin
+cat milestones.json | superstate state init --milestones -
+```
+
+#### Feature branch targeting & sequential worktrees
+
+When initialized within a git repository, Superstate automatically captures your active feature branch (e.g., `feat/payment-flow`), never defaulting to `main`:
+1. **Isolated Worktree Provisioning:** Superstate provisions an isolated worktree for the active milestone (`.wt/task-1` on branch `wt/task-1`) branched off your active feature branch.
+2. **Automatic Sequential Progression:** When `superstate state next --verify-cmd "..."` succeeds, Superstate commits any uncommitted worktree changes, merges the worktree cleanly into your active feature branch, cleans up `.wt/task-1`, and automatically provisions the next worktree (`.wt/task-2`) with the latest base branch state.
+
+#### From a markdown plan
 
 The plan is ordinary markdown. Tasks are `### Task N: Title` headings, and
 `**Depends on:**` lines make it a graph rather than a list.
@@ -171,6 +197,14 @@ superstate state sync --plan docs/plan.md   # plan revised mid-flight
 superstate state resume            # briefing after a lost session
 ```
 
+## MCP Server Integration (`superstate-mcp`)
+
+Superstate exposes a full JSON-RPC 2.0 stdio MCP server for direct agent orchestration in Cursor, Claude Code, and Antigravity:
+
+- **`superstate_preflight`**: Validates verification commands before state initialization to catch environment issues early. Supports both single command execution (`verify_cmd: "..."`) and batch validation (`verify_cmds: ["...", "..."]`).
+- **`superstate_handoff`**: Direct handoff from chat into Superstate without markdown plan files. Supports single-task goals (`goal`, `verify_cmd`) or multi-milestone specifications (`milestones: [{title, verify_cmd, files}]`). Captures the active feature branch, initializes in-memory state, provisions `.wt/task-1`, and returns a turnkey prompt.
+- **`state_next`**: Verifies the active milestone, merges the worktree back into the active feature branch, advances to the next milestone, and automatically provisions the next worktree (`.wt/task-2`), returning the next turnkey prompt.
+
 ## Development & Verification
 
 Ensure you have a modern Rust toolchain (2024 edition compatible):
@@ -191,12 +225,13 @@ cargo clippy --all-targets -- -D warnings
 ```
 superstate/
 ├── crates/
-│   ├── superstate-core/    # DFA state machine, atomic persistence, plan parser, verifier
-│   ├── superstate-syntax/  # Polyglot Tree-sitter AST symbol extractor
-│   ├── superstate-review/  # Adversarial code reviewer and git diff engine
-│   ├── superstate-rules/   # Minijinja rules generator
-│   ├── superstate-mcp/     # Native stdio JSON-RPC MCP server
-│   └── superstate-cli/     # Unified CLI (superstate) and state runner (state)
+│   ├── superstate-core/      # DFA state machine, atomic persistence, plan parser, verifier
+│   ├── superstate-syntax/    # Polyglot Tree-sitter AST symbol extractor
+│   ├── superstate-review/    # Adversarial code reviewer and git diff engine
+│   ├── superstate-rules/     # Minijinja rules generator
+│   ├── superstate-worktree/  # Isolated git worktrees and active branch targeting
+│   ├── superstate-mcp/       # Native stdio JSON-RPC MCP server
+│   └── superstate-cli/       # Unified CLI (superstate) and state runner (state)
 ```
 
 ## Contributing
