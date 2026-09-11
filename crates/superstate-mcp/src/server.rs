@@ -9,11 +9,11 @@ use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use superstate_core::ledger::append_ledger_note;
-use superstate_core::models::LedgerEntry;
+use superstate_core::models::{LedgerEntry, MilestoneSpec};
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::prompt::render_turnkey_prompt;
 use superstate_core::state_machine::{
-    advance_step, init_state_direct, load_state, save_state_atomic,
+    advance_step, init_state_direct, init_state_milestones, load_state, save_state_atomic,
 };
 use superstate_core::verifier::execute_all_gates;
 use superstate_worktree::manager::{
@@ -189,20 +189,86 @@ pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> Result<PreflightResult
 ///
 /// # Errors
 /// Returns an error message string if required arguments are missing or tool execution fails.
-fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
+pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "superstate_preflight" => {
-            let verify_cmd = args
-                .get("verify_cmd")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
-
             let cwd = args
                 .get("cwd")
                 .or_else(|| args.get("repo_root"))
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            // If verify_cmds array is provided, iterate and dry-run each command
+            if let Some(cmds_val) = args.get("verify_cmds") {
+                let cmds: Vec<String> = cmds_val
+                    .as_array()
+                    .ok_or_else(|| "'verify_cmds' must be an array of strings".to_string())?
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(ToString::to_string)
+                            .ok_or_else(|| "Each entry in 'verify_cmds' must be a string".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let mut results = Vec::new();
+                let mut all_executable = true;
+                let mut all_passed = true;
+                let mut aggregate_stdout = String::new();
+                let mut aggregate_stderr = String::new();
+
+                // Validate each verification command independently and aggregate outcomes
+                for cmd in &cmds {
+                    let res = execute_preflight(cmd, &cwd)?;
+                    if !res.executable {
+                        all_executable = false;
+                        all_passed = false;
+                    }
+                    if res.exit_code != 0 {
+                        all_passed = false;
+                    }
+                    if !res.stdout.is_empty() {
+                        if !aggregate_stdout.is_empty() {
+                            aggregate_stdout.push('\n');
+                        }
+                        aggregate_stdout.push_str(&res.stdout);
+                    }
+                    if !res.stderr.is_empty() {
+                        if !aggregate_stderr.is_empty() {
+                            aggregate_stderr.push('\n');
+                        }
+                        aggregate_stderr.push_str(&res.stderr);
+                    }
+                    results.push(serde_json::json!({
+                        "command": cmd,
+                        "executable": res.executable,
+                        "exit_code": res.exit_code,
+                        "stdout": res.stdout,
+                        "stderr": res.stderr,
+                    }));
+                }
+
+                return Ok(serde_json::json!({
+                    "executable": all_executable,
+                    "exit_code": if all_passed { 0 } else { 1 },
+                    "all_passed": all_passed,
+                    "results": results,
+                    "stdout": aggregate_stdout,
+                    "stderr": aggregate_stderr,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": format!("preflight executed {} commands, all_passed: {}", results.len(), all_passed)
+                        }
+                    ]
+                }));
+            }
+
+            let verify_cmd = args
+                .get("verify_cmd")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
 
             let res = execute_preflight(verify_cmd, &cwd)?;
 
@@ -220,32 +286,6 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             }))
         }
         "superstate_handoff" => {
-            let goal = args
-                .get("goal")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'goal'".to_string())?;
-
-            let verify_cmd = args
-                .get("verify_cmd")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
-
-            let no_worktree = args
-                .get("no_worktree")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let files_modify: Vec<PathBuf> = args
-                .get("files")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str())
-                        .map(PathBuf::from)
-                        .collect()
-                })
-                .unwrap_or_default();
-
             let repo_root = args
                 .get("repo_root")
                 .or_else(|| args.get("cwd"))
@@ -259,30 +299,115 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| repo_root.join(".agent-state").join("state.json"));
 
+            let no_worktree = args
+                .get("no_worktree")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
             // Ensure baseline repository setup and git exclude invariants
             ensure_git_baseline(&repo_root);
 
-            // Execute dry-run validation of the verify_cmd
-            let _preflight = execute_preflight(verify_cmd, &repo_root)?;
+            // Multi-milestone handoff or single-goal handoff dispatch
+            let state = if let Some(milestones_val) = args.get("milestones") {
+                // Deserialize milestones array into Vec<MilestoneSpec>
+                let milestones: Vec<MilestoneSpec> = serde_json::from_value(milestones_val.clone())
+                    .map_err(|e| format!("Invalid milestones array: {}", e))?;
 
-            // Directly construct ExecutionState from goal and invariant without plan.md
-            let mut state = init_state_direct(goal, verify_cmd, files_modify, no_worktree);
-
-            // Provision isolated git worktree if isolation is enabled and git repository exists
-            if !no_worktree && repo_root.join(".git").exists() {
-                ensure_git_exclude(&repo_root);
-                let manager = WorktreeManager::new(&repo_root)
-                    .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
-                if let Some(ref active) = state.active_task {
-                    let wt = manager
-                        .ensure_task_worktree(&active.id, None)
-                        .map_err(|e| {
-                            format!("Failed to ensure worktree for task {}: {}", active.id, e)
-                        })?;
-                    state.active_worktree = Some(wt.path.clone());
-                    state.active_branch = Some(wt.branch.clone());
+                // Preflight dry-run each milestone's verify_cmd before state generation
+                for m in &milestones {
+                    execute_preflight(&m.verify_cmd, &repo_root)?;
                 }
-            }
+
+                // Discover active feature branch from repository
+                let base_branch = if repo_root.join(".git").exists() {
+                    WorktreeManager::new(&repo_root)
+                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?
+                        .current_branch()
+                        .ok()
+                } else {
+                    None
+                };
+
+                let goal = args.get("goal").and_then(|v| v.as_str());
+                let mut st = init_state_milestones(
+                    goal,
+                    milestones,
+                    base_branch.as_deref(),
+                    no_worktree,
+                )
+                .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?;
+
+                // Provision isolated git worktree for task-1 if isolation is enabled
+                if !no_worktree && repo_root.join(".git").exists() {
+                    ensure_git_exclude(&repo_root);
+                    let manager = WorktreeManager::new(&repo_root)
+                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+                    if let Some(ref active) = st.active_task {
+                        let wt = manager
+                            .ensure_task_worktree(&active.id, base_branch.as_deref())
+                            .map_err(|e| {
+                                format!("Failed to ensure worktree for task {}: {}", active.id, e)
+                            })?;
+                        st.active_worktree = Some(wt.path.clone());
+                        st.active_branch = Some(wt.branch.clone());
+                    }
+                }
+
+                st
+            } else if let (Some(goal), Some(verify_cmd)) = (
+                args.get("goal").and_then(|v| v.as_str()),
+                args.get("verify_cmd").and_then(|v| v.as_str()),
+            ) {
+                let files_modify: Vec<PathBuf> = args
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str())
+                            .map(PathBuf::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Execute dry-run validation of the verify_cmd
+                let _preflight = execute_preflight(verify_cmd, &repo_root)?;
+
+                // Directly construct ExecutionState from goal and invariant without plan.md
+                let mut st = init_state_direct(goal, verify_cmd, files_modify, no_worktree);
+
+                // Discover active feature branch from repository
+                let base_branch = if repo_root.join(".git").exists() {
+                    WorktreeManager::new(&repo_root)
+                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?
+                        .current_branch()
+                        .ok()
+                } else {
+                    None
+                };
+                st.base_branch = base_branch.clone();
+
+                // Provision isolated git worktree if isolation is enabled and git repository exists
+                if !no_worktree && repo_root.join(".git").exists() {
+                    ensure_git_exclude(&repo_root);
+                    let manager = WorktreeManager::new(&repo_root)
+                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+                    if let Some(ref active) = st.active_task {
+                        let wt = manager
+                            .ensure_task_worktree(&active.id, base_branch.as_deref())
+                            .map_err(|e| {
+                                format!("Failed to ensure worktree for task {}: {}", active.id, e)
+                            })?;
+                        st.active_worktree = Some(wt.path.clone());
+                        st.active_branch = Some(wt.branch.clone());
+                    }
+                }
+
+                st
+            } else {
+                return Err(
+                    "Must provide either 'milestones' array or both 'goal' and 'verify_cmd'".to_string(),
+                );
+            };
 
             // Atomically persist state to disk
             save_state_atomic(&state_path, &state)
@@ -407,11 +532,16 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 }
             }
 
+            // Resolve base branch from state.base_branch, falling back to manager's current_branch or default_branch
+            let base_branch = state.base_branch.clone().unwrap_or_else(|| {
+                WorktreeManager::new(&repo_root)
+                    .map(|m| m.current_branch().unwrap_or_else(|_| m.default_branch()))
+                    .unwrap_or_else(|_| "main".to_string())
+            });
+
+            // Merge active worktree into base branch and cleanup
             if let Some(ref wt_path) = state.active_worktree.clone() {
                 if wt_path.exists() {
-                    let base_branch = WorktreeManager::new(&repo_root)
-                        .map(|m| m.default_branch())
-                        .unwrap_or_else(|_| "main".to_string());
                     let branch = state.active_branch.clone().unwrap_or_else(|| {
                         format!(
                             "wt/{}",
@@ -421,7 +551,7 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     let wt = IsolatedWorktree {
                         branch,
                         path: wt_path.clone(),
-                        base_branch,
+                        base_branch: base_branch.clone(),
                         repo_root: repo_root.clone(),
                     };
                     let commit_msg = format!("feat({}): {}", active_task.id, active_task.title);
@@ -433,14 +563,55 @@ fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             }
 
             advance_step(&mut state).map_err(|e| format!("Advance step error: {}", e))?;
+
+            // Provision worktree for the next task if isolation is enabled
+            if !state.no_worktree && repo_root.join(".git").exists() {
+                if let Some(ref next_task) = state.active_task {
+                    let manager = WorktreeManager::new(&repo_root)
+                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+                    let wt = manager
+                        .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
+                        .map_err(|e| {
+                            format!("Failed to ensure worktree for task {}: {}", next_task.id, e)
+                        })?;
+                    state.active_worktree = Some(wt.path.clone());
+                    state.active_branch = Some(wt.branch.clone());
+                }
+            }
+
+            // Render turnkey prompt for the newly active task if one exists
+            let mut turnkey_prompt_opt = None;
+            if state.active_task.is_some() {
+                let is_in_place = state.no_worktree;
+                if let Ok(prompt) =
+                    render_turnkey_prompt(&state, &state_path, None, is_in_place, false)
+                {
+                    turnkey_prompt_opt = Some(prompt);
+                }
+            }
+
             save_state_atomic(&state_path, &state)
                 .map_err(|e| format!("Save state error: {}", e))?;
 
-            Ok(serde_json::json!({
+            let mut res_obj = serde_json::json!({
                 "status": "success",
                 "step": state.step,
-                "active_task": state.active_task
-            }))
+                "active_task": state.active_task,
+                "active_worktree": state.active_worktree.as_ref().map(|p| p.display().to_string()),
+                "active_branch": state.active_branch,
+            });
+
+            if let Some(ref prompt) = turnkey_prompt_opt {
+                res_obj["turnkey_prompt"] = serde_json::Value::String(prompt.clone());
+                res_obj["content"] = serde_json::json!([
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]);
+            }
+
+            Ok(res_obj)
         }
         "state_prompt" => {
             let repo_root = args

@@ -87,9 +87,14 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                     "verify_cmd": {
                         "type": "string",
                         "description": "Shell command to execute in dry-run validation"
+                    },
+                    "verify_cmds": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of shell commands to execute in dry-run validation"
                     }
                 }),
-                required: vec!["verify_cmd".to_string()],
+                required: vec![],
             },
         },
         McpTool {
@@ -106,6 +111,23 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                         "type": "string",
                         "description": "Shell command that must exit 0 to pass"
                     },
+                    "milestones": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "Milestone title or task name" },
+                                "verify_cmd": { "type": "string", "description": "Verification command that must exit 0" },
+                                "files": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Optional target files to modify"
+                                }
+                            },
+                            "required": ["title", "verify_cmd"]
+                        },
+                        "description": "Optional array of milestones for direct multi-task DAG initialization"
+                    },
                     "files": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -116,7 +138,7 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                         "description": "If true, execute in-place without creating a worktree"
                     }
                 }),
-                required: vec!["goal".to_string(), "verify_cmd".to_string()],
+                required: vec![],
             },
         },
     ]
