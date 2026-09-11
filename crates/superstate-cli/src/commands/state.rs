@@ -164,7 +164,10 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
 
     // Direct state initialization branch: no plan.md is read or created
     if let Some(ref goal) = args.goal {
-        let verify_cmd = args.verify_cmd.as_deref().unwrap();
+        let verify_cmd = args.verify_cmd.as_deref().ok_or_else(|| {
+            "Missing required verification command (--verify-cmd) for direct state initialization"
+                .to_string()
+        })?;
         let files_modify: Vec<PathBuf> = args
             .files
             .as_deref()
@@ -177,7 +180,16 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
             })
             .unwrap_or_default();
 
+        let base_branch = if root.join(".git").exists() {
+            WorktreeManager::new(&root)
+                .and_then(|m| m.current_branch())
+                .ok()
+        } else {
+            None
+        };
+
         let mut state = init_state_direct(goal, verify_cmd, files_modify, args.no_worktree);
+        state.base_branch = base_branch.clone();
 
         // Provision isolated worktree for the active task unless no_worktree is explicitly set
         if !args.no_worktree && root.join(".git").exists() {
@@ -186,7 +198,7 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
                 .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
             if let Some(ref active) = state.active_task {
                 let wt = manager
-                    .ensure_task_worktree(&active.id, None)
+                    .ensure_task_worktree(&active.id, base_branch.as_deref())
                     .map_err(|e| {
                         format!("Failed to ensure worktree for task {}: {}", active.id, e)
                     })?;
