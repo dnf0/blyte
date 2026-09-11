@@ -49,7 +49,8 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
         "repo_root": repo_root.to_str().unwrap()
     });
 
-    let res = handle_tool_call("superstate_handoff", &args).expect("superstate_handoff should succeed");
+    let res =
+        handle_tool_call("superstate_handoff", &args).expect("superstate_handoff should succeed");
 
     // Asserts response contains task-1 turnkey prompt
     let prompt = res["turnkey_prompt"]
@@ -93,14 +94,8 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
 
     // Asserts .wt/task-1 exists
     let wt_task1 = repo_root.join(".wt").join("task-1");
-    assert!(
-        wt_task1.exists(),
-        ".wt/task-1 should exist on disk"
-    );
-    assert!(
-        wt_task1.is_dir(),
-        ".wt/task-1 should be a directory"
-    );
+    assert!(wt_task1.exists(), ".wt/task-1 should exist on disk");
+    assert!(wt_task1.is_dir(), ".wt/task-1 should be a directory");
 }
 
 #[test]
@@ -156,8 +151,7 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
     let next_args = serde_json::json!({
         "repo_root": repo_root.to_str().unwrap()
     });
-    let next_res = handle_tool_call("state_next", &next_args)
-        .expect("state_next should succeed");
+    let next_res = handle_tool_call("state_next", &next_args).expect("state_next should succeed");
 
     // Asserts .wt/task-1 is merged to feat/multi-task-flow and cleaned up
     assert!(
@@ -175,7 +169,9 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
         .current_dir(repo_root)
         .output()
         .expect("git rev-parse");
-    let branch_str = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+    let branch_str = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
     assert_eq!(
         branch_str, "feat/multi-task-flow",
         "Primary repo should be on feat/multi-task-flow"
@@ -187,10 +183,7 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
         wt_task2.exists(),
         ".wt/task-2 should be provisioned on disk"
     );
-    assert!(
-        wt_task2.is_dir(),
-        ".wt/task-2 should be a directory"
-    );
+    assert!(wt_task2.is_dir(), ".wt/task-2 should be a directory");
 
     // Asserts active_task.id is task-2
     assert_eq!(

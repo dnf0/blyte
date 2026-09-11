@@ -206,9 +206,9 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     .ok_or_else(|| "'verify_cmds' must be an array of strings".to_string())?
                     .iter()
                     .map(|v| {
-                        v.as_str()
-                            .map(ToString::to_string)
-                            .ok_or_else(|| "Each entry in 'verify_cmds' must be a string".to_string())
+                        v.as_str().map(ToString::to_string).ok_or_else(|| {
+                            "Each entry in 'verify_cmds' must be a string".to_string()
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -329,13 +329,11 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 };
 
                 let goal = args.get("goal").and_then(|v| v.as_str());
-                let mut st = init_state_milestones(
-                    goal,
-                    milestones,
-                    base_branch.as_deref(),
-                    no_worktree,
-                )
-                .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?;
+                let mut st =
+                    init_state_milestones(goal, milestones, base_branch.as_deref(), no_worktree)
+                        .map_err(|e| {
+                            format!("Failed to initialize state from milestones: {}", e)
+                        })?;
 
                 // Provision isolated git worktree for task-1 if isolation is enabled
                 if !no_worktree && repo_root.join(".git").exists() {
@@ -405,7 +403,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 st
             } else {
                 return Err(
-                    "Must provide either 'milestones' array or both 'goal' and 'verify_cmd'".to_string(),
+                    "Must provide either 'milestones' array or both 'goal' and 'verify_cmd'"
+                        .to_string(),
                 );
             };
 
