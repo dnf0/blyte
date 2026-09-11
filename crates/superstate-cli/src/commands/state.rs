@@ -1,8 +1,11 @@
+use crate::state_cli::InitArgs;
 use std::path::{Path, PathBuf};
 use superstate_core::ledger::append_ledger_note;
 use superstate_core::models::LedgerEntry;
 use superstate_core::plan_parser::init_state_from_plan;
-use superstate_core::state_machine::{advance_step, load_state, save_state_atomic};
+use superstate_core::state_machine::{
+    advance_step, init_state_direct, load_state, save_state_atomic,
+};
 use superstate_core::verifier::execute_all_gates;
 use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
 
@@ -134,21 +137,100 @@ pub fn ensure_git_exclude(repo_root: &Path) {
     }
 }
 
-pub fn cmd_init(plan: PathBuf, state_path: PathBuf, no_worktree: bool) -> Result<(), String> {
-    reject_nested_state(&state_path)?;
-    let root = resolve_project_root(&state_path);
+/// Initialize project execution state either from plan markdown or directly from a goal.
+///
+/// # Arguments
+/// * `args` - Configuration arguments containing optional plan path, goal, verify_cmd, files, state path, and no_worktree flag.
+///
+/// # Errors
+/// Returns an error if:
+/// * Neither `--plan` nor `--goal` is provided.
+/// * `--goal` is provided without `--verify-cmd`.
+/// * Both `--plan` and `--goal` are provided simultaneously.
+/// * Nested state exists within the repository hierarchy.
+/// * State saving or worktree provisioning fails.
+pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
+    // Validate mutually exclusive or required initialization modes
+    if args.plan.is_none() && args.goal.is_none() {
+        return Err(
+            "Must provide either --plan <path> or --goal <text> with --verify-cmd <cmd>"
+                .to_string(),
+        );
+    }
+    if args.plan.is_some() && args.goal.is_some() {
+        return Err("Cannot provide both --plan and --goal".to_string());
+    }
+    if args.goal.is_some() && args.verify_cmd.is_none() {
+        return Err("--verify-cmd is required when initializing with --goal".to_string());
+    }
+
+    let state_path = &args.state;
+    // Guard against creating a divergent nested state inside an existing state hierarchy
+    reject_nested_state(state_path)?;
+
+    // Ensure baseline git repository is present before initializing state
+    let root = resolve_project_root(state_path);
     ensure_git_baseline(&root);
-    let mut state = init_state_from_plan(&plan, &state_path)
-        .map_err(|e| format!("Failed to initialize state from plan: {}", e))?;
-    if no_worktree {
-        state.no_worktree = true;
-        save_state_atomic(&state_path, &state)
+
+    // Direct state initialization branch: no plan.md is read or created
+    if let Some(ref goal) = args.goal {
+        let verify_cmd = args.verify_cmd.as_deref().unwrap();
+        let files_modify: Vec<PathBuf> = args
+            .files
+            .as_deref()
+            .map(|f| {
+                f.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut state = init_state_direct(goal, verify_cmd, files_modify, args.no_worktree);
+
+        // Provision isolated worktree for the active task unless no_worktree is explicitly set
+        if !args.no_worktree && root.join(".git").exists() {
+            ensure_git_exclude(&root);
+            let manager = WorktreeManager::new(&root)
+                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+            if let Some(ref active) = state.active_task {
+                let wt = manager
+                    .ensure_task_worktree(&active.id, None)
+                    .map_err(|e| {
+                        format!("Failed to ensure worktree for task {}: {}", active.id, e)
+                    })?;
+                state.active_worktree = Some(wt.path.clone());
+                state.active_branch = Some(wt.branch.clone());
+            }
+        }
+
+        save_state_atomic(state_path, &state)
             .map_err(|e| format!("Failed to save state: {}", e))?;
+
+        println!("State initialized at {}", state_path.display());
+        if let Some(ref task) = state.active_task {
+            println!("Active Task: {}: {}", task.id, task.title);
+        }
+        return Ok(());
     }
-    println!("State initialized at {}", state_path.display());
-    if let Some(task) = state.active_task {
-        println!("Active Task: {}: {}", task.id, task.title);
+
+    // Markdown plan initialization branch: preserves multi-milestone parsing
+    if let Some(ref plan) = args.plan {
+        let mut state = init_state_from_plan(plan, state_path)
+            .map_err(|e| format!("Failed to initialize state from plan: {}", e))?;
+        if args.no_worktree {
+            state.no_worktree = true;
+            save_state_atomic(state_path, &state)
+                .map_err(|e| format!("Failed to save state: {}", e))?;
+        }
+        println!("State initialized at {}", state_path.display());
+        if let Some(ref task) = state.active_task {
+            println!("Active Task: {}: {}", task.id, task.title);
+        }
+        return Ok(());
     }
+
     Ok(())
 }
 
@@ -333,6 +415,54 @@ pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
             println!("  • [{}] {}", note.author, note.note);
         }
     }
+    Ok(())
+}
+
+/// Show execution state as formatted markdown or machine-readable JSON.
+///
+/// # Arguments
+/// * `state_path` - Path to the state JSON file.
+/// * `_markdown` - Flag indicating markdown output requested (default behaviour).
+/// * `as_json` - Flag indicating JSON output requested.
+///
+/// # Errors
+/// Returns an error if the state file cannot be loaded or serialized.
+pub fn cmd_show(state_path: &Path, _markdown: bool, as_json: bool) -> Result<(), String> {
+    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+
+    // Machine-readable JSON output requested
+    if as_json {
+        let rendered = serde_json::to_string_pretty(&state)
+            .map_err(|e| format!("Failed to serialize state: {}", e))?;
+        println!("{}", rendered);
+        return Ok(());
+    }
+
+    // Default clean markdown view output
+    println!("# Superstate Execution Status");
+    println!("- **Status:** {:?} (Step {})", state.status, state.step);
+    if let Some(ref task) = state.active_task {
+        println!("- **Active Task:** {}: {}", task.id, task.title);
+        if let Some(ref cmd) = task.verification_cmd {
+            println!("- **Verification Command:** `{}`", cmd);
+        }
+    } else {
+        println!("- **Active Task:** None");
+    }
+
+    // Include active worktree and branch if provisioned
+    if let Some(ref wt) = state.active_worktree {
+        if let Some(ref branch) = state.active_branch {
+            println!(
+                "- **Active Worktree:** `{}` (branch `{}`)",
+                wt.display(),
+                branch
+            );
+        } else {
+            println!("- **Active Worktree:** `{}`", wt.display());
+        }
+    }
+
     Ok(())
 }
 

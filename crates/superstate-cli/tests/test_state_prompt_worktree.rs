@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use superstate_cli::commands::state::{cmd_init, cmd_prompt};
+use superstate_cli::state_cli::InitArgs;
 use superstate_core::state_machine::load_state;
 use tempfile::tempdir;
 
@@ -56,7 +57,8 @@ fn test_state_prompt_provisions_worktree_and_contract() {
     .unwrap();
 
     let state_file = dir.path().join(".agent-state").join("state.json");
-    cmd_init(plan_file, state_file.clone(), false).expect("Failed to initialize state");
+    cmd_init(&InitArgs::for_plan(plan_file, state_file.clone(), false))
+        .expect("Failed to initialize state");
 
     // Call cmd_prompt with 5 arguments: (state_path, task, with_graph, json_output, no_worktree)
     cmd_prompt(&state_file, None, false, false, false).expect("cmd_prompt failed");
@@ -307,7 +309,8 @@ Implement the first task.
     fs::write(&plan_file, plan_content).unwrap();
 
     let state_file = dir.path().join(".agent-state/state.json");
-    cmd_init(plan_file, state_file.clone(), false).expect("Failed to initialize state");
+    cmd_init(&InitArgs::for_plan(plan_file, state_file.clone(), false))
+        .expect("Failed to initialize state");
 
     // Call state prompt with --no-worktree and --json flag
     let output = Command::new(bin())

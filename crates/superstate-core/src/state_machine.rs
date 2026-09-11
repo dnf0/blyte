@@ -61,6 +61,49 @@ pub fn save_state_atomic(path: &Path, state: &ExecutionState) -> Result<(), Stat
     Ok(())
 }
 
+/// Initializes execution state directly from a goal and verification command without a plan.md file.
+///
+/// # Arguments
+/// * `goal` - Concise description of the goal / active task title.
+/// * `verify_cmd` - Shell verification command that must pass.
+/// * `files_modify` - List of target files the task intends to modify.
+/// * `no_worktree` - Whether to disable worktree provisioning and operate in-place.
+///
+/// # Returns
+/// An `ExecutionState` initialized with status `InProgress`, step 1, and `task-1` as the active task.
+pub fn init_state_direct(
+    goal: &str,
+    verify_cmd: &str,
+    files_modify: Vec<PathBuf>,
+    no_worktree: bool,
+) -> ExecutionState {
+    // Construct the primary active task directly from the provided goal and verification command
+    let task = TaskSpec {
+        id: "task-1".to_string(),
+        title: goal.to_string(),
+        depends_on: Vec::new(),
+        files_modify,
+        interfaces_produces: Vec::new(),
+        verification_cmd: Some(verify_cmd.to_string()),
+    };
+
+    // Construct the initial in-progress state at step 1 without an associated plan path
+    ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(task),
+        pending_tasks: Vec::new(),
+        completed_tasks: Vec::new(),
+        modified_files: Vec::new(),
+        errors: Vec::new(),
+        plan_path: None,
+        notes: Vec::new(),
+        active_worktree: None,
+        active_branch: None,
+        no_worktree,
+    }
+}
+
 /// Advances execution state to the next task, completing the current active task.
 ///
 /// Resets active worktree and branch tracking fields to None so that subsequent tasks
