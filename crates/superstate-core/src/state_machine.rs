@@ -270,6 +270,144 @@ pub fn ready_tasks(state: &ExecutionState) -> Vec<&TaskSpec> {
 /// Directory holding a project's execution state.
 pub const STATE_DIR: &str = ".agent-state";
 
+/// Sanitizes a git branch name into a safe filesystem slug.
+///
+/// Replaces characters outside `[a-zA-Z0-9._-]` with hyphens, collapses consecutive
+/// hyphens into a single hyphen, and trims leading and trailing hyphens.
+///
+/// # Arguments
+/// * `branch` - Name of the git branch.
+///
+/// # Returns
+/// A sanitized string suitable for file naming.
+pub fn sanitize_branch_slug(branch: &str) -> String {
+    // Replace non-alphanumeric, non-dot, non-underscore, non-hyphen characters with hyphens
+    let replaced: String = branch
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // Collapse consecutive hyphens into a single hyphen
+    let mut collapsed = String::with_capacity(replaced.len());
+    let mut prev_hyphen = false;
+    for c in replaced.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                collapsed.push(c);
+                prev_hyphen = true;
+            }
+        } else {
+            collapsed.push(c);
+            prev_hyphen = false;
+        }
+    }
+
+    // Trim leading and trailing hyphens
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.is_empty() {
+        "branch".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Computes the state file path for a given branch in a repository.
+///
+/// Default branches (`main`, `master`) use `.agent-state/state.json` for 100% backward compatibility.
+/// Feature branches route to `.agent-state/branches/<slug>.json`.
+///
+/// # Arguments
+/// * `repo_root` - Root path of the repository.
+/// * `branch` - Current or target branch name.
+///
+/// # Returns
+/// The resolved `PathBuf` for the state file.
+pub fn branch_scoped_state_path(repo_root: &Path, branch: &str) -> PathBuf {
+    if branch == "main" || branch == "master" {
+        repo_root.join(STATE_DIR).join("state.json")
+    } else {
+        let slug = sanitize_branch_slug(branch);
+        repo_root
+            .join(STATE_DIR)
+            .join("branches")
+            .join(format!("{}.json", slug))
+    }
+}
+
+/// Finds the branch-scoped state file associated with a worktree.
+///
+/// Scans `.agent-state/branches/` for valid state files and matches either:
+/// 1. An exact match against `active_worktree` (canonicalized or relative to `repo_root`).
+/// 2. A match against `active_branch` if `worktree_branch` is provided.
+///
+/// # Arguments
+/// * `repo_root` - Root path of the repository.
+/// * `worktree_path` - Path of the worktree being inspected.
+/// * `worktree_branch` - Optional branch checked out in the worktree.
+///
+/// # Returns
+/// `Some(PathBuf)` pointing to the matching branch state file, or `None` if not found.
+pub fn find_branch_state_for_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    worktree_branch: Option<&str>,
+) -> Option<PathBuf> {
+    let branches_dir = repo_root.join(STATE_DIR).join("branches");
+    if !branches_dir.is_dir() {
+        return None;
+    }
+
+    // Collect all candidate JSON state files deterministically sorted
+    let entries = fs::read_dir(&branches_dir).ok()?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+
+    let canonical_target = fs::canonicalize(worktree_path).ok();
+    let mut branch_match = None;
+
+    for file in files {
+        if let Ok(state) = load_state(&file) {
+            // Check active_worktree match first
+            if let Some(ref wt) = state.active_worktree {
+                let matches_worktree = if let Some(target_canon) = &canonical_target {
+                    if let Ok(wt_canon) = fs::canonicalize(wt) {
+                        &wt_canon == target_canon
+                    } else if let Ok(wt_canon) = fs::canonicalize(repo_root.join(wt)) {
+                        &wt_canon == target_canon
+                    } else {
+                        wt == worktree_path || repo_root.join(wt) == worktree_path
+                    }
+                } else {
+                    wt == worktree_path || repo_root.join(wt) == worktree_path
+                };
+
+                if matches_worktree {
+                    return Some(file);
+                }
+            }
+
+            // Fallback match by active_branch
+            if let Some(target_branch) = worktree_branch {
+                if state.active_branch.as_deref() == Some(target_branch) && branch_match.is_none() {
+                    branch_match = Some(file);
+                }
+            }
+        }
+    }
+
+    branch_match
+}
+
 /// Resolve a state path by searching upward for the project's state, as git does
 /// for `.git`.
 ///
@@ -299,12 +437,26 @@ pub fn resolve_state_path(path: &Path, start: &Path) -> PathBuf {
 
 /// The nearest ancestor of `start` that already holds project state, if any.
 ///
+/// Checks for either `.agent-state/state.json` or any `.json` file in `.agent-state/branches/`.
 /// Used to refuse creating a nested second state inside an existing project.
 pub fn enclosing_state_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(current) = dir {
-        if current.join(STATE_DIR).join("state.json").exists() {
+        let state_dir = current.join(STATE_DIR);
+        if state_dir.join("state.json").exists() {
             return Some(current.to_path_buf());
+        }
+        let branches_dir = state_dir.join("branches");
+        if branches_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&branches_dir) {
+                let has_json = entries.filter_map(|e| e.ok()).any(|e| {
+                    e.path().is_file()
+                        && e.path().extension().and_then(|ext| ext.to_str()) == Some("json")
+                });
+                if has_json {
+                    return Some(current.to_path_buf());
+                }
+            }
         }
         dir = current.parent();
     }

@@ -88,6 +88,7 @@ terminal output, so a session resumed later can still explain why it stopped.
 - ⚡ **Deterministic State Engine (`superstate-core`)**: Mathematical DFA execution engine backed by `fd-lock` atomic file locks, checkpointing, and an append-only epistemic ledger.
 - 🌳 **Polyglot Code Intelligence (`superstate-syntax`)**: High-speed symbol and AST hierarchy extraction powered by Tree-sitter across Rust, Python, TypeScript, and Go.
 - 🌿 **Isolated Milestone Worktrees (`superstate-worktree`)**: Automated git worktree lifecycle management targeting active feature branches with copy-on-write cache directory reflink support.
+- 🔀 **Branch-Scoped State Isolation & Multi-Agent Concurrency**: Partitioned branch state storage (`.agent-state/branches/<branch>.json`) and reverse worktree discovery, allowing multiple autonomous agents or developer sessions to run in parallel on distinct feature branches with zero state collisions.
 - 🛡️ **Zero-Noise Code Review (`superstate-review`)**: Daemon-less, git diff-driven adversarial code review system returning structured JSON findings.
 - 📜 **Guidance & Rule Engine (`superstate-rules`)**: Deterministic Minijinja templates for generating universal agent guidance (`AGENTS.md`, `.cursor/rules`).
 - 🔌 **Native Stdio MCP Server (`superstate-mcp`)**: Lightweight JSON-RPC 2.0 stdio server connecting state engine tools directly into Cursor, Claude Code, and Antigravity.
@@ -130,11 +131,20 @@ superstate state init --milestones '[
 cat milestones.json | superstate state init --milestones -
 ```
 
-#### Feature branch targeting & sequential worktrees
+#### Feature branch targeting, isolated worktrees & branch-scoped state isolation
 
 When initialized within a git repository, Superstate automatically captures your active feature branch (e.g., `feat/payment-flow`), never defaulting to `main`:
-1. **Isolated Worktree Provisioning:** Superstate provisions an isolated worktree for the active milestone (`.wt/task-1` on branch `wt/task-1`) branched off your active feature branch.
-2. **Automatic Sequential Progression:** When `superstate state next --verify-cmd "..."` succeeds, Superstate commits any uncommitted worktree changes, merges the worktree cleanly into your active feature branch, cleans up `.wt/task-1`, and automatically provisions the next worktree (`.wt/task-2`) with the latest base branch state.
+
+1. **Branch-Scoped State Isolation:** Feature branches automatically resolve and persist state to `.agent-state/branches/<sanitized-branch>.json` (e.g., branch `feat/payment-flow` maps to `.agent-state/branches/feat-payment-flow.json`). Default branches (`main`, `master`) and non-git environments continue to default to `.agent-state/state.json` (100% backward compatible).
+2. **Reverse Worktree Discovery:** Subagents and commands executing from inside an isolated worktree (`.wt/<task_slug>`) automatically discover and resolve to the parent feature branch state file without requiring `--state`.
+3. **Turnkey Prompt State Contract:** Prompts rendered via `superstate state prompt` explicitly embed the state binding:
+   ```markdown
+   - **State File:** `/path/to/repo/.agent-state/branches/feat-payment-flow.json`
+   - **Next Gate Command:** `superstate state next --state "/path/to/repo/.agent-state/branches/feat-payment-flow.json"`
+   ```
+   ensuring agents and automated runners always advance against the exact branch state.
+4. **Isolated Worktree Provisioning:** Superstate provisions an isolated worktree for the active milestone (`.wt/task-1` on branch `wt/task-1`) branched off your active feature branch.
+5. **Automatic Sequential Progression:** When `superstate state next --verify-cmd "..."` succeeds, Superstate commits any uncommitted worktree changes, merges the worktree cleanly into your active feature branch, cleans up `.wt/task-1`, and automatically provisions the next worktree (`.wt/task-2`) with the latest base branch state.
 
 #### From a markdown plan
 
@@ -195,7 +205,55 @@ superstate state metrics --json    # progress and telemetry
 superstate state doctor --repair   # diagnose plan/state drift
 superstate state sync --plan docs/plan.md   # plan revised mid-flight
 superstate state resume            # briefing after a lost session
+superstate state list              # ASCII table view across all active & completed branches
+superstate state list --json       # machine-readable JSON array of branch state summaries
 ```
+
+#### Inspecting branch execution states (`state list`)
+
+View all active and completed branch states across the repository in a clear ASCII table:
+
+```bash
+superstate state list
+```
+
+```text
+Active & Completed Branches:
+  Branch                     Status       Active Task              Step   Base Branch         
+  feat-payment               InProgress   task-1: Add Stripe       1/2    main                
+  feat-analytics             InProgress   task-1: Export Analytics 1/1    main                
+  main (default)             Completed    -                        3/3    main                
+```
+
+Or query structured JSON for automation or multi-agent orchestrators:
+
+```bash
+superstate state list --json
+```
+
+```json
+[
+  {
+    "branch": "feat-payment",
+    "status": "in_progress",
+    "active_task": "task-1: Add Stripe",
+    "step": 1,
+    "total_steps": 2,
+    "base_branch": "main",
+    "state_file": "/path/to/repo/.agent-state/branches/feat-payment.json"
+  }
+]
+```
+
+## Multi-Agent Concurrency
+
+Superstate is built from the ground up for concurrent multi-agent development where multiple autonomous agents (e.g., Claude Code, Cursor, Antigravity, or parallel CLI subagents) and human developers operate simultaneously in the same repository:
+
+- **Zero State Collisions:** Each agent running on a feature branch (e.g., `feat/billing`, `feat/auth`) automatically writes to its own isolated state file in `.agent-state/branches/<sanitized-branch>.json`. Because state files are partitioned per branch, multiple agents can initialize, checkpoint, fail, or advance without mutating or locking each other's execution DAGs.
+- **Independent Git Worktrees:** Each milestone executes inside an isolated git worktree (`.wt/<task_slug>`) branched from the owning feature branch. Agents run isolated builds, tests, and edits without git index contention or file lock collisions. Shared build directories (e.g. `target/`, `node_modules/`) utilize copy-on-write reflinks for speed.
+- **Reverse Worktree Discovery for Subagents:** When an orchestrator dispatches a subagent into `.wt/<task_slug>`, the subagent can invoke CLI commands (`superstate state show`, `superstate state next`) without needing an explicit `--state` flag. Superstate inspects `.agent-state/branches/*.json` and matches the active worktree path back to its parent branch state file automatically.
+- **Explicit Turnkey Prompt Contracts:** Turnkey prompts produced by `superstate state prompt` explicitly declare `- **State File:** <path>` and `- **Next Gate Command:** superstate state next --state "<path>"`, eliminating ambiguity when orchestrating across agent boundaries.
+- **Repository-Wide Visibility:** Orchestrators can invoke `superstate state list [--json]` at any time from any worktree or repository root to monitor the real-time status, active tasks, and progression steps across all concurrent agent runs.
 
 ## MCP Server Integration (`superstate-mcp`)
 

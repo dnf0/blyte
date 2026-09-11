@@ -57,8 +57,14 @@ fn test_cli_init_milestones_from_json_string() {
 
     assert!(output.status.success(), "init failed: {:?}", output);
 
-    let state_file = repo_root.join(".agent-state").join("state.json");
-    assert!(state_file.exists(), ".agent-state/state.json must exist");
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-cli-feature.json");
+    assert!(
+        state_file.exists(),
+        ".agent-state/branches/feat-cli-feature.json must exist"
+    );
 
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
@@ -80,10 +86,10 @@ fn test_cli_init_milestones_from_json_string() {
     assert_eq!(state.pending_tasks[0].title, "Step 2");
     assert_eq!(state.pending_tasks[0].depends_on, vec!["task-1"]);
 
-    let wt_task_1 = repo_root.join(".wt").join("task-1");
-    assert!(wt_task_1.exists(), ".wt/task-1 directory must exist");
+    let wt_task_1 = repo_root.join(".wt").join("feat-cli-feature-task-1");
+    assert!(wt_task_1.exists(), ".wt/feat-cli-feature-task-1 directory must exist");
     assert_eq!(state.active_worktree, Some(wt_task_1));
-    assert_eq!(state.active_branch, Some("wt/task-1".to_string()));
+    assert_eq!(state.active_branch, Some("wt/feat-cli-feature-task-1".to_string()));
 
     // Verify superstate state show displays Base Branch
     let show_output = Command::new(bin())
@@ -132,7 +138,10 @@ fn test_cli_init_milestones_from_stdin() {
         output
     );
 
-    let state_file = repo_root.join(".agent-state").join("state.json");
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-cli-feature.json");
     assert!(state_file.exists());
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
@@ -211,10 +220,10 @@ fn test_cli_milestones_sequential_progression() {
         .expect("Failed to run superstate state init");
     assert!(init_out.status.success());
 
-    let wt_task_1 = repo_root.join(".wt").join("task-1");
-    assert!(wt_task_1.exists(), ".wt/task-1 must exist after init");
+    let wt_task_1 = repo_root.join(".wt").join("feat-cli-feature-task-1");
+    assert!(wt_task_1.exists(), ".wt/feat-cli-feature-task-1 must exist after init");
 
-    // Modify a file in .wt/task-1 and commit it
+    // Modify a file in .wt/feat-cli-feature-task-1 and commit it
     let file_in_wt1 = wt_task_1.join("step1.txt");
     fs::write(&file_in_wt1, b"completed step 1\n").unwrap();
 
@@ -244,10 +253,10 @@ fn test_cli_milestones_sequential_progression() {
         String::from_utf8_lossy(&next_out.stderr)
     );
 
-    // Asserts .wt/task-1 was merged into feat/cli-feature and deleted
+    // Asserts .wt/feat-cli-feature-task-1 was merged into feat/cli-feature and deleted
     assert!(
         !wt_task_1.exists(),
-        ".wt/task-1 must be deleted after merge"
+        ".wt/feat-cli-feature-task-1 must be deleted after merge"
     );
     let file_in_main = repo_root.join("step1.txt");
     assert!(
@@ -266,15 +275,18 @@ fn test_cli_milestones_sequential_progression() {
         "feat/cli-feature"
     );
 
-    // Asserts .wt/task-2 was automatically provisioned, task-2 is active,
-    // and state.active_worktree points to .wt/task-2
-    let wt_task_2 = repo_root.join(".wt").join("task-2");
+    // Asserts .wt/feat-cli-feature-task-2 was automatically provisioned, task-2 is active,
+    // and state.active_worktree points to .wt/feat-cli-feature-task-2
+    let wt_task_2 = repo_root.join(".wt").join("feat-cli-feature-task-2");
     assert!(
         wt_task_2.exists(),
-        ".wt/task-2 must be automatically provisioned"
+        ".wt/feat-cli-feature-task-2 must be automatically provisioned"
     );
 
-    let state_file = repo_root.join(".agent-state").join("state.json");
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-cli-feature.json");
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
 
@@ -283,7 +295,7 @@ fn test_cli_milestones_sequential_progression() {
     assert_eq!(active_task.id, "task-2");
     assert_eq!(active_task.title, "Step 2");
     assert_eq!(state.active_worktree, Some(wt_task_2));
-    assert_eq!(state.active_branch, Some("wt/task-2".to_string()));
+    assert_eq!(state.active_branch, Some("wt/feat-cli-feature-task-2".to_string()));
     assert_eq!(state.completed_tasks.len(), 1);
     assert_eq!(state.completed_tasks[0].id, "task-1");
 }

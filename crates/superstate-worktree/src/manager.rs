@@ -160,6 +160,11 @@ impl WorktreeManager {
 
     /// Provision or reuse an isolated worktree for a specific milestone task.
     ///
+    /// When `base_branch` is a feature branch (not "main" or "master"), the worktree
+    /// branch and checkout directory are namespaced by the sanitized feature branch slug
+    /// (`wt/<sanitized_base_branch>-<task_slug>`), unlocking concurrent isolated worktrees
+    /// across independent agents in the same repository.
+    ///
     /// # Parameters
     /// - `task_slug`: Identifier for the task (sanitized to remove slashes and whitespace).
     /// - `base_branch`: Optional base branch to spawn from; defaults to current active branch or repo default.
@@ -174,11 +179,6 @@ impl WorktreeManager {
         task_slug: &str,
         base_branch: Option<&str>,
     ) -> Result<IsolatedWorktree, WorktreeError> {
-        // Sanitize task_slug by trimming and replacing slashes/whitespace with hyphens.
-        let sanitized_slug = sanitize_slug(task_slug);
-        let target_branch = format!("wt/{}", sanitized_slug);
-        let target_path = self.repo_root.join(".wt").join(&sanitized_slug);
-
         // Resolve base branch: explicit branch if provided, otherwise active feature branch or default.
         let resolved_base_branch = match base_branch {
             Some(b) => b.to_string(),
@@ -186,6 +186,9 @@ impl WorktreeManager {
                 .current_branch()
                 .unwrap_or_else(|_| self.default_branch()),
         };
+
+        let (target_branch, target_path) =
+            task_worktree_names(&self.repo_root, task_slug, Some(&resolved_base_branch));
 
         // If path already exists, return the worktree handle idempotently.
         if target_path.exists() {
@@ -213,6 +216,47 @@ impl WorktreeManager {
         };
 
         self.create(&config)
+    }
+}
+
+/// Helper to determine the target worktree branch name and directory path for a task.
+///
+/// When `base_branch` is a feature branch (not "main", "master", "wt/*", or "superstate/*"),
+/// the worktree branch and path are namespaced by the sanitized base branch slug:
+/// - Branch: `wt/<sanitized_base_branch>-<sanitized_task_slug>`
+/// - Path: `<repo_root>/.wt/<sanitized_base_branch>-<sanitized_task_slug>`
+///
+/// For trunk branches ("main", "master") or default:
+/// - Branch: `wt/<sanitized_task_slug>`
+/// - Path: `<repo_root>/.wt/<sanitized_task_slug>`
+pub fn task_worktree_names(
+    repo_root: &Path,
+    task_slug: &str,
+    base_branch: Option<&str>,
+) -> (String, PathBuf) {
+    let sanitized_slug = sanitize_slug(task_slug);
+    let is_feature = match base_branch {
+        Some(b) => {
+            let b_trimmed = b.trim();
+            !matches!(b_trimmed, "main" | "master")
+                && !b_trimmed.starts_with("wt/")
+                && !b_trimmed.starts_with("superstate/")
+        }
+        None => false,
+    };
+
+    if is_feature {
+        let base_slug = sanitize_slug(base_branch.unwrap());
+        let full_slug = format!("{}-{}", base_slug, sanitized_slug);
+        (
+            format!("wt/{}", full_slug),
+            repo_root.join(".wt").join(full_slug),
+        )
+    } else {
+        (
+            format!("wt/{}", sanitized_slug),
+            repo_root.join(".wt").join(sanitized_slug),
+        )
     }
 }
 

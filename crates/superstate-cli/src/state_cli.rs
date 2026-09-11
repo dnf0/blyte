@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::commands;
 
-const DEFAULT_STATE: &str = ".agent-state/state.json";
+pub const DEFAULT_STATE: &str = ".agent-state/state.json";
 
 /// Arguments for initializing state from a plan or direct goal.
 #[derive(clap::Args, Clone, Debug)]
@@ -36,6 +36,17 @@ pub struct InitArgs {
     /// JSON array of milestones or - for stdin
     #[arg(long, help = "JSON array of milestones or - for stdin")]
     pub milestones: Option<String>,
+}
+
+/// Arguments for listing branch-scoped states.
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct ListArgs {
+    /// Emit machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Optional path to state file or directory to scan
+    #[arg(short, long)]
+    pub state: Option<PathBuf>,
 }
 
 impl Default for InitArgs {
@@ -237,22 +248,24 @@ pub enum StateCommands {
         #[arg(short, long, default_value = "agent")]
         author: String,
     },
+    /// List active and completed branch-scoped states
+    List(ListArgs),
 }
 
-/// Find the project's state, searching upward from the working directory.
-///
-/// A default relative path is resolved against the nearest ancestor that has one,
-/// so running from a subdirectory acts on the project's state rather than failing
-/// or creating a second one beside it.
+/// Find the project's state, dynamically resolving branch-scoped states and worktrees.
 fn resolve(state: PathBuf) -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    superstate_core::state_machine::resolve_state_path(&state, &cwd)
+    commands::state::resolve_effective_state_path(&state, &cwd)
 }
 
 /// Dispatch a `state` subcommand. Shared by both binaries.
 pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
     match cmd {
         StateCommands::Init(args) => commands::state::cmd_init(&args),
+        StateCommands::List(args) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            commands::state::cmd_list(args.state.as_deref(), args.json, &cwd)
+        }
         StateCommands::Show(args) => {
             commands::state::cmd_show(&resolve(args.state), args.markdown, args.json)
         }

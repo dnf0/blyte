@@ -69,9 +69,12 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
         prompt
     );
 
-    // Asserts .agent-state/state.json has base_branch == "feat/multi-task-flow", active_task.id == "task-1", pending_tasks.len() == 1
-    let state_file = repo_root.join(".agent-state").join("state.json");
-    assert!(state_file.exists(), ".agent-state/state.json must exist");
+    // Asserts .agent-state/branches/feat-multi-task-flow.json has base_branch == "feat/multi-task-flow", active_task.id == "task-1", pending_tasks.len() == 1
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-multi-task-flow.json");
+    assert!(state_file.exists(), ".agent-state/branches/feat-multi-task-flow.json must exist");
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state_json: serde_json::Value = serde_json::from_str(&state_content).unwrap();
 
@@ -92,10 +95,10 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
         "pending task should be 'task-2'"
     );
 
-    // Asserts .wt/task-1 exists
-    let wt_task1 = repo_root.join(".wt").join("task-1");
-    assert!(wt_task1.exists(), ".wt/task-1 should exist on disk");
-    assert!(wt_task1.is_dir(), ".wt/task-1 should be a directory");
+    // Asserts .wt/feat-multi-task-flow-task-1 exists
+    let wt_task1 = repo_root.join(".wt").join("feat-multi-task-flow-task-1");
+    assert!(wt_task1.exists(), ".wt/feat-multi-task-flow-task-1 should exist on disk");
+    assert!(wt_task1.is_dir(), ".wt/feat-multi-task-flow-task-1 should be a directory");
 }
 
 #[test]
@@ -141,10 +144,10 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
     let _handoff_res = handle_tool_call("superstate_handoff", &handoff_args)
         .expect("superstate_handoff should succeed");
 
-    let wt_task1 = repo_root.join(".wt").join("task-1");
-    assert!(wt_task1.exists(), ".wt/task-1 should exist initially");
+    let wt_task1 = repo_root.join(".wt").join("feat-multi-task-flow-task-1");
+    assert!(wt_task1.exists(), ".wt/feat-multi-task-flow-task-1 should exist initially");
 
-    // Write an artifact inside .wt/task-1 to ensure it commits and merges
+    // Write an artifact inside .wt/feat-multi-task-flow-task-1 to ensure it commits and merges
     std::fs::write(wt_task1.join("task1_artifact.txt"), "task 1 done").unwrap();
 
     // 2. Call state_next
@@ -153,10 +156,10 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
     });
     let next_res = handle_tool_call("state_next", &next_args).expect("state_next should succeed");
 
-    // Asserts .wt/task-1 is merged to feat/multi-task-flow and cleaned up
+    // Asserts .wt/feat-multi-task-flow-task-1 is merged to feat/multi-task-flow and cleaned up
     assert!(
         !wt_task1.exists(),
-        ".wt/task-1 should be cleaned up after state_next"
+        ".wt/feat-multi-task-flow-task-1 should be cleaned up after state_next"
     );
     assert!(
         repo_root.join("task1_artifact.txt").exists(),
@@ -177,13 +180,13 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
         "Primary repo should be on feat/multi-task-flow"
     );
 
-    // Asserts .wt/task-2 is provisioned
-    let wt_task2 = repo_root.join(".wt").join("task-2");
+    // Asserts .wt/feat-multi-task-flow-task-2 is provisioned
+    let wt_task2 = repo_root.join(".wt").join("feat-multi-task-flow-task-2");
     assert!(
         wt_task2.exists(),
-        ".wt/task-2 should be provisioned on disk"
+        ".wt/feat-multi-task-flow-task-2 should be provisioned on disk"
     );
-    assert!(wt_task2.is_dir(), ".wt/task-2 should be a directory");
+    assert!(wt_task2.is_dir(), ".wt/feat-multi-task-flow-task-2 should be a directory");
 
     // Asserts active_task.id is task-2
     assert_eq!(
@@ -191,13 +194,16 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
         "active_task.id should be task-2 in response"
     );
 
-    // Also verify state.json on disk
-    let state_file = repo_root.join(".agent-state").join("state.json");
+    // Also verify branch-scoped state on disk
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-multi-task-flow.json");
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state_json: serde_json::Value = serde_json::from_str(&state_content).unwrap();
     assert_eq!(
         state_json["active_task"]["id"], "task-2",
-        "active_task.id in state.json should be task-2"
+        "active_task.id in state should be task-2"
     );
     assert_eq!(
         state_json["active_worktree"],

@@ -45,21 +45,32 @@ pub fn select_task<'a>(state: &'a ExecutionState, task: Option<&str>) -> Option<
 }
 
 /// Resolve repository root given a state path.
-fn repo_root_for(state_path: &Path) -> PathBuf {
-    let root = state_path
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or_else(|| Path::new(""));
-    if root.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        root.to_path_buf()
+/// Walks upward until finding `.agent-state`, then returns its parent directory.
+/// If `.agent-state` is not found, falls back to the state file's immediate parent directory.
+pub fn resolve_project_root(state_path: &Path) -> PathBuf {
+    let mut dir = state_path.parent();
+    while let Some(current) = dir {
+        if current.file_name().and_then(|s| s.to_str()) == Some(crate::state_machine::STATE_DIR) {
+            if let Some(parent) = current.parent() {
+                if parent.as_os_str().is_empty() {
+                    return PathBuf::from(".");
+                }
+                return parent.to_path_buf();
+            }
+        }
+        dir = current.parent();
     }
+    if let Some(parent) = state_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.to_path_buf();
+        }
+    }
+    PathBuf::from(".")
 }
 
 /// Locate a knowledge-graph report near the workspace if generated.
 fn find_graph_context(state_path: &Path) -> Option<(PathBuf, String)> {
-    let root = repo_root_for(state_path);
+    let root = resolve_project_root(state_path);
     for candidate in [
         root.join("graphify-out/GRAPH_REPORT.md"),
         root.join("GRAPH_REPORT.md"),
@@ -114,6 +125,9 @@ pub fn render_turnkey_prompt(
     if !active.depends_on.is_empty() {
         rendered.push_str(&format!("- Depends on: {}\n", active.depends_on.join(", ")));
     }
+    if let Some(ref verify_cmd) = active.verification_cmd {
+        rendered.push_str(&format!("- Verification Command: `{}`\n", verify_cmd));
+    }
     if !active.files_modify.is_empty() {
         rendered.push_str("Files to modify:\n");
         let mut seen = HashSet::new();
@@ -123,18 +137,17 @@ pub fn render_turnkey_prompt(
             }
         }
     }
-    if let Some(ref cmd) = active.verification_cmd {
-        rendered.push_str(&format!("Verification command: `{}`\n", cmd));
-    }
 
     if !is_in_place {
         if let (Some(ref wt_path), Some(ref wt_branch)) =
             (&state.active_worktree, &state.active_branch)
         {
             rendered.push_str(&format!(
-                "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits and test runs MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to commit, merge, or delete this worktree. Simply implement the task and verify it. The orchestrator automatically snapshots your changes, verifies your work, and merges this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree.\n",
+                "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- State File: {}\n- Next Gate Command: superstate state next --state \"{}\"\n- Working Directory Contract: All code edits and test runs MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to commit, merge, or delete this worktree. Simply implement the task and verify it. The orchestrator automatically snapshots your changes, verifies your work, and merges this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree.\n",
                 wt_path.display(),
-                wt_branch
+                wt_branch,
+                state_path.display(),
+                state_path.display(),
             ));
         }
     }
