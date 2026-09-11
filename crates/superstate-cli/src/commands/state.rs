@@ -554,8 +554,14 @@ pub fn cmd_prompt(
     let ledger = superstate_core::ledger::read_ledger(state_path);
     if !ledger.is_empty() {
         rendered_prompt.push_str("\n## Epistemic Ledger (findings from earlier milestones)\n");
-        for entry in &ledger {
-            rendered_prompt.push_str(&format!("- [{}] {}\n", entry.author, entry.note));
+        // Limit to the most recent 4 entries to keep prompt context bounded
+        let start_idx = ledger.len().saturating_sub(4);
+        for entry in &ledger[start_idx..] {
+            rendered_prompt.push_str(&format!(
+                "- [{}] {}\n",
+                entry.author,
+                compact_ledger_note(&entry.note)
+            ));
         }
     }
 
@@ -618,6 +624,29 @@ fn find_graph_context(state_path: &Path) -> Option<(std::path::PathBuf, String)>
         }
     }
     None
+}
+
+/// Compact a raw epistemic ledger note to keep turnkey prompts bounded and fast.
+fn compact_ledger_note(note: &str) -> String {
+    let clean = note.trim();
+    // If multiline, take up to the first double-newline paragraph break
+    let paragraph = if let Some(idx) = clean.find("\n\n") {
+        clean[..idx].trim()
+    } else {
+        clean
+    };
+    // Replace embedded newlines with spaces
+    let single_line = paragraph.replace('\n', " ");
+    let max_len = 250;
+    if single_line.len() > max_len {
+        let mut end = max_len;
+        while !single_line.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", single_line[..end].trim_end())
+    } else {
+        single_line
+    }
 }
 
 pub fn cmd_note(state_path: &Path, note: &str, author: &str) -> Result<(), String> {
