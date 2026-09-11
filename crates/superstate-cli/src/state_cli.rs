@@ -33,6 +33,9 @@ pub struct InitArgs {
     /// Comma-separated list of files to modify
     #[arg(long)]
     pub files: Option<String>,
+    /// JSON array of milestones or - for stdin
+    #[arg(long, help = "JSON array of milestones or - for stdin")]
+    pub milestones: Option<String>,
 }
 
 impl Default for InitArgs {
@@ -44,6 +47,7 @@ impl Default for InitArgs {
             goal: None,
             verify_cmd: None,
             files: None,
+            milestones: None,
         }
     }
 }
@@ -58,6 +62,7 @@ impl InitArgs {
             goal: None,
             verify_cmd: None,
             files: None,
+            milestones: None,
         }
     }
 }

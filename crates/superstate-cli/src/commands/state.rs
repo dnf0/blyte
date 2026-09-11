@@ -1,11 +1,11 @@
 use crate::state_cli::InitArgs;
 use std::path::{Path, PathBuf};
 use superstate_core::ledger::append_ledger_note;
-use superstate_core::models::LedgerEntry;
+use superstate_core::models::{LedgerEntry, MilestoneSpec};
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::prompt::{render_turnkey_prompt, select_task};
 use superstate_core::state_machine::{
-    advance_step, init_state_direct, load_state, save_state_atomic,
+    advance_step, init_state_direct, init_state_milestones, load_state, save_state_atomic,
 };
 use superstate_core::verifier::execute_all_gates;
 pub use superstate_worktree::manager::ensure_git_exclude;
@@ -53,28 +53,40 @@ fn resolve_project_root(state_path: &Path) -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Initialize project execution state either from plan markdown or directly from a goal.
+/// Initialize project execution state either from plan markdown, directly from a goal, or from milestones.
 ///
 /// # Arguments
-/// * `args` - Configuration arguments containing optional plan path, goal, verify_cmd, files, state path, and no_worktree flag.
+/// * `args` - Configuration arguments containing optional plan path, goal, verify_cmd, files, milestones, state path, and no_worktree flag.
 ///
 /// # Errors
 /// Returns an error if:
-/// * Neither `--plan` nor `--goal` is provided.
+/// * None of `--plan`, `--goal`, or `--milestones` is provided.
+/// * More than one of `--plan`, `--goal`, or `--milestones` is provided.
 /// * `--goal` is provided without `--verify-cmd`.
-/// * Both `--plan` and `--goal` are provided simultaneously.
 /// * Nested state exists within the repository hierarchy.
 /// * State saving or worktree provisioning fails.
 pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
     // Validate mutually exclusive or required initialization modes
-    if args.plan.is_none() && args.goal.is_none() {
+    let modes_count = [
+        args.plan.is_some(),
+        args.goal.is_some(),
+        args.milestones.is_some(),
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
+
+    if modes_count == 0 {
         return Err(
-            "Must provide either --plan <path> or --goal <text> with --verify-cmd <cmd>"
+            "Must provide either --plan <path> or --goal <text> with --verify-cmd <cmd>, or --milestones <json>"
                 .to_string(),
         );
     }
-    if args.plan.is_some() && args.goal.is_some() {
-        return Err("Cannot provide both --plan and --goal".to_string());
+    if modes_count > 1 {
+        return Err(
+            "Cannot combine --plan, --goal, and --milestones; choose exactly one initialization mode"
+                .to_string(),
+        );
     }
     if args.goal.is_some() && args.verify_cmd.is_none() {
         return Err("--verify-cmd is required when initializing with --goal".to_string());
@@ -87,6 +99,68 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
     // Ensure baseline git repository is present before initializing state
     let root = resolve_project_root(state_path);
     ensure_git_baseline(&root);
+
+    // Direct milestones array initialization branch: constructs sequential DAG in-memory
+    if let Some(ref raw_milestones) = args.milestones {
+        // Read milestone JSON directly from string or piped standard input if '-'
+        let raw_json = if raw_milestones.trim() == "-" {
+            use std::io::Read;
+            let mut buffer = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buffer)
+                .map_err(|e| format!("Failed to read milestones from stdin: {}", e))?;
+            buffer
+        } else {
+            raw_milestones.clone()
+        };
+
+        // Parse JSON array into strongly-typed MilestoneSpec list
+        let parsed: Vec<MilestoneSpec> = serde_json::from_str(&raw_json)
+            .map_err(|e| format!("Failed to parse milestones JSON: {}", e))?;
+
+        // Detect active feature branch from git repository if available
+        let base_branch = if root.join(".git").exists() {
+            WorktreeManager::new(&root)
+                .ok()
+                .and_then(|m| m.current_branch().ok())
+        } else {
+            None
+        };
+
+        // Initialize multi-milestone DAG with base branch propagation
+        let mut state = init_state_milestones(
+            args.goal.as_deref(),
+            parsed,
+            base_branch.as_deref(),
+            args.no_worktree,
+        )
+        .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?;
+
+        // Provision isolated worktree for initial active task unless no_worktree is set
+        if !args.no_worktree && root.join(".git").exists() {
+            ensure_git_exclude(&root);
+            let manager = WorktreeManager::new(&root)
+                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+            if let Some(ref active) = state.active_task {
+                let wt = manager
+                    .ensure_task_worktree(&active.id, base_branch.as_deref())
+                    .map_err(|e| {
+                        format!("Failed to ensure worktree for task {}: {}", active.id, e)
+                    })?;
+                state.active_worktree = Some(wt.path.clone());
+                state.active_branch = Some(wt.branch.clone());
+            }
+        }
+
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
+
+        println!("State initialized at {}", state_path.display());
+        if let Some(ref task) = state.active_task {
+            println!("Active Task: {}: {}", task.id, task.title);
+        }
+        return Ok(());
+    }
 
     // Direct state initialization branch: no plan.md is read or created
     if let Some(ref goal) = args.goal {
@@ -332,6 +406,9 @@ pub fn cmd_show(state_path: &Path, _markdown: bool, as_json: bool) -> Result<(),
     // Default clean markdown view output
     println!("# Superstate Execution Status");
     println!("- **Status:** {:?} (Step {})", state.status, state.step);
+    if let Some(ref base) = state.base_branch {
+        println!("- **Base Branch:** `{}`", base);
+    }
     if let Some(ref task) = state.active_task {
         println!("- **Active Task:** {}: {}", task.id, task.title);
         if let Some(ref cmd) = task.verification_cmd {
@@ -374,7 +451,7 @@ pub fn cmd_next(
         task_to_verify.verification_cmd = Some(cmd);
     }
 
-    let repo_root = repo_root_for(state_path);
+    let repo_root = resolve_project_root(state_path);
     ensure_git_exclude(&repo_root);
 
     // When an isolated worktree is active, gates must run within that worktree checkout
@@ -413,9 +490,12 @@ pub fn cmd_next(
     // If merge fails, state is preserved without advancement so work is not lost.
     if let Some(ref wt_path) = state.active_worktree.clone() {
         if wt_path.exists() {
-            let base_branch = WorktreeManager::new(&repo_root)
-                .map(|m| m.default_branch())
-                .unwrap_or_else(|_| "main".to_string());
+            // Target the recorded feature base branch, falling back to current branch or default
+            let base_branch = state.base_branch.clone().unwrap_or_else(|| {
+                WorktreeManager::new(&repo_root)
+                    .map(|m| m.current_branch().unwrap_or_else(|_| m.default_branch()))
+                    .unwrap_or_else(|_| "main".to_string())
+            });
             let branch = state.active_branch.clone().unwrap_or_else(|| {
                 format!(
                     "wt/{}",
@@ -438,6 +518,23 @@ pub fn cmd_next(
 
     advance_step(&mut state).map_err(|e| format!("Failed to advance step: {}", e))?;
     save_state_atomic(state_path, &state).map_err(|e| format!("Failed to save state: {}", e))?;
+
+    // Provision worktree for newly active task in sequential progression
+    if !state.no_worktree && repo_root.join(".git").exists() {
+        if let Some(ref next_task) = state.active_task {
+            let manager = WorktreeManager::new(&repo_root)
+                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+            let wt = manager
+                .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
+                .map_err(|e| {
+                    format!("Failed to ensure worktree for task {}: {}", next_task.id, e)
+                })?;
+            state.active_worktree = Some(wt.path);
+            state.active_branch = Some(wt.branch);
+            save_state_atomic(state_path, &state)
+                .map_err(|e| format!("Failed to save state: {}", e))?;
+        }
+    }
 
     if let Some(ref next_task) = state.active_task {
         println!(
