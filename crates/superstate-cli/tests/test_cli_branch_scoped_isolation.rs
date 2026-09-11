@@ -139,10 +139,10 @@ fn test_cli_worktree_reverse_lookup() {
         .expect("Failed to run superstate state init");
     assert!(init_out.status.success());
 
-    let wt_path = dir.path().join(".wt").join("task-1");
+    let wt_path = dir.path().join(".wt").join("feat-payment-task-1");
     assert!(
         wt_path.exists(),
-        "Worktree .wt/task-1 should exist after init"
+        "Worktree .wt/feat-payment-task-1 should exist after init"
     );
 
     // Run `state show --json` inside .wt/task-1 without --state

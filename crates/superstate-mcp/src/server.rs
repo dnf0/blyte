@@ -627,10 +627,12 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             if let Some(ref wt_path) = state.active_worktree.clone() {
                 if wt_path.exists() {
                     let branch = state.active_branch.clone().unwrap_or_else(|| {
-                        format!(
-                            "wt/{}",
-                            superstate_worktree::manager::sanitize_slug(&active_task.id)
+                        superstate_worktree::manager::task_worktree_names(
+                            &repo_root,
+                            &active_task.id,
+                            state.base_branch.as_deref(),
                         )
+                        .0
                     });
                     let wt = IsolatedWorktree {
                         branch,
