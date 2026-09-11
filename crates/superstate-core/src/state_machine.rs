@@ -1,4 +1,4 @@
-use crate::models::{ExecutionState, ExecutionStatus, TaskSpec};
+use crate::models::{ExecutionState, ExecutionStatus, MilestoneSpec, TaskSpec};
 use fd_lock::RwLock;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -101,7 +101,99 @@ pub fn init_state_direct(
         active_worktree: None,
         active_branch: None,
         no_worktree,
+        base_branch: None,
     }
+}
+
+/// Initializes execution state directly from a sequence of milestone specifications without a plan.md file.
+///
+/// Constructs a sequential DAG where the first milestone becomes `task-1` (the active task),
+/// and subsequent milestones become `task-2..N` (pending tasks) with each task depending on the previous one.
+///
+/// # Arguments
+/// * `goal` - Optional high-level goal description for context.
+/// * `milestones` - Non-empty sequence of milestone specifications.
+/// * `base_branch` - Optional name of the active feature branch to merge back into.
+/// * `no_worktree` - Whether to disable worktree isolation and operate directly in the repository root.
+///
+/// # Returns
+/// An `ExecutionState` initialized with status `InProgress`, step 1, `task-1` active, and pending tasks chained.
+///
+/// # Errors
+/// Returns `StateError::InvalidTransition` if `milestones` is empty, or if any milestone has an empty title or verify command.
+pub fn init_state_milestones(
+    _goal: Option<&str>,
+    milestones: Vec<MilestoneSpec>,
+    base_branch: Option<&str>,
+    no_worktree: bool,
+) -> Result<ExecutionState, StateError> {
+    // Fail fast if no milestones were provided, preventing an invalid state with no executable tasks
+    if milestones.is_empty() {
+        return Err(StateError::InvalidTransition(
+            "milestones cannot be empty".to_string(),
+        ));
+    }
+
+    // Validate that each milestone defines both a non-empty title and verification command
+    for (idx, milestone) in milestones.iter().enumerate() {
+        if milestone.title.trim().is_empty() {
+            return Err(StateError::InvalidTransition(format!(
+                "milestone {} title cannot be empty",
+                idx + 1
+            )));
+        }
+        if milestone.verify_cmd.trim().is_empty() {
+            return Err(StateError::InvalidTransition(format!(
+                "milestone {} verify_cmd cannot be empty",
+                idx + 1
+            )));
+        }
+    }
+
+    // Deconstruct milestones into the initial active task (task-1) and pending sequential tasks (task-2..N)
+    let mut iter = milestones.into_iter();
+    let first = iter.next().expect("guaranteed non-empty by validation");
+
+    let task_1 = TaskSpec {
+        id: "task-1".to_string(),
+        title: first.title,
+        depends_on: Vec::new(),
+        files_modify: first.files,
+        interfaces_produces: Vec::new(),
+        verification_cmd: Some(first.verify_cmd),
+    };
+
+    // Build subsequent tasks in the DAG, each chained to depend on the previous task ID
+    let mut pending_tasks = Vec::new();
+    for (i, milestone) in iter.enumerate() {
+        let current_task_num = i + 2;
+        let prev_task_num = i + 1;
+        pending_tasks.push(TaskSpec {
+            id: format!("task-{}", current_task_num),
+            title: milestone.title,
+            depends_on: vec![format!("task-{}", prev_task_num)],
+            files_modify: milestone.files,
+            interfaces_produces: Vec::new(),
+            verification_cmd: Some(milestone.verify_cmd),
+        });
+    }
+
+    // Assemble initial ExecutionState at step 1 in progress with configured base branch
+    Ok(ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(task_1),
+        pending_tasks,
+        completed_tasks: Vec::new(),
+        modified_files: Vec::new(),
+        errors: Vec::new(),
+        plan_path: None,
+        notes: Vec::new(),
+        active_worktree: None,
+        active_branch: None,
+        no_worktree,
+        base_branch: base_branch.map(ToString::to_string),
+    })
 }
 
 /// Advances execution state to the next task, completing the current active task.

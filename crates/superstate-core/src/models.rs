@@ -125,6 +125,14 @@ impl LedgerEntry {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MilestoneSpec {
+    pub title: String,
+    pub verify_cmd: String,
+    #[serde(default)]
+    pub files: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionState {
     pub status: ExecutionStatus,
@@ -152,6 +160,9 @@ pub struct ExecutionState {
     /// Whether to disable worktrees and operate directly in the workspace root.
     #[serde(default)]
     pub no_worktree: bool,
+    /// Base branch that worktree changes merge back into upon task completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
 }
 
 impl Default for ExecutionState {
@@ -169,6 +180,7 @@ impl Default for ExecutionState {
             active_worktree: None,
             active_branch: None,
             no_worktree: false,
+            base_branch: None,
         }
     }
 }
