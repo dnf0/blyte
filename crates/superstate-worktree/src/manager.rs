@@ -34,6 +34,40 @@ impl WorktreeManager {
             .unwrap_or_else(|| "main".to_string())
     }
 
+    /// Discover the currently active branch in the repository root.
+    ///
+    /// Runs `git -C <repo_root> rev-parse --abbrev-ref HEAD` to detect the checked-out branch.
+    /// If the HEAD is detached or the command fails, falls back to the default branch.
+    ///
+    /// # Returns
+    /// The trimmed active branch name on success, or the repository default branch fallback.
+    ///
+    /// # Errors
+    /// Returns `WorktreeError` if an unrecoverable error occurs (not triggered under standard fallback behavior).
+    pub fn current_branch(&self) -> Result<String, WorktreeError> {
+        // Query Git for the currently active symbolic ref at the repository root.
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_root)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output();
+
+        // Inspect command result, handling detached HEAD or command failures gracefully.
+        match output {
+            Ok(out) if out.status.success() => {
+                let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                // If HEAD is detached, rev-parse outputs literal "HEAD". Fall back to default branch.
+                if branch.is_empty() || branch == "HEAD" {
+                    Ok(self.default_branch())
+                } else {
+                    Ok(branch)
+                }
+            }
+            // If git command fails or repo is invalid, fall back to default branch.
+            _ => Ok(self.default_branch()),
+        }
+    }
+
     /// List all registered worktrees in the repository.
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
         let repo = self.repo()?;
@@ -128,7 +162,7 @@ impl WorktreeManager {
     ///
     /// # Parameters
     /// - `task_slug`: Identifier for the task (sanitized to remove slashes and whitespace).
-    /// - `base_branch`: Optional base branch to spawn from; defaults to repo default branch.
+    /// - `base_branch`: Optional base branch to spawn from; defaults to current active branch or repo default.
     ///
     /// # Returns
     /// An `IsolatedWorktree` handle pointing to the task worktree.
@@ -145,18 +179,20 @@ impl WorktreeManager {
         let target_branch = format!("wt/{}", sanitized_slug);
         let target_path = self.repo_root.join(".wt").join(&sanitized_slug);
 
+        // Resolve base branch: explicit branch if provided, otherwise active feature branch or default.
+        let resolved_base_branch = match base_branch {
+            Some(b) => b.to_string(),
+            None => self
+                .current_branch()
+                .unwrap_or_else(|_| self.default_branch()),
+        };
+
         // If path already exists, return the worktree handle idempotently.
         if target_path.exists() {
-            let repo = self.repo()?;
-            let base_branch_name = match base_branch {
-                Some(b) => b.to_string(),
-                None => repo.default_branch().unwrap_or_else(|| "main".to_string()),
-            };
-
             return Ok(IsolatedWorktree {
                 branch: target_branch,
                 path: target_path,
-                base_branch: base_branch_name,
+                base_branch: resolved_base_branch,
                 repo_root: self.repo_root.clone(),
             });
         }
@@ -171,7 +207,7 @@ impl WorktreeManager {
         let config = WorktreeConfig {
             base_path: self.repo_root.clone(),
             branch: target_branch,
-            base_branch: base_branch.map(|s| s.to_string()),
+            base_branch: Some(resolved_base_branch),
             worktree_path: Some(target_path),
             cache_dirs: default_cache_dirs,
         };

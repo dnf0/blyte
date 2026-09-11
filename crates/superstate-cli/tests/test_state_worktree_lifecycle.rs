@@ -121,16 +121,20 @@ fn test_state_next_worktree_merge_and_advance() {
         ".wt/task-1 should be deleted after successful merge and cleanup"
     );
 
-    // 6. Assert state advanced to Task 2, active_worktree is None, active_branch is None
+    // 6. Assert state advanced to Task 2 and automatically provisioned worktree for Task 2
     let state_after = load_state(&state_file).expect("Failed to load state after next");
+    let expected_task2_wt = repo_root.join(".wt").join("task-2");
     assert_eq!(
-        state_after.active_worktree, None,
-        "state.active_worktree must be cleared after merge"
+        state_after.active_worktree,
+        Some(expected_task2_wt.clone()),
+        "state.active_worktree must point to provisioned worktree for Task 2"
     );
     assert_eq!(
-        state_after.active_branch, None,
-        "state.active_branch must be cleared after merge"
+        state_after.active_branch,
+        Some("wt/task-2".to_string()),
+        "state.active_branch must point to wt/task-2"
     );
+    assert!(expected_task2_wt.exists(), ".wt/task-2 must exist");
     assert_eq!(state_after.step, 2, "step should advance from 1 to 2");
     let active_task = state_after
         .active_task
