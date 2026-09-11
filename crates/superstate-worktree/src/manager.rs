@@ -532,15 +532,12 @@ pub fn ensure_git_baseline(repo_root: &Path) {
             .current_dir(repo_root)
             .status();
 
-        let _ = match init_status {
-            Ok(s) if s.success() => true,
-            _ => std::process::Command::new("git")
+        if !init_status.is_ok_and(|s| s.success()) {
+            let _ = std::process::Command::new("git")
                 .args(["init"])
                 .current_dir(repo_root)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false),
-        };
+                .status();
+        }
     }
 
     // Ensure harness and state artifacts are excluded before checking HEAD or staging
