@@ -4,6 +4,7 @@ use superstate_core::models::LedgerEntry;
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::state_machine::{advance_step, load_state, save_state_atomic};
 use superstate_core::verifier::execute_all_gates;
+use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
 
 /// Refuse to create a second state inside a project that already has one.
 ///
@@ -30,7 +31,9 @@ fn reject_nested_state(state_path: &Path) -> Result<(), String> {
 
 fn resolve_project_root(state_path: &Path) -> PathBuf {
     if let Some(parent) = state_path.parent() {
-        if parent.file_name().and_then(|s| s.to_str()) == Some(superstate_core::state_machine::STATE_DIR) {
+        if parent.file_name().and_then(|s| s.to_str())
+            == Some(superstate_core::state_machine::STATE_DIR)
+        {
             if let Some(grandparent) = parent.parent() {
                 if grandparent.as_os_str().is_empty() {
                     return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -94,16 +97,26 @@ fn ensure_git_baseline(repo_root: &Path) {
         }
     }
 
-    // Exclude harness / superstate metadata from git dirty tree check
+    ensure_git_exclude(repo_root);
+}
+
+pub fn ensure_git_exclude(repo_root: &Path) {
     let exclude_path = repo_root.join(".git").join("info").join("exclude");
     if let Some(parent) = exclude_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let entries = [
+        ".agent-state/",
+        ".wt/",
+        ".wt",
+        "plan.md",
+        "plan.normalized.md",
+        "run-in-container",
+    ];
     if let Ok(mut current) = std::fs::read_to_string(&exclude_path) {
-        let entries = [".agent-state/", "plan.md", "plan.normalized.md", "run-in-container"];
         let mut appended = false;
         for entry in &entries {
-            if !current.contains(entry) {
+            if !current.lines().any(|l| l.trim() == *entry) {
                 if !current.ends_with('\n') && !current.is_empty() {
                     current.push('\n');
                 }
@@ -116,17 +129,22 @@ fn ensure_git_baseline(repo_root: &Path) {
             let _ = std::fs::write(&exclude_path, current);
         }
     } else {
-        let initial = ".agent-state/\nplan.md\nplan.normalized.md\nrun-in-container\n";
+        let initial = ".agent-state/\n.wt/\n.wt\nplan.md\nplan.normalized.md\nrun-in-container\n";
         let _ = std::fs::write(&exclude_path, initial);
     }
 }
 
-pub fn cmd_init(plan: PathBuf, state_path: PathBuf) -> Result<(), String> {
+pub fn cmd_init(plan: PathBuf, state_path: PathBuf, no_worktree: bool) -> Result<(), String> {
     reject_nested_state(&state_path)?;
     let root = resolve_project_root(&state_path);
     ensure_git_baseline(&root);
-    let state = init_state_from_plan(&plan, &state_path)
+    let mut state = init_state_from_plan(&plan, &state_path)
         .map_err(|e| format!("Failed to initialize state from plan: {}", e))?;
+    if no_worktree {
+        state.no_worktree = true;
+        save_state_atomic(&state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
+    }
     println!("State initialized at {}", state_path.display());
     if let Some(task) = state.active_task {
         println!("Active Task: {}: {}", task.id, task.title);
@@ -204,8 +222,35 @@ pub fn cmd_checkpoint(state_path: &Path) -> Result<(), String> {
 
 /// Restore the working tree to a checkpoint, discarding untracked files with it.
 pub fn cmd_rollback(state_path: &Path, reference: Option<&str>) -> Result<(), String> {
-    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+    let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
     let root = repo_root_for(state_path);
+
+    // If an isolated worktree was active for this step, abort it cleanly before restoring
+    // the git checkpoint, preventing dangling branches or worktrees.
+    if let Some(ref wt_path) = state.active_worktree.clone() {
+        if wt_path.exists() {
+            let base_branch = WorktreeManager::new(&root)
+                .map(|m| m.default_branch())
+                .unwrap_or_else(|_| "main".to_string());
+            let branch = state
+                .active_branch
+                .clone()
+                .unwrap_or_else(|| "wt/task".to_string());
+            let wt = IsolatedWorktree {
+                branch,
+                path: wt_path.clone(),
+                base_branch,
+                repo_root: root.clone(),
+            };
+            wt.abort()
+                .map_err(|e| format!("Failed to abort worktree on rollback: {}", e))?;
+        }
+        state.active_worktree = None;
+        state.active_branch = None;
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to update state after worktree abort: {}", e))?;
+    }
+
     let target = superstate_core::checkpoint::rollback_to(
         &root,
         state.step,
@@ -231,6 +276,23 @@ fn preserved(state_path: &Path) -> Vec<&str> {
 /// A relative state path such as `.agent-state/state.json` walks up to an empty
 /// path, which is not a usable working directory, so an empty result means "here".
 fn repo_root_for(state_path: &Path) -> std::path::PathBuf {
+    if let Some(parent) = state_path.parent() {
+        if parent.file_name().and_then(|s| s.to_str())
+            == Some(superstate_core::state_machine::STATE_DIR)
+        {
+            if let Some(grandparent) = parent.parent() {
+                if grandparent.as_os_str().is_empty() {
+                    return std::path::PathBuf::from(".");
+                }
+                return grandparent.to_path_buf();
+            }
+        } else if parent.join(".git").exists() {
+            if parent.as_os_str().is_empty() {
+                return std::path::PathBuf::from(".");
+            }
+            return parent.to_path_buf();
+        }
+    }
     let root = state_path
         .parent()
         .and_then(|p| p.parent())
@@ -286,13 +348,24 @@ pub fn cmd_next(
         None => return Err("No active task to advance".to_string()),
     };
 
-    let mut task_to_verify = active_task;
+    let mut task_to_verify = active_task.clone();
     if let Some(cmd) = verify_cmd {
         task_to_verify.verification_cmd = Some(cmd);
     }
 
     let repo_root = repo_root_for(state_path);
-    let results = execute_all_gates(&repo_root, &task_to_verify, verify_git_clean)
+    ensure_git_exclude(&repo_root);
+
+    // When an isolated worktree is active, gates must run within that worktree checkout
+    // where task changes were staged and committed, rather than the primary repo root.
+    let target_dir = state
+        .active_worktree
+        .as_ref()
+        .filter(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| repo_root.clone());
+
+    let results = execute_all_gates(&target_dir, &task_to_verify, verify_git_clean)
         .map_err(|e| format!("Gate execution error: {}", e))?;
 
     for res in &results {
@@ -312,6 +385,33 @@ pub fn cmd_next(
                 "Verification gate '{}' FAILED:\n{}",
                 res.gate_name, reason
             ));
+        }
+    }
+
+    // Merge verified worktree back into base branch and destroy the temporary checkout.
+    // If merge fails, state is preserved without advancement so work is not lost.
+    if let Some(ref wt_path) = state.active_worktree.clone() {
+        if wt_path.exists() {
+            let base_branch = WorktreeManager::new(&repo_root)
+                .map(|m| m.default_branch())
+                .unwrap_or_else(|_| "main".to_string());
+            let branch = state.active_branch.clone().unwrap_or_else(|| {
+                format!(
+                    "wt/{}",
+                    superstate_worktree::manager::sanitize_slug(&active_task.id)
+                )
+            });
+            let wt = IsolatedWorktree {
+                branch,
+                path: wt_path.clone(),
+                base_branch,
+                repo_root: repo_root.clone(),
+            };
+            let commit_msg = format!("feat({}): {}", active_task.id, active_task.title);
+            wt.merge_and_cleanup(&commit_msg)
+                .map_err(|e| format!("Failed to merge and cleanup worktree: {}", e))?;
+            state.active_worktree = None;
+            state.active_branch = None;
         }
     }
 
@@ -338,10 +438,18 @@ pub fn cmd_next(
 /// `task` selects a specific task by id or title -- without it only the active
 /// task is reachable, which makes `state ready` a query with nowhere to go: a
 /// runner can learn which tasks are unblocked but cannot ask for any of them.
-pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Result<(), String> {
-    let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+pub fn cmd_prompt(
+    state_path: &Path,
+    task: Option<&str>,
+    with_graph: bool,
+    json_output: bool,
+    no_worktree: bool,
+) -> Result<(), String> {
+    let mut state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
 
-    let active = match select_task(&state, task) {
+    let is_in_place = no_worktree || state.no_worktree;
+
+    let active = match select_task(&state, task).cloned() {
         Some(t) => t,
         None => {
             match task {
@@ -351,30 +459,80 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
                         wanted
                     ))
                 }
-                None => println!("All tasks completed."),
+                None => {
+                    if json_output {
+                        let json = serde_json::json!({
+                            "task": serde_json::Value::Null,
+                            "active_worktree": serde_json::Value::Null,
+                            "active_branch": serde_json::Value::Null,
+                            "prompt": "All tasks completed."
+                        });
+                        let rendered = serde_json::to_string_pretty(&json)
+                            .map_err(|e| format!("Failed to serialize state: {}", e))?;
+                        println!("{}", rendered);
+                    } else {
+                        println!("All tasks completed.");
+                    }
+                }
             }
             return Ok(());
         }
     };
 
-    println!(
-        "You are an Implementer Subagent working on **{}: {}**.\n",
+    let repo_root = repo_root_for(state_path);
+    if !is_in_place && repo_root.join(".git").exists() {
+        ensure_git_exclude(&repo_root);
+        let manager = WorktreeManager::new(&repo_root)
+            .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+        let wt = manager
+            .ensure_task_worktree(&active.id, None)
+            .map_err(|e| format!("Failed to ensure worktree for task {}: {}", active.id, e))?;
+        state.active_worktree = Some(wt.path.clone());
+        state.active_branch = Some(wt.branch.clone());
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
+    } else if is_in_place && (state.active_worktree.is_some() || state.active_branch.is_some()) {
+        state.active_worktree = None;
+        state.active_branch = None;
+        save_state_atomic(state_path, &state)
+            .map_err(|e| format!("Failed to save state: {}", e))?;
+    }
+
+    let mut rendered_prompt = String::new();
+
+    rendered_prompt.push_str(&format!(
+        "You are an Implementer Subagent working on **{}: {}**.\n\n",
         active.id, active.title
-    );
-    println!("## Task Specification");
-    println!("- ID: {}", active.id);
-    println!("- Title: {}", active.title);
+    ));
+    rendered_prompt.push_str("## Task Specification\n");
+    rendered_prompt.push_str(&format!("- ID: {}\n", active.id));
+    rendered_prompt.push_str(&format!("- Title: {}\n", active.title));
     if !active.depends_on.is_empty() {
-        println!("- Depends on: {}", active.depends_on.join(", "));
+        rendered_prompt.push_str(&format!("- Depends on: {}\n", active.depends_on.join(", ")));
     }
     if !active.files_modify.is_empty() {
-        println!("Files to modify:");
+        rendered_prompt.push_str("Files to modify:\n");
+        let mut seen = std::collections::HashSet::new();
         for f in &active.files_modify {
-            println!("- {}", f.display());
+            if seen.insert(f) {
+                rendered_prompt.push_str(&format!("- {}\n", f.display()));
+            }
         }
     }
     if let Some(ref cmd) = active.verification_cmd {
-        println!("Verification command: `{}`", cmd);
+        rendered_prompt.push_str(&format!("Verification command: `{}`\n", cmd));
+    }
+
+    if !is_in_place {
+        if let (Some(ref wt_path), Some(ref wt_branch)) =
+            (&state.active_worktree, &state.active_branch)
+        {
+            rendered_prompt.push_str(&format!(
+                "\n## 🌲 Active Isolated Worktree\n- Worktree Path: {}\n- Branch: {}\n- Working Directory Contract: All code edits and test runs MUST be performed inside this worktree! Do NOT edit or create files in the parent workspace directory.\n- Lifecycle Contract: Do NOT attempt to commit, merge, or delete this worktree. Simply implement the task and verify it. The orchestrator automatically snapshots your changes, verifies your work, and merges this worktree into the base branch after your turn completes.\n- Container / Sandbox Paths: If task specifications or commands reference container root paths such as `/app/<path>`, map them to `<path>` relative to this worktree.\n",
+                wt_path.display(),
+                wt_branch
+            ));
+        }
     }
 
     // Completed milestones and the epistemic ledger. This is the whole point of
@@ -383,17 +541,23 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
     // forward -- rather than the whole conversation -- is what keeps the context
     // footprint flat while preserving what was learned.
     if !state.completed_tasks.is_empty() {
-        println!("\n## Completed Milestones");
+        rendered_prompt.push_str("\n## Completed Milestones\n");
         for done in &state.completed_tasks {
-            println!("- {}: {}", done.id, done.title);
+            rendered_prompt.push_str(&format!("- {}: {}\n", done.id, done.title));
         }
     }
 
     let ledger = superstate_core::ledger::read_ledger(state_path);
     if !ledger.is_empty() {
-        println!("\n## Epistemic Ledger (findings from earlier milestones)");
-        for entry in &ledger {
-            println!("- [{}] {}", entry.author, entry.note);
+        rendered_prompt.push_str("\n## Epistemic Ledger (findings from earlier milestones)\n");
+        // Limit to the most recent 4 entries to keep prompt context bounded
+        let start_idx = ledger.len().saturating_sub(4);
+        for entry in &ledger[start_idx..] {
+            rendered_prompt.push_str(&format!(
+                "- [{}] {}\n",
+                entry.author,
+                compact_ledger_note(&entry.note)
+            ));
         }
     }
 
@@ -401,8 +565,11 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
         let graph = find_graph_context(state_path);
         match graph {
             Some((path, body)) => {
-                println!("\n## Architecture Context ({})", path.display());
-                println!("{}", body);
+                rendered_prompt.push_str(&format!(
+                    "\n## Architecture Context ({})\n{}\n",
+                    path.display(),
+                    body
+                ));
             }
             None => {
                 // Say so rather than accept the flag and silently ignore it.
@@ -414,11 +581,29 @@ pub fn cmd_prompt(state_path: &Path, task: Option<&str>, with_graph: bool) -> Re
         }
     }
 
-    println!("\n## Instructions");
-    println!("1. Implement the requested task following Test-Driven Development (TDD).");
-    println!("2. Run the targeted verification command to confirm your fix.");
-    println!("3. Commit your changes with a conventional commit message.");
-    println!("4. Return a summary with commit SHA and verification output.");
+    rendered_prompt.push_str("\n## Instructions\n");
+    rendered_prompt.push_str(
+        "1. Implement the minimal direct fix required to satisfy the task specification.\n",
+    );
+    rendered_prompt.push_str("2. Run the targeted verification command to confirm your fix.\n");
+    rendered_prompt.push_str("3. HARD STOP UPON PASSING: The moment the verification command passes with exit code 0, finish your turn immediately. Do NOT run extra tests, alternative scripts, or exploratory commands.\n");
+    rendered_prompt.push_str("4. Return a concise summary with verification output.\n");
+    rendered_prompt.push_str("5. Confine ALL inspections, searches, and commands strictly to the project container or workspace directory. Do not inspect parent directories, host processes, or external repositories.\n");
+
+    if json_output {
+        let json_value = serde_json::json!({
+            "task": active,
+            "active_worktree": if is_in_place { serde_json::Value::Null } else { serde_json::to_value(&state.active_worktree).unwrap_or(serde_json::Value::Null) },
+            "active_branch": if is_in_place { serde_json::Value::Null } else { serde_json::to_value(&state.active_branch).unwrap_or(serde_json::Value::Null) },
+            "prompt": rendered_prompt,
+        });
+        let serialized = serde_json::to_string_pretty(&json_value)
+            .map_err(|e| format!("Failed to serialize prompt JSON: {}", e))?;
+        println!("{}", serialized);
+    } else {
+        print!("{}", rendered_prompt);
+    }
+
     Ok(())
 }
 
@@ -436,6 +621,29 @@ fn find_graph_context(state_path: &Path) -> Option<(std::path::PathBuf, String)>
         }
     }
     None
+}
+
+/// Compact a raw epistemic ledger note to keep turnkey prompts bounded and fast.
+fn compact_ledger_note(note: &str) -> String {
+    let clean = note.trim();
+    // If multiline, take up to the first double-newline paragraph break
+    let paragraph = if let Some(idx) = clean.find("\n\n") {
+        clean[..idx].trim()
+    } else {
+        clean
+    };
+    // Replace embedded newlines with spaces
+    let single_line = paragraph.replace('\n', " ");
+    let max_len = 250;
+    if single_line.len() > max_len {
+        let mut end = max_len;
+        while !single_line.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", single_line[..end].trim_end())
+    } else {
+        single_line
+    }
 }
 
 pub fn cmd_note(state_path: &Path, note: &str, author: &str) -> Result<(), String> {
@@ -698,12 +906,19 @@ pub fn cmd_exec(
             .map_err(|e| format!("Failed to checkpoint before exec: {}", e))?;
     }
 
-    let gate = superstate_core::verifier::run_verification_cmd(verify_cmd, &root, 600)
+    let target_dir = state
+        .active_worktree
+        .as_ref()
+        .filter(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| root.clone());
+
+    let gate = superstate_core::verifier::run_verification_cmd(verify_cmd, &target_dir, 600)
         .map_err(|e| format!("Verification could not run: {}", e))?;
 
     let mut git_clean_passed = true;
     if gate.passed && verify_git_clean {
-        let clean = superstate_core::verifier::verify_git_clean(&root)
+        let clean = superstate_core::verifier::verify_git_clean(&target_dir)
             .map_err(|e| format!("git clean check failed: {}", e))?;
         git_clean_passed = clean.passed;
     }
@@ -736,6 +951,35 @@ pub fn cmd_exec(
         write_json(state_path, &value)?;
 
         if rollback_on_fail {
+            if let Some(ref wt_path) = failed_state.active_worktree {
+                if wt_path.exists() {
+                    let base_branch = WorktreeManager::new(&root)
+                        .map(|m| m.default_branch())
+                        .unwrap_or_else(|_| "main".to_string());
+                    let branch = failed_state.active_branch.clone().unwrap_or_else(|| {
+                        format!(
+                            "wt/{}",
+                            superstate_worktree::manager::sanitize_slug(
+                                failed_state
+                                    .active_task
+                                    .as_ref()
+                                    .map(|t| t.id.as_str())
+                                    .unwrap_or("task"),
+                            )
+                        )
+                    });
+                    let wt = IsolatedWorktree {
+                        branch,
+                        path: wt_path.clone(),
+                        base_branch,
+                        repo_root: root.clone(),
+                    };
+                    let _ = wt.abort();
+                    failed_state.active_worktree = None;
+                    failed_state.active_branch = None;
+                    let _ = save_state_atomic(state_path, &failed_state);
+                }
+            }
             superstate_core::checkpoint::rollback_to(&root, step, None, &preserved(state_path))
                 .map_err(|e| format!("Failed to roll back after failure: {}", e))?;
             rolled_back = true;

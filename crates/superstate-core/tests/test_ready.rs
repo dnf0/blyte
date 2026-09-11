@@ -25,6 +25,7 @@ fn state_from(plan: &str) -> ExecutionState {
         errors: Vec::new(),
         plan_path: None,
         notes: Vec::new(),
+        ..Default::default()
     }
 }
 

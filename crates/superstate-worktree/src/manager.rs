@@ -2,9 +2,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use worktrunk::git::{
-    remove_worktree_with_cleanup, BranchDeletionMode, RemoveOptions, Repository,
-};
+use worktrunk::git::{remove_worktree_with_cleanup, BranchDeletionMode, RemoveOptions, Repository};
 
 use crate::cache::reflink_cache_dirs;
 use crate::error::WorktreeError;
@@ -26,6 +24,14 @@ impl WorktreeManager {
     /// Open repository via worktrunk.
     fn repo(&self) -> Result<Repository, WorktreeError> {
         Repository::at(&self.repo_root).map_err(|e| WorktreeError::Repository(e.to_string()))
+    }
+
+    /// Get the default or base branch name for the repository.
+    pub fn default_branch(&self) -> String {
+        self.repo()
+            .ok()
+            .and_then(|r| r.default_branch())
+            .unwrap_or_else(|| "main".to_string())
     }
 
     /// List all registered worktrees in the repository.
@@ -117,6 +123,61 @@ impl WorktreeManager {
             repo_root: self.repo_root.clone(),
         })
     }
+
+    /// Provision or reuse an isolated worktree for a specific milestone task.
+    ///
+    /// # Parameters
+    /// - `task_slug`: Identifier for the task (sanitized to remove slashes and whitespace).
+    /// - `base_branch`: Optional base branch to spawn from; defaults to repo default branch.
+    ///
+    /// # Returns
+    /// An `IsolatedWorktree` handle pointing to the task worktree.
+    ///
+    /// # Errors
+    /// Returns `WorktreeError` if repo discovery or git worktree creation fails.
+    pub fn ensure_task_worktree(
+        &self,
+        task_slug: &str,
+        base_branch: Option<&str>,
+    ) -> Result<IsolatedWorktree, WorktreeError> {
+        // Sanitize task_slug by trimming and replacing slashes/whitespace with hyphens.
+        let sanitized_slug = sanitize_slug(task_slug);
+        let target_branch = format!("wt/{}", sanitized_slug);
+        let target_path = self.repo_root.join(".wt").join(&sanitized_slug);
+
+        // If path already exists, return the worktree handle idempotently.
+        if target_path.exists() {
+            let repo = self.repo()?;
+            let base_branch_name = match base_branch {
+                Some(b) => b.to_string(),
+                None => repo.default_branch().unwrap_or_else(|| "main".to_string()),
+            };
+
+            return Ok(IsolatedWorktree {
+                branch: target_branch,
+                path: target_path,
+                base_branch: base_branch_name,
+                repo_root: self.repo_root.clone(),
+            });
+        }
+
+        // Configure default cache directories for copy-on-write sharing.
+        let default_cache_dirs = vec![
+            ".venv".to_string(),
+            "target".to_string(),
+            "node_modules".to_string(),
+        ];
+
+        let config = WorktreeConfig {
+            base_path: self.repo_root.clone(),
+            branch: target_branch,
+            base_branch: base_branch.map(|s| s.to_string()),
+            worktree_path: Some(target_path),
+            cache_dirs: default_cache_dirs,
+        };
+
+        self.create(&config)
+    }
 }
 
 /// An active, isolated working tree.
@@ -138,8 +199,140 @@ impl IsolatedWorktree {
         let repo = Repository::at(&self.repo_root)
             .map_err(|e| WorktreeError::Repository(e.to_string()))?;
 
-        repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch])
-            .map_err(|e| WorktreeError::MergeConflict(e.to_string()))?;
+        // Ensure primary repo is on base_branch before merging
+        let current_branch = repo
+            .require_current_branch("merge")
+            .map_err(|e| WorktreeError::Repository(e.to_string()))?;
+        if current_branch != self.base_branch {
+            repo.run_command(&["checkout", &self.base_branch])
+                .map_err(|e| {
+                    WorktreeError::Repository(format!(
+                        "Primary repo is on branch '{}', failed checking out base '{}': {}",
+                        current_branch, self.base_branch, e
+                    ))
+                })?;
+        }
+
+        if let Err(e) = repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch]) {
+            let err_msg = e.to_string();
+            // Git exit code 2 indicates conflicting untracked files or dirty working tree.
+            // Check if untracked files in the primary working tree conflict with files
+            // committed in the branch being merged. The worktree's committed version is authoritative.
+            if err_msg.contains("exit 2") {
+                let status_output = repo
+                    .run_command(&["status", "--porcelain"])
+                    .unwrap_or_default();
+                let untracked_files: Vec<String> = status_output
+                    .lines()
+                    .filter(|l| l.starts_with("?? "))
+                    .map(|l| l[3..].trim().to_string())
+                    .collect();
+
+                let diff_cmd = format!("{}...{}", self.base_branch, self.branch);
+                let branch_files_output = repo
+                    .run_command(&["diff", "--name-only", &diff_cmd])
+                    .unwrap_or_default();
+                let branch_files: Vec<&str> =
+                    branch_files_output.lines().map(|l| l.trim()).collect();
+
+                let mut cleaned_any = false;
+                for u in &untracked_files {
+                    if branch_files.contains(&u.as_str()) {
+                        let target = self.repo_root.join(u);
+                        if target.is_file() {
+                            let _ = fs::remove_file(&target);
+                            cleaned_any = true;
+                        } else if target.is_dir() {
+                            let _ = fs::remove_dir_all(&target);
+                            cleaned_any = true;
+                        }
+                    }
+                }
+
+                if cleaned_any {
+                    if let Err(retry_err) =
+                        repo.run_command(&["merge", "--no-ff", "-m", commit_msg, &self.branch])
+                    {
+                        let _ = repo.run_command(&["merge", "--abort"]);
+                        return Err(WorktreeError::MergeConflict(retry_err.to_string()));
+                    } else {
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Clean up any conflicted merge state so primary repo is not left dirty
+            let _ = repo.run_command(&["merge", "--abort"]);
+            return Err(WorktreeError::MergeConflict(err_msg));
+        }
+
+        Ok(())
+    }
+
+    /// Merge commits from this worktree branch into the base branch, then remove worktree.
+    ///
+    /// # Parameters
+    /// - `commit_msg`: Commit message used when merging into the base branch.
+    ///
+    /// # Returns
+    /// Automatically stage and commit any dirty changes remaining in the worktree.
+    ///
+    /// # Returns
+    /// `Ok(true)` if changes were committed, `Ok(false)` if working tree was already clean.
+    pub fn auto_commit_if_dirty(&self, commit_msg: &str) -> Result<bool, WorktreeError> {
+        let repo =
+            Repository::at(&self.path).map_err(|e| WorktreeError::Repository(e.to_string()))?;
+        let status = repo
+            .run_command(&["status", "--porcelain"])
+            .map_err(|e| WorktreeError::Git(e.to_string()))?;
+        if !status.trim().is_empty() {
+            repo.run_command(&["add", "-A"])
+                .map_err(|e| WorktreeError::Git(e.to_string()))?;
+            repo.run_command(&["commit", "-m", commit_msg])
+                .map_err(|e| WorktreeError::Git(e.to_string()))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Merge commits from this worktree branch into the base branch, then remove worktree.
+    /// Automatically stages and commits any remaining uncommitted changes before merging.
+    ///
+    /// # Parameters
+    /// - `commit_msg`: Commit message used when merging into the base branch.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful merge and cleanup.
+    ///
+    /// # Errors
+    /// Returns `WorktreeError` if merge conflict arises or worktree deletion fails.
+    pub fn merge_and_cleanup(self, commit_msg: &str) -> Result<(), WorktreeError> {
+        // Automatically stage and commit any uncommitted changes left by the agent
+        let _ = self.auto_commit_if_dirty(commit_msg);
+
+        // Merge worktree branch into base branch in the primary repo.
+        self.merge_into_base(commit_msg)?;
+
+        // Tear down worktree checkout and branch. All committed changes are
+        // now safely merged into the base branch, so force removal of the
+        // worktree directory to ensure untracked test/build artifacts do not
+        // wedge the state machine.
+        self.destroy(true)?;
+
+        Ok(())
+    }
+
+    /// Abort task worktree without merging, force-deleting worktree and branch.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful deletion.
+    ///
+    /// # Errors
+    /// Returns `WorktreeError` if worktree teardown fails.
+    pub fn abort(self) -> Result<(), WorktreeError> {
+        // Force-delete worktree checkout and branch, discarding unmerged changes.
+        self.destroy(true)?;
 
         Ok(())
     }
@@ -171,5 +364,52 @@ impl IsolatedWorktree {
         }
 
         Ok(())
+    }
+}
+
+/// Sanitize task slug by replacing slashes and whitespace with hyphens and trimming.
+pub fn sanitize_slug(slug: &str) -> String {
+    let trimmed = slug.trim();
+    let mut result = String::new();
+    let mut prev_dash = false;
+
+    // Traverse characters, collapsing whitespace, slashes, and hyphens into single hyphens.
+    for c in trimmed.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_whitespace() || c == '/' || c == '\\' || c == '-' {
+            if !prev_dash && !result.is_empty() {
+                result.push('-');
+                prev_dash = true;
+            }
+        } else {
+            result.push(c);
+            prev_dash = false;
+        }
+    }
+
+    // Strip trailing hyphen if present after sanitization.
+    if result.ends_with('-') {
+        result.pop();
+    }
+
+    if result.is_empty() {
+        "task".to_string()
+    } else {
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_slug() {
+        assert_eq!(sanitize_slug("task-1"), "task-1");
+        assert_eq!(sanitize_slug("Task 1"), "task-1");
+        assert_eq!(sanitize_slug("task/1"), "task-1");
+        assert_eq!(sanitize_slug("task 1"), "task-1");
+        assert_eq!(sanitize_slug("  task / 1  "), "task-1");
+        assert_eq!(sanitize_slug(""), "task");
     }
 }

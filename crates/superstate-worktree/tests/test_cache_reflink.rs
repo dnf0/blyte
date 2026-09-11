@@ -1,6 +1,6 @@
 use std::fs;
-use tempfile::TempDir;
 use superstate_worktree::cache::reflink_cache_dirs;
+use tempfile::TempDir;
 
 #[test]
 fn test_reflink_cache_dirs_copies_specified_trees() {
@@ -22,12 +22,12 @@ fn test_reflink_cache_dirs_copies_specified_trees() {
     fs::write(other_dir.join("main.rs"), b"fn main() {}").unwrap();
 
     // Run reflink cache copy
-    let result = reflink_cache_dirs(
-        src_dir.path(),
-        dst_dir.path(),
-        &[".venv", "target"],
+    let result = reflink_cache_dirs(src_dir.path(), dst_dir.path(), &[".venv", "target"]);
+    assert!(
+        result.is_ok(),
+        "reflink_cache_dirs failed: {:?}",
+        result.err()
     );
-    assert!(result.is_ok(), "reflink_cache_dirs failed: {:?}", result.err());
 
     // Verify .venv and target exist in dst_dir
     let dst_python = dst_dir.path().join(".venv").join("bin").join("python");
@@ -39,5 +39,8 @@ fn test_reflink_cache_dirs_copies_specified_trees() {
     assert_eq!(fs::read(&dst_app).unwrap(), b"binary-bytes");
 
     // Verify src was NOT copied
-    assert!(!dst_dir.path().join("src").exists(), "src/ should not have been copied");
+    assert!(
+        !dst_dir.path().join("src").exists(),
+        "src/ should not have been copied"
+    );
 }

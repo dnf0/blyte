@@ -81,7 +81,10 @@ fn resolve_worktree_for_action(
         .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
 
     if wt.is_main {
-        return Err(format!("Cannot {} primary worktree branch '{}'", action, branch));
+        return Err(format!(
+            "Cannot {} primary worktree branch '{}'",
+            action, branch
+        ));
     }
 
     if action == "remove" {
@@ -106,7 +109,9 @@ fn resolve_worktree_for_action(
 
     if action == "merge" {
         if primary_wt.branch.is_none() {
-            return Err("Cannot merge: primary repository worktree is in a detached HEAD state".to_string());
+            return Err(
+                "Cannot merge: primary repository worktree is in a detached HEAD state".to_string(),
+            );
         }
         if primary_wt.branch.as_deref() != Some(&base_branch) {
             return Err(format!(
@@ -173,9 +178,7 @@ pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
             println!("{:<25} {:<10} {:<40}", "BRANCH", "HEAD", "PATH");
             println!("{:-<25} {:-<10} {:-<40}", "", "", "");
             for wt in list {
-                let branch_display = wt
-                    .branch
-                    .unwrap_or_else(|| "(detached HEAD)".to_string())
+                let branch_display = wt.branch.unwrap_or_else(|| "(detached HEAD)".to_string())
                     + if wt.is_main { " [main]" } else { "" };
                 let short_sha = if wt.commit_sha.len() >= 7 {
                     &wt.commit_sha[..7]
@@ -198,7 +201,9 @@ pub fn dispatch_worktree(cmd: WorktreeCommands) -> Result<(), String> {
             repo,
         } => {
             let isolated = resolve_worktree_for_action(&repo, &branch, "merge", base.as_deref())?;
-            isolated.merge_into_base(&message).map_err(|e| e.to_string())?;
+            isolated
+                .merge_into_base(&message)
+                .map_err(|e| e.to_string())?;
             println!("Merged worktree branch '{}' into base", branch);
             Ok(())
         }

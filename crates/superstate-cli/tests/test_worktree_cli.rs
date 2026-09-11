@@ -50,7 +50,11 @@ fn test_cli_worktree_lifecycle() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(create_out.status.success(), "create failed: {:?}", create_out);
+    assert!(
+        create_out.status.success(),
+        "create failed: {:?}",
+        create_out
+    );
 
     // 2. List worktrees via CLI
     let list_out = Command::new(bin())
@@ -60,7 +64,11 @@ fn test_cli_worktree_lifecycle() {
         .unwrap();
     assert!(list_out.status.success(), "list failed: {:?}", list_out);
     let list_str = String::from_utf8_lossy(&list_out.stdout);
-    assert!(list_str.contains("wt/cli-branch"), "list should contain wt/cli-branch, got: {}", list_str);
+    assert!(
+        list_str.contains("wt/cli-branch"),
+        "list should contain wt/cli-branch, got: {}",
+        list_str
+    );
 
     // 3. Make commit inside worktree
     let wt_path = dir.path().join(".wt").join("wt-cli-branch");
@@ -80,12 +88,21 @@ fn test_cli_worktree_lifecycle() {
 
     // 4. Merge via CLI
     let merge_out = Command::new(bin())
-        .args(["worktree", "merge", "wt/cli-branch", "--message", "feat: merge worktree"])
+        .args([
+            "worktree",
+            "merge",
+            "wt/cli-branch",
+            "--message",
+            "feat: merge worktree",
+        ])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert!(merge_out.status.success(), "merge failed: {:?}", merge_out);
-    assert!(dir.path().join("file.txt").exists(), "file.txt should exist in main repo after merge");
+    assert!(
+        dir.path().join("file.txt").exists(),
+        "file.txt should exist in main repo after merge"
+    );
 
     // 5. Remove worktree via CLI
     let remove_out = Command::new(bin())
@@ -93,7 +110,11 @@ fn test_cli_worktree_lifecycle() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(remove_out.status.success(), "remove failed: {:?}", remove_out);
+    assert!(
+        remove_out.status.success(),
+        "remove failed: {:?}",
+        remove_out
+    );
     assert!(!wt_path.exists(), "worktree dir should be removed");
 
     // 6. Verify worktree list no longer contains branch
@@ -104,7 +125,10 @@ fn test_cli_worktree_lifecycle() {
         .unwrap();
     assert!(list_after_out.status.success());
     let list_after_str = String::from_utf8_lossy(&list_after_out.stdout);
-    assert!(!list_after_str.contains("wt/cli-branch"), "list should no longer contain wt/cli-branch");
+    assert!(
+        !list_after_str.contains("wt/cli-branch"),
+        "list should no longer contain wt/cli-branch"
+    );
 }
 
 #[test]
@@ -120,7 +144,11 @@ fn test_cli_cannot_remove_or_merge_primary_worktree() {
         .unwrap();
     assert!(!remove_main.status.success());
     let err_str = String::from_utf8_lossy(&remove_main.stderr);
-    assert!(err_str.contains("Cannot remove primary worktree"), "Expected guard against removing primary worktree, got: {}", err_str);
+    assert!(
+        err_str.contains("Cannot remove primary worktree"),
+        "Expected guard against removing primary worktree, got: {}",
+        err_str
+    );
 
     // Attempting to merge main into itself must fail
     let merge_main = Command::new(bin())
@@ -130,7 +158,11 @@ fn test_cli_cannot_remove_or_merge_primary_worktree() {
         .unwrap();
     assert!(!merge_main.status.success());
     let err_str = String::from_utf8_lossy(&merge_main.stderr);
-    assert!(err_str.contains("Cannot merge primary worktree"), "Expected guard against merging primary worktree, got: {}", err_str);
+    assert!(
+        err_str.contains("Cannot merge primary worktree"),
+        "Expected guard against merging primary worktree, got: {}",
+        err_str
+    );
 }
 
 #[test]
@@ -149,11 +181,18 @@ fn test_cli_no_cache_flag_prevents_cache_copy() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(create_out.status.success(), "create failed: {:?}", create_out);
+    assert!(
+        create_out.status.success(),
+        "create failed: {:?}",
+        create_out
+    );
 
     let wt_path = dir.path().join(".wt").join("wt-no-cache-branch");
     assert!(wt_path.exists());
-    assert!(!wt_path.join(".venv").exists(), ".venv should not have been copied due to --no-cache");
+    assert!(
+        !wt_path.join(".venv").exists(),
+        ".venv should not have been copied due to --no-cache"
+    );
 }
 
 #[test]
@@ -174,8 +213,16 @@ fn test_cli_operations_from_inside_worktree() {
 
     // 2. Commit inside worktree
     fs::write(wt_path.join("inner.txt"), b"inner content").unwrap();
-    Command::new("git").args(["add", "inner.txt"]).current_dir(&wt_path).status().unwrap();
-    Command::new("git").args(["commit", "-m", "feat: inner"]).current_dir(&wt_path).status().unwrap();
+    Command::new("git")
+        .args(["add", "inner.txt"])
+        .current_dir(&wt_path)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "feat: inner"])
+        .current_dir(&wt_path)
+        .status()
+        .unwrap();
 
     // 3. Merge *from inside* the worktree directory
     let merge_out = Command::new(bin())
@@ -183,8 +230,15 @@ fn test_cli_operations_from_inside_worktree() {
         .current_dir(&wt_path)
         .output()
         .unwrap();
-    assert!(merge_out.status.success(), "merge from inside worktree failed: {:?}", merge_out);
-    assert!(dir.path().join("inner.txt").exists(), "inner.txt should exist in main repo root");
+    assert!(
+        merge_out.status.success(),
+        "merge from inside worktree failed: {:?}",
+        merge_out
+    );
+    assert!(
+        dir.path().join("inner.txt").exists(),
+        "inner.txt should exist in main repo root"
+    );
 
     // 4. Remove *from main dir* (since removing the worktree while CWD is inside it is an OS lock issue)
     let remove_out = Command::new(bin())
@@ -192,7 +246,11 @@ fn test_cli_operations_from_inside_worktree() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(remove_out.status.success(), "remove failed: {:?}", remove_out);
+    assert!(
+        remove_out.status.success(),
+        "remove failed: {:?}",
+        remove_out
+    );
     assert!(!wt_path.exists());
 }
 
@@ -211,13 +269,23 @@ fn test_cli_merge_base_mismatch_error() {
 
     // Try to merge with non-matching --base
     let merge_out = Command::new(bin())
-        .args(["worktree", "merge", "wt/mismatch-branch", "--base", "release-2.0"])
+        .args([
+            "worktree",
+            "merge",
+            "wt/mismatch-branch",
+            "--base",
+            "release-2.0",
+        ])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert!(!merge_out.status.success());
     let err_str = String::from_utf8_lossy(&merge_out.stderr);
-    assert!(err_str.contains("expected target base branch 'release-2.0'"), "Expected mismatch error, got: {}", err_str);
+    assert!(
+        err_str.contains("expected target base branch 'release-2.0'"),
+        "Expected mismatch error, got: {}",
+        err_str
+    );
 }
 
 #[test]
@@ -234,11 +302,21 @@ fn test_cli_multiple_caches_copied() {
     fs::write(c2.join("c2.txt"), b"c2").unwrap();
 
     let create_out = Command::new(bin())
-        .args(["worktree", "create", "wt/multi-cache-branch", "--caches", "cache1,cache2"])
+        .args([
+            "worktree",
+            "create",
+            "wt/multi-cache-branch",
+            "--caches",
+            "cache1,cache2",
+        ])
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(create_out.status.success(), "create failed: {:?}", create_out);
+    assert!(
+        create_out.status.success(),
+        "create failed: {:?}",
+        create_out
+    );
 
     let wt_path = dir.path().join(".wt").join("wt-multi-cache-branch");
     assert!(wt_path.join("cache1").join("c1.txt").exists());
@@ -303,7 +381,11 @@ fn test_cli_remove_sibling_from_inside_worktree() {
         .current_dir(&wt1_path)
         .output()
         .unwrap();
-    assert!(remove_out.status.success(), "remove sibling failed: {:?}", remove_out);
+    assert!(
+        remove_out.status.success(),
+        "remove sibling failed: {:?}",
+        remove_out
+    );
     assert!(!wt2_path.exists());
 }
 
@@ -321,8 +403,16 @@ fn test_cli_merge_explicit_base_matches() {
 
     let wt_path = dir.path().join(".wt").join("wt-explicit-base");
     fs::write(wt_path.join("exp.txt"), b"explicit").unwrap();
-    Command::new("git").args(["add", "exp.txt"]).current_dir(&wt_path).status().unwrap();
-    Command::new("git").args(["commit", "-m", "feat: explicit"]).current_dir(&wt_path).status().unwrap();
+    Command::new("git")
+        .args(["add", "exp.txt"])
+        .current_dir(&wt_path)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "feat: explicit"])
+        .current_dir(&wt_path)
+        .status()
+        .unwrap();
 
     // Merge with explicit matching --base main
     let merge_out = Command::new(bin())
@@ -330,7 +420,11 @@ fn test_cli_merge_explicit_base_matches() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(merge_out.status.success(), "merge with explicit base failed: {:?}", merge_out);
+    assert!(
+        merge_out.status.success(),
+        "merge with explicit base failed: {:?}",
+        merge_out
+    );
     assert!(dir.path().join("exp.txt").exists());
 }
 
@@ -340,13 +434,24 @@ fn test_cli_no_cache_conflicts_with_caches() {
     init_git_repo(dir.path());
 
     let create_out = Command::new(bin())
-        .args(["worktree", "create", "wt/conflict", "--no-cache", "--caches", ".venv"])
+        .args([
+            "worktree",
+            "create",
+            "wt/conflict",
+            "--no-cache",
+            "--caches",
+            ".venv",
+        ])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert!(!create_out.status.success(), "Expected Clap conflict error");
     let err_str = String::from_utf8_lossy(&create_out.stderr);
-    assert!(err_str.contains("cannot be used with"), "Expected Clap conflict error, got: {}", err_str);
+    assert!(
+        err_str.contains("cannot be used with"),
+        "Expected Clap conflict error, got: {}",
+        err_str
+    );
 }
 
 #[test]

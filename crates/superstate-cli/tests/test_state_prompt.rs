@@ -133,3 +133,51 @@ fn both_binaries_expose_the_same_state_commands() {
         );
     }
 }
+
+#[test]
+fn prompt_compacts_overly_long_ledger_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = setup(dir.path());
+
+    let long_note = format!(
+        "### Summary of findings\n\n{}\n\nExcessive detail that should not bloat the prompt.",
+        "A".repeat(500)
+    );
+
+    run(&[
+        "state",
+        "note",
+        &long_note,
+        "--state",
+        state.to_str().unwrap(),
+    ]);
+
+    let (ok, stdout, _) = run(&["state", "prompt", "--state", state.to_str().unwrap()]);
+    assert!(ok);
+    assert!(stdout.contains("Epistemic Ledger"), "{}", stdout);
+    // The prompt should NOT contain the full 500-char repeat or the trailing excessive detail
+    assert!(
+        !stdout.contains("Excessive detail that should not bloat the prompt"),
+        "{}",
+        stdout
+    );
+}
+
+#[test]
+fn prompt_includes_minimal_direct_fix_and_hard_stop_instructions() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = setup(dir.path());
+
+    let (ok, stdout, _) = run(&["state", "prompt", "--state", state.to_str().unwrap()]);
+    assert!(ok);
+    assert!(
+        stdout.contains("minimal direct fix"),
+        "Prompt should instruct minimal direct fix: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("HARD STOP UPON PASSING"),
+        "Prompt should instruct hard stop upon passing: {}",
+        stdout
+    );
+}

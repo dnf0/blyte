@@ -61,10 +61,18 @@ pub fn save_state_atomic(path: &Path, state: &ExecutionState) -> Result<(), Stat
     Ok(())
 }
 
+/// Advances execution state to the next task, completing the current active task.
+///
+/// Resets active worktree and branch tracking fields to None so that subsequent tasks
+/// start with clean worktree state unless explicitly provisioned.
 pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
     if let Some(completed) = state.active_task.take() {
         state.completed_tasks.push(completed);
     }
+
+    // Reset active worktree and branch tracking for the completed task
+    state.active_worktree = None;
+    state.active_branch = None;
 
     if !state.pending_tasks.is_empty() {
         state.active_task = Some(state.pending_tasks.remove(0));

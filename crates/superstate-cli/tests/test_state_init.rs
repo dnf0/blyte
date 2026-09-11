@@ -23,7 +23,10 @@ fn init_auto_initializes_git_in_greenfield_workspace() {
         .unwrap();
 
     assert!(out.status.success(), "init failed: {:?}", out);
-    assert!(dir.path().join(".git").exists(), ".git should be auto-initialized");
+    assert!(
+        dir.path().join(".git").exists(),
+        ".git should be auto-initialized"
+    );
 
     // Working tree should be clean because .agent-state and plan.md should be excluded
     let status_out = Command::new("git")
@@ -33,5 +36,9 @@ fn init_auto_initializes_git_in_greenfield_workspace() {
         .unwrap();
     assert!(status_out.status.success());
     let porcelain = String::from_utf8_lossy(&status_out.stdout);
-    assert!(porcelain.trim().is_empty(), "Working tree should be clean, got: {}", porcelain);
+    assert!(
+        porcelain.trim().is_empty(),
+        "Working tree should be clean, got: {}",
+        porcelain
+    );
 }

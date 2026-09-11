@@ -19,6 +19,7 @@ fn project() -> (tempfile::TempDir, std::path::PathBuf) {
         errors: Vec::new(),
         plan_path: None,
         notes: Vec::new(),
+        ..Default::default()
     };
     save_state_atomic(&state_path, &state).unwrap();
     (dir, state_path)

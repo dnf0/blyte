@@ -32,6 +32,40 @@ fn test_parse_plan_markdown() {
 }
 
 #[test]
+fn test_parse_plan_markdown_unbolded_variations() {
+    let markdown = r#"
+# Feature Plan
+
+### Task 1: Scaffolding
+- Depends on: none
+Files:
+- Modify: `/app/secret.txt`
+- Verification Command: `test -s /app/secret.txt && grep -Eq '^secret\[.+\]$' /app/secret.txt`
+Goal: Initialize project
+
+### Task 2: Expire reflogs
+- **Depends on:** Task 1
+Files:
+- Modify: `/app/repo/.git`
+- Verification: `test -z "$(git -C /app/repo reflog)"`
+"#;
+    let tasks =
+        parse_plan_markdown(markdown).expect("Failed to parse plan with unbolded variations");
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks[0].id, "Task 1");
+    assert_eq!(
+        tasks[0].verification_cmd.as_deref(),
+        Some("test -s /app/secret.txt && grep -Eq '^secret\\[.+\\]$' /app/secret.txt")
+    );
+    assert_eq!(tasks[1].id, "Task 2");
+    assert_eq!(tasks[1].depends_on, vec!["Task 1"]);
+    assert_eq!(
+        tasks[1].verification_cmd.as_deref(),
+        Some("test -z \"$(git -C /app/repo reflog)\"")
+    );
+}
+
+#[test]
 fn test_init_state_from_plan() {
     let dir = tempdir().unwrap();
     let plan_file = dir.path().join("plan.md");
