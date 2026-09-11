@@ -13,7 +13,8 @@ use superstate_core::models::{LedgerEntry, MilestoneSpec};
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::prompt::render_turnkey_prompt;
 use superstate_core::state_machine::{
-    advance_step, init_state_direct, init_state_milestones, load_state, save_state_atomic,
+    advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
+    init_state_milestones, load_state, save_state_atomic, STATE_DIR,
 };
 use superstate_core::verifier::execute_all_gates;
 use superstate_worktree::manager::{
@@ -181,6 +182,79 @@ pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> Result<PreflightResult
     execute_preflight_with_timeout(verify_cmd, cwd, std::time::Duration::from_secs(15))
 }
 
+/// Dynamically resolve state path for MCP operations.
+///
+/// 1. If explicit state path is provided and non-empty, resolves relative to `repo_root` (or absolute).
+/// 2. If inside a worktree, matches via `find_branch_state_for_worktree`.
+/// 3. If in a git repository on a feature branch (not `main`, `master`, and not starting with `wt/` or `superstate/`),
+///    returns `branch_scoped_state_path(repo_root, &branch)`.
+/// 4. Fallback: returns `repo_root.join(STATE_DIR).join("state.json")`.
+pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) -> PathBuf {
+    if let Some(s) = explicit_state {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            let p = Path::new(trimmed);
+            return if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                repo_root.join(p)
+            };
+        }
+    }
+
+    // Check if repo_root is inside a worktree
+    let wt_branch = WorktreeManager::new(repo_root)
+        .ok()
+        .and_then(|m| m.current_branch().ok());
+
+    let mut ancestor = Some(repo_root);
+    while let Some(current) = ancestor {
+        let branches_dir = current.join(STATE_DIR).join("branches");
+        if branches_dir.is_dir() {
+            let mut wt_cand = Some(repo_root);
+            while let Some(p) = wt_cand {
+                if p == current {
+                    break;
+                }
+                if let Some(matched) =
+                    find_branch_state_for_worktree(current, p, wt_branch.as_deref())
+                {
+                    return matched;
+                }
+                wt_cand = p.parent();
+            }
+        }
+        ancestor = current.parent();
+    }
+
+    // Query current branch
+    if let Ok(manager) = WorktreeManager::new(repo_root) {
+        if let Ok(branch) = manager.current_branch() {
+            let is_feature_branch = branch != "main"
+                && branch != "master"
+                && !branch.starts_with("wt/")
+                && !branch.starts_with("superstate/");
+            if is_feature_branch {
+                let root = superstate_core::state_machine::enclosing_state_root(repo_root)
+                    .or_else(|| {
+                        let mut d = Some(repo_root);
+                        while let Some(cur) = d {
+                            if cur.join(".git").exists() {
+                                return Some(cur.to_path_buf());
+                            }
+                            d = cur.parent();
+                        }
+                        None
+                    })
+                    .unwrap_or_else(|| repo_root.to_path_buf());
+                return branch_scoped_state_path(&root, &branch);
+            }
+        }
+    }
+
+    repo_root.join(STATE_DIR).join("state.json")
+}
+
 /// Dispatch a tool execution by name and arguments.
 ///
 /// # Arguments
@@ -198,6 +272,9 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let _state_path =
+                resolve_mcp_state_path(&cwd, args.get("state").and_then(Value::as_str));
 
             // If verify_cmds array is provided, iterate and dry-run each command
             if let Some(cmds_val) = args.get("verify_cmds") {
@@ -293,11 +370,10 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = args
-                .get("state")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo_root.join(".agent-state").join("state.json"));
+            let state_path = resolve_mcp_state_path(
+                &repo_root,
+                args.get("state").and_then(Value::as_str),
+            );
 
             let no_worktree = args
                 .get("no_worktree")
@@ -408,6 +484,12 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 );
             };
 
+            // Ensure parent directory exists for branch-scoped state
+            if let Some(parent) = state_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create state directory: {}", e))?;
+            }
+
             // Atomically persist state to disk
             save_state_atomic(&state_path, &state)
                 .map_err(|e| format!("Failed to save state: {}", e))?;
@@ -449,11 +531,15 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = args
-                .get("state")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo_root.join(".agent-state").join("state.json"));
+            let state_path = resolve_mcp_state_path(
+                &repo_root,
+                args.get("state").and_then(Value::as_str),
+            );
+
+            if let Some(parent) = state_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create state directory: {}", e))?;
+            }
 
             ensure_git_baseline(&repo_root);
             let plan_path = PathBuf::from(plan);
@@ -466,7 +552,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 "active_task": state.active_task
             }))
         }
-        "state_next" => {
+        "state_next" | "state_step" => {
             let verify_cmd = args
                 .get("verify_cmd")
                 .and_then(|v| v.as_str())
@@ -484,11 +570,10 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = args
-                .get("state")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo_root.join(".agent-state").join("state.json"));
+            let state_path = resolve_mcp_state_path(
+                &repo_root,
+                args.get("state").and_then(Value::as_str),
+            );
 
             let mut state =
                 load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
@@ -615,15 +700,15 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
         "state_prompt" => {
             let repo_root = args
                 .get("repo_root")
+                .or_else(|| args.get("cwd"))
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = args
-                .get("state")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo_root.join(".agent-state").join("state.json"));
+            let state_path = resolve_mcp_state_path(
+                &repo_root,
+                args.get("state").and_then(Value::as_str),
+            );
 
             let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
             let task = args.get("task").and_then(|v| v.as_str());
@@ -648,15 +733,15 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
 
             let repo_root = args
                 .get("repo_root")
+                .or_else(|| args.get("cwd"))
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = args
-                .get("state")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo_root.join(".agent-state").join("state.json"));
+            let state_path = resolve_mcp_state_path(
+                &repo_root,
+                args.get("state").and_then(Value::as_str),
+            );
 
             append_ledger_note(&state_path, LedgerEntry::new(author, note))
                 .map_err(|e| format!("Note error: {}", e))?;
@@ -664,6 +749,34 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             Ok(serde_json::json!({
                 "status": "success",
                 "note_recorded": true
+            }))
+        }
+        "state_get" => {
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path = resolve_mcp_state_path(
+                &repo_root,
+                args.get("state").and_then(Value::as_str),
+            );
+
+            let state =
+                load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "state": state,
+                "state_path": state_path.display().to_string(),
+                "content": [
+                    {
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&state).unwrap_or_default()
+                    }
+                ]
             }))
         }
         "superstate_review" => {

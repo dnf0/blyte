@@ -69,9 +69,12 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
         prompt
     );
 
-    // Asserts .agent-state/state.json has base_branch == "feat/multi-task-flow", active_task.id == "task-1", pending_tasks.len() == 1
-    let state_file = repo_root.join(".agent-state").join("state.json");
-    assert!(state_file.exists(), ".agent-state/state.json must exist");
+    // Asserts .agent-state/branches/feat-multi-task-flow.json has base_branch == "feat/multi-task-flow", active_task.id == "task-1", pending_tasks.len() == 1
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-multi-task-flow.json");
+    assert!(state_file.exists(), ".agent-state/branches/feat-multi-task-flow.json must exist");
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state_json: serde_json::Value = serde_json::from_str(&state_content).unwrap();
 
@@ -191,13 +194,16 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
         "active_task.id should be task-2 in response"
     );
 
-    // Also verify state.json on disk
-    let state_file = repo_root.join(".agent-state").join("state.json");
+    // Also verify branch-scoped state on disk
+    let state_file = repo_root
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-multi-task-flow.json");
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state_json: serde_json::Value = serde_json::from_str(&state_content).unwrap();
     assert_eq!(
         state_json["active_task"]["id"], "task-2",
-        "active_task.id in state.json should be task-2"
+        "active_task.id in state should be task-2"
     );
     assert_eq!(
         state_json["active_worktree"],
