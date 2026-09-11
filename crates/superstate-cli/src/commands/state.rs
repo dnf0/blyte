@@ -53,24 +53,7 @@ fn reject_nested_state(state_path: &Path) -> Result<(), String> {
 /// (`.agent-state`), returning its parent as the project root. If `STATE_DIR` is not found,
 /// falls back to the state path's parent or current working directory.
 pub fn resolve_project_root(state_path: &Path) -> PathBuf {
-    let mut current = state_path.parent();
-    while let Some(dir) = current {
-        if dir.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
-            if let Some(parent) = dir.parent() {
-                if parent.as_os_str().is_empty() {
-                    return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                }
-                return parent.to_path_buf();
-            }
-        }
-        current = dir.parent();
-    }
-    if let Some(parent) = state_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            return parent.to_path_buf();
-        }
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    superstate_core::resolve_project_root(state_path)
 }
 
 /// Dynamically resolve effective state path based on branch-scoped isolation rules.
@@ -863,25 +846,18 @@ pub fn cmd_prompt(
     let mut rendered_prompt =
         render_turnkey_prompt(&state, state_path, task, is_in_place, with_graph)?;
 
-    let state_display = state_path.display();
-    let contract_additions = format!(
-        "- **State File:** `{}`\n- **Next Gate Command:** `superstate state next --state \"{}\"`\n",
-        state_display, state_display
-    );
-    if let Some(pos) = rendered_prompt.find("## 🌲 Active Isolated Worktree") {
-        if let Some(newline_pos) = rendered_prompt[pos..].find("\n\n") {
-            rendered_prompt.insert_str(
-                pos + newline_pos,
-                &format!("\n{}", contract_additions.trim_end()),
-            );
+    if !rendered_prompt.contains("- **State File:**") {
+        let state_display = state_path.display();
+        let contract_additions = format!(
+            "- **State File:** `{}`\n- **Next Gate Command:** `superstate state next --state \"{}\"`\n",
+            state_display, state_display
+        );
+        if let Some(pos) = rendered_prompt.find("## Instructions\n") {
+            let insert_idx = pos + "## Instructions\n".len();
+            rendered_prompt.insert_str(insert_idx, &contract_additions);
         } else {
             rendered_prompt.push_str(&format!("\n{}", contract_additions));
         }
-    } else if let Some(pos) = rendered_prompt.find("## Instructions\n") {
-        let insert_idx = pos + "## Instructions\n".len();
-        rendered_prompt.insert_str(insert_idx, &contract_additions);
-    } else {
-        rendered_prompt.push_str(&format!("\n{}", contract_additions));
     }
 
     if json_output {

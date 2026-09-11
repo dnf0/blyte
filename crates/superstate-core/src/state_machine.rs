@@ -309,7 +309,12 @@ pub fn sanitize_branch_slug(branch: &str) -> String {
     }
 
     // Trim leading and trailing hyphens
-    collapsed.trim_matches('-').to_string()
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.is_empty() {
+        "branch".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Computes the state file path for a given branch in a repository.

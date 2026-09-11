@@ -39,6 +39,10 @@ fn test_sanitize_branch_slug() {
         sanitize_branch_slug("release-1.0.0_beta.2"),
         "release-1.0.0_beta.2"
     );
+
+    // Empty or symbol-only branches fallback to "branch"
+    assert_eq!(sanitize_branch_slug("///---///"), "branch");
+    assert_eq!(sanitize_branch_slug(""), "branch");
 }
 
 #[test]
@@ -166,6 +170,25 @@ fn test_enclosing_state_root_with_branch_scoped_state() {
     let found = enclosing_state_root(&nested_dir).expect("should find enclosing state root");
     assert_eq!(
         fs::canonicalize(found).unwrap(),
+        fs::canonicalize(repo_root).unwrap()
+    );
+}
+
+#[test]
+fn test_resolve_project_root() {
+    let dir = tempdir().unwrap();
+    let repo_root = dir.path();
+    let state_file = repo_root.join(STATE_DIR).join("branches").join("feat-payment.json");
+    let resolved = superstate_core::resolve_project_root(&state_file);
+    assert_eq!(
+        fs::canonicalize(resolved).unwrap(),
+        fs::canonicalize(repo_root).unwrap()
+    );
+
+    let default_state = repo_root.join(STATE_DIR).join("state.json");
+    let resolved_default = superstate_core::resolve_project_root(&default_state);
+    assert_eq!(
+        fs::canonicalize(resolved_default).unwrap(),
         fs::canonicalize(repo_root).unwrap()
     );
 }
