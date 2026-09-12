@@ -1106,6 +1106,342 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 }))
             }
         }
+        "state_checkpoint" => {
+            // Resolve repository root and state path
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            // Load execution state to determine current step
+            let state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let root = repo_root_for(&state_path, &repo_root);
+
+            // Create git checkpoint tag guarding this step
+            let tag = superstate_core::checkpoint::create_checkpoint(&root, state.step)
+                .map_err(|e| format!("Failed to create checkpoint: {}", e))?;
+
+            Ok(serde_json::json!({
+                "checkpoint": tag,
+                "step": state.step,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": format!("Checkpoint created: {}", tag)
+                    }
+                ]
+            }))
+        }
+        "state_rollback" => {
+            // Resolve repository root and state path
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            // Load state to inspect worktree and step
+            let mut state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let root = repo_root_for(&state_path, &repo_root);
+
+            // If an isolated worktree was active for this step, abort it cleanly before restoring
+            // the git checkpoint, preventing dangling branches or worktrees.
+            if let Some(ref wt_path) = state.active_worktree.clone() {
+                if wt_path.exists() {
+                    let base_branch = WorktreeManager::new(&root)
+                        .map(|m| m.default_branch())
+                        .unwrap_or_else(|_| "main".to_string());
+                    let branch = state
+                        .active_branch
+                        .clone()
+                        .unwrap_or_else(|| "wt/task".to_string());
+                    let wt = IsolatedWorktree {
+                        branch,
+                        path: wt_path.clone(),
+                        base_branch,
+                        repo_root: root.clone(),
+                    };
+                    wt.abort()
+                        .map_err(|e| format!("Failed to abort worktree on rollback: {}", e))?;
+                }
+                state.active_worktree = None;
+                state.active_branch = None;
+                save_state_atomic(&state_path, &state)
+                    .map_err(|e| format!("Failed to update state after worktree abort: {}", e))?;
+            }
+
+            let reference = args.get("reference").and_then(Value::as_str);
+            let preserved_paths = preserved(&state_path);
+            let preserve_refs: Vec<&str> = preserved_paths.iter().map(String::as_str).collect();
+
+            // Perform hard reset and clean untracked debris while preserving state file
+            let target = superstate_core::checkpoint::rollback_to(
+                &root,
+                state.step,
+                reference,
+                &preserve_refs,
+            )
+            .map_err(|e| format!("Failed to roll back: {}", e))?;
+
+            Ok(serde_json::json!({
+                "target": target,
+                "step": state.step,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": format!("Working tree cleanly rolled back to {}", target)
+                    }
+                ]
+            }))
+        }
+        "state_exec" => {
+            let verify_cmd = args
+                .get("verify_cmd")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
+
+            // Resolve repository context and effective branch-scoped state path
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let mut state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let root = repo_root_for(&state_path, &repo_root);
+            let step = state.step;
+
+            let checkpoint = args
+                .get("checkpoint")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let rollback_on_fail = args
+                .get("rollback_on_fail")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let advance = args.get("advance").and_then(Value::as_bool).unwrap_or(true);
+            let verify_git_clean = args
+                .get("verify_git_clean")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            // Optional checkpoint creation before running verification command
+            if checkpoint {
+                superstate_core::checkpoint::create_checkpoint(&root, step)
+                    .map_err(|e| format!("Failed to checkpoint before exec: {}", e))?;
+            }
+
+            // Target directory: active worktree if present, else repository root
+            let target_dir = state
+                .active_worktree
+                .as_ref()
+                .filter(|p| p.exists())
+                .cloned()
+                .unwrap_or_else(|| root.clone());
+
+            // Run verification command with standard 600s timeout
+            let gate =
+                superstate_core::verifier::run_verification_cmd(verify_cmd, &target_dir, 600)
+                    .map_err(|e| format!("Verification could not run: {}", e))?;
+
+            // Check git clean status if requested and verification command passed
+            let mut git_clean_passed = true;
+            if gate.passed && verify_git_clean {
+                ensure_git_exclude(&root);
+                let clean = superstate_core::verifier::verify_git_clean(&target_dir)
+                    .map_err(|e| format!("git clean check failed: {}", e))?;
+                git_clean_passed = clean.passed;
+            }
+
+            let passed = gate.passed && git_clean_passed;
+            let mut rolled_back = false;
+            let mut advanced = false;
+
+            if passed && advance {
+                // Merge active worktree into base branch and cleanup if present
+                if let Some(ref wt_path) = state.active_worktree.clone() {
+                    if wt_path.exists() {
+                        let base_branch = state.base_branch.clone().unwrap_or_else(|| {
+                            WorktreeManager::new(&root)
+                                .map(|m| m.current_branch().unwrap_or_else(|_| m.default_branch()))
+                                .unwrap_or_else(|_| "main".to_string())
+                        });
+                        let branch = state.active_branch.clone().unwrap_or_else(|| {
+                            superstate_worktree::manager::task_worktree_names(
+                                &root,
+                                state
+                                    .active_task
+                                    .as_ref()
+                                    .map(|t| t.id.as_str())
+                                    .unwrap_or("task"),
+                                state.base_branch.as_deref(),
+                            )
+                            .0
+                        });
+                        let wt = IsolatedWorktree {
+                            branch,
+                            path: wt_path.clone(),
+                            base_branch,
+                            repo_root: root.clone(),
+                        };
+                        let commit_msg = format!(
+                            "feat({}): {}",
+                            state
+                                .active_task
+                                .as_ref()
+                                .map(|t| t.id.as_str())
+                                .unwrap_or("task"),
+                            state
+                                .active_task
+                                .as_ref()
+                                .map(|t| t.title.as_str())
+                                .unwrap_or("task"),
+                        );
+                        wt.merge_and_cleanup(&commit_msg)
+                            .map_err(|e| format!("Failed to merge and cleanup worktree: {}", e))?;
+                        state.active_worktree = None;
+                        state.active_branch = None;
+                    }
+                }
+
+                advance_step(&mut state).map_err(|e| format!("Advance step error: {}", e))?;
+
+                // Provision worktree for the next task if isolation is enabled
+                if !state.no_worktree && root.join(".git").exists() {
+                    if let Some(ref next_task) = state.active_task {
+                        let manager = WorktreeManager::new(&root)
+                            .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+                        let wt = manager
+                            .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
+                            .map_err(|e| {
+                                format!(
+                                    "Failed to ensure worktree for task {}: {}",
+                                    next_task.id, e
+                                )
+                            })?;
+                        state.active_worktree = Some(wt.path.clone());
+                        state.active_branch = Some(wt.branch.clone());
+                    }
+                }
+
+                save_state_atomic(&state_path, &state)
+                    .map_err(|e| format!("Save state error: {}", e))?;
+                advanced = true;
+            } else if !passed {
+                // Record why, so the failure survives in the state
+                let mut failed_state = load_state(&state_path)
+                    .map_err(|e| format!("Failed to reload state: {}", e))?;
+                failed_state.errors.push(format!(
+                    "step {}: verification failed for `{}`: {}",
+                    step,
+                    verify_cmd,
+                    gate.failure_reason.clone().unwrap_or_else(|| {
+                        if git_clean_passed {
+                            "non-zero exit".into()
+                        } else {
+                            "working tree not clean".into()
+                        }
+                    })
+                ));
+                save_state_atomic(&state_path, &failed_state)
+                    .map_err(|e| format!("Failed to save state after error: {}", e))?;
+
+                if rollback_on_fail {
+                    // Abort isolated worktree if active
+                    if let Some(ref wt_path) = failed_state.active_worktree {
+                        if wt_path.exists() {
+                            let base_branch = WorktreeManager::new(&root)
+                                .map(|m| m.default_branch())
+                                .unwrap_or_else(|_| "main".to_string());
+                            let branch = failed_state.active_branch.clone().unwrap_or_else(|| {
+                                format!(
+                                    "wt/{}",
+                                    superstate_worktree::manager::sanitize_slug(
+                                        failed_state
+                                            .active_task
+                                            .as_ref()
+                                            .map(|t| t.id.as_str())
+                                            .unwrap_or("task"),
+                                    )
+                                )
+                            });
+                            let wt = IsolatedWorktree {
+                                branch,
+                                path: wt_path.clone(),
+                                base_branch,
+                                repo_root: root.clone(),
+                            };
+                            let _ = wt.abort();
+                            failed_state.active_worktree = None;
+                            failed_state.active_branch = None;
+                            let _ = save_state_atomic(&state_path, &failed_state);
+                        }
+                    }
+                    let preserved_paths = preserved(&state_path);
+                    let preserve_refs: Vec<&str> =
+                        preserved_paths.iter().map(String::as_str).collect();
+                    superstate_core::checkpoint::rollback_to(&root, step, None, &preserve_refs)
+                        .map_err(|e| format!("Failed to roll back after failure: {}", e))?;
+                    rolled_back = true;
+                }
+            }
+
+            let text = if passed {
+                format!(
+                    "Verification passed{}",
+                    if advanced {
+                        " and state advanced."
+                    } else {
+                        "."
+                    }
+                )
+            } else {
+                format!(
+                    "Verification failed{}",
+                    if rolled_back {
+                        "; working tree rolled back."
+                    } else {
+                        "; failure recorded in state."
+                    }
+                )
+            };
+
+            let mut res = serde_json::json!({
+                "passed": passed,
+                "advanced": advanced,
+                "rolled_back": rolled_back,
+                "step": step,
+                "verify_cmd": verify_cmd,
+                "output": gate.output,
+            });
+
+            if as_json {
+                let pretty = serde_json::to_string_pretty(&res).unwrap_or_default();
+                res["content"] = serde_json::json!([{ "type": "text", "text": pretty }]);
+            } else {
+                res["text"] = serde_json::Value::String(text.clone());
+                res["content"] = serde_json::json!([{ "type": "text", "text": text }]);
+            }
+
+            Ok(res)
+        }
         "superstate_review" => {
             let repo_root = args
                 .get("repo")
@@ -1243,6 +1579,48 @@ fn resolve_worktree_for_merge(
         base_branch,
         repo_root: primary_wt.path,
     })
+}
+
+/// Returns list of paths that git rollback/clean operations must never delete.
+///
+/// Ensures both the `.agent-state` directory and the specific state file name
+/// are preserved during git clean so failure records and task progress survive.
+///
+/// # Parameters
+/// - `state_path`: The absolute or canonical path to the active state file.
+///
+/// # Returns
+/// A `Vec<String>` containing paths/patterns to pass into git's exclude flags.
+fn preserved(state_path: &Path) -> Vec<String> {
+    let mut keep = vec![".agent-state".to_string()];
+    if let Some(name) = state_path.file_name().and_then(|n| n.to_str()) {
+        if !keep.iter().any(|p| p == name) {
+            keep.push(name.to_string());
+        }
+    }
+    keep
+}
+
+/// Resolves the repository root that owns the specified state file.
+///
+/// Traverses up from `state_path` looking for a `.git` directory, and falls back
+/// to `fallback` if `resolve_project_root` does not find a repository marker.
+///
+/// # Parameters
+/// - `state_path`: Path to the state file being executed against.
+/// - `fallback`: Fallback repository root path if discovery fails.
+///
+/// # Returns
+/// The resolved repository root `PathBuf`.
+fn repo_root_for(state_path: &Path, fallback: &Path) -> PathBuf {
+    let pr = resolve_project_root(state_path);
+    if pr.join(".git").exists() {
+        pr
+    } else if fallback.join(".git").exists() {
+        fallback.to_path_buf()
+    } else {
+        pr
+    }
 }
 
 pub fn handle_json_rpc(req: JsonRpcRequest) -> JsonRpcResponse {
