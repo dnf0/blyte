@@ -312,7 +312,8 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
-                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON array" }
                 }),
                 required: vec![],
             },
@@ -336,7 +337,8 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
-                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" },
+                    "force": { "type": "boolean", "description": "Force removal of dirty or unmerged orphaned branches" }
                 }),
                 required: vec![],
             },

@@ -411,3 +411,91 @@ fn test_json_rpc_dispatch_all_three_tools() {
     let clean_res = clean_resp.result.unwrap();
     assert!(clean_res["cleaned"].is_number());
 }
+
+#[test]
+fn test_worktree_clean_honors_force_flag_on_unmerged_branch() {
+    let (_dir, repo_root) = setup_test_repo();
+
+    // 1. Create a branch wt/unmerged-orphan and add a commit not merged to main
+    let _ = std::process::Command::new("git")
+        .args(["checkout", "-b", "wt/unmerged-orphan"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    std::fs::write(repo_root.join("new_file.txt"), "unmerged content").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "feat: unmerged commit on orphan branch"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+
+    // Switch back to main so wt/unmerged-orphan has no worktree and is unmerged
+    let _ = std::process::Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+
+    // 2. Run worktree_clean with force = false
+    let clean_no_force = handle_tool_call(
+        "worktree_clean",
+        &json!({
+            "repo": repo_root.to_str().unwrap(),
+            "force": false
+        }),
+    )
+    .expect("worktree_clean should succeed");
+
+    let branches_no_force: Vec<&str> = clean_no_force["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !branches_no_force.contains(&"wt/unmerged-orphan"),
+        "unmerged branch should NOT be cleaned when force is false"
+    );
+
+    // Verify branch still exists in git
+    let check_still_exists = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "wt/unmerged-orphan"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    assert!(check_still_exists.status.success());
+
+    // 3. Run worktree_clean with force = true
+    let clean_with_force = handle_tool_call(
+        "worktree_clean",
+        &json!({
+            "repo": repo_root.to_str().unwrap(),
+            "force": true
+        }),
+    )
+    .expect("worktree_clean should succeed");
+
+    let branches_force: Vec<&str> = clean_with_force["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        branches_force.contains(&"wt/unmerged-orphan"),
+        "unmerged branch SHOULD be cleaned when force is true"
+    );
+
+    // Verify branch is deleted in git
+    let check_deleted = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "wt/unmerged-orphan"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    assert!(!check_deleted.status.success());
+}

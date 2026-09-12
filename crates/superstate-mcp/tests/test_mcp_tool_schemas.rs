@@ -204,11 +204,13 @@ fn test_tool_parameter_schemas_and_requirements() {
     let worktree_list = find_tool("worktree_list");
     let wt_list_props = &worktree_list.input_schema.properties;
     assert_eq!(wt_list_props["repo"]["type"], "string");
+    assert_eq!(wt_list_props["json"]["type"], "boolean");
 
     // worktree_clean schema
     let worktree_clean = find_tool("worktree_clean");
     let wt_clean_props = &worktree_clean.input_schema.properties;
     assert_eq!(wt_clean_props["repo"]["type"], "string");
+    assert_eq!(wt_clean_props["force"]["type"], "boolean");
 }
 
 #[test]
