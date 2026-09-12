@@ -119,11 +119,11 @@ pub fn render_turnkey_prompt(
         active.id, active.title
     ));
 
-    // Inject the global objective and requirements if recorded in the state, providing
-    // full task specification context to the subagent before the individual milestone breakdown.
-    if let Some(ref goal) = state.goal {
+    // Inject the global objective and requirements if recorded in the state with non-empty content,
+    // providing full task specification context to the subagent before the individual milestone breakdown.
+    if let Some(goal) = state.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
         rendered.push_str("## 🎯 Global Task Objective & Requirements\n");
-        rendered.push_str(goal.trim());
+        rendered.push_str(goal);
         rendered.push_str("\n\n");
     }
 
