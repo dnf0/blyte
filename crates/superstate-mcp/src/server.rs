@@ -2416,10 +2416,7 @@ fn resolve_worktree_for_remove(repo: &Path, branch: &str) -> Result<IsolatedWork
     })
 }
 
-fn clean_orphaned_worktrees(
-    repo_root: &Path,
-    _force: bool,
-) -> Result<(usize, Vec<String>), String> {
+fn clean_orphaned_worktrees(repo_root: &Path, force: bool) -> Result<(usize, Vec<String>), String> {
     let mut cleaned_count = 0;
     let mut cleaned_branches = Vec::new();
 
@@ -2447,6 +2444,8 @@ fn clean_orphaned_worktrees(
         }
     }
 
+    let del_flag = if force { "-D" } else { "-d" };
+
     // 3. Inspect .wt/ directory in the repository for orphaned directories
     let wt_dir = repo_root.join(".wt");
     if wt_dir.is_dir() {
@@ -2472,13 +2471,17 @@ fn clean_orphaned_worktrees(
                                     .output();
                                 if let Ok(out) = check {
                                     if out.status.success() {
-                                        let _ = std::process::Command::new("git")
-                                            .args(["branch", "-D", cand])
+                                        let del = std::process::Command::new("git")
+                                            .args(["branch", del_flag, cand])
                                             .current_dir(repo_root)
                                             .output();
-                                        if !cleaned_branches.contains(cand) {
-                                            cleaned_branches.push(cand.clone());
-                                            branch_deleted = true;
+                                        if let Ok(del_out) = del {
+                                            if del_out.status.success()
+                                                && !cleaned_branches.contains(cand)
+                                            {
+                                                cleaned_branches.push(cand.clone());
+                                                branch_deleted = true;
+                                            }
                                         }
                                     }
                                 }
@@ -2515,7 +2518,7 @@ fn clean_orphaned_worktrees(
             if !active_branches.iter().any(|ab| ab == branch) {
                 // Delete orphaned branch
                 let del_out = std::process::Command::new("git")
-                    .args(["branch", "-D", branch])
+                    .args(["branch", del_flag, branch])
                     .current_dir(repo_root)
                     .output();
                 if let Ok(del) = del_out {
