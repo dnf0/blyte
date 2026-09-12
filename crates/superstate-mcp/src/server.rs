@@ -9,16 +9,17 @@ use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use superstate_core::ledger::{append_ledger_note, read_ledger};
-use superstate_core::maintenance::{metrics, resume_briefing};
-use superstate_core::models::{LedgerEntry, MilestoneSpec};
+use superstate_core::maintenance::{diagnose, metrics, repair, resume_briefing, sync_with_plan};
+use superstate_core::models::{ExecutionStatus, LedgerEntry, MilestoneSpec};
+use superstate_core::patching::{apply_patch, validate_state};
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::prompt::render_turnkey_prompt;
 use superstate_core::resolve_project_root;
 use superstate_core::state_machine::{
     advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
-    init_state_milestones, load_state, save_state_atomic, STATE_DIR,
+    init_state_milestones, load_state, ready_tasks, save_state_atomic, STATE_DIR,
 };
-use superstate_core::verifier::execute_all_gates;
+use superstate_core::verifier::execute_all_gates_filtered;
 use superstate_worktree::manager::{
     ensure_git_baseline, ensure_git_exclude, IsolatedWorktree, WorktreeManager,
 };
@@ -57,6 +58,35 @@ pub struct PreflightResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchStateSummary {
+    pub branch: String,
+    pub status: ExecutionStatus,
+    pub active_task: Option<String>,
+    pub step: usize,
+    pub total_steps: usize,
+    pub base_branch: Option<String>,
+    pub state_file: PathBuf,
+}
+
+fn save_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+        }
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_file_path = parent.join(format!(".state.{}.tmp", std::process::id()));
+    let serialized = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+    std::fs::write(&temp_file_path, serialized)
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+    std::fs::rename(&temp_file_path, path)
+        .map_err(|e| format!("Failed to atomically save {}: {}", path.display(), e))?;
+    Ok(())
 }
 
 /// Safely clip a string to a maximum byte length on valid UTF-8 character boundaries.
@@ -634,6 +664,11 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+            let ignore_untracked_glob = args
+                .get("ignore_untracked_glob")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+
             let repo_root = args
                 .get("repo_root")
                 .or_else(|| args.get("cwd"))
@@ -666,8 +701,13 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .cloned()
                 .unwrap_or_else(|| repo_root.clone());
 
-            let results = execute_all_gates(&target_dir, &task_to_verify, verify_git_clean)
-                .map_err(|e| format!("Gate execution error: {}", e))?;
+            let results = execute_all_gates_filtered(
+                &target_dir,
+                &task_to_verify,
+                verify_git_clean,
+                ignore_untracked_glob.as_deref(),
+            )
+            .map_err(|e| format!("Gate execution error: {}", e))?;
 
             for res in &results {
                 if !res.passed {
@@ -781,12 +821,21 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
 
             let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
             let task = args.get("task").and_then(|v| v.as_str());
-            let prompt =
-                render_turnkey_prompt(&state, &state_path, task, state.no_worktree, false)?;
+            let with_graph = args
+                .get("with_graph")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let no_worktree = args
+                .get("no_worktree")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(state.no_worktree);
+            let prompt = render_turnkey_prompt(&state, &state_path, task, no_worktree, with_graph)?;
 
             Ok(serde_json::json!({
-                "turnkey_prompt": prompt,
-                "content": [{ "type": "text", "text": prompt }]
+                "status": "success",
+                "turnkey_prompt": &prompt,
+                "prompt": &prompt,
+                "content": [{ "type": "text", "text": &prompt }]
             }))
         }
         "state_note" => {
@@ -1528,6 +1577,593 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 "branch": branch,
                 "base": isolated.base_branch,
             }))
+        }
+        "state_ready" => {
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let ready = ready_tasks(&state);
+            let ready_titles: Vec<String> = ready
+                .iter()
+                .map(|t| format!("{}: {}", t.id, t.title))
+                .collect();
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            let text = if ready.is_empty() {
+                "No tasks are currently unblocked (all remaining tasks have unsatisfied dependencies).".to_string()
+            } else {
+                let mut out = format!("Unblocked tasks ({}):\n", ready.len());
+                for task in &ready {
+                    out.push_str(&format!("  - {}: {}\n", task.id, task.title));
+                }
+                out
+            };
+
+            if as_json {
+                let pretty =
+                    serde_json::to_string_pretty(&serde_json::json!({ "ready": &ready_titles }))
+                        .map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "ready": ready_titles,
+                    "content": [{ "type": "text", "text": pretty }]
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "ready": ready_titles,
+                    "output": text,
+                    "text": text,
+                    "content": [{ "type": "text", "text": text }]
+                }))
+            }
+        }
+        "state_sync" => {
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let plan_str = args
+                .get("plan")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Missing required parameter 'plan' for state_sync".to_string())?;
+
+            let plan_path = if Path::new(plan_str).is_absolute() {
+                PathBuf::from(plan_str)
+            } else {
+                repo_root.join(plan_str)
+            };
+
+            let plan_content = std::fs::read_to_string(&plan_path)
+                .map_err(|e| format!("Failed to read plan at {}: {}", plan_path.display(), e))?;
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let mut state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+
+            let report = sync_with_plan(&mut state, &plan_content)?;
+            state.plan_path = Some(plan_path.clone());
+
+            let target_path = if let Some(out_str) = args.get("out").and_then(Value::as_str) {
+                if Path::new(out_str).is_absolute() {
+                    PathBuf::from(out_str)
+                } else {
+                    repo_root.join(out_str)
+                }
+            } else {
+                state_path.clone()
+            };
+
+            save_state_atomic(&target_path, &state)
+                .map_err(|e| format!("Failed to write state: {}", e))?;
+
+            let mut text = format!("State synced with plan '{}':\n", plan_path.display());
+            for a in &report.added {
+                text.push_str(&format!("  + {}\n", a));
+            }
+            for r in &report.removed {
+                text.push_str(&format!("  - {}\n", r));
+            }
+            if report.preserved_completed > 0 {
+                text.push_str(&format!(
+                    "  {} completed task(s) preserved.\n",
+                    report.preserved_completed
+                ));
+            }
+            if let Some(ref active) = report.active_task {
+                text.push_str(&format!("Active: {}\n", active));
+            }
+            text.push_str(&format!("Pending: {}\n", report.pending));
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "report": &report,
+                "added": &report.added,
+                "removed": &report.removed,
+                "preserved_completed": report.preserved_completed,
+                "active_task": &report.active_task,
+                "pending": report.pending,
+                "output": text,
+                "text": text,
+                "content": [{ "type": "text", "text": text }]
+            }))
+        }
+        "state_doctor" => {
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let mut state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+
+            let plan_content = if let Some(plan_str) = args.get("plan").and_then(Value::as_str) {
+                let plan_path = if Path::new(plan_str).is_absolute() {
+                    PathBuf::from(plan_str)
+                } else {
+                    repo_root.join(plan_str)
+                };
+                Some(std::fs::read_to_string(&plan_path).map_err(|e| {
+                    format!("Failed to read plan at {}: {}", plan_path.display(), e)
+                })?)
+            } else {
+                None
+            };
+
+            let report = diagnose(&state, plan_content.as_deref());
+            let repair_flag = args.get("repair").and_then(Value::as_bool).unwrap_or(false);
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            let mut actions = Vec::new();
+            if repair_flag {
+                actions = repair(&mut state);
+                if !actions.is_empty() {
+                    save_state_atomic(&state_path, &state)
+                        .map_err(|e| format!("Failed to save repaired state: {}", e))?;
+                }
+            }
+
+            let mut text = String::new();
+            if report.is_healthy {
+                text.push_str("Doctor: state is healthy.\n");
+            } else {
+                text.push_str("Doctor found issues:\n");
+                for issue in &report.issues {
+                    text.push_str(&format!("  [!] {}\n", issue));
+                }
+            }
+            for w in &report.warnings {
+                text.push_str(&format!("  [*] {}\n", w));
+            }
+            if !actions.is_empty() {
+                text.push_str("Repairs made:\n");
+                for a in &actions {
+                    text.push_str(&format!("  + {}\n", a));
+                }
+            }
+
+            if as_json {
+                let pretty = serde_json::to_string_pretty(&serde_json::json!({
+                    "is_healthy": report.is_healthy,
+                    "issues": report.issues,
+                    "warnings": report.warnings,
+                    "repaired_actions": actions,
+                    "details": report.details,
+                }))
+                .map_err(|e| e.to_string())?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "is_healthy": report.is_healthy,
+                    "issues": report.issues,
+                    "warnings": report.warnings,
+                    "repaired_actions": actions,
+                    "details": report.details,
+                    "content": [{ "type": "text", "text": pretty }]
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "is_healthy": report.is_healthy,
+                    "issues": report.issues,
+                    "warnings": report.warnings,
+                    "repaired_actions": actions,
+                    "details": report.details,
+                    "output": text,
+                    "text": text,
+                    "content": [{ "type": "text", "text": text }]
+                }))
+            }
+        }
+        "state_validate" => {
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let body = std::fs::read_to_string(&state_path)
+                .map_err(|e| format!("Failed to read {}: {}", state_path.display(), e))?;
+            let raw: Value = serde_json::from_str(&body)
+                .map_err(|e| format!("Failed to parse {}: {}", state_path.display(), e))?;
+
+            let errors = validate_state(&raw);
+            if errors.is_empty() {
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "valid": true,
+                    "errors": Vec::<String>::new(),
+                    "output": "State is valid.",
+                    "text": "State is valid.",
+                    "content": [{ "type": "text", "text": "State is valid." }]
+                }))
+            } else {
+                let msg = format!("State is invalid ({} problem(s)).", errors.len());
+                let mut text = format!("State is invalid ({} problem(s)):\n", errors.len());
+                for err in &errors {
+                    text.push_str(&format!("  - {}\n", err));
+                }
+                Ok(serde_json::json!({
+                    "status": "error",
+                    "valid": false,
+                    "errors": errors,
+                    "output": text,
+                    "text": text,
+                    "content": [{ "type": "text", "text": msg }]
+                }))
+            }
+        }
+        "state_apply" => {
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let patch_val =
+                if let Some(p_val) = args.get("patch") {
+                    if let Some(s) = p_val.as_str() {
+                        let candidate = if Path::new(s).is_absolute() {
+                            PathBuf::from(s)
+                        } else {
+                            repo_root.join(s)
+                        };
+                        if candidate.is_file() {
+                            let content = std::fs::read_to_string(&candidate).map_err(|e| {
+                                format!("Failed to read patch file {}: {}", candidate.display(), e)
+                            })?;
+                            Some(serde_json::from_str::<Value>(&content).map_err(|e| {
+                                format!("Failed to parse patch file as JSON: {}", e)
+                            })?)
+                        } else {
+                            Some(serde_json::from_str::<Value>(s).map_err(|e| {
+                                format!("Failed to parse patch string as JSON: {}", e)
+                            })?)
+                        }
+                    } else if p_val.is_object() {
+                        Some(p_val.clone())
+                    } else {
+                        return Err(
+                            "Invalid 'patch' argument: must be JSON object or string".to_string()
+                        );
+                    }
+                } else {
+                    None
+                };
+
+            let note = args.get("note").and_then(Value::as_str);
+
+            if patch_val.is_none() && note.is_none() {
+                return Err("Nothing to apply: pass patch and/or note.".to_string());
+            }
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let body = std::fs::read_to_string(&state_path)
+                .map_err(|e| format!("Failed to read {}: {}", state_path.display(), e))?;
+            let mut state_val: Value = serde_json::from_str(&body)
+                .map_err(|e| format!("Failed to parse {}: {}", state_path.display(), e))?;
+
+            if let Some(ref p) = patch_val {
+                apply_patch(&mut state_val, p);
+            }
+
+            if let Some(n) = note {
+                append_ledger_note(&state_path, LedgerEntry::new("agent", n))
+                    .map_err(|e| format!("Failed to record note: {}", e))?;
+            }
+
+            let errors = validate_state(&state_val);
+            if !errors.is_empty() {
+                return Err(format!(
+                    "Patch would produce an invalid state; nothing written ({} problem(s)): {}",
+                    errors.len(),
+                    errors.join(", ")
+                ));
+            }
+
+            let save_path = if let Some(out_str) = args.get("out").and_then(Value::as_str) {
+                if Path::new(out_str).is_absolute() {
+                    PathBuf::from(out_str)
+                } else {
+                    repo_root.join(out_str)
+                }
+            } else {
+                state_path.clone()
+            };
+
+            save_json_atomic(&save_path, &state_val)?;
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "applied": true,
+                "note": note,
+                "output": "State updated.",
+                "text": "State updated.",
+                "content": [{ "type": "text", "text": "State updated." }]
+            }))
+        }
+        "state_list" => {
+            let repo_root = if let Some(arg) = args.get("state").and_then(Value::as_str) {
+                let p = if Path::new(arg).is_absolute() {
+                    PathBuf::from(arg)
+                } else {
+                    let base = args
+                        .get("repo_root")
+                        .or_else(|| args.get("cwd"))
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        });
+                    base.join(arg)
+                };
+                if p.is_dir() {
+                    if p.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
+                        p.parent().unwrap_or(&p).to_path_buf()
+                    } else if p.file_name().and_then(|s| s.to_str()) == Some("branches")
+                        && p.parent()
+                            .and_then(|pp| pp.file_name())
+                            .and_then(|s| s.to_str())
+                            == Some(STATE_DIR)
+                    {
+                        p.parent()
+                            .and_then(|pp| pp.parent())
+                            .unwrap_or(&p)
+                            .to_path_buf()
+                    } else {
+                        p
+                    }
+                } else {
+                    superstate_core::prompt::resolve_project_root(&p)
+                }
+            } else {
+                args.get("repo_root")
+                    .or_else(|| args.get("cwd"))
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    })
+            };
+
+            let state_dir = repo_root.join(STATE_DIR);
+            let mut summaries = Vec::new();
+
+            // 1. Scan .agent-state/branches/*.json
+            let branches_dir = state_dir.join("branches");
+            if branches_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&branches_dir) {
+                    let mut paths: Vec<PathBuf> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.is_file()
+                                && p.extension().and_then(|ext| ext.to_str()) == Some("json")
+                        })
+                        .collect();
+                    paths.sort();
+
+                    for path in paths {
+                        if let Ok(st) = load_state(&path) {
+                            let slug = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let total_steps = st.completed_tasks.len()
+                                + if st.active_task.is_some() { 1 } else { 0 }
+                                + st.pending_tasks.len();
+                            let active_task = st
+                                .active_task
+                                .as_ref()
+                                .map(|t| format!("{}: {}", t.id, t.title));
+                            let display_step = if st.status == ExecutionStatus::Completed {
+                                total_steps
+                            } else {
+                                st.step.min(total_steps)
+                            };
+                            summaries.push(BranchStateSummary {
+                                branch: slug,
+                                status: st.status,
+                                active_task,
+                                step: display_step,
+                                total_steps,
+                                base_branch: st.base_branch,
+                                state_file: path,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // 2. Scan .agent-state/state.json if present
+            let default_state_file = state_dir.join("state.json");
+            if default_state_file.is_file() {
+                if let Ok(st) = load_state(&default_state_file) {
+                    let total_steps = st.completed_tasks.len()
+                        + if st.active_task.is_some() { 1 } else { 0 }
+                        + st.pending_tasks.len();
+                    let active_task = st
+                        .active_task
+                        .as_ref()
+                        .map(|t| format!("{}: {}", t.id, t.title));
+                    let default_branch_name = WorktreeManager::new(&repo_root)
+                        .map(|m| m.default_branch())
+                        .unwrap_or_else(|_| "main".to_string());
+                    let branch_display = format!("{} (default)", default_branch_name);
+                    let display_step = if st.status == ExecutionStatus::Completed {
+                        total_steps
+                    } else {
+                        st.step.min(total_steps)
+                    };
+                    summaries.push(BranchStateSummary {
+                        branch: branch_display,
+                        status: st.status,
+                        active_task,
+                        step: display_step,
+                        total_steps,
+                        base_branch: st.base_branch.or(Some(default_branch_name)),
+                        state_file: default_state_file,
+                    });
+                }
+            }
+
+            // 3. Scan .wt/* worktree directories if repo exists
+            let wt_dir = repo_root.join(".wt");
+            if wt_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&wt_dir) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            let wt_state = p.join(STATE_DIR).join("state.json");
+                            if wt_state.is_file()
+                                && !summaries.iter().any(|s| s.state_file == wt_state)
+                            {
+                                if let Ok(st) = load_state(&wt_state) {
+                                    let wt_name =
+                                        p.file_name().and_then(|s| s.to_str()).unwrap_or("wt");
+                                    let total_steps = st.completed_tasks.len()
+                                        + if st.active_task.is_some() { 1 } else { 0 }
+                                        + st.pending_tasks.len();
+                                    let active_task = st
+                                        .active_task
+                                        .as_ref()
+                                        .map(|t| format!("{}: {}", t.id, t.title));
+                                    let display_step = if st.status == ExecutionStatus::Completed {
+                                        total_steps
+                                    } else {
+                                        st.step.min(total_steps)
+                                    };
+                                    summaries.push(BranchStateSummary {
+                                        branch: format!("{} (worktree)", wt_name),
+                                        status: st.status,
+                                        active_task,
+                                        step: display_step,
+                                        total_steps,
+                                        base_branch: st.base_branch,
+                                        state_file: wt_state,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            summaries.sort_by(|a, b| a.branch.cmp(&b.branch));
+
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            let summaries_val: Vec<Value> = summaries
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "branch": s.branch,
+                        "status": format!("{:?}", s.status),
+                        "active_task": s.active_task,
+                        "step": s.step,
+                        "total_steps": s.total_steps,
+                        "base_branch": s.base_branch,
+                        "state_file": s.state_file.display().to_string(),
+                    })
+                })
+                .collect();
+
+            let mut text = String::from("Active & Completed Branches:\n");
+            text.push_str(&format!(
+                "  {:<26} {:<12} {:<24} {:<6} {:<20}\n",
+                "Branch", "Status", "Active Task", "Step", "Base Branch"
+            ));
+            for s in &summaries {
+                let status_str = match s.status {
+                    ExecutionStatus::NotStarted => "NotStarted",
+                    ExecutionStatus::InProgress => "InProgress",
+                    ExecutionStatus::Completed => "Completed",
+                    ExecutionStatus::Failed => "Failed",
+                    ExecutionStatus::Blocked => "Blocked",
+                };
+                let task_str = s.active_task.as_deref().unwrap_or("-");
+                let step_str = format!("{}/{}", s.step, s.total_steps);
+                let base_str = s.base_branch.as_deref().unwrap_or("-");
+                text.push_str(&format!(
+                    "  {:<26} {:<12} {:<24} {:<6} {:<20}\n",
+                    s.branch,
+                    status_str,
+                    if task_str.len() > 22 {
+                        &task_str[..22]
+                    } else {
+                        task_str
+                    },
+                    step_str,
+                    base_str
+                ));
+            }
+
+            if as_json {
+                let pretty = serde_json::to_string_pretty(&summaries_val)
+                    .map_err(|e| format!("Failed to serialize summaries: {}", e))?;
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "states": summaries_val,
+                    "branches": summaries_val,
+                    "content": [{ "type": "text", "text": pretty }]
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "states": summaries_val,
+                    "branches": summaries_val,
+                    "output": text,
+                    "text": text,
+                    "content": [{ "type": "text", "text": text }]
+                }))
+            }
         }
         unknown => Err(format!("Unknown tool: {}", unknown)),
     }
