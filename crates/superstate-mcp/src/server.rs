@@ -654,9 +654,22 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             }))
         }
         "state_next" | "state_step" => {
+            let verify_stage = args
+                .get("verify_stage")
+                .and_then(|v| v.as_str())
+                .unwrap_or("milestone");
+
+            if verify_stage != "milestone" && verify_stage != "final" {
+                return Err(format!(
+                    "Invalid verify_stage '{}'. Must be 'milestone' or 'final'",
+                    verify_stage
+                ));
+            }
+
             let verify_cmd = args
                 .get("verify_cmd")
                 .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
                 .map(ToString::to_string);
 
             let verify_git_clean = args
@@ -791,6 +804,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let mut res_obj = serde_json::json!({
                 "status": "success",
                 "step": state.step,
+                "stage": verify_stage,
                 "active_task": state.active_task,
                 "active_worktree": state.active_worktree.as_ref().map(|p| p.display().to_string()),
                 "active_branch": state.active_branch,
@@ -1567,7 +1581,10 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Merge worktree branch");
-            let verify_full_suite = args.get("verify_full_suite").and_then(|v| v.as_str());
+            let verify_full_suite = args
+                .get("verify_full_suite")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty());
 
             let isolated = resolve_worktree_for_merge(&repo_root, branch, base)?;
             let _ = isolated.auto_commit_if_dirty(message);
@@ -1576,7 +1593,11 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             // If verification fails (non-zero exit), abort before merging into base so the
             // isolated worktree remains intact for debugging and regressions are kept out of base.
             if let Some(cmd) = verify_full_suite {
-                let gate_res = execute_preflight(cmd, &isolated.path)?;
+                let gate_res = execute_preflight_with_timeout(
+                    cmd,
+                    &isolated.path,
+                    std::time::Duration::from_secs(600),
+                )?;
                 if gate_res.exit_code != 0 {
                     return Err(format!(
                         "Pre-merge verification failed (exit code {}):\nSTDOUT:\n{}\nSTDERR:\n{}",
