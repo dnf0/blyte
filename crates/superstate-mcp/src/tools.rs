@@ -18,6 +18,7 @@ pub struct McpToolInputSchema {
 pub struct McpTool {
     pub name: String,
     pub description: String,
+    #[serde(rename = "inputSchema", alias = "input_schema")]
     pub input_schema: McpToolInputSchema,
 }
 
@@ -217,7 +218,13 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
                     "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
-                    "patch": { "type": "string", "description": "Path to patch JSON file (null values delete fields)" },
+                    "patch": {
+                        "description": "RFC 7396 JSON merge patch object or file path/JSON string",
+                        "oneOf": [
+                            { "type": "object" },
+                            { "type": "string" }
+                        ]
+                    },
                     "note": { "type": "string", "description": "Optional note to append to the epistemic ledger" },
                     "out": { "type": "string", "description": "Write modified state here instead of in place" }
                 }),

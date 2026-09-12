@@ -2461,7 +2461,12 @@ fn clean_orphaned_worktrees(repo_root: &Path, force: bool) -> Result<(usize, Vec
                         let _ = std::fs::remove_dir_all(&path);
 
                         // Check if an orphaned branch corresponding to this dir exists
-                        let candidate_branches = [format!("wt/{}", dir_name), dir_name.clone()];
+                        let mut candidate_branches =
+                            vec![format!("wt/{}", dir_name), dir_name.clone()];
+                        if let Some(stripped) = dir_name.strip_prefix("wt-") {
+                            candidate_branches.push(format!("wt/{}", stripped));
+                            candidate_branches.push(stripped.to_string());
+                        }
                         let mut branch_deleted = false;
                         for cand in &candidate_branches {
                             if !active_branches.contains(cand) {

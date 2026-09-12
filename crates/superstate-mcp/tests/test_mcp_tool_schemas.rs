@@ -190,7 +190,7 @@ fn test_tool_parameter_schemas_and_requirements() {
     let state_apply = find_tool("state_apply");
     let apply_props = &state_apply.input_schema.properties;
     assert_eq!(apply_props["state"]["type"], "string");
-    assert_eq!(apply_props["patch"]["type"], "string");
+    assert!(apply_props["patch"]["oneOf"].is_array());
     assert_eq!(apply_props["note"]["type"], "string");
     assert_eq!(apply_props["out"]["type"], "string");
 
@@ -229,4 +229,11 @@ fn test_tools_list_rpc_schema_parity() {
         .and_then(|v| v.as_array())
         .expect("tools array");
     assert_eq!(tools.len(), 25);
+    for t in tools {
+        assert!(
+            t.get("inputSchema").is_some(),
+            "Tool missing standard MCP inputSchema: {:?}",
+            t.get("name")
+        );
+    }
 }
