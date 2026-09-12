@@ -45,6 +45,7 @@ fn test_init_state_milestones_dag_construction() {
     assert_eq!(state.step, 1);
     assert!(state.plan_path.is_none());
     assert_eq!(state.base_branch, Some("feat/stripe-webhooks".to_string()));
+    assert_eq!(state.goal, Some("Implement Stripe webhooks".to_string()));
 
     let active = state
         .active_task
@@ -197,4 +198,30 @@ fn test_milestone_spec_and_execution_state_serde() {
     let json_no_branch = serde_json::to_string(&state_no_branch)
         .expect("ExecutionState serialization without base_branch must succeed");
     assert!(!json_no_branch.contains("base_branch"));
+
+    // Verify ExecutionState serialization includes goal when present
+    let state_with_goal = ExecutionState {
+        goal: Some("Build compiler".to_string()),
+        ..Default::default()
+    };
+    let json_with_goal = serde_json::to_string(&state_with_goal)
+        .expect("ExecutionState serialization with goal must succeed");
+    assert!(json_with_goal.contains(r#""goal":"Build compiler""#));
+
+    // Verify ExecutionState roundtrip deserialization preserves goal
+    let deserialized_with_goal: ExecutionState = serde_json::from_str(&json_with_goal)
+        .expect("ExecutionState deserialization with goal must succeed");
+    assert_eq!(
+        deserialized_with_goal.goal,
+        Some("Build compiler".to_string())
+    );
+
+    // Verify ExecutionState deserialization defaults goal to None when omitted
+    assert_eq!(deserialized_minimal.goal, None);
+
+    // Verify ExecutionState serialization omits goal when None (skip_serializing_if)
+    let state_no_goal = ExecutionState::default();
+    let json_no_goal = serde_json::to_string(&state_no_goal)
+        .expect("ExecutionState serialization without goal must succeed");
+    assert!(!json_no_goal.contains("goal"));
 }

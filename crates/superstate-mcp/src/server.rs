@@ -20,6 +20,7 @@ use superstate_core::verifier::execute_all_gates;
 use superstate_worktree::manager::{
     ensure_git_baseline, ensure_git_exclude, IsolatedWorktree, WorktreeManager,
 };
+use superstate_worktree::types::WorktreeConfig;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -370,15 +371,17 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
-            let no_worktree = args
-                .get("no_worktree")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let no_worktree = if let Some(nw) = args.get("no_worktree").and_then(Value::as_bool) {
+                nw
+            } else {
+                !args
+                    .get("worktree")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            };
 
             // Ensure baseline repository setup and git exclude invariants
             ensure_git_baseline(&repo_root);
@@ -520,21 +523,15 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             }))
         }
         "state_init" => {
-            let plan = args
-                .get("plan")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'plan'".to_string())?;
-
             let repo_root = args
                 .get("repo_root")
+                .or_else(|| args.get("cwd"))
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             if let Some(parent) = state_path.parent() {
                 std::fs::create_dir_all(parent)
@@ -542,9 +539,81 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             }
 
             ensure_git_baseline(&repo_root);
-            let plan_path = PathBuf::from(plan);
-            let state = init_state_from_plan(&plan_path, &state_path)
-                .map_err(|e| format!("Plan parse error: {}", e))?;
+
+            let no_worktree = if let Some(nw) = args.get("no_worktree").and_then(Value::as_bool) {
+                nw
+            } else {
+                !args
+                    .get("worktree")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            };
+
+            let base_branch = if repo_root.join(".git").exists() {
+                WorktreeManager::new(&repo_root)
+                    .ok()
+                    .and_then(|m| m.current_branch().ok())
+            } else {
+                None
+            };
+
+            let mut state = if let Some(plan) = args.get("plan").and_then(|v| v.as_str()) {
+                let plan_path = PathBuf::from(plan);
+                let mut st = init_state_from_plan(&plan_path, &state_path)
+                    .map_err(|e| format!("Plan parse error: {}", e))?;
+                if st.base_branch.is_none() {
+                    st.base_branch = base_branch.clone();
+                }
+                st.no_worktree = no_worktree;
+                st
+            } else if let Some(milestones_val) = args.get("milestones") {
+                let milestones: Vec<MilestoneSpec> = serde_json::from_value(milestones_val.clone())
+                    .map_err(|e| format!("Invalid milestones array: {}", e))?;
+                let goal = args.get("goal").and_then(|v| v.as_str());
+                init_state_milestones(goal, milestones, base_branch.as_deref(), no_worktree)
+                    .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?
+            } else if let Some(goal) = args.get("goal").and_then(|v| v.as_str()) {
+                let verify_cmd = args
+                    .get("verify_cmd")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
+                let files_modify: Vec<PathBuf> = args
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str())
+                            .map(PathBuf::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut st = init_state_direct(goal, verify_cmd, files_modify, no_worktree);
+                st.base_branch = base_branch.clone();
+                st
+            } else {
+                return Err(
+                    "Must provide either 'plan', 'goal' with 'verify_cmd', or 'milestones'"
+                        .to_string(),
+                );
+            };
+
+            if !no_worktree && repo_root.join(".git").exists() {
+                ensure_git_exclude(&repo_root);
+                let manager = WorktreeManager::new(&repo_root)
+                    .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+                if let Some(ref active) = state.active_task {
+                    let wt = manager
+                        .ensure_task_worktree(&active.id, base_branch.as_deref())
+                        .map_err(|e| {
+                            format!("Failed to ensure worktree for task {}: {}", active.id, e)
+                        })?;
+                    state.active_worktree = Some(wt.path.clone());
+                    state.active_branch = Some(wt.branch.clone());
+                }
+            }
+
+            save_state_atomic(&state_path, &state)
+                .map_err(|e| format!("Failed to save state: {}", e))?;
 
             Ok(serde_json::json!({
                 "status": "success",
@@ -570,10 +639,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             let mut state =
                 load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
@@ -707,10 +774,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
             let task = args.get("task").and_then(|v| v.as_str());
@@ -740,10 +805,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             append_ledger_note(&state_path, LedgerEntry::new(author, note))
                 .map_err(|e| format!("Note error: {}", e))?;
@@ -761,13 +824,10 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
-            let state =
-                load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
+            let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
 
             Ok(serde_json::json!({
                 "status": "success",
@@ -799,8 +859,125 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 "diff": diff
             }))
         }
+        "worktree_create" => {
+            let branch = args
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
+
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let base = args.get("base").and_then(|v| v.as_str());
+            let custom_path = args.get("path").and_then(|v| v.as_str()).map(PathBuf::from);
+
+            ensure_git_exclude(&repo_root);
+            let manager = WorktreeManager::new(&repo_root)
+                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+
+            let config = WorktreeConfig {
+                base_path: repo_root.clone(),
+                branch: branch.to_string(),
+                base_branch: base.map(ToString::to_string),
+                worktree_path: custom_path,
+                cache_dirs: vec![],
+            };
+
+            let isolated = manager
+                .create(&config)
+                .map_err(|e| format!("Failed to create worktree: {}", e))?;
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "branch": isolated.branch,
+                "worktree_path": isolated.path.display().to_string(),
+            }))
+        }
+        "worktree_merge" => {
+            let branch = args
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
+
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let base = args.get("base").and_then(|v| v.as_str());
+            let message = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Merge worktree branch");
+
+            let isolated = resolve_worktree_for_merge(&repo_root, branch, base)?;
+            let _ = isolated.auto_commit_if_dirty(message);
+            isolated
+                .merge_into_base(message)
+                .map_err(|e| format!("Failed to merge worktree: {}", e))?;
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "branch": branch,
+                "base": isolated.base_branch,
+            }))
+        }
         unknown => Err(format!("Unknown tool: {}", unknown)),
     }
+}
+
+fn resolve_worktree_for_merge(
+    repo: &Path,
+    branch: &str,
+    expected_base: Option<&str>,
+) -> Result<IsolatedWorktree, String> {
+    let manager = WorktreeManager::new(repo).map_err(|e| e.to_string())?;
+    let list = manager.list().map_err(|e| e.to_string())?;
+
+    let primary_wt = list
+        .iter()
+        .find(|w| w.is_main)
+        .cloned()
+        .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
+
+    let wt = list
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some(branch))
+        .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
+
+    if wt.is_main {
+        return Err(format!("Cannot merge primary worktree branch '{}'", branch));
+    }
+
+    let base_branch = expected_base
+        .map(|s| s.to_string())
+        .or_else(|| primary_wt.branch.clone())
+        .unwrap_or_else(|| "main".to_string());
+
+    if primary_wt.branch.is_none() {
+        return Err(
+            "Cannot merge: primary repository worktree is in a detached HEAD state".to_string(),
+        );
+    }
+    if primary_wt.branch.as_deref() != Some(&base_branch) {
+        return Err(format!(
+            "Primary worktree is checked out to {:?}, expected target base branch '{}'",
+            primary_wt.branch, base_branch
+        ));
+    }
+
+    Ok(IsolatedWorktree {
+        branch: branch.to_string(),
+        path: wt.path,
+        base_branch,
+        repo_root: primary_wt.path,
+    })
 }
 
 pub fn handle_json_rpc(req: JsonRpcRequest) -> JsonRpcResponse {

@@ -50,7 +50,13 @@ fn test_cli_init_milestones_from_json_string() {
     let json_milestones =
         r#"[{"title":"Step 1","verify_cmd":"true"},{"title":"Step 2","verify_cmd":"true"}]"#;
     let output = Command::new(bin())
-        .args(["state", "init", "--milestones", json_milestones])
+        .args([
+            "state",
+            "init",
+            "--milestones",
+            json_milestones,
+            "--worktree",
+        ])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state init");
@@ -87,9 +93,15 @@ fn test_cli_init_milestones_from_json_string() {
     assert_eq!(state.pending_tasks[0].depends_on, vec!["task-1"]);
 
     let wt_task_1 = repo_root.join(".wt").join("feat-cli-feature-task-1");
-    assert!(wt_task_1.exists(), ".wt/feat-cli-feature-task-1 directory must exist");
+    assert!(
+        wt_task_1.exists(),
+        ".wt/feat-cli-feature-task-1 directory must exist"
+    );
     assert_eq!(state.active_worktree, Some(wt_task_1));
-    assert_eq!(state.active_branch, Some("wt/feat-cli-feature-task-1".to_string()));
+    assert_eq!(
+        state.active_branch,
+        Some("wt/feat-cli-feature-task-1".to_string())
+    );
 
     // Verify superstate state show displays Base Branch
     let show_output = Command::new(bin())
@@ -214,14 +226,23 @@ fn test_cli_milestones_sequential_progression() {
     let json_milestones =
         r#"[{"title":"Step 1","verify_cmd":"true"},{"title":"Step 2","verify_cmd":"true"}]"#;
     let init_out = Command::new(bin())
-        .args(["state", "init", "--milestones", json_milestones])
+        .args([
+            "state",
+            "init",
+            "--milestones",
+            json_milestones,
+            "--worktree",
+        ])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state init");
     assert!(init_out.status.success());
 
     let wt_task_1 = repo_root.join(".wt").join("feat-cli-feature-task-1");
-    assert!(wt_task_1.exists(), ".wt/feat-cli-feature-task-1 must exist after init");
+    assert!(
+        wt_task_1.exists(),
+        ".wt/feat-cli-feature-task-1 must exist after init"
+    );
 
     // Modify a file in .wt/feat-cli-feature-task-1 and commit it
     let file_in_wt1 = wt_task_1.join("step1.txt");
@@ -295,7 +316,10 @@ fn test_cli_milestones_sequential_progression() {
     assert_eq!(active_task.id, "task-2");
     assert_eq!(active_task.title, "Step 2");
     assert_eq!(state.active_worktree, Some(wt_task_2));
-    assert_eq!(state.active_branch, Some("wt/feat-cli-feature-task-2".to_string()));
+    assert_eq!(
+        state.active_branch,
+        Some("wt/feat-cli-feature-task-2".to_string())
+    );
     assert_eq!(state.completed_tasks.len(), 1);
     assert_eq!(state.completed_tasks[0].id, "task-1");
 }

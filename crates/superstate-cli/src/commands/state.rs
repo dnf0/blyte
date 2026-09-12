@@ -126,11 +126,7 @@ pub fn resolve_effective_state_path(state_arg: &Path, cwd: &Path) -> PathBuf {
 }
 
 /// List active and completed branch-scoped states.
-pub fn cmd_list(
-    state_arg: Option<&Path>,
-    as_json: bool,
-    cwd: &Path,
-) -> Result<(), String> {
+pub fn cmd_list(state_arg: Option<&Path>, as_json: bool, cwd: &Path) -> Result<(), String> {
     let repo_root = if let Some(arg) = state_arg {
         let p = resolve_state_path(arg, cwd);
         if p.is_dir() {
@@ -337,6 +333,9 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
         None
     };
 
+    let use_worktree = args.use_worktree();
+    let no_worktree = !use_worktree;
+
     // Direct milestones array initialization branch: constructs sequential DAG in-memory
     if let Some(ref raw_milestones) = args.milestones {
         // Read milestone JSON directly from string or piped standard input if '-'
@@ -360,12 +359,12 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
             args.goal.as_deref(),
             parsed,
             base_branch.as_deref(),
-            args.no_worktree,
+            no_worktree,
         )
         .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?;
 
-        // Provision isolated worktree for initial active task unless no_worktree is set
-        if !args.no_worktree && root.join(".git").exists() {
+        // Provision isolated worktree for initial active task only if use_worktree is set
+        if use_worktree && root.join(".git").exists() {
             ensure_git_exclude(&root);
             let manager = WorktreeManager::new(&root)
                 .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
@@ -408,11 +407,11 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
             })
             .unwrap_or_default();
 
-        let mut state = init_state_direct(goal, verify_cmd, files_modify, args.no_worktree);
+        let mut state = init_state_direct(goal, verify_cmd, files_modify, no_worktree);
         state.base_branch = base_branch.clone();
 
-        // Provision isolated worktree for the active task unless no_worktree is explicitly set
-        if !args.no_worktree && root.join(".git").exists() {
+        // Provision isolated worktree for the active task only if use_worktree is set
+        if use_worktree && root.join(".git").exists() {
             ensure_git_exclude(&root);
             let manager = WorktreeManager::new(&root)
                 .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
@@ -444,9 +443,7 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
         if state.base_branch.is_none() {
             state.base_branch = base_branch.clone();
         }
-        if args.no_worktree {
-            state.no_worktree = true;
-        }
+        state.no_worktree = no_worktree;
         save_state_atomic(state_path, &state)
             .map_err(|e| format!("Failed to save state: {}", e))?;
         println!("State initialized at {}", state_path.display());
@@ -1191,7 +1188,12 @@ pub fn cmd_exec(
     let mut advanced = false;
 
     if passed && advance {
-        cmd_next(state_path, Some(verify_cmd.to_string()), verify_git_clean, None)?;
+        cmd_next(
+            state_path,
+            Some(verify_cmd.to_string()),
+            verify_git_clean,
+            None,
+        )?;
         advanced = true;
     } else if !passed {
         // Record why, so the failure survives in the state rather than only in

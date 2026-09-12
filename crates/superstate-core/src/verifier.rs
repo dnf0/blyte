@@ -94,7 +94,9 @@ pub fn verify_git_clean_filtered(
                 return true;
             }
             let filename = l.split_whitespace().nth(1).unwrap_or(l);
-            !patterns.iter().any(|pat| filename.contains(pat) || filename == *pat)
+            !patterns
+                .iter()
+                .any(|pat| filename.contains(pat) || filename == *pat)
         })
         .collect();
 

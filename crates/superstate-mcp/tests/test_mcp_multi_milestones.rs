@@ -46,6 +46,7 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
             { "title": "T1", "verify_cmd": "true" },
             { "title": "T2", "verify_cmd": "true" }
         ],
+        "worktree": true,
         "repo_root": repo_root.to_str().unwrap()
     });
 
@@ -74,7 +75,10 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
         .join(".agent-state")
         .join("branches")
         .join("feat-multi-task-flow.json");
-    assert!(state_file.exists(), ".agent-state/branches/feat-multi-task-flow.json must exist");
+    assert!(
+        state_file.exists(),
+        ".agent-state/branches/feat-multi-task-flow.json must exist"
+    );
     let state_content = std::fs::read_to_string(&state_file).unwrap();
     let state_json: serde_json::Value = serde_json::from_str(&state_content).unwrap();
 
@@ -97,8 +101,14 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
 
     // Asserts .wt/feat-multi-task-flow-task-1 exists
     let wt_task1 = repo_root.join(".wt").join("feat-multi-task-flow-task-1");
-    assert!(wt_task1.exists(), ".wt/feat-multi-task-flow-task-1 should exist on disk");
-    assert!(wt_task1.is_dir(), ".wt/feat-multi-task-flow-task-1 should be a directory");
+    assert!(
+        wt_task1.exists(),
+        ".wt/feat-multi-task-flow-task-1 should exist on disk"
+    );
+    assert!(
+        wt_task1.is_dir(),
+        ".wt/feat-multi-task-flow-task-1 should be a directory"
+    );
 }
 
 #[test]
@@ -139,13 +149,17 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
             { "title": "T1", "verify_cmd": "true" },
             { "title": "T2", "verify_cmd": "true" }
         ],
+        "worktree": true,
         "repo_root": repo_root.to_str().unwrap()
     });
     let _handoff_res = handle_tool_call("superstate_handoff", &handoff_args)
         .expect("superstate_handoff should succeed");
 
     let wt_task1 = repo_root.join(".wt").join("feat-multi-task-flow-task-1");
-    assert!(wt_task1.exists(), ".wt/feat-multi-task-flow-task-1 should exist initially");
+    assert!(
+        wt_task1.exists(),
+        ".wt/feat-multi-task-flow-task-1 should exist initially"
+    );
 
     // Write an artifact inside .wt/feat-multi-task-flow-task-1 to ensure it commits and merges
     std::fs::write(wt_task1.join("task1_artifact.txt"), "task 1 done").unwrap();
@@ -186,7 +200,10 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
         wt_task2.exists(),
         ".wt/feat-multi-task-flow-task-2 should be provisioned on disk"
     );
-    assert!(wt_task2.is_dir(), ".wt/feat-multi-task-flow-task-2 should be a directory");
+    assert!(
+        wt_task2.is_dir(),
+        ".wt/feat-multi-task-flow-task-2 should be a directory"
+    );
 
     // Asserts active_task.id is task-2
     assert_eq!(

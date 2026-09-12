@@ -1,3 +1,4 @@
+use superstate_core::state_machine::load_state;
 use superstate_mcp::server::{handle_json_rpc, JsonRpcRequest};
 use tempfile::tempdir;
 
@@ -32,6 +33,14 @@ fn test_tools_list_contains_preflight_and_handoff() {
     assert!(
         tool_names.contains(&"superstate_handoff"),
         "tools/list must contain superstate_handoff"
+    );
+    assert!(
+        tool_names.contains(&"worktree_create"),
+        "tools/list must contain worktree_create"
+    );
+    assert!(
+        tool_names.contains(&"worktree_merge"),
+        "tools/list must contain worktree_merge"
     );
 }
 
@@ -451,5 +460,205 @@ fn test_execute_preflight_timeout() {
         err.contains("timed out"),
         "error should indicate timeout, got: {}",
         err
+    );
+}
+
+#[test]
+fn test_tools_call_state_init_goal_default_in_place() {
+    let temp = tempdir().unwrap();
+    let repo_root = temp.path();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(serde_json::json!(20)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "state_init",
+            "arguments": {
+                "goal": "Implement in-place direct init",
+                "verify_cmd": "echo ok",
+                "repo_root": repo_root.to_str().unwrap()
+            }
+        })),
+    };
+
+    let resp = handle_json_rpc(req);
+    assert!(
+        resp.error.is_none(),
+        "tools/call state_init returned error: {:?}",
+        resp.error
+    );
+    let res = resp.result.expect("result should be present");
+    assert_eq!(res["status"], "success");
+    assert_eq!(res["active_task"]["id"], "task-1");
+
+    let state_file = repo_root.join(".agent-state").join("state.json");
+    assert!(state_file.exists());
+    let state = load_state(&state_file).unwrap();
+    assert!(
+        state.no_worktree,
+        "state.no_worktree must be true by default in MCP state_init"
+    );
+    assert_eq!(state.active_worktree, None);
+    assert!(!repo_root.join(".wt").exists());
+}
+
+#[test]
+fn test_tools_call_state_init_goal_with_worktree() {
+    let temp = tempdir().unwrap();
+    let repo_root = temp.path();
+
+    // Baseline git repo
+    let _ = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(repo_root)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Superstate Test"])
+        .current_dir(repo_root)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "superstate@test.local"])
+        .current_dir(repo_root)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args([
+            "commit",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "-m",
+            "chore: baseline",
+        ])
+        .current_dir(repo_root)
+        .status();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(serde_json::json!(21)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "state_init",
+            "arguments": {
+                "goal": "Implement isolated task",
+                "verify_cmd": "echo ok",
+                "worktree": true,
+                "repo_root": repo_root.to_str().unwrap()
+            }
+        })),
+    };
+
+    let resp = handle_json_rpc(req);
+    assert!(
+        resp.error.is_none(),
+        "tools/call state_init returned error: {:?}",
+        resp.error
+    );
+
+    let state_file = repo_root.join(".agent-state").join("state.json");
+    assert!(state_file.exists());
+    let state = load_state(&state_file).unwrap();
+    assert!(
+        !state.no_worktree,
+        "state.no_worktree must be false when worktree: true"
+    );
+    assert!(state.active_worktree.is_some());
+    assert!(repo_root.join(".wt").join("task-1").exists());
+}
+
+#[test]
+fn test_tools_call_worktree_create_and_merge() {
+    let temp = tempdir().unwrap();
+    let repo_root = temp.path();
+
+    // Baseline git repo
+    let _ = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(repo_root)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Superstate Test"])
+        .current_dir(repo_root)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "superstate@test.local"])
+        .current_dir(repo_root)
+        .status();
+    std::fs::write(repo_root.join("README.md"), b"# Base Repo\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(repo_root)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "--no-gpg-sign", "-m", "chore: baseline"])
+        .current_dir(repo_root)
+        .status();
+
+    // 1. Call worktree_create
+    let create_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(serde_json::json!(22)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "worktree_create",
+            "arguments": {
+                "branch": "wt/mcp-feature",
+                "base": "main",
+                "repo_root": repo_root.to_str().unwrap()
+            }
+        })),
+    };
+
+    let create_resp = handle_json_rpc(create_req);
+    assert!(
+        create_resp.error.is_none(),
+        "worktree_create returned error: {:?}",
+        create_resp.error
+    );
+    let create_res = create_resp.result.expect("result should be present");
+    assert_eq!(create_res["status"], "success");
+    assert_eq!(create_res["branch"], "wt/mcp-feature");
+
+    let wt_path = repo_root.join(".wt").join("wt-mcp-feature");
+    assert!(wt_path.exists(), "worktree checkout directory must exist");
+
+    // 2. Write a file and commit inside worktree
+    let feature_file = wt_path.join("mcp_feature.txt");
+    std::fs::write(&feature_file, b"mcp feature content\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "mcp_feature.txt"])
+        .current_dir(&wt_path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "feat: implement mcp feature"])
+        .current_dir(&wt_path)
+        .status();
+
+    // 3. Call worktree_merge
+    let merge_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(serde_json::json!(23)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "worktree_merge",
+            "arguments": {
+                "branch": "wt/mcp-feature",
+                "base": "main",
+                "message": "feat: merge mcp feature",
+                "repo_root": repo_root.to_str().unwrap()
+            }
+        })),
+    };
+
+    let merge_resp = handle_json_rpc(merge_req);
+    assert!(
+        merge_resp.error.is_none(),
+        "worktree_merge returned error: {:?}",
+        merge_resp.error
+    );
+
+    // 4. Verify file merged to base branch
+    assert!(
+        repo_root.join("mcp_feature.txt").exists(),
+        "mcp_feature.txt should exist in repo root after merge"
     );
 }

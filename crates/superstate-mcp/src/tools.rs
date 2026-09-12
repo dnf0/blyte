@@ -25,14 +25,68 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
     vec![
         McpTool {
             name: "state_init".to_string(),
-            description: "Initialize a DFA execution state machine from a markdown implementation plan".to_string(),
+            description: "Initialize a DFA execution state machine from a markdown implementation plan, goal, or milestones".to_string(),
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
                     "plan": { "type": "string", "description": "Path to implementation plan markdown file" },
-                    "state": { "type": "string", "description": "Path to state JSON output (default .agent-state/state.json)" }
+                    "state": { "type": "string", "description": "Path to state JSON output (default .agent-state/state.json)" },
+                    "goal": { "type": "string", "description": "Goal description for direct initialization without a plan" },
+                    "verify_cmd": { "type": "string", "description": "Verification command required when goal is provided" },
+                    "milestones": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "Milestone title or task name" },
+                                "verify_cmd": { "type": "string", "description": "Verification command that must exit 0" },
+                                "files": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Optional target files to modify"
+                                }
+                            },
+                            "required": ["title", "verify_cmd"]
+                        },
+                        "description": "Optional array of milestones for direct multi-task DAG initialization"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of files to modify"
+                    },
+                    "worktree": {
+                        "type": "boolean",
+                        "description": "Enable Git worktree isolation for tasks (default: false, runs in-place)"
+                    }
                 }),
-                required: vec!["plan".to_string()],
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "worktree_create".to_string(),
+            description: "Create an isolated Git worktree for parallel task execution".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "branch": { "type": "string", "description": "Branch name to create or checkout" },
+                    "base": { "type": "string", "description": "Optional base branch to branch off from (e.g. main)" },
+                    "path": { "type": "string", "description": "Optional custom destination path for worktree" }
+                }),
+                required: vec!["branch".to_string()],
+            },
+        },
+        McpTool {
+            name: "worktree_merge".to_string(),
+            description: "Merge an isolated Git worktree branch into the base branch".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "branch": { "type": "string", "description": "Branch name of the worktree to merge" },
+                    "base": { "type": "string", "description": "Optional base branch to merge into" },
+                    "message": { "type": "string", "description": "Optional commit message for the merge" }
+                }),
+                required: vec!["branch".to_string()],
             },
         },
         McpTool {
@@ -132,6 +186,10 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional target files to modify"
+                    },
+                    "worktree": {
+                        "type": "boolean",
+                        "description": "Enable Git worktree isolation for tasks (default: false, runs in-place)"
                     },
                     "no_worktree": {
                         "type": "boolean",

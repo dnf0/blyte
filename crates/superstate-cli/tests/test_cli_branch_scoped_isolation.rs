@@ -133,6 +133,7 @@ fn test_cli_worktree_reverse_lookup() {
             "Add Stripe",
             "--verify-cmd",
             "true",
+            "--worktree",
         ])
         .current_dir(dir.path())
         .output()
