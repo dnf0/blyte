@@ -21,6 +21,9 @@ pub struct InitArgs {
     /// Path to state JSON file (`--out` is accepted for reference parity)
     #[arg(short, long, alias = "out", default_value = DEFAULT_STATE)]
     pub state: PathBuf,
+    /// Enable Git worktree isolation for tasks (default: false, runs in-place)
+    #[arg(long, default_value_t = false)]
+    pub worktree: bool,
     /// Disable git worktree creation; operate in-place in workspace root
     #[arg(long)]
     pub no_worktree: bool,
@@ -54,7 +57,8 @@ impl Default for InitArgs {
         Self {
             plan: None,
             state: PathBuf::from(DEFAULT_STATE),
-            no_worktree: false,
+            worktree: false,
+            no_worktree: true,
             goal: None,
             verify_cmd: None,
             files: None,
@@ -64,11 +68,17 @@ impl Default for InitArgs {
 }
 
 impl InitArgs {
+    /// Returns whether worktree isolation should be used.
+    pub fn use_worktree(&self) -> bool {
+        self.worktree && !self.no_worktree
+    }
+
     /// Helper to construct InitArgs from a plan path.
     pub fn for_plan(plan: PathBuf, state: PathBuf, no_worktree: bool) -> Self {
         Self {
             plan: Some(plan),
             state,
+            worktree: !no_worktree,
             no_worktree,
             goal: None,
             verify_cmd: None,

@@ -46,6 +46,7 @@ fn test_mcp_superstate_handoff_with_milestones_array() {
             { "title": "T1", "verify_cmd": "true" },
             { "title": "T2", "verify_cmd": "true" }
         ],
+        "worktree": true,
         "repo_root": repo_root.to_str().unwrap()
     });
 
@@ -139,6 +140,7 @@ fn test_mcp_state_next_advances_and_provisions_task_2() {
             { "title": "T1", "verify_cmd": "true" },
             { "title": "T2", "verify_cmd": "true" }
         ],
+        "worktree": true,
         "repo_root": repo_root.to_str().unwrap()
     });
     let _handoff_res = handle_tool_call("superstate_handoff", &handoff_args)

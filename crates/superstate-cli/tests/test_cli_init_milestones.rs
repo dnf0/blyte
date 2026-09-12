@@ -50,7 +50,13 @@ fn test_cli_init_milestones_from_json_string() {
     let json_milestones =
         r#"[{"title":"Step 1","verify_cmd":"true"},{"title":"Step 2","verify_cmd":"true"}]"#;
     let output = Command::new(bin())
-        .args(["state", "init", "--milestones", json_milestones])
+        .args([
+            "state",
+            "init",
+            "--milestones",
+            json_milestones,
+            "--worktree",
+        ])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state init");
@@ -214,7 +220,13 @@ fn test_cli_milestones_sequential_progression() {
     let json_milestones =
         r#"[{"title":"Step 1","verify_cmd":"true"},{"title":"Step 2","verify_cmd":"true"}]"#;
     let init_out = Command::new(bin())
-        .args(["state", "init", "--milestones", json_milestones])
+        .args([
+            "state",
+            "init",
+            "--milestones",
+            json_milestones,
+            "--worktree",
+        ])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state init");
