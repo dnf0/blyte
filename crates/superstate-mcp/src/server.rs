@@ -754,9 +754,14 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                         .collect();
 
                     synthesized_verify_cmd_opt =
-                        synthesize_targeted_test_command(&repo_root, &impacted);
+                        synthesize_targeted_test_command(check_dir, &impacted);
 
                     impacted_tests_list = rel_tests;
+
+                    // Enforce synthesized targeted test command as a blocking verification gate
+                    if let Some(ref synth_cmd) = synthesized_verify_cmd_opt {
+                        task_to_verify.verification_cmd = Some(synth_cmd.clone());
+                    }
                 }
             }
 

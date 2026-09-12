@@ -92,6 +92,8 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 required: vec![],
             },
         },
+        // Advance active task in state machine with verification gates.
+        // Note: `state_step` is supported in runtime JSON-RPC dispatch as a backward-compatible alias.
         McpTool {
             name: "state_next".to_string(),
             description: "Advance active task in state machine with verification gates".to_string(),

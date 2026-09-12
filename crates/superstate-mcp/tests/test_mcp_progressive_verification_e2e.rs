@@ -301,3 +301,115 @@ fn test_state_next_infers_impacted_tests_for_empty_verify_cmd_milestone() {
         synth_cmd
     );
 }
+
+#[test]
+fn test_state_next_infers_impacted_tests_in_active_worktree_without_wt_prefix() {
+    let (_dir, repo_root) = setup_test_repo();
+
+    // Create baseline test structure on main branch
+    let src_dir = repo_root.join("src");
+    let tests_dir = repo_root.join("tests");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&tests_dir).unwrap();
+
+    let calc_src = src_dir.join("calc.py");
+    let calc_test = tests_dir.join("test_calc.py");
+    fs::write(&calc_src, "def add(a, b): return a + b\n").unwrap();
+    fs::write(&calc_test, "def test_add(): assert True\n").unwrap();
+
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "feat: initial calc and test"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+
+    // 1. superstate_handoff with no_worktree: false (provisions task worktree)
+    let handoff_args = json!({
+        "repo_root": repo_root.to_str().unwrap(),
+        "goal": "Test worktree-scoped impact command generation",
+        "milestones": [
+            {
+                "id": "task-1",
+                "title": "Worktree Inferred Test Milestone",
+                "verify_cmd": "true"
+            }
+        ],
+        "no_worktree": false
+    });
+    let handoff_res = handle_tool_call("superstate_handoff", &handoff_args)
+        .expect("superstate_handoff should succeed");
+    assert_eq!(handoff_res["status"], "ready");
+    let wt_path_str = handoff_res["worktree_path"]
+        .as_str()
+        .expect("worktree_path should be present");
+    let wt_path = PathBuf::from(wt_path_str);
+    assert!(wt_path.exists(), "worktree path must exist on disk");
+
+    // 2. Clear verification_cmd in state to trigger impacted test inference
+    let state_path = repo_root.join(".agent-state").join("state.json");
+    let mut state: superstate_core::models::ExecutionState =
+        superstate_core::state_machine::load_state(&state_path).unwrap();
+    assert!(
+        state.active_worktree.is_some(),
+        "active_worktree must be populated"
+    );
+    if let Some(ref mut task) = state.active_task {
+        task.verification_cmd = None;
+    }
+    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
+
+    // 3. Verify that a failing inferred test blocks state_next
+    let wt_calc_src = wt_path.join("src").join("calc.py");
+    let wt_calc_test = wt_path.join("tests").join("test_calc.py");
+    fs::write(&wt_calc_test, "def test_fail(): assert False\n").unwrap();
+    fs::write(&wt_calc_src, "def add(a, b): return a + b\n").unwrap();
+
+    let next_args = json!({
+        "repo_root": repo_root.to_str().unwrap(),
+        "verify_stage": "milestone"
+    });
+    let err_res = handle_tool_call("state_next", &next_args);
+    assert!(
+        err_res.is_err(),
+        "state_next must fail when synthesized targeted test fails"
+    );
+    let err_msg = err_res.unwrap_err();
+    assert!(
+        err_msg.contains("verify_cmd: pytest tests/test_calc.py") && err_msg.contains("FAILED"),
+        "error message should indicate verification_cmd gate failure, got: {}",
+        err_msg
+    );
+
+    // 4. Fix test in the isolated worktree
+    fs::write(&wt_calc_test, "def test_ok(): assert True\n").unwrap();
+    fs::write(&wt_calc_src, "def add(a, b): return a + b + 0\n").unwrap();
+
+    // 5. Advance with verify_stage: milestone
+    let res = handle_tool_call("state_next", &next_args)
+        .expect("state_next should succeed in worktree with inferred tests passing");
+    assert_eq!(res["status"], "success");
+    assert_eq!(res["stage"], "milestone");
+
+    // 6. Verify synthesized_verify_cmd does NOT contain ".wt/"
+    assert!(
+        res.get("synthesized_verify_cmd").is_some(),
+        "Response should include synthesized_verify_cmd, got: {:?}",
+        res
+    );
+    let synth_cmd = res["synthesized_verify_cmd"].as_str().unwrap();
+    assert!(
+        !synth_cmd.contains(".wt/"),
+        "synthesized_verify_cmd must not contain '.wt/' path prefix: {}",
+        synth_cmd
+    );
+    assert!(
+        synth_cmd.starts_with("pytest") && synth_cmd.contains("tests/test_calc.py"),
+        "synthesized_verify_cmd must target relative test path inside worktree root: {}",
+        synth_cmd
+    );
+}
