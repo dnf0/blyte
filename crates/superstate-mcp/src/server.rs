@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use superstate_core::ledger::append_ledger_note;
+use superstate_core::ledger::{append_ledger_note, read_ledger};
+use superstate_core::maintenance::{metrics, resume_briefing};
 use superstate_core::models::{LedgerEntry, MilestoneSpec};
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::prompt::render_turnkey_prompt;
+use superstate_core::resolve_project_root;
 use superstate_core::state_machine::{
     advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
     init_state_milestones, load_state, save_state_atomic, STATE_DIR,
@@ -840,6 +842,269 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     }
                 ]
             }))
+        }
+        "state_status" => {
+            // Resolve repository context and effective branch-scoped state path
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            // Load execution state and associated epistemic ledger history
+            let state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let ledger_entries = read_ledger(&state_path);
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            if as_json {
+                // Machine-readable format: serializes execution state directly matching CLI parity
+                let pretty = serde_json::to_string_pretty(&state)
+                    .map_err(|e| format!("Failed to serialize state: {}", e))?;
+                let mut val = serde_json::to_value(&state)
+                    .map_err(|e| format!("Failed to convert state to JSON value: {}", e))?;
+                if let Value::Object(ref mut map) = val {
+                    map.insert(
+                        "state".to_string(),
+                        serde_json::to_value(&state).unwrap_or_default(),
+                    );
+                    map.insert(
+                        "content".to_string(),
+                        serde_json::json!([{ "type": "text", "text": pretty }]),
+                    );
+                }
+                Ok(val)
+            } else {
+                // Human-readable summary: renders step, task progress, and recent epistemic notes
+                let mut text = String::new();
+                text.push_str(&format!("State Status: {:?}\n", state.status));
+                text.push_str(&format!("Step: {}\n", state.step));
+                if let Some(ref task) = state.active_task {
+                    text.push_str(&format!("Active Task: {}: {}\n", task.id, task.title));
+                } else {
+                    text.push_str("Active Task: None\n");
+                }
+                text.push_str(&format!(
+                    "Completed Tasks: {}\n",
+                    state.completed_tasks.len()
+                ));
+                text.push_str(&format!("Ledger Entries: {}\n", ledger_entries.len()));
+                for task in &state.completed_tasks {
+                    text.push_str(&format!("  ✓ {}: {}\n", task.id, task.title));
+                }
+                if !ledger_entries.is_empty() {
+                    text.push_str("\nRecent Notes (Epistemic Ledger):\n");
+                    for note in ledger_entries.iter().rev().take(5) {
+                        text.push_str(&format!("  • [{}] {}\n", note.author, note.note));
+                    }
+                }
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "output": text,
+                    "text": text,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        }
+                    ]
+                }))
+            }
+        }
+        "state_show" => {
+            // Resolve repository root and state path based on branch isolation
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            if as_json {
+                // Provide raw execution state in JSON format matching CLI show --json
+                let pretty = serde_json::to_string_pretty(&state)
+                    .map_err(|e| format!("Failed to serialize state: {}", e))?;
+                let mut val = serde_json::to_value(&state)
+                    .map_err(|e| format!("Failed to convert state to JSON value: {}", e))?;
+                if let Value::Object(ref mut map) = val {
+                    map.insert(
+                        "state".to_string(),
+                        serde_json::to_value(&state).unwrap_or_default(),
+                    );
+                    map.insert(
+                        "content".to_string(),
+                        serde_json::json!([{ "type": "text", "text": pretty }]),
+                    );
+                }
+                Ok(val)
+            } else {
+                // Markdown executive overview: summarizes active task, worktree, and verification command
+                let mut md = String::new();
+                md.push_str("# Superstate Execution Status\n");
+                md.push_str(&format!(
+                    "- **Status:** {:?} (Step {})\n",
+                    state.status, state.step
+                ));
+                if let Some(ref base) = state.base_branch {
+                    md.push_str(&format!("- **Base Branch:** `{}`\n", base));
+                }
+                if let Some(ref task) = state.active_task {
+                    md.push_str(&format!("- **Active Task:** {}: {}\n", task.id, task.title));
+                    if let Some(ref cmd) = task.verification_cmd {
+                        md.push_str(&format!("- **Verification Command:** `{}`\n", cmd));
+                    }
+                } else {
+                    md.push_str("- **Active Task:** None\n");
+                }
+                if let Some(ref wt) = state.active_worktree {
+                    if let Some(ref branch) = state.active_branch {
+                        md.push_str(&format!(
+                            "- **Active Worktree:** `{}` (branch `{}`)\n",
+                            wt.display(),
+                            branch
+                        ));
+                    } else {
+                        md.push_str(&format!("- **Active Worktree:** `{}`\n", wt.display()));
+                    }
+                }
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "markdown": md,
+                    "output": md,
+                    "text": md,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": md
+                        }
+                    ]
+                }))
+            }
+        }
+        "state_resume" => {
+            // Resolve project root and locate state file
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let root = if repo_root.join(".git").exists() {
+                repo_root
+            } else {
+                resolve_project_root(&state_path)
+            };
+
+            // Query recent git history to ground context for resumed agent session
+            let commits = std::process::Command::new("git")
+                .args(["log", "--oneline", "-5"])
+                .current_dir(&root)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let notes = read_ledger(&state_path);
+            let briefing = resume_briefing(&state, &notes, &commits);
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "briefing": briefing,
+                "output": briefing,
+                "text": briefing,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": briefing
+                    }
+                ]
+            }))
+        }
+        "state_metrics" => {
+            // Resolve state path and load execution state
+            let repo_root = args
+                .get("repo_root")
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+
+            let state =
+                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+            let notes = read_ledger(&state_path);
+
+            // Compute performance and completion telemetry metrics
+            let m = metrics(&state, notes.len());
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            if as_json {
+                let pretty = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
+                let mut val = serde_json::to_value(&m)
+                    .map_err(|e| format!("Failed to convert metrics to JSON value: {}", e))?;
+                if let Value::Object(ref mut map) = val {
+                    map.insert(
+                        "metrics".to_string(),
+                        serde_json::to_value(&m).unwrap_or_default(),
+                    );
+                    map.insert(
+                        "content".to_string(),
+                        serde_json::json!([{ "type": "text", "text": pretty }]),
+                    );
+                }
+                Ok(val)
+            } else {
+                let mut text = String::new();
+                text.push_str(&format!("Step:            {}\n", m.step));
+                text.push_str(&format!("Status:          {}\n", m.status));
+                text.push_str(&format!(
+                    "Tasks:           {}/{} complete ({}%)\n",
+                    m.tasks_completed, m.tasks_total, m.completion_pct
+                ));
+                text.push_str(&format!("Remaining:       {}\n", m.tasks_remaining));
+                text.push_str(&format!("Notes recorded:  {}\n", m.notes_recorded));
+                text.push_str(&format!("Errors recorded: {}\n", m.errors_recorded));
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "metrics": m,
+                    "output": text,
+                    "text": text,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        }
+                    ]
+                }))
+            }
         }
         "superstate_review" => {
             let repo_root = args
