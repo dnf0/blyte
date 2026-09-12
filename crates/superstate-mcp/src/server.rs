@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use superstate_core::impact::infer_impacted_tests;
 use superstate_core::ledger::{append_ledger_note, read_ledger};
 use superstate_core::maintenance::{diagnose, metrics, repair, resume_briefing, sync_with_plan};
 use superstate_core::models::{ExecutionStatus, LedgerEntry, MilestoneSpec};
@@ -714,6 +715,51 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .cloned()
                 .unwrap_or_else(|| repo_root.clone());
 
+            // Progressive staged verification: infer impacted tests for milestone stage when verification_cmd is empty
+            let mut impacted_tests_list: Vec<String> = Vec::new();
+            let mut synthesized_verify_cmd_opt: Option<String> = None;
+
+            if verify_stage == "milestone"
+                && task_to_verify
+                    .verification_cmd
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            {
+                // Discover impacted tests against base branch in target directory or repository root
+                let check_dir = if target_dir.exists() {
+                    &target_dir
+                } else {
+                    &repo_root
+                };
+
+                let mut impacted = infer_impacted_tests(check_dir, state.base_branch.as_deref());
+                // Fall back to repo_root discovery if target_dir returned no impacted tests
+                if impacted.is_empty() && check_dir != &repo_root {
+                    impacted = infer_impacted_tests(&repo_root, None);
+                }
+
+                if !impacted.is_empty() {
+                    // Extract relative path strings for response payload
+                    let rel_tests: Vec<String> = impacted
+                        .iter()
+                        .map(|p| {
+                            p.strip_prefix(check_dir)
+                                .or_else(|_| p.strip_prefix(&repo_root))
+                                .unwrap_or(p)
+                                .display()
+                                .to_string()
+                        })
+                        .collect();
+
+                    synthesized_verify_cmd_opt =
+                        synthesize_targeted_test_command(&repo_root, &impacted);
+
+                    impacted_tests_list = rel_tests;
+                }
+            }
+
             let results = execute_all_gates_filtered(
                 &target_dir,
                 &task_to_verify,
@@ -809,6 +855,16 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 "active_worktree": state.active_worktree.as_ref().map(|p| p.display().to_string()),
                 "active_branch": state.active_branch,
             });
+
+            // Note impacted tests discovered during milestone verification
+            if !impacted_tests_list.is_empty() {
+                res_obj["impacted_tests"] = serde_json::json!(impacted_tests_list);
+            }
+
+            // Include synthesized targeted test runner command if constructed
+            if let Some(ref synth) = synthesized_verify_cmd_opt {
+                res_obj["synthesized_verify_cmd"] = serde_json::json!(synth);
+            }
 
             if let Some(ref prompt) = turnkey_prompt_opt {
                 res_obj["turnkey_prompt"] = serde_json::Value::String(prompt.clone());
@@ -2582,6 +2638,94 @@ fn clean_orphaned_worktrees(repo_root: &Path, force: bool) -> Result<(usize, Vec
         .output();
 
     Ok((cleaned_count, cleaned_branches))
+}
+
+/// Synthesizes a targeted test runner command based on inferred test file paths.
+///
+/// Discovers the project test language family (Python, Rust, JavaScript/TypeScript, Go)
+/// from the provided test files and formats a targeted runner invocation referencing
+/// only the impacted test files.
+///
+/// # Parameters
+/// - `repo_root`: Repository root path used to relativize test file paths.
+/// - `tests`: Slice of absolute or relative test file paths to execute.
+///
+/// # Returns
+/// An `Option<String>` containing the synthesized runner command, or `None` if
+/// `tests` is empty or no valid files can be referenced.
+fn synthesize_targeted_test_command(repo_root: &Path, tests: &[PathBuf]) -> Option<String> {
+    // Guard clause: Return early if no candidate test files exist
+    if tests.is_empty() {
+        return None;
+    }
+
+    // Relativize all candidate paths against repo_root for clean command line strings
+    let rel_paths: Vec<PathBuf> = tests
+        .iter()
+        .map(|p| p.strip_prefix(repo_root).unwrap_or(p).to_path_buf())
+        .collect();
+
+    // Inspect file extensions to identify test runner ecosystem
+    let has_py = rel_paths
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("py"));
+    let has_rs = rel_paths
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"));
+    let has_js = rel_paths.iter().any(|p| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e == "ts" || e == "tsx" || e == "js" || e == "jsx")
+            .unwrap_or(false)
+    });
+    let has_go = rel_paths
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("go"));
+
+    if has_py {
+        // Python ecosystem: construct pytest invocation targeting impacted test modules
+        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
+        Some(format!("pytest {}", paths.join(" ")))
+    } else if has_rs {
+        // Rust ecosystem: construct cargo test invocation targeting integration test binaries
+        let mut test_targets = Vec::new();
+        for p in &rel_paths {
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                test_targets.push(format!("--test {}", stem));
+            }
+        }
+        if !test_targets.is_empty() {
+            Some(format!("cargo test {}", test_targets.join(" ")))
+        } else {
+            Some("cargo test".to_string())
+        }
+    } else if has_js {
+        // JavaScript/TypeScript ecosystem: pass test paths to npm test runner
+        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
+        Some(format!("npm test -- {}", paths.join(" ")))
+    } else if has_go {
+        // Go ecosystem: execute go test on parent package directories of impacted files
+        let mut dirs: Vec<String> = rel_paths
+            .iter()
+            .filter_map(|p| {
+                p.parent().map(|d| {
+                    let s = d.display().to_string();
+                    if s.is_empty() {
+                        ".".to_string()
+                    } else {
+                        format!("./{}", s)
+                    }
+                })
+            })
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        Some(format!("go test {}", dirs.join(" ")))
+    } else {
+        // Generic fallback: invoke test command with relative file paths
+        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
+        Some(format!("test {}", paths.join(" ")))
+    }
 }
 
 /// Returns list of paths that git rollback/clean operations must never delete.

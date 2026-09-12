@@ -99,6 +99,11 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
                     "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "verify_stage": {
+                        "type": "string",
+                        "enum": ["milestone", "final"],
+                        "description": "Verification stage: 'milestone' (default) executes scoped checks; 'final' enforces comprehensive verification before completing execution state"
+                    },
                     "verify_cmd": { "type": "string", "description": "Optional shell command to verify" },
                     "verify_git_clean": { "type": "boolean", "description": "Require clean git working tree" },
                     "ignore_untracked_glob": { "type": "string", "description": "Optional glob pattern of untracked files to ignore during git clean verification" }
@@ -308,7 +313,11 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                     "branch": { "type": "string", "description": "Branch name of the worktree to merge" },
                     "base": { "type": "string", "description": "Optional base branch to merge into" },
                     "message": { "type": "string", "description": "Optional commit message for the merge" },
-                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" },
+                    "verify_full_suite": {
+                        "type": "string",
+                        "description": "Optional pre-merge verification command executed in the isolated worktree before merging into base"
+                    }
                 }),
                 required: vec!["branch".to_string()],
             },
