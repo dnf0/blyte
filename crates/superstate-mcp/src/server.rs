@@ -1567,9 +1567,24 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Merge worktree branch");
+            let verify_full_suite = args.get("verify_full_suite").and_then(|v| v.as_str());
 
             let isolated = resolve_worktree_for_merge(&repo_root, branch, base)?;
             let _ = isolated.auto_commit_if_dirty(message);
+
+            // Enforce pre-merge verification gate if a full suite check command is specified.
+            // If verification fails (non-zero exit), abort before merging into base so the
+            // isolated worktree remains intact for debugging and regressions are kept out of base.
+            if let Some(cmd) = verify_full_suite {
+                let gate_res = execute_preflight(cmd, &isolated.path)?;
+                if gate_res.exit_code != 0 {
+                    return Err(format!(
+                        "Pre-merge verification failed (exit code {}):\nSTDOUT:\n{}\nSTDERR:\n{}",
+                        gate_res.exit_code, gate_res.stdout, gate_res.stderr
+                    ));
+                }
+            }
+
             isolated
                 .merge_into_base(message)
                 .map_err(|e| format!("Failed to merge worktree: {}", e))?;
