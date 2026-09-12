@@ -2672,6 +2672,12 @@ pub fn handle_json_rpc(req: JsonRpcRequest) -> JsonRpcResponse {
                 },
             }
         }
+        "notifications/initialized" | "notifications/cancelled" => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: req.id,
+            result: Some(serde_json::json!({})),
+            error: None,
+        },
         _ => JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             id: req.id,
@@ -2695,6 +2701,11 @@ pub fn run_stdio_mcp_server() -> Result<(), McpError> {
         }
 
         if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&line) {
+            // JSON-RPC 2.0 and MCP spec: notifications have no id and must not receive a response.
+            if req.id.is_none() || req.method.starts_with("notifications/") {
+                continue;
+            }
+
             let resp = handle_json_rpc(req);
             let resp_str = serde_json::to_string(&resp)?;
             writeln!(stdout, "{}", resp_str)?;
