@@ -118,6 +118,15 @@ pub fn render_turnkey_prompt(
         "You are an Implementer Subagent working on **{}: {}**.\n\n",
         active.id, active.title
     ));
+
+    // Inject the global objective and requirements if recorded in the state, providing
+    // full task specification context to the subagent before the individual milestone breakdown.
+    if let Some(ref goal) = state.goal {
+        rendered.push_str("## 🎯 Global Task Objective & Requirements\n");
+        rendered.push_str(goal.trim());
+        rendered.push_str("\n\n");
+    }
+
     rendered.push_str("## Task Specification\n");
     rendered.push_str(&format!("- Task: {}: {}\n", active.id, active.title));
     rendered.push_str(&format!("- ID: {}\n", active.id));

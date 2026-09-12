@@ -163,6 +163,9 @@ pub struct ExecutionState {
     /// Base branch that worktree changes merge back into upon task completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
+    /// High-level global task objective or prompt context for the entire workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
 }
 
 impl Default for ExecutionState {
@@ -181,6 +184,7 @@ impl Default for ExecutionState {
             active_branch: None,
             no_worktree: false,
             base_branch: None,
+            goal: None,
         }
     }
 }

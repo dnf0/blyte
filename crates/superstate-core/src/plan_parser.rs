@@ -157,6 +157,7 @@ pub fn init_state_from_plan(
         active_branch: None,
         no_worktree: false,
         base_branch: None,
+        goal: None,
     };
 
     save_state_atomic(state_path, &state)?;

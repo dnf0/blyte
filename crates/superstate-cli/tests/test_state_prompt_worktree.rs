@@ -180,6 +180,7 @@ fn test_state_prompt_provisions_worktree_from_state_json() {
         notes: vec![],
         no_worktree: false,
         base_branch: None,
+        goal: None,
     };
     superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
 
@@ -247,6 +248,7 @@ fn test_state_prompt_non_git_json_fallback() {
         notes: vec![],
         no_worktree: false,
         base_branch: None,
+        goal: None,
     };
     superstate_core::state_machine::save_state_atomic(&state_file, &initial_state).unwrap();
 

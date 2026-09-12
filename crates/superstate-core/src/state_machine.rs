@@ -102,6 +102,7 @@ pub fn init_state_direct(
         active_branch: None,
         no_worktree,
         base_branch: None,
+        goal: Some(goal.to_string()),
     }
 }
 
@@ -122,7 +123,7 @@ pub fn init_state_direct(
 /// # Errors
 /// Returns `StateError::InvalidTransition` if `milestones` is empty, or if any milestone has an empty title or verify command.
 pub fn init_state_milestones(
-    _goal: Option<&str>,
+    goal: Option<&str>,
     milestones: Vec<MilestoneSpec>,
     base_branch: Option<&str>,
     no_worktree: bool,
@@ -198,6 +199,7 @@ pub fn init_state_milestones(
         active_branch: None,
         no_worktree,
         base_branch: base_branch.map(ToString::to_string),
+        goal: goal.map(ToString::to_string),
     })
 }
 

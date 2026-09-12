@@ -146,6 +146,7 @@ fn test_init_state_direct() {
     assert_eq!(state.step, 1);
     assert!(state.plan_path.is_none());
     assert!(state.no_worktree);
+    assert_eq!(state.goal, Some("Build parser".to_string()));
     assert!(state.pending_tasks.is_empty());
     assert!(state.completed_tasks.is_empty());
 
