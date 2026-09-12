@@ -5,7 +5,10 @@ use superstate_core::prompt::render_turnkey_prompt;
 #[test]
 fn test_render_turnkey_prompt_includes_global_goal() {
     let state = ExecutionState {
-        goal: Some("Implement a high-performance streaming parser for JSON2 with byte-exact output.".to_string()),
+        goal: Some(
+            "Implement a high-performance streaming parser for JSON2 with byte-exact output."
+                .to_string(),
+        ),
         active_task: Some(TaskSpec {
             id: "task-1".to_string(),
             title: "Add streaming buffer".to_string(),
@@ -21,7 +24,9 @@ fn test_render_turnkey_prompt_includes_global_goal() {
     let rendered = render_turnkey_prompt(&state, &state_path, None, true, false).unwrap();
 
     assert!(rendered.contains("## 🎯 Global Task Objective & Requirements"));
-    assert!(rendered.contains("Implement a high-performance streaming parser for JSON2 with byte-exact output."));
+    assert!(rendered.contains(
+        "Implement a high-performance streaming parser for JSON2 with byte-exact output."
+    ));
     assert!(rendered.contains("Add streaming buffer"));
 }
 

@@ -287,7 +287,12 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             verify_cmd,
             verify_git_clean,
             ignore_untracked_glob,
-        } => commands::state::cmd_next(&resolve(state), verify_cmd, verify_git_clean, ignore_untracked_glob.as_deref()),
+        } => commands::state::cmd_next(
+            &resolve(state),
+            verify_cmd,
+            verify_git_clean,
+            ignore_untracked_glob.as_deref(),
+        ),
         StateCommands::Ready { state, json } => commands::state::cmd_ready(&resolve(state), json),
         StateCommands::Checkpoint { state } => commands::state::cmd_checkpoint(&resolve(state)),
         StateCommands::Rollback { state, reference } => {

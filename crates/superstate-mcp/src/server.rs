@@ -371,15 +371,16 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             let no_worktree = if let Some(nw) = args.get("no_worktree").and_then(Value::as_bool) {
                 nw
             } else {
-                !args.get("worktree").and_then(Value::as_bool).unwrap_or(false)
+                !args
+                    .get("worktree")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
             };
 
             // Ensure baseline repository setup and git exclude invariants
@@ -529,10 +530,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             if let Some(parent) = state_path.parent() {
                 std::fs::create_dir_all(parent)
@@ -544,7 +543,10 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let no_worktree = if let Some(nw) = args.get("no_worktree").and_then(Value::as_bool) {
                 nw
             } else {
-                !args.get("worktree").and_then(Value::as_bool).unwrap_or(false)
+                !args
+                    .get("worktree")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
             };
 
             let base_branch = if repo_root.join(".git").exists() {
@@ -637,10 +639,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             let mut state =
                 load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
@@ -774,10 +774,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
             let task = args.get("task").and_then(|v| v.as_str());
@@ -807,10 +805,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             append_ledger_note(&state_path, LedgerEntry::new(author, note))
                 .map_err(|e| format!("Note error: {}", e))?;
@@ -828,13 +824,10 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path = resolve_mcp_state_path(
-                &repo_root,
-                args.get("state").and_then(Value::as_str),
-            );
+            let state_path =
+                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
-            let state =
-                load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
+            let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
 
             Ok(serde_json::json!({
                 "status": "success",

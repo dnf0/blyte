@@ -126,11 +126,7 @@ pub fn resolve_effective_state_path(state_arg: &Path, cwd: &Path) -> PathBuf {
 }
 
 /// List active and completed branch-scoped states.
-pub fn cmd_list(
-    state_arg: Option<&Path>,
-    as_json: bool,
-    cwd: &Path,
-) -> Result<(), String> {
+pub fn cmd_list(state_arg: Option<&Path>, as_json: bool, cwd: &Path) -> Result<(), String> {
     let repo_root = if let Some(arg) = state_arg {
         let p = resolve_state_path(arg, cwd);
         if p.is_dir() {
@@ -1192,7 +1188,12 @@ pub fn cmd_exec(
     let mut advanced = false;
 
     if passed && advance {
-        cmd_next(state_path, Some(verify_cmd.to_string()), verify_git_clean, None)?;
+        cmd_next(
+            state_path,
+            Some(verify_cmd.to_string()),
+            verify_git_clean,
+            None,
+        )?;
         advanced = true;
     } else if !passed {
         // Record why, so the failure survives in the state rather than only in

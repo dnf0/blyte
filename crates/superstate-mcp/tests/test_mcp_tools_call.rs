@@ -495,7 +495,10 @@ fn test_tools_call_state_init_goal_default_in_place() {
     let state_file = repo_root.join(".agent-state").join("state.json");
     assert!(state_file.exists());
     let state = load_state(&state_file).unwrap();
-    assert!(state.no_worktree, "state.no_worktree must be true by default in MCP state_init");
+    assert!(
+        state.no_worktree,
+        "state.no_worktree must be true by default in MCP state_init"
+    );
     assert_eq!(state.active_worktree, None);
     assert!(!repo_root.join(".wt").exists());
 }
@@ -554,7 +557,10 @@ fn test_tools_call_state_init_goal_with_worktree() {
     let state_file = repo_root.join(".agent-state").join("state.json");
     assert!(state_file.exists());
     let state = load_state(&state_file).unwrap();
-    assert!(!state.no_worktree, "state.no_worktree must be false when worktree: true");
+    assert!(
+        !state.no_worktree,
+        "state.no_worktree must be false when worktree: true"
+    );
     assert!(state.active_worktree.is_some());
     assert!(repo_root.join(".wt").join("task-1").exists());
 }
@@ -583,12 +589,7 @@ fn test_tools_call_worktree_create_and_merge() {
         .current_dir(repo_root)
         .status();
     let _ = std::process::Command::new("git")
-        .args([
-            "commit",
-            "--no-gpg-sign",
-            "-m",
-            "chore: baseline",
-        ])
+        .args(["commit", "--no-gpg-sign", "-m", "chore: baseline"])
         .current_dir(repo_root)
         .status();
 
@@ -661,4 +662,3 @@ fn test_tools_call_worktree_create_and_merge() {
         "mcp_feature.txt should exist in repo root after merge"
     );
 }
-

@@ -103,8 +103,13 @@ fn test_state_next_worktree_merge_and_advance() {
 
     // 3. Call cmd_next with verify_cmd checking feature.txt and verify_git_clean = true
     // This asserts that verification runs inside the worktree (where feature.txt exists).
-    cmd_next(&state_file, Some("test -f feature.txt".to_string()), true, None)
-        .expect("cmd_next should succeed and merge worktree");
+    cmd_next(
+        &state_file,
+        Some("test -f feature.txt".to_string()),
+        true,
+        None,
+    )
+    .expect("cmd_next should succeed and merge worktree");
 
     // 4. Assert worktree changes were merged into main
     let feature_file_in_main = repo_root.join("feature.txt");

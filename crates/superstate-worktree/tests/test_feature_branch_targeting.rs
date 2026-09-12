@@ -234,4 +234,3 @@ fn test_trunk_worktrees_preserve_legacy_names() {
     assert_eq!(wt.path, repo_root.join(".wt").join("task-1"));
     assert!(wt.path.is_dir());
 }
-

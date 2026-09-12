@@ -285,4 +285,3 @@ fn test_ensure_git_baseline_stages_preexisting_files() {
 
     wt.abort().unwrap();
 }
-

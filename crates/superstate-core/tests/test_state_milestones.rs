@@ -225,4 +225,3 @@ fn test_milestone_spec_and_execution_state_serde() {
         .expect("ExecutionState serialization without goal must succeed");
     assert!(!json_no_goal.contains("goal"));
 }
-

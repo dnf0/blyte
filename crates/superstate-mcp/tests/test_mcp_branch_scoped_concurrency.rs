@@ -49,8 +49,8 @@ fn test_mcp_handoff_creates_branch_scoped_state() {
         "repo_root": repo_root.to_str().unwrap()
     });
 
-    let res = handle_tool_call("superstate_handoff", &args)
-        .expect("superstate_handoff should succeed");
+    let res =
+        handle_tool_call("superstate_handoff", &args).expect("superstate_handoff should succeed");
     assert_eq!(res["status"], "ready");
 
     let branch_state = repo_root
@@ -147,8 +147,8 @@ fn test_mcp_concurrent_agents_independent_states() {
     let next_args_a = serde_json::json!({
         "repo_root": repo_root.to_str().unwrap()
     });
-    let next_res_a = handle_tool_call("state_next", &next_args_a)
-        .expect("Agent A state_next should succeed");
+    let next_res_a =
+        handle_tool_call("state_next", &next_args_a).expect("Agent A state_next should succeed");
     assert_eq!(next_res_a["status"], "success");
 
     // Verify Agent A's state was advanced
@@ -218,4 +218,3 @@ fn test_mcp_state_get_and_step_resolve_branch_scoped_state() {
         handle_tool_call("state_get", &get_args).expect("state_get after step should succeed");
     assert_eq!(get_res_after["state"]["step"], 2);
 }
-

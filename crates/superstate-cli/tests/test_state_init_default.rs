@@ -49,14 +49,7 @@ fn test_state_init_default_in_place() {
     init_git_repo(repo_root);
 
     let output = Command::new(bin())
-        .args([
-            "state",
-            "init",
-            "--goal",
-            "test",
-            "--verify-cmd",
-            "echo 1",
-        ])
+        .args(["state", "init", "--goal", "test", "--verify-cmd", "echo 1"])
         .current_dir(repo_root)
         .output()
         .expect("Failed to execute state init");
@@ -69,9 +62,18 @@ fn test_state_init_default_in_place() {
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
 
-    assert!(state.no_worktree, "state.no_worktree must be true by default");
-    assert_eq!(state.active_worktree, None, "state.active_worktree must be None");
-    assert!(!repo_root.join(".wt").exists(), ".wt/ directory must not exist");
+    assert!(
+        state.no_worktree,
+        "state.no_worktree must be true by default"
+    );
+    assert_eq!(
+        state.active_worktree, None,
+        "state.active_worktree must be None"
+    );
+    assert!(
+        !repo_root.join(".wt").exists(),
+        ".wt/ directory must not exist"
+    );
 }
 
 #[test]
@@ -102,7 +104,16 @@ fn test_state_init_with_explicit_worktree() {
     let content = fs::read_to_string(&state_file).unwrap();
     let state: ExecutionState = serde_json::from_str(&content).unwrap();
 
-    assert!(!state.no_worktree, "state.no_worktree must be false when --worktree is passed");
-    assert!(state.active_worktree.is_some(), "state.active_worktree must be Some");
-    assert!(repo_root.join(".wt").join("task-1").exists(), ".wt/task-1 directory must exist");
+    assert!(
+        !state.no_worktree,
+        "state.no_worktree must be false when --worktree is passed"
+    );
+    assert!(
+        state.active_worktree.is_some(),
+        "state.active_worktree must be Some"
+    );
+    assert!(
+        repo_root.join(".wt").join("task-1").exists(),
+        ".wt/task-1 directory must exist"
+    );
 }

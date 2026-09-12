@@ -52,7 +52,10 @@ fn test_branch_scoped_state_path() {
     // Feature branch routes to .agent-state/branches/<slug>.json
     assert_eq!(
         branch_scoped_state_path(repo_root, "feat/auth"),
-        repo_root.join(STATE_DIR).join("branches").join("feat-auth.json")
+        repo_root
+            .join(STATE_DIR)
+            .join("branches")
+            .join("feat-auth.json")
     );
 
     // Complex branch slug routes correctly
@@ -140,11 +143,8 @@ fn test_find_branch_state_for_worktree() {
     assert_eq!(found_by_branch, Some(state_file_2));
 
     // 3. Neither matches
-    let not_found = find_branch_state_for_worktree(
-        repo_root,
-        &non_matching_path,
-        Some("unknown-branch"),
-    );
+    let not_found =
+        find_branch_state_for_worktree(repo_root, &non_matching_path, Some("unknown-branch"));
     assert_eq!(not_found, None);
 }
 
@@ -178,7 +178,10 @@ fn test_enclosing_state_root_with_branch_scoped_state() {
 fn test_resolve_project_root() {
     let dir = tempdir().unwrap();
     let repo_root = dir.path();
-    let state_file = repo_root.join(STATE_DIR).join("branches").join("feat-payment.json");
+    let state_file = repo_root
+        .join(STATE_DIR)
+        .join("branches")
+        .join("feat-payment.json");
     let resolved = superstate_core::resolve_project_root(&state_file);
     assert_eq!(
         fs::canonicalize(resolved).unwrap(),
