@@ -58,9 +58,218 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                     "worktree": {
                         "type": "boolean",
                         "description": "Enable Git worktree isolation for tasks (default: false, runs in-place)"
+                    },
+                    "no_worktree": {
+                        "type": "boolean",
+                        "description": "Disable git worktree creation; operate in-place in workspace root"
                     }
                 }),
                 required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_show".to_string(),
+            description: "Show execution state in markdown or JSON format".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_status".to_string(),
+            description: "Display state machine status and epistemic ledger".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_next".to_string(),
+            description: "Advance active task in state machine with verification gates".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "verify_cmd": { "type": "string", "description": "Optional shell command to verify" },
+                    "verify_git_clean": { "type": "boolean", "description": "Require clean git working tree" },
+                    "ignore_untracked_glob": { "type": "string", "description": "Optional glob pattern of untracked files to ignore during git clean verification" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_ready".to_string(),
+            description: "Display tasks whose dependencies are satisfied and may run now".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "json": { "type": "boolean", "description": "Emit a JSON array of task titles" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_checkpoint".to_string(),
+            description: "Create a git checkpoint guarding the current step".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_rollback".to_string(),
+            description: "Reset the working tree and untracked files to a checkpoint".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "reference": { "type": "string", "description": "Checkpoint to restore (defaults to the current step's checkpoint)" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_prompt".to_string(),
+            description: "Generate bounded turnkey subagent prompt for active task".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "task": { "type": "string", "description": "Task to prompt for, by id or title (defaults to active task)" },
+                    "with_graph": { "type": "boolean", "description": "Include knowledge-graph context in the prompt" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON" },
+                    "no_worktree": { "type": "boolean", "description": "Disable git worktree creation; operate in-place in workspace root" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_sync".to_string(),
+            description: "Reconcile state with a revised plan, preserving completed tasks".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "plan": { "type": "string", "description": "Path to revised plan markdown file" },
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "out": { "type": "string", "description": "Write the reconciled state here instead of in place" }
+                }),
+                required: vec!["plan".to_string()],
+            },
+        },
+        McpTool {
+            name: "state_exec".to_string(),
+            description: "Run a verification command and atomically advance or record failure".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "verify_cmd": { "type": "string", "description": "Verification shell command to execute" },
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "verify_git_clean": { "type": "boolean", "description": "Require clean git working tree" },
+                    "checkpoint": { "type": "boolean", "description": "Checkpoint before running, so a failure can be rolled back" },
+                    "rollback_on_fail": { "type": "boolean", "description": "Restore the checkpoint if verification fails" },
+                    "advance": { "type": "boolean", "description": "Advance step on successful verification (default: true)" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON" }
+                }),
+                required: vec!["verify_cmd".to_string()],
+            },
+        },
+        McpTool {
+            name: "state_doctor".to_string(),
+            description: "Diagnose plan/state drift and optionally repair it".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "plan": { "type": "string", "description": "Optional plan markdown file for drift diagnosis" },
+                    "repair": { "type": "boolean", "description": "Automatically repair detected state inconsistencies" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_validate".to_string(),
+            description: "Validate a state JSON file against the execution schema".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_apply".to_string(),
+            description: "Apply a state patch (null deletes) and/or append a note".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "patch": { "type": "string", "description": "Path to patch JSON file (null values delete fields)" },
+                    "note": { "type": "string", "description": "Optional note to append to the epistemic ledger" },
+                    "out": { "type": "string", "description": "Write modified state here instead of in place" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_resume".to_string(),
+            description: "Executive briefing for resuming after context loss".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_metrics".to_string(),
+            description: "Task telemetry and efficiency metrics".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_list".to_string(),
+            description: "List active and completed branch-scoped states".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "state": { "type": "string", "description": "Optional path to state file or directory to scan" },
+                    "json": { "type": "boolean", "description": "Emit machine-readable JSON" }
+                }),
+                required: vec![],
+            },
+        },
+        McpTool {
+            name: "state_note".to_string(),
+            description: "Append discovery, hypothesis, or constraint to epistemic ledger".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "note": { "type": "string", "description": "The note content" },
+                    "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "author": { "type": "string", "description": "Author attribution for note (default: agent)" }
+                }),
+                required: vec!["note".to_string()],
             },
         },
         McpTool {
@@ -71,7 +280,14 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 properties: serde_json::json!({
                     "branch": { "type": "string", "description": "Branch name to create or checkout" },
                     "base": { "type": "string", "description": "Optional base branch to branch off from (e.g. main)" },
-                    "path": { "type": "string", "description": "Optional custom destination path for worktree" }
+                    "path": { "type": "string", "description": "Optional custom destination path for worktree" },
+                    "caches": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Cache directory names to reflink-copy (e.g. .venv target node_modules)"
+                    },
+                    "no_cache": { "type": "boolean", "description": "Disable auto-detection and copying of cache directories" },
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
                 }),
                 required: vec!["branch".to_string()],
             },
@@ -84,41 +300,45 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 properties: serde_json::json!({
                     "branch": { "type": "string", "description": "Branch name of the worktree to merge" },
                     "base": { "type": "string", "description": "Optional base branch to merge into" },
-                    "message": { "type": "string", "description": "Optional commit message for the merge" }
+                    "message": { "type": "string", "description": "Optional commit message for the merge" },
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
                 }),
                 required: vec!["branch".to_string()],
             },
         },
         McpTool {
-            name: "state_next".to_string(),
-            description: "Advance active task in state machine with verification gates".to_string(),
+            name: "worktree_list".to_string(),
+            description: "List active worktrees in the repository".to_string(),
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
-                    "verify_cmd": { "type": "string", "description": "Optional shell command to verify" },
-                    "verify_git_clean": { "type": "boolean", "description": "Require clean git working tree" }
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
                 }),
                 required: vec![],
             },
         },
         McpTool {
-            name: "state_prompt".to_string(),
-            description: "Generate bounded turnkey subagent prompt for active task".to_string(),
-            input_schema: McpToolInputSchema {
-                r#type: "object".to_string(),
-                properties: serde_json::json!({}),
-                required: vec![],
-            },
-        },
-        McpTool {
-            name: "state_note".to_string(),
-            description: "Append discovery, hypothesis, or constraint to epistemic ledger".to_string(),
+            name: "worktree_remove".to_string(),
+            description: "Remove a worktree and clean up its tracking".to_string(),
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
-                    "note": { "type": "string", "description": "The note content" }
+                    "branch": { "type": "string", "description": "Branch name of the worktree to remove" },
+                    "force": { "type": "boolean", "description": "Force removal even if worktree is dirty" },
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
                 }),
-                required: vec!["note".to_string()],
+                required: vec!["branch".to_string()],
+            },
+        },
+        McpTool {
+            name: "worktree_clean".to_string(),
+            description: "Clean orphaned worktree directories and prune tracking".to_string(),
+            input_schema: McpToolInputSchema {
+                r#type: "object".to_string(),
+                properties: serde_json::json!({
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
+                }),
+                required: vec![],
             },
         },
         McpTool {
