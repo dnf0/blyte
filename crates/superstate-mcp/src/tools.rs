@@ -187,6 +187,10 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                         "items": { "type": "string" },
                         "description": "Optional target files to modify"
                     },
+                    "worktree": {
+                        "type": "boolean",
+                        "description": "Enable Git worktree isolation for tasks (default: false, runs in-place)"
+                    },
                     "no_worktree": {
                         "type": "boolean",
                         "description": "If true, execute in-place without creating a worktree"

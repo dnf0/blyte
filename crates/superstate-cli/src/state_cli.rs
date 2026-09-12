@@ -58,7 +58,7 @@ impl Default for InitArgs {
             plan: None,
             state: PathBuf::from(DEFAULT_STATE),
             worktree: false,
-            no_worktree: true,
+            no_worktree: false,
             goal: None,
             verify_cmd: None,
             files: None,

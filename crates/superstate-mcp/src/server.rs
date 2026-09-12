@@ -882,6 +882,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let base = args.get("base").and_then(|v| v.as_str());
             let custom_path = args.get("path").and_then(|v| v.as_str()).map(PathBuf::from);
 
+            ensure_git_exclude(&repo_root);
             let manager = WorktreeManager::new(&repo_root)
                 .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
 
