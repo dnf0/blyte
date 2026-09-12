@@ -1516,7 +1516,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
 
             let repo_root = args
-                .get("repo_root")
+                .get("repo")
+                .or_else(|| args.get("repo_root"))
                 .or_else(|| args.get("cwd"))
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
@@ -1554,7 +1555,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
 
             let repo_root = args
-                .get("repo_root")
+                .get("repo")
+                .or_else(|| args.get("repo_root"))
                 .or_else(|| args.get("cwd"))
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
@@ -1576,6 +1578,147 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 "status": "success",
                 "branch": branch,
                 "base": isolated.base_branch,
+            }))
+        }
+        "worktree_list" => {
+            let repo_root = args
+                .get("repo")
+                .or_else(|| args.get("repo_root"))
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+
+            let manager = WorktreeManager::new(&repo_root)
+                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+            let list = manager
+                .list()
+                .map_err(|e| format!("Failed to list worktrees: {}", e))?;
+
+            let json_list: Vec<Value> = list
+                .iter()
+                .map(|wt| {
+                    serde_json::json!({
+                        "branch": wt.branch,
+                        "path": wt.path.display().to_string(),
+                        "head": wt.commit_sha,
+                        "commit_sha": wt.commit_sha,
+                        "is_main": wt.is_main,
+                        "active": wt.is_main,
+                    })
+                })
+                .collect();
+
+            let mut text = String::new();
+            if list.is_empty() {
+                text.push_str("No active worktrees.\n");
+            } else {
+                text.push_str(&format!("{:<25} {:<10} {:<40}\n", "BRANCH", "HEAD", "PATH"));
+                text.push_str(&format!("{:-<25} {:-<10} {:-<40}\n", "", "", ""));
+                for wt in &list {
+                    let branch_display = wt
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| "(detached HEAD)".to_string())
+                        + if wt.is_main { " [main]" } else { "" };
+                    let short_sha = if wt.commit_sha.len() >= 7 {
+                        &wt.commit_sha[..7]
+                    } else {
+                        &wt.commit_sha
+                    };
+                    text.push_str(&format!(
+                        "{:<25} {:<10} {:<40}\n",
+                        branch_display,
+                        short_sha,
+                        wt.path.display()
+                    ));
+                }
+            }
+
+            if as_json {
+                let pretty = serde_json::to_string_pretty(&json_list)
+                    .map_err(|e| format!("Failed to serialize worktree list: {}", e))?;
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "worktrees": json_list,
+                    "content": [{
+                        "type": "text",
+                        "text": pretty
+                    }]
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "worktrees": json_list,
+                    "output": text,
+                    "text": text,
+                    "content": [{
+                        "type": "text",
+                        "text": text
+                    }]
+                }))
+            }
+        }
+        "worktree_remove" => {
+            let branch = args
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
+
+            let repo_root = args
+                .get("repo")
+                .or_else(|| args.get("repo_root"))
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+
+            let isolated = resolve_worktree_for_remove(&repo_root, branch)?;
+            let wt_path = isolated.path.clone();
+            isolated
+                .destroy(force)
+                .map_err(|e| format!("Failed to remove worktree: {}", e))?;
+
+            if wt_path.exists() {
+                let _ = std::fs::remove_dir_all(&wt_path);
+            }
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "branch": branch,
+                "removed": true,
+                "content": [{
+                    "type": "text",
+                    "text": format!("Removed worktree for branch '{}'", branch)
+                }]
+            }))
+        }
+        "worktree_clean" => {
+            let repo_root = args
+                .get("repo")
+                .or_else(|| args.get("repo_root"))
+                .or_else(|| args.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+
+            let (cleaned_count, cleaned_branches) = clean_orphaned_worktrees(&repo_root, force)
+                .map_err(|e| format!("Failed to clean worktrees: {}", e))?;
+
+            Ok(serde_json::json!({
+                "status": "success",
+                "cleaned": cleaned_count,
+                "branches": cleaned_branches,
+                "content": [{
+                    "type": "text",
+                    "text": format!("Cleaned {} orphaned worktree(s)", cleaned_count)
+                }]
             }))
         }
         "state_ready" => {
@@ -2215,6 +2358,186 @@ fn resolve_worktree_for_merge(
         base_branch,
         repo_root: primary_wt.path,
     })
+}
+
+fn resolve_worktree_for_remove(repo: &Path, branch: &str) -> Result<IsolatedWorktree, String> {
+    let manager = WorktreeManager::new(repo).map_err(|e| e.to_string())?;
+    let list = manager.list().map_err(|e| e.to_string())?;
+
+    let primary_wt = list
+        .iter()
+        .find(|w| w.is_main)
+        .cloned()
+        .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
+
+    let wt = list
+        .into_iter()
+        .find(|w| {
+            w.branch.as_deref() == Some(branch)
+                || w.branch.as_deref() == Some(&format!("wt/{}", branch))
+                || branch
+                    .strip_prefix("wt/")
+                    .map(|b| w.branch.as_deref() == Some(b))
+                    .unwrap_or(false)
+        })
+        .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
+
+    if wt.is_main {
+        return Err(format!(
+            "Cannot remove primary worktree branch '{}'",
+            branch
+        ));
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let is_inside = match (cwd.canonicalize(), wt.path.canonicalize()) {
+            (Ok(c), Ok(w)) => c.starts_with(&w),
+            _ => cwd.starts_with(&wt.path),
+        };
+        if is_inside {
+            return Err(format!(
+                "Cannot remove worktree '{}' while current working directory is inside it",
+                branch
+            ));
+        }
+    }
+
+    let actual_branch = wt.branch.unwrap_or_else(|| branch.to_string());
+    let base_branch = primary_wt
+        .branch
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
+
+    Ok(IsolatedWorktree {
+        branch: actual_branch,
+        path: wt.path,
+        base_branch,
+        repo_root: primary_wt.path,
+    })
+}
+
+fn clean_orphaned_worktrees(
+    repo_root: &Path,
+    _force: bool,
+) -> Result<(usize, Vec<String>), String> {
+    let mut cleaned_count = 0;
+    let mut cleaned_branches = Vec::new();
+
+    // 1. Run git worktree prune to eliminate stale worktree references in git metadata
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output();
+
+    // 2. Fetch active worktree list from WorktreeManager
+    let manager = WorktreeManager::new(repo_root).map_err(|e| e.to_string())?;
+    let active_worktrees = manager.list().unwrap_or_default();
+
+    let mut active_paths: Vec<PathBuf> = Vec::new();
+    let mut active_branches: Vec<String> = Vec::new();
+
+    for wt in &active_worktrees {
+        if let Ok(canon) = wt.path.canonicalize() {
+            active_paths.push(canon);
+        } else {
+            active_paths.push(wt.path.clone());
+        }
+        if let Some(ref b) = wt.branch {
+            active_branches.push(b.clone());
+        }
+    }
+
+    // 3. Inspect .wt/ directory in the repository for orphaned directories
+    let wt_dir = repo_root.join(".wt");
+    if wt_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&wt_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    if !active_paths.contains(&canon) {
+                        // Orphaned worktree directory
+                        let dir_name = entry.file_name().to_string_lossy().to_string();
+                        // Remove directory from disk
+                        let _ = std::fs::remove_dir_all(&path);
+
+                        // Check if an orphaned branch corresponding to this dir exists
+                        let candidate_branches = [format!("wt/{}", dir_name), dir_name.clone()];
+                        let mut branch_deleted = false;
+                        for cand in &candidate_branches {
+                            if !active_branches.contains(cand) {
+                                let check = std::process::Command::new("git")
+                                    .args(["rev-parse", "--verify", cand])
+                                    .current_dir(repo_root)
+                                    .output();
+                                if let Ok(out) = check {
+                                    if out.status.success() {
+                                        let _ = std::process::Command::new("git")
+                                            .args(["branch", "-D", cand])
+                                            .current_dir(repo_root)
+                                            .output();
+                                        if !cleaned_branches.contains(cand) {
+                                            cleaned_branches.push(cand.clone());
+                                            branch_deleted = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !branch_deleted && !cleaned_branches.contains(&dir_name) {
+                            cleaned_branches.push(dir_name);
+                        }
+                        cleaned_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Inspect git branches starting with wt/ that have no active worktree
+    let branch_out = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/wt/*",
+        ])
+        .current_dir(repo_root)
+        .output();
+
+    if let Ok(out) = branch_out {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            let branch = line.trim();
+            if branch.is_empty() {
+                continue;
+            }
+            if !active_branches.iter().any(|ab| ab == branch) {
+                // Delete orphaned branch
+                let del_out = std::process::Command::new("git")
+                    .args(["branch", "-D", branch])
+                    .current_dir(repo_root)
+                    .output();
+                if let Ok(del) = del_out {
+                    if del.status.success() {
+                        let branch_str = branch.to_string();
+                        if !cleaned_branches.contains(&branch_str) {
+                            cleaned_branches.push(branch_str);
+                            cleaned_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Run git worktree prune one more time
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output();
+
+    Ok((cleaned_count, cleaned_branches))
 }
 
 /// Returns list of paths that git rollback/clean operations must never delete.
