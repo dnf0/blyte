@@ -137,9 +137,14 @@ if ! echo "$GIT_LOG" | grep -q "chore(superstate): checkpoint completed mileston
     exit 1
 fi
 
-COMPLETION_JSON="$TMP_DIR/.agent-state/branches/completion.json"
+COMPLETION_JSON="$TMP_DIR/.agent-state/branches/completion-feat-e2e-autonomous.json"
 if [ ! -f "$COMPLETION_JSON" ]; then
-    echo "Error: completion report not found at $COMPLETION_JSON" >&2
+    echo "Error: scoped completion report not found at $COMPLETION_JSON" >&2
+    exit 1
+fi
+LEGACY_COMPLETION_JSON="$TMP_DIR/.agent-state/branches/completion.json"
+if [ ! -f "$LEGACY_COMPLETION_JSON" ]; then
+    echo "Error: backwards compatible completion report not found at $LEGACY_COMPLETION_JSON" >&2
     exit 1
 fi
 
@@ -157,7 +162,7 @@ fi
 # Part 2: Autonomous Worktree Lifecycle Execution under DaemonRunner
 # ==============================================================================
 echo "==> Part 2: Worktree Lifecycle under DaemonRunner on feat/e2e-worktree..."
-git checkout -b feat/e2e-worktree
+git checkout -b feat/e2e-worktree main
 
 cat << 'WT_DRIVER_EOF' > wt_driver.sh
 #!/usr/bin/env bash
@@ -249,6 +254,13 @@ echo "==> Verifying PID file cleanup for worktree daemon..."
 WT_PID_FILE="$TMP_DIR/.agent-state/daemons/feat-e2e-worktree.pid"
 if [ -f "$WT_PID_FILE" ]; then
     echo "Error: PID file $WT_PID_FILE should have been cleaned up after completion" >&2
+    exit 1
+fi
+
+echo "==> Verifying worktree completion report..."
+WT_COMPLETION_JSON="$TMP_DIR/.agent-state/branches/completion-feat-e2e-worktree.json"
+if [ ! -f "$WT_COMPLETION_JSON" ]; then
+    echo "Error: worktree completion report not found at $WT_COMPLETION_JSON" >&2
     exit 1
 fi
 

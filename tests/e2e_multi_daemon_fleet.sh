@@ -39,7 +39,7 @@ chmod +x driver_alpha.sh
 cat << 'DRIVER_B_EOF' > driver_beta.sh
 #!/usr/bin/env bash
 set -eu
-sleep 0.8
+sleep 1.0
 echo "beta data" > beta.txt
 DRIVER_B_EOF
 chmod +x driver_beta.sh
@@ -48,10 +48,10 @@ chmod +x driver_beta.sh
 # Step 1: Initialize branch states for feat/fleet-alpha and feat/fleet-beta
 # ==============================================================================
 echo "==> Initializing branch feat/fleet-alpha..."
-git checkout -b feat/fleet-alpha
+git checkout -b feat/fleet-alpha main
 "$BIN" state init \
-  --milestones '[{"title":"Fleet Alpha Milestone","verify_cmd":"test -f alpha.txt"}]' \
-  --no-worktree
+  --milestones '[{"title":"Create alpha.txt","verify_cmd":"test -f alpha.txt"}]' \
+  --worktree
 
 STATE_ALPHA="$TMP_DIR/.agent-state/branches/feat-fleet-alpha.json"
 if [ ! -f "$STATE_ALPHA" ]; then
@@ -60,10 +60,10 @@ if [ ! -f "$STATE_ALPHA" ]; then
 fi
 
 echo "==> Initializing branch feat/fleet-beta..."
-git checkout -b feat/fleet-beta
+git checkout -b feat/fleet-beta main
 "$BIN" state init \
-  --milestones '[{"title":"Fleet Beta Milestone","verify_cmd":"test -f beta.txt"}]' \
-  --no-worktree
+  --milestones '[{"title":"Create beta.txt","verify_cmd":"test -f beta.txt"}]' \
+  --worktree
 
 STATE_BETA="$TMP_DIR/.agent-state/branches/feat-fleet-beta.json"
 if [ ! -f "$STATE_BETA" ]; then
@@ -192,39 +192,91 @@ fi
 # ==============================================================================
 # Step 5: Verify branch milestones, commits, completion reports & cleanup
 # ==============================================================================
-echo "==> Verifying milestone output artifacts..."
-if [ ! -f alpha.txt ]; then
-    echo "Error: alpha.txt not created by alpha driver" >&2
-    exit 1
-fi
-if [ ! -f beta.txt ]; then
-    echo "Error: beta.txt not created by beta driver" >&2
-    exit 1
-fi
+echo "==> Verifying true branch isolation and dual commits on isolated branches..."
+ALPHA_LOG="$(git log feat/fleet-alpha --oneline)"
+echo "Alpha branch git log:"
+echo "$ALPHA_LOG"
 
-echo "==> Verifying auto-checkpoint commits on git branches..."
-GIT_LOG="$(git log -n 5 --oneline)"
-echo "$GIT_LOG"
-
-if ! echo "$GIT_LOG" | grep -q "chore(superstate): checkpoint completed milestone task-1: Fleet Alpha Milestone"; then
-    echo "Error: expected checkpoint commit for Fleet Alpha Milestone" >&2
+if ! echo "$ALPHA_LOG" | grep -q "Create alpha.txt"; then
+    echo "Error: expected Alpha commit ('Create alpha.txt') on feat/fleet-alpha" >&2
     exit 1
 fi
 
-if ! echo "$GIT_LOG" | grep -q "chore(superstate): checkpoint completed milestone task-1: Fleet Beta Milestone"; then
-    echo "Error: expected checkpoint commit for Fleet Beta Milestone" >&2
+if echo "$ALPHA_LOG" | grep -q "Create beta.txt"; then
+    echo "Error: Beta commit leaked onto feat/fleet-alpha!" >&2
     exit 1
 fi
 
-echo "==> Verifying completion report generation..."
-COMPLETION_JSON="$TMP_DIR/.agent-state/branches/completion.json"
-if [ ! -f "$COMPLETION_JSON" ]; then
-    echo "Error: completion report not found at $COMPLETION_JSON" >&2
+BETA_LOG="$(git log feat/fleet-beta --oneline)"
+echo "Beta branch git log:"
+echo "$BETA_LOG"
+
+if ! echo "$BETA_LOG" | grep -q "Create beta.txt"; then
+    echo "Error: expected Beta commit ('Create beta.txt') on feat/fleet-beta" >&2
     exit 1
 fi
 
-echo "==> Final completion report content:"
-cat "$COMPLETION_JSON"
+if echo "$BETA_LOG" | grep -q "Create alpha.txt"; then
+    echo "Error: Alpha commit leaked onto feat/fleet-beta!" >&2
+    exit 1
+fi
+
+echo "==> Verifying tracked files on isolated branches..."
+if ! git show feat/fleet-alpha:alpha.txt >/dev/null 2>&1; then
+    echo "Error: alpha.txt not found on feat/fleet-alpha" >&2
+    exit 1
+fi
+if git show feat/fleet-alpha:beta.txt >/dev/null 2>&1; then
+    echo "Error: beta.txt found on feat/fleet-alpha (branch pollution)!" >&2
+    exit 1
+fi
+
+if ! git show feat/fleet-beta:beta.txt >/dev/null 2>&1; then
+    echo "Error: beta.txt not found on feat/fleet-beta" >&2
+    exit 1
+fi
+if git show feat/fleet-beta:alpha.txt >/dev/null 2>&1; then
+    echo "Error: alpha.txt found on feat/fleet-beta (branch pollution)!" >&2
+    exit 1
+fi
+
+echo "==> Verifying discrete completion reports..."
+ALPHA_COMPLETION="$TMP_DIR/.agent-state/branches/completion-feat-fleet-alpha.json"
+if [ ! -f "$ALPHA_COMPLETION" ]; then
+    echo "Error: Alpha completion report not found at $ALPHA_COMPLETION" >&2
+    exit 1
+fi
+
+BETA_COMPLETION="$TMP_DIR/.agent-state/branches/completion-feat-fleet-beta.json"
+if [ ! -f "$BETA_COMPLETION" ]; then
+    echo "Error: Beta completion report not found at $BETA_COMPLETION" >&2
+    exit 1
+fi
+
+echo "==> Alpha completion report:"
+cat "$ALPHA_COMPLETION"
+if ! grep -q '"base_branch": "feat/fleet-alpha"' "$ALPHA_COMPLETION"; then
+    echo "Error: Alpha completion report missing base branch feat/fleet-alpha" >&2
+    exit 1
+fi
+
+echo "==> Beta completion report:"
+cat "$BETA_COMPLETION"
+if ! grep -q '"base_branch": "feat/fleet-beta"' "$BETA_COMPLETION"; then
+    echo "Error: Beta completion report missing base branch feat/fleet-beta" >&2
+    exit 1
+fi
+
+echo "==> Verifying worktree directories were cleaned up..."
+if [ -d "$TMP_DIR/.wt/feat-fleet-alpha-task-1" ]; then
+    echo "Error: Alpha worktree .wt/feat-fleet-alpha-task-1 was not cleaned up" >&2
+    exit 1
+fi
+
+if [ -d "$TMP_DIR/.wt/feat-fleet-beta-task-1" ]; then
+    echo "Error: Beta worktree .wt/feat-fleet-beta-task-1 was not cleaned up" >&2
+    exit 1
+fi
 
 echo "==> Verifying PID file cleanup for both fleet daemons..."
 if [ -f "$ALPHA_PID_FILE" ]; then

@@ -454,12 +454,22 @@ impl DaemonRunner {
         }
 
         let final_state = load_state(&self.config.state_path)?;
-        let completion_file = self
+
+        // Resolve slug to prevent cross-daemon collision on completion artifacts.
+        // Default state machines write to `completion.json`, while branch-scoped daemons
+        // write to `completion-<slug>.json`.
+        let (slug, _) = resolve_daemon_slug_and_state_dir(&self.config.state_path);
+        let parent = self
             .config
             .state_path
             .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("completion.json");
+            .unwrap_or_else(|| Path::new("."));
+
+        let completion_file = if slug == "default" {
+            parent.join("completion.json")
+        } else {
+            parent.join(format!("completion-{}.json", slug))
+        };
 
         let report = CompletionReport {
             status: final_state.status.clone(),
@@ -469,7 +479,13 @@ impl DaemonRunner {
         };
 
         let serialized = serde_json::to_string_pretty(&report)?;
-        fs::write(&completion_file, serialized)?;
+        fs::write(&completion_file, &serialized)?;
+
+        // For backwards compatibility with single-branch callers expecting completion.json,
+        // also maintain a secondary copy at completion.json when scoped.
+        if slug != "default" {
+            let _ = fs::write(parent.join("completion.json"), &serialized);
+        }
 
         Ok(report)
     }

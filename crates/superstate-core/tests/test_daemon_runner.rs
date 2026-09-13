@@ -122,6 +122,53 @@ fn test_daemon_run_to_completion() {
 }
 
 #[test]
+fn test_daemon_run_to_completion_branch_scoped_slug() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join(".agent-state/branches/feat-alpha.json");
+
+    let milestones = vec![MilestoneSpec {
+        title: "Task Branch Alpha".to_string(),
+        verify_cmd: "true".to_string(),
+        files: vec![],
+    }];
+
+    let state = init_state_milestones(Some("Branch Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("echo 'worker completed'".to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+    };
+
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let report = runner.run_to_completion().unwrap();
+
+    assert_eq!(report.milestones_completed, 1);
+    assert_eq!(report.status, ExecutionStatus::Completed);
+
+    let scoped_completion_file = state_path
+        .parent()
+        .unwrap()
+        .join("completion-feat-alpha.json");
+    assert!(
+        scoped_completion_file.exists(),
+        "completion-feat-alpha.json must exist"
+    );
+    assert_eq!(
+        report.completion_file, scoped_completion_file,
+        "report.completion_file must point to scoped completion file"
+    );
+
+    let legacy_completion_file = state_path.parent().unwrap().join("completion.json");
+    assert!(
+        legacy_completion_file.exists(),
+        "secondary completion.json must also exist for backwards compatibility"
+    );
+}
+
+#[test]
 fn test_daemon_step_advancer_invoked() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join(".agent-state/state.json");
