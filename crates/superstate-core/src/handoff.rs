@@ -225,8 +225,9 @@ pub fn write_handoff_package(
     fs::create_dir_all(&handoffs_dir)
         .map_err(|e| format!("Failed to create handoffs directory: {}", e))?;
 
-    // Write the scoped handoff package for record-keeping
-    let scoped_file = handoffs_dir.join(format!("{}.md", spec.slug));
+    // Write the scoped handoff package for record-keeping (sanitize slug to handle branch names with slashes)
+    let sanitized_slug = crate::state_machine::sanitize_branch_slug(&spec.slug);
+    let scoped_file = handoffs_dir.join(format!("{}.md", sanitized_slug));
     fs::write(&scoped_file, &md)
         .map_err(|e| format!("Failed to write {}: {}", scoped_file.display(), e))?;
 

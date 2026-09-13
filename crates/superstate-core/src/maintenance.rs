@@ -284,12 +284,13 @@ pub fn resume_briefing_with_root(
     ));
 
     // Resolve handoff artifact location. Checks the provided repo root first,
-    // then falls back to project root resolved from plan path, and finally current dir.
+    // then falls back to project root discovered via enclosing_state_root, and finally current dir.
     let handoff_path = repo_root
         .map(|r| r.join(".agent-state/handoff.md"))
         .unwrap_or_else(|| {
-            if let Some(ref plan) = state.plan_path {
-                let root = crate::prompt::resolve_project_root(plan);
+            if let Some(root) =
+                crate::state_machine::enclosing_state_root(std::path::Path::new("."))
+            {
                 let candidate = root.join(".agent-state/handoff.md");
                 if candidate.exists() {
                     return candidate;
@@ -304,15 +305,29 @@ pub fn resume_briefing_with_root(
         out.push_str("\n## 🤝 Active Handoff\n");
         out.push_str(&format!("- **Package:** `{}`\n", handoff_path.display()));
         let worktree = state.active_worktree.as_deref();
-        let state_path = state
-            .plan_path
-            .as_deref()
-            .unwrap_or(std::path::Path::new(".agent-state/state.json"));
+        // Resolve state path using repo_root and active_branch via branch_scoped_state_path,
+        // never using plan_path (which is markdown), falling back to .agent-state/state.json.
+        let state_path = match (&state.active_branch, repo_root) {
+            (Some(branch), Some(root)) => {
+                crate::state_machine::branch_scoped_state_path(root, branch)
+            }
+            (Some(branch), None) => {
+                let base = crate::state_machine::enclosing_state_root(std::path::Path::new("."));
+                let root = match base.as_deref() {
+                    Some(b) if b == std::path::Path::new(".") => std::path::Path::new(""),
+                    Some(b) => b,
+                    None => std::path::Path::new(""),
+                };
+                crate::state_machine::branch_scoped_state_path(root, branch)
+            }
+            (None, Some(root)) => root.join(".agent-state/state.json"),
+            (None, None) => std::path::PathBuf::from(".agent-state/state.json"),
+        };
         let claude_cmd =
-            crate::handoff::generate_resumption_command("claude", worktree, state_path);
-        let agy_cmd = crate::handoff::generate_resumption_command("agy", worktree, state_path);
+            crate::handoff::generate_resumption_command("claude", worktree, &state_path);
+        let agy_cmd = crate::handoff::generate_resumption_command("agy", worktree, &state_path);
         let daemon_cmd =
-            crate::handoff::generate_resumption_command("daemon", worktree, state_path);
+            crate::handoff::generate_resumption_command("daemon", worktree, &state_path);
         out.push_str(&format!("- **Claude Resume:** `{}`\n", claude_cmd));
         out.push_str(&format!("- **Agy Resume:** `{}`\n", agy_cmd));
         out.push_str(&format!("- **Daemon Resume:** `{}`\n", daemon_cmd));
