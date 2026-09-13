@@ -98,9 +98,16 @@ fn resolve_superstate_binary() -> PathBuf {
     PathBuf::from("superstate")
 }
 
-fn resolve_state_dir(repo_or_state: Option<&Path>) -> PathBuf {
-    if let Some(p) = repo_or_state {
-        if p.is_file() {
+/// Resolves the `.agent-state` directory given an optional repository root, state file path,
+/// or ancestor directory.
+///
+/// If a target directory does not directly contain `.agent-state`, walks upward looking for
+/// an ancestor containing `.agent-state` or `.git` to support running daemon commands
+/// from subdirectories.
+pub fn resolve_state_dir(repo_or_state: Option<&Path>) -> PathBuf {
+    let target = if let Some(p) = repo_or_state {
+        // If pointing to a json state file or existing file, resolve its state directory
+        if p.is_file() || p.extension().and_then(|s| s.to_str()) == Some("json") {
             let (_, base_dir) = resolve_daemon_slug_and_state_dir(p);
             if base_dir.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
                 return base_dir;
@@ -113,11 +120,13 @@ fn resolve_state_dir(repo_or_state: Option<&Path>) -> PathBuf {
         if p.join(STATE_DIR).exists() {
             return p.join(STATE_DIR);
         }
-        return p.to_path_buf();
-    }
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut cur = Some(cwd.as_path());
+    // Walk upward looking for a directory containing .agent-state or .git
+    let mut cur = Some(target.as_path());
     while let Some(d) = cur {
         if d.join(STATE_DIR).exists() {
             return d.join(STATE_DIR);
@@ -127,7 +136,7 @@ fn resolve_state_dir(repo_or_state: Option<&Path>) -> PathBuf {
         }
         cur = d.parent();
     }
-    cwd.join(STATE_DIR)
+    target.join(STATE_DIR)
 }
 
 /// Spawns or executes an autonomous daemon runner for a given state machine.
@@ -216,11 +225,12 @@ pub fn cmd_daemon(
             )
         })?;
 
-        if let Some(parent) = paths.pid_file.parent().and_then(|p| p.parent()) {
-            let _ = fs::write(parent.join("daemon.pid"), pid.to_string());
-        }
-        if let Some(parent) = state_path.parent() {
-            let _ = fs::write(parent.join("daemon.pid"), pid.to_string());
+        // Write fallback daemon.pid only if this is the default state machine daemon.
+        // Branch-scoped daemons must never overwrite or write legacy daemon.pid.
+        if paths.slug == "default" {
+            if let Some(parent) = paths.pid_file.parent().and_then(|p| p.parent()) {
+                let _ = fs::write(parent.join("daemon.pid"), pid.to_string());
+            }
         }
 
         println!(
@@ -265,6 +275,12 @@ pub fn cmd_daemon(
         let res = runner.run_to_completion();
 
         let _ = fs::remove_file(&paths.pid_file);
+        // Clean up fallback daemon.pid if this was the default daemon
+        if paths.slug == "default" {
+            if let Some(parent) = paths.pid_file.parent().and_then(|p| p.parent()) {
+                let _ = fs::remove_file(parent.join("daemon.pid"));
+            }
+        }
 
         match res {
             Ok(report) => {
@@ -416,6 +432,9 @@ pub fn cmd_cancel(
     if all {
         let daemons_dir = state_dir.join("daemons");
         let mut cancelled_count = 0;
+        let mut killed_pids = std::collections::HashSet::new();
+
+        // Scan and terminate active daemons registered in daemons/
         if daemons_dir.exists() {
             if let Ok(dir_entries) = fs::read_dir(&daemons_dir) {
                 for entry in dir_entries.flatten() {
@@ -428,27 +447,36 @@ pub fn cmd_cancel(
                             .to_string();
                         if let Ok(pid_str) = fs::read_to_string(&path) {
                             if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                                kill_pid(pid);
+                                // Deduplicate PIDs so a process tracked by multiple PID files is only killed and counted once
+                                if killed_pids.insert(pid) {
+                                    kill_pid(pid);
+                                    println!("Terminated daemon '{}' (PID: {})", slug, pid);
+                                    cancelled_count += 1;
+                                }
                                 let _ = fs::remove_file(&path);
-                                println!("Terminated daemon '{}' (PID: {})", slug, pid);
-                                cancelled_count += 1;
                             }
                         }
                     }
                 }
             }
         }
+
+        // Clean up legacy daemon.pid fallback if present
         let legacy_pid = state_dir.join("daemon.pid");
         if legacy_pid.exists() {
             if let Ok(pid_str) = fs::read_to_string(&legacy_pid) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    kill_pid(pid);
+                    // Deduplicate against PIDs already terminated from daemons/
+                    if killed_pids.insert(pid) {
+                        kill_pid(pid);
+                        println!("Terminated legacy daemon (PID: {})", pid);
+                        cancelled_count += 1;
+                    }
                     let _ = fs::remove_file(&legacy_pid);
-                    println!("Terminated legacy daemon (PID: {})", pid);
-                    cancelled_count += 1;
                 }
             }
         }
+
         if cancelled_count == 0 {
             println!("No active daemons found to cancel.");
         }
@@ -457,7 +485,16 @@ pub fn cmd_cancel(
 
     if let Some(branch_name) = branch {
         let slug = sanitize_branch_slug(branch_name);
-        let pid_file = state_dir.join("daemons").join(format!("{}.pid", slug));
+        let mut pid_file = state_dir.join("daemons").join(format!("{}.pid", slug));
+
+        // If branch is "main" or "master" and branch pid file doesn't exist, fallback to default.pid
+        if !pid_file.exists() && (slug == "main" || slug == "master") {
+            let default_pid = state_dir.join("daemons").join("default.pid");
+            if default_pid.exists() {
+                pid_file = default_pid;
+            }
+        }
+
         if !pid_file.exists() {
             println!(
                 "No active daemon PID file found for branch '{}' ({})",
@@ -473,6 +510,12 @@ pub fn cmd_cancel(
             .map_err(|e: std::num::ParseIntError| e.to_string())?;
         kill_pid(pid);
         let _ = fs::remove_file(&pid_file);
+
+        // If cancelling default daemon via main/master branch, also clean up legacy daemon.pid
+        if slug == "main" || slug == "master" {
+            let _ = fs::remove_file(state_dir.join("daemon.pid"));
+        }
+
         println!(
             "Daemon for branch '{}' (PID: {}) terminated.",
             branch_name, pid
@@ -492,6 +535,12 @@ pub fn cmd_cancel(
             .map_err(|e: std::num::ParseIntError| e.to_string())?;
         kill_pid(pid);
         let _ = fs::remove_file(&paths.pid_file);
+
+        // Remove legacy fallback daemon.pid if this was the default daemon
+        if paths.slug == "default" {
+            let _ = fs::remove_file(state_dir.join("daemon.pid"));
+        }
+
         println!("Daemon process {} terminated.", pid);
         return Ok(());
     }

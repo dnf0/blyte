@@ -94,7 +94,16 @@ fn main() {
         Commands::Daemon(args) => match args.command {
             Some(superstate_cli::state_cli::DaemonSubcommands::List { repo, json }) => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let repo_root = repo.unwrap_or(cwd);
+                let repo_root = repo.unwrap_or_else(|| {
+                    let mut cur = Some(cwd.as_path());
+                    while let Some(d) = cur {
+                        if d.join(".agent-state").exists() || d.join(".git").exists() {
+                            return d.to_path_buf();
+                        }
+                        cur = d.parent();
+                    }
+                    cwd
+                });
                 commands::daemon::cmd_daemon_list(&repo_root, json)
             }
             None => commands::daemon::cmd_daemon(

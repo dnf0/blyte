@@ -208,6 +208,21 @@ fn test_cli_multi_daemon_fleet() {
     assert!(alpha_log_file.exists(), "alpha log file should exist");
     assert!(beta_log_file.exists(), "beta log file should exist");
 
+    let root_legacy_pid = dir.path().join(".agent-state").join("daemon.pid");
+    let branches_legacy_pid = dir
+        .path()
+        .join(".agent-state")
+        .join("branches")
+        .join("daemon.pid");
+    assert!(
+        !root_legacy_pid.exists(),
+        "root daemon.pid should not be written for branch daemons"
+    );
+    assert!(
+        !branches_legacy_pid.exists(),
+        "branches/daemon.pid should not be written for branch daemons"
+    );
+
     let alpha_pid: i32 = fs::read_to_string(&alpha_pid_file)
         .unwrap()
         .trim()
@@ -297,4 +312,93 @@ fn test_cli_multi_daemon_fleet() {
     assert!(!is_pid_alive(beta_pid), "Beta daemon should be terminated");
     assert!(!alpha_pid_file.exists(), "Alpha PID file should be removed");
     assert!(!beta_pid_file.exists(), "Beta PID file should be removed");
+}
+
+#[test]
+fn test_subdirectory_daemon_list() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let state_dir = dir.path().join(".agent-state");
+    let daemons_dir = state_dir.join("daemons");
+    fs::create_dir_all(&daemons_dir).unwrap();
+
+    // Spawn dummy process
+    let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = child.id() as i32;
+    fs::write(daemons_dir.join("default.pid"), pid.to_string()).unwrap();
+
+    // Create deep nested subdirectory
+    let sub = dir.path().join("crates").join("foo").join("src");
+    fs::create_dir_all(&sub).unwrap();
+
+    // Run `superstate daemon list` from subdirectory
+    let output = Command::new(bin())
+        .args(["daemon", "list"])
+        .current_dir(&sub)
+        .output()
+        .expect("Failed to run daemon list from subdirectory");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {}", stderr);
+    assert!(
+        stdout.contains("default") && stdout.contains(&pid.to_string()),
+        "Daemon list from subdirectory should find default daemon. Output: {}",
+        stdout
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn test_cancel_branch_main_fallback() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".agent-state");
+    let daemons_dir = state_dir.join("daemons");
+    fs::create_dir_all(&daemons_dir).unwrap();
+    let state_file = state_dir.join("state.json");
+    fs::write(&state_file, "{}").unwrap();
+
+    let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = child.id() as i32;
+    let default_pid_file = daemons_dir.join("default.pid");
+    fs::write(&default_pid_file, pid.to_string()).unwrap();
+
+    // Cancel with branch "main" when main.pid doesn't exist
+    let cancel_res =
+        superstate_cli::commands::daemon::cmd_cancel(Some(&state_file), Some("main"), false);
+    assert!(cancel_res.is_ok());
+    assert!(
+        !default_pid_file.exists(),
+        "default.pid should be removed by branch main cancel fallback"
+    );
+    assert!(!is_pid_alive(pid), "Process should be killed");
+    let _ = child.wait();
+}
+
+#[test]
+fn test_cancel_all_deduplicates_pids() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".agent-state");
+    let daemons_dir = state_dir.join("daemons");
+    fs::create_dir_all(&daemons_dir).unwrap();
+    let state_file = state_dir.join("state.json");
+    fs::write(&state_file, "{}").unwrap();
+
+    let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = child.id() as i32;
+    let default_pid_file = daemons_dir.join("default.pid");
+    let legacy_pid_file = state_dir.join("daemon.pid");
+    fs::write(&default_pid_file, pid.to_string()).unwrap();
+    fs::write(&legacy_pid_file, pid.to_string()).unwrap();
+
+    // Cancel all
+    let cancel_res = superstate_cli::commands::daemon::cmd_cancel(Some(&state_file), None, true);
+    assert!(cancel_res.is_ok());
+    assert!(!default_pid_file.exists(), "default.pid should be removed");
+    assert!(!legacy_pid_file.exists(), "daemon.pid should be removed");
+    assert!(!is_pid_alive(pid), "Process should be killed");
+    let _ = child.wait();
 }

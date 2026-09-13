@@ -2,7 +2,6 @@ use std::fs;
 use superstate_cli::commands::daemon::{
     cmd_cancel, cmd_daemon, cmd_logs, daemon_paths_for_state, is_pid_alive,
 };
-use superstate_cli::commands::state::cmd_status;
 use superstate_core::models::MilestoneSpec;
 use superstate_core::state_machine::{init_state_milestones, save_state_atomic};
 use tempfile::tempdir;
@@ -57,16 +56,50 @@ fn test_cli_daemon_lifecycle() {
     let pid: i32 = pid_str.trim().parse().unwrap();
     assert!(is_pid_alive(pid));
 
-    // Verify cmd_status works during daemon run
-    cmd_status(&state_path, false).unwrap();
-    cmd_status(&state_path, true).unwrap();
+    let legacy_pid = state_dir.join("daemon.pid");
+    assert!(
+        legacy_pid.exists(),
+        "daemon.pid must exist for detached default daemon"
+    );
 
     // Cancel daemon
     cmd_cancel(Some(&state_path), None, false).unwrap();
 
     assert!(!is_pid_alive(pid));
+    assert!(
+        !legacy_pid.exists(),
+        "daemon.pid must be cleaned up on cancel"
+    );
 
     // Inspect logs
     let logs_output = cmd_logs(Some(&state_path), None, Some(10)).unwrap();
     assert!(!logs_output.is_empty());
+}
+
+#[test]
+fn test_cli_daemon_completion_cleans_legacy_pid() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".agent-state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
+
+    let milestones = vec![MilestoneSpec {
+        title: "Fast Task".to_string(),
+        verify_cmd: "true".to_string(),
+        files: vec![],
+    }];
+
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let legacy_pid = state_dir.join("daemon.pid");
+    fs::write(&legacy_pid, "99999").unwrap();
+
+    // Run daemon to completion synchronously
+    cmd_daemon(&state_path, None, false, 1, 5).unwrap();
+
+    assert!(
+        !legacy_pid.exists(),
+        "daemon.pid must be removed on daemon completion"
+    );
 }
