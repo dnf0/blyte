@@ -48,6 +48,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install Pytest
+        run: pipx install pytest || pip install pytest || true
+
       - name: Rustfmt Check
         run: cargo fmt --all --check
 

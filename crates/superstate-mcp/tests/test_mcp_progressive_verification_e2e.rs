@@ -209,8 +209,66 @@ fn test_mcp_tool_schemas_parity_progressive_verification() {
     );
 }
 
+struct MockPytestGuard {
+    _temp_dir: tempfile::TempDir,
+    orig_path: String,
+}
+
+impl Drop for MockPytestGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::set_var("PATH", &self.orig_path);
+        }
+    }
+}
+
+fn setup_pytest_mock_if_needed() -> Option<MockPytestGuard> {
+    let pytest_works = Command::new("pytest")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if pytest_works {
+        return None;
+    }
+
+    let temp_dir = tempdir().unwrap();
+    let bin_path = temp_dir.path().join("pytest");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = r#"#!/usr/bin/env bash
+for arg in "$@"; do
+    if [ -f "$arg" ] && grep -q "assert False" "$arg"; then
+        echo "FAILED $arg" >&2
+        exit 1
+    fi
+done
+exit 0
+"#;
+        fs::write(&bin_path, script).unwrap();
+        let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin_path, perms).unwrap();
+    }
+
+    let orig_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", temp_dir.path().display(), orig_path);
+    unsafe {
+        std::env::set_var("PATH", new_path);
+    }
+
+    Some(MockPytestGuard {
+        _temp_dir: temp_dir,
+        orig_path,
+    })
+}
+
 #[test]
 fn test_state_next_infers_impacted_tests_for_empty_verify_cmd_milestone() {
+    let _pytest_guard = setup_pytest_mock_if_needed();
     let (_dir, repo_root) = setup_test_repo();
 
     // Create a source file and corresponding test file in main
@@ -304,6 +362,7 @@ fn test_state_next_infers_impacted_tests_for_empty_verify_cmd_milestone() {
 
 #[test]
 fn test_state_next_infers_impacted_tests_in_active_worktree_without_wt_prefix() {
+    let _pytest_guard = setup_pytest_mock_if_needed();
     let (_dir, repo_root) = setup_test_repo();
 
     // Create baseline test structure on main branch
