@@ -1,5 +1,6 @@
 pub mod daemon;
 pub mod doctor;
+pub mod handoff;
 pub mod init;
 pub mod review;
 pub mod state;

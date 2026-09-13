@@ -268,6 +268,8 @@ pub enum StateCommands {
     Cancel(CancelArgs),
     /// Inspect background daemon logs
     Logs(LogsArgs),
+    /// Prepare standardized cross-agent handoff package
+    Handoff(HandoffArgs),
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -326,6 +328,78 @@ pub struct LogsArgs {
     /// Number of lines to tail
     #[arg(short, long)]
     pub tail: Option<usize>,
+}
+
+/// Arguments for preparing a cross-agent handoff package.
+#[derive(clap::Args, Clone, Debug)]
+pub struct HandoffArgs {
+    /// High-level goal statement
+    #[arg(long)]
+    pub goal: Option<String>,
+
+    /// Verification invariant command
+    #[arg(long)]
+    pub verify_cmd: Option<String>,
+
+    /// Plan markdown file to parse milestones from
+    #[arg(long)]
+    pub plan: Option<PathBuf>,
+
+    /// Source agent (e.g. claude, agy, human)
+    #[arg(long)]
+    pub from: Option<String>,
+
+    /// Target agent (e.g. agy, claude, daemon, any)
+    #[arg(long)]
+    pub to: Option<String>,
+
+    /// Worktree isolation (default: true)
+    #[arg(long, default_value_t = true)]
+    pub worktree: bool,
+
+    /// Execute in-place without creating worktree
+    #[arg(long)]
+    pub no_worktree: bool,
+
+    /// Launch background daemon runner immediately
+    #[arg(long)]
+    pub detach: bool,
+
+    /// Headless coding driver preset (claude, agy) or command
+    #[arg(long)]
+    pub driver: Option<String>,
+
+    /// Format output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    #[arg(short, long, default_value = DEFAULT_STATE)]
+    pub state: PathBuf,
+}
+
+impl Default for HandoffArgs {
+    fn default() -> Self {
+        Self {
+            goal: None,
+            verify_cmd: None,
+            plan: None,
+            from: None,
+            to: None,
+            worktree: true,
+            no_worktree: false,
+            detach: false,
+            driver: None,
+            json: false,
+            state: PathBuf::from(DEFAULT_STATE),
+        }
+    }
+}
+
+impl HandoffArgs {
+    /// Returns whether worktree isolation should be used.
+    pub fn use_worktree(&self) -> bool {
+        self.worktree && !self.no_worktree
+    }
 }
 
 /// Find the project's state, dynamically resolving branch-scoped states and worktrees.
@@ -459,5 +533,6 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             commands::daemon::cmd_logs(state_path.as_deref(), args.branch.as_deref(), args.tail)
                 .map(|_| ())
         }
+        StateCommands::Handoff(args) => commands::handoff::cmd_handoff(&args),
     }
 }

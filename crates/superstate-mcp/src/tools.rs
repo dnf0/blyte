@@ -405,6 +405,14 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                         "type": "string",
                         "description": "Shell command that must exit 0 to pass"
                     },
+                    "from_agent": {
+                        "type": "string",
+                        "description": "Source agent performing handoff (e.g. claude, agy, human)"
+                    },
+                    "to_agent": {
+                        "type": "string",
+                        "description": "Target agent receiving handoff (e.g. agy, claude, daemon, any)"
+                    },
                     "milestones": {
                         "type": "array",
                         "items": {

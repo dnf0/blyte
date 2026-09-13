@@ -52,12 +52,13 @@ enum Commands {
         cmd: commands::worktree::WorktreeCommands,
     },
     /// Run autonomous background daemon over milestones
-    /// Run autonomous background daemon over milestones
     Daemon(superstate_cli::state_cli::DaemonArgs),
     /// Cancel a running background daemon process
     Cancel(superstate_cli::state_cli::CancelArgs),
     /// Inspect background daemon logs
     Logs(superstate_cli::state_cli::LogsArgs),
+    /// Prepare standardized cross-agent handoff package
+    Handoff(superstate_cli::state_cli::HandoffArgs),
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -121,6 +122,7 @@ fn main() {
             commands::daemon::cmd_logs(args.state.as_deref(), args.branch.as_deref(), args.tail)
                 .map(|_| ())
         }
+        Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
     };
 
     if let Err(e) = result {

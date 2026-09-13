@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use superstate_core::daemon::{daemon_paths_for_state, is_pid_alive};
+use superstate_core::daemon::{
+    daemon_paths_for_state, is_pid_alive, resolve_daemon_slug_and_state_dir, resolve_driver_command,
+};
+use superstate_core::handoff::{generate_resumption_command, write_handoff_package, HandoffSpec};
 use superstate_core::impact::infer_impacted_tests;
 use superstate_core::ledger::{append_ledger_note, read_ledger};
 use superstate_core::maintenance::{diagnose, metrics, repair, resume_briefing, sync_with_plan};
@@ -19,7 +22,8 @@ use superstate_core::prompt::render_turnkey_prompt;
 use superstate_core::resolve_project_root;
 use superstate_core::state_machine::{
     advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
-    init_state_milestones, load_state, ready_tasks, save_state_atomic, STATE_DIR,
+    init_state_milestones, load_state, ready_tasks, sanitize_branch_slug, save_state_atomic,
+    STATE_DIR,
 };
 use superstate_core::verifier::execute_all_gates_filtered;
 use superstate_worktree::manager::{
@@ -593,8 +597,78 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             save_state_atomic(&state_path, &state)
                 .map_err(|e| format!("Failed to save state: {}", e))?;
 
+            // Determine source agent from explicit property or ambient runtime environment variables
+            let from_agent = if let Some(from) = args
+                .get("from_agent")
+                .or_else(|| args.get("from"))
+                .and_then(Value::as_str)
+            {
+                from.to_string()
+            } else if std::env::var("CLAUDE_PROJECT_ROOT").is_ok() {
+                "claude".to_string()
+            } else if std::env::var("AGY_VERSION").is_ok() {
+                "agy".to_string()
+            } else {
+                "human".to_string()
+            };
+
+            // Determine target agent preset or generic fallback
+            let to_agent = args
+                .get("to_agent")
+                .or_else(|| args.get("to"))
+                .and_then(Value::as_str)
+                .unwrap_or("any")
+                .to_string();
+
+            // Expand driver preset flags (e.g. claude -> claude -p --dangerously-skip-permissions)
+            let raw_driver = args.get("driver").and_then(Value::as_str);
+            let resolved_driver = raw_driver.map(resolve_driver_command);
+
+            // Derive deterministic job slug for file naming and process coordination
+            let (default_slug, _) = resolve_daemon_slug_and_state_dir(&state_path);
+            let slug = if default_slug != "default" {
+                default_slug
+            } else if let Some(ref b) = state.active_branch {
+                sanitize_branch_slug(b)
+            } else if let Some(ref t) = state.active_task {
+                sanitize_branch_slug(&t.id)
+            } else {
+                "default".to_string()
+            };
+
+            // Assemble handoff specification and load epistemic ledger history
+            let spec = HandoffSpec {
+                from_agent: Some(from_agent.clone()),
+                to_agent: Some(to_agent.clone()),
+                state_path: state_path.clone(),
+                worktree_path: state.active_worktree.clone(),
+                slug: slug.clone(),
+            };
+
+            let notes = read_ledger(&state_path);
+            let handoff_file = write_handoff_package(&repo_root, &state, &spec, &notes)
+                .map_err(|e| format!("Failed to write handoff package: {}", e))?;
+
+            // Record [handoff] metadata note in epistemic ledger for provenance tracking
+            let active_task_desc = state
+                .active_task
+                .as_ref()
+                .map(|t| format!("{}: {}", t.id, t.title))
+                .unwrap_or_else(|| "none".to_string());
+            let handoff_note = format!(
+                "[handoff] Handed off to {}: active task {}",
+                to_agent, active_task_desc
+            );
+            let _ = append_ledger_note(&state_path, LedgerEntry::new(&from_agent, handoff_note));
+
+            // Generate formatted copy-pasteable target resumption command
+            let target_resumption_cmd = generate_resumption_command(
+                &to_agent,
+                state.active_worktree.as_deref(),
+                &state_path,
+            );
+
             let detach = args.get("detach").and_then(Value::as_bool).unwrap_or(false);
-            let driver = args.get("driver").and_then(Value::as_str);
 
             if detach {
                 let bin = resolve_superstate_binary();
@@ -602,7 +676,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 cmd.arg("state").arg("daemon");
                 cmd.arg("--state").arg(&state_path);
                 cmd.arg("--detach");
-                if let Some(d) = driver {
+                let driver_str = resolved_driver.as_deref().or(raw_driver);
+                if let Some(d) = driver_str {
                     cmd.arg("--driver").arg(d);
                 }
                 cmd.current_dir(&repo_root);
@@ -662,6 +737,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     "state_path": state_path.display().to_string(),
                     "worktree_path": state.active_worktree.as_ref().map(|p| p.display().to_string()),
                     "branch": state.active_branch,
+                    "handoff_file": handoff_file.display().to_string(),
+                    "target_resumption_command": target_resumption_cmd,
                     "content": [
                         {
                             "type": "text",
@@ -685,6 +762,9 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             Ok(serde_json::json!({
                 "status": "ready",
                 "task_id": task_id,
+                "slug": slug,
+                "handoff_file": handoff_file.display().to_string(),
+                "target_resumption_command": target_resumption_cmd,
                 "worktree_path": state.active_worktree.as_ref().map(|p| p.display().to_string()),
                 "branch": state.active_branch,
                 "turnkey_prompt": turnkey_prompt,
