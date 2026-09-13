@@ -105,6 +105,60 @@ pub fn resolve_daemon_slug_and_state_dir(state_path: &Path) -> (String, PathBuf)
     (slug, base_dir)
 }
 
+/// Scoped filesystem paths allocated to a daemon executing over a discrete state file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonPaths {
+    pub pid_file: PathBuf,
+    pub log_file: PathBuf,
+    pub prompt_file: PathBuf,
+    pub slug: String,
+}
+
+/// Resolves scoped daemon paths for a given state machine path.
+///
+/// Default state (`state.json`) maps to slug `"default"`, PID `.agent-state/daemons/default.pid`,
+/// logs `.agent-state/logs/default.log`, and prompts `.agent-state/prompts/default.md`.
+/// Feature branches (`branches/<slug>.json`) scope to `.agent-state/daemons/<slug>.pid`.
+pub fn daemon_paths_for_state(state_path: &Path) -> DaemonPaths {
+    let (slug, base_dir) = resolve_daemon_slug_and_state_dir(state_path);
+    let state_dir = if base_dir.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
+        base_dir
+    } else {
+        base_dir.join(STATE_DIR)
+    };
+    DaemonPaths {
+        pid_file: state_dir.join("daemons").join(format!("{}.pid", slug)),
+        log_file: state_dir.join("logs").join(format!("{}.log", slug)),
+        prompt_file: state_dir.join("prompts").join(format!("{}.md", slug)),
+        slug,
+    }
+}
+
+/// Checks whether an operating system PID is active and alive.
+#[cfg(unix)]
+pub fn is_pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let mut status: libc::c_int = 0;
+    let wait_res = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if wait_res == pid {
+        // Child exited and was reaped
+        return false;
+    }
+    if wait_res == 0 {
+        // Child is still running
+        return true;
+    }
+    // ECHILD (not our child) or other error: check kill(pid, 0)
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn is_pid_alive(_pid: i32) -> bool {
+    false
+}
+
 pub struct DaemonRunner {
     config: DaemonConfig,
     retry_counts: HashMap<String, usize>,

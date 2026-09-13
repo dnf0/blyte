@@ -82,7 +82,7 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
         },
         McpTool {
             name: "state_status".to_string(),
-            description: "Display state machine status and epistemic ledger".to_string(),
+            description: "Display state machine status, daemon execution status, and epistemic ledger".to_string(),
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
@@ -263,7 +263,7 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
         },
         McpTool {
             name: "state_list".to_string(),
-            description: "List active and completed branch-scoped states".to_string(),
+            description: "List active and completed branch-scoped states and daemon fleet status".to_string(),
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({

@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::time::Duration;
 use superstate_mcp::server::handle_tool_call;
 use tempfile::tempdir;
@@ -57,8 +58,10 @@ fn test_mcp_detached_handoff_lifecycle() {
         .expect("superstate_handoff with detach should succeed");
 
     assert_eq!(res["status"], "detached");
+    assert_eq!(res["slug"], "feat-detached-test");
     assert!(res["job_id"].is_string());
     assert!(res["pid"].is_number());
+    assert!(res["log_path"].is_string());
 
     let state_path = repo_root
         .join(".agent-state")
@@ -66,16 +69,25 @@ fn test_mcp_detached_handoff_lifecycle() {
         .join("feat-detached-test.json");
     assert!(state_path.exists(), "State file must exist");
 
+    let scoped_pid_file = repo_root
+        .join(".agent-state")
+        .join("daemons")
+        .join("feat-detached-test.pid");
     let pid_file = repo_root
         .join(".agent-state")
         .join("branches")
         .join("daemon.pid");
     let fallback_pid_file = repo_root.join(".agent-state").join("daemon.pid");
     assert!(
-        pid_file.exists() || fallback_pid_file.exists(),
-        "daemon.pid must exist"
+        scoped_pid_file.exists() || pid_file.exists() || fallback_pid_file.exists(),
+        "daemon pid file must exist"
     );
 
     // Let the daemon run briefly
     std::thread::sleep(Duration::from_millis(50));
+
+    // Clean up background daemon
+    if let Some(pid) = res["pid"].as_i64() {
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+    }
 }
