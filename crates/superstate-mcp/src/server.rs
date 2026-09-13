@@ -216,6 +216,26 @@ pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> Result<PreflightResult
     execute_preflight_with_timeout(verify_cmd, cwd, std::time::Duration::from_secs(15))
 }
 
+fn resolve_superstate_binary() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        let name = exe.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if (name == "superstate" || name == "superstate.exe") && !name.contains('-') {
+            return exe;
+        }
+        if let Some(parent) = exe.parent() {
+            if parent.file_name().and_then(|s| s.to_str()) == Some("deps") {
+                if let Some(target_dir) = parent.parent() {
+                    let cand = target_dir.join("superstate");
+                    if cand.exists() {
+                        return cand;
+                    }
+                }
+            }
+        }
+    }
+    PathBuf::from("superstate")
+}
+
 /// Dynamically resolve state path for MCP operations.
 ///
 /// 1. If explicit state path is provided and non-empty, resolves relative to `repo_root` (or absolute).
@@ -529,6 +549,63 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             // Atomically persist state to disk
             save_state_atomic(&state_path, &state)
                 .map_err(|e| format!("Failed to save state: {}", e))?;
+
+            let detach = args.get("detach").and_then(Value::as_bool).unwrap_or(false);
+            let driver = args.get("driver").and_then(Value::as_str);
+
+            if detach {
+                let bin = resolve_superstate_binary();
+                let mut cmd = std::process::Command::new(bin);
+                cmd.arg("state").arg("daemon");
+                cmd.arg("--state").arg(&state_path);
+                cmd.arg("--detach");
+                if let Some(d) = driver {
+                    cmd.arg("--driver").arg(d);
+                }
+                cmd.current_dir(&repo_root);
+
+                let output = cmd
+                    .output()
+                    .map_err(|e| format!("Failed to spawn daemon process: {}", e))?;
+
+                if !output.status.success() {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("Daemon spawn failed: {}", err));
+                }
+
+                let state_dir = state_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let pid_file = state_dir.join("daemon.pid");
+                let fallback_pid_file = repo_root.join(".agent-state").join("daemon.pid");
+
+                let pid = if pid_file.exists() {
+                    std::fs::read_to_string(&pid_file)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<i32>().ok())
+                } else if fallback_pid_file.exists() {
+                    std::fs::read_to_string(&fallback_pid_file)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<i32>().ok())
+                } else {
+                    None
+                };
+
+                let job_id = pid.map(|p| p.to_string()).unwrap_or_else(|| "detached".to_string());
+
+                return Ok(serde_json::json!({
+                    "status": "detached",
+                    "job_id": job_id,
+                    "pid": pid,
+                    "state_path": state_path.display().to_string(),
+                    "worktree_path": state.active_worktree.as_ref().map(|p| p.display().to_string()),
+                    "branch": state.active_branch,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": format!("Autonomous daemon launched in background (PID: {}). Track progress with superstate state status or superstate state logs.", job_id)
+                        }
+                    ]
+                }));
+            }
 
             // Generate turnkey prompt for the active task
             let is_in_place = no_worktree || state.no_worktree;

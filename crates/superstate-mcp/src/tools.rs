@@ -434,9 +434,18 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                     "no_worktree": {
                         "type": "boolean",
                         "description": "If true, execute in-place without creating a worktree"
+                    },
+                    "detach": {
+                        "type": "boolean",
+                        "description": "If true, launch background daemon runner and return immediately (default: false)"
+                    },
+                    "driver": {
+                        "type": "string",
+                        "description": "Headless coding driver command or agent (e.g. claude, agy, or command)"
                     }
                 }),
                 required: vec![],
+
             },
         },
     ]
