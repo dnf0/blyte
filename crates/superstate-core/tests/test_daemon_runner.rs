@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
+use superstate_core::daemon::{DaemonConfig, DaemonError, DaemonRunner, DaemonStepOutcome};
 
 use superstate_core::models::{ExecutionStatus, MilestoneSpec};
 use superstate_core::state_machine::{init_state_milestones, load_state, save_state_atomic};
@@ -161,6 +161,105 @@ fn test_daemon_step_advancer_invoked() {
 
     let recorded = invoked_path.lock().unwrap().take();
     assert_eq!(recorded, Some(state_path));
+}
+
+#[test]
+fn test_daemon_step_advancer_error_propagation() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join(".agent-state/state.json");
+
+    let milestones = vec![MilestoneSpec {
+        title: "Advancer Failure Milestone".to_string(),
+        verify_cmd: "true".to_string(),
+        files: vec![],
+    }];
+
+    // Initialize state with in-place execution mode
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("echo 'worker output'".to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+    };
+
+    // Configure a StepAdvancer that simulates downstream failure during advancement
+    let advancer = Box::new(|_p: &std::path::Path| Err("custom step advancer error".to_string()));
+
+    let mut runner = DaemonRunner::new(config)
+        .unwrap()
+        .with_step_advancer(advancer);
+
+    // Verify error is converted into DaemonError::StepAdvancer and propagated to caller
+    let err = runner.run_step().unwrap_err();
+    match err {
+        DaemonError::StepAdvancer(msg) => {
+            assert_eq!(msg, "custom step advancer error");
+        }
+        other => panic!("Expected DaemonError::StepAdvancer, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join(".agent-state/state.json");
+
+    let target_file = dir.path().join("bounded_rescued.txt");
+    let target_str = target_file.to_str().unwrap();
+
+    let milestones = vec![MilestoneSpec {
+        title: "Rescue Milestone Bounded Stderr".to_string(),
+        verify_cmd: format!("test -f {}", target_str),
+        files: vec![],
+    }];
+
+    let state = init_state_milestones(Some("Rescue Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    // Driver creates target file, writes 1500 chars to stderr, and exits with code 1
+    let driver_cmd = format!(
+        "touch {} && printf '%1500s' | tr ' ' 'E' >&2 && exit 1",
+        target_str
+    );
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some(driver_cmd),
+        max_retries: 3,
+        timeout_secs: 10,
+    };
+
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let outcome = runner.run_step().unwrap();
+
+    // Verification gate passes despite driver non-zero exit code
+    assert!(matches!(outcome, DaemonStepOutcome::Advanced { .. }));
+
+    // Verify warning entry in state notes is bounded to 1000 characters
+    let updated_state = load_state(&state_path).unwrap();
+    let warn_note = updated_state
+        .notes
+        .iter()
+        .find(|n| n.note.contains("[driver-warn]"))
+        .expect("Expected [driver-warn] note in state.notes");
+
+    let prefix = "[driver-warn] Driver for task task-1 exited with code 1: ";
+    assert!(
+        warn_note.note.starts_with(prefix),
+        "Expected note to start with prefix '{}', found: {}",
+        prefix,
+        warn_note.note
+    );
+    let captured_stderr = &warn_note.note[prefix.len()..];
+    assert_eq!(
+        captured_stderr.chars().count(),
+        1000,
+        "Expected captured stderr to be bounded to exactly 1000 chars, got length {}",
+        captured_stderr.chars().count()
+    );
 }
 
 #[test]

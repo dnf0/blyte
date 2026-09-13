@@ -240,17 +240,26 @@ impl DaemonRunner {
                 .env("SUPERSTATE_ACTIVE_TASK", &active_task.id)
                 .spawn()?;
 
-            // Pipe prompt into driver stdin for agents reading from stdin
+            // Pipe prompt into driver stdin on a background thread to avoid pipe buffer deadlock
+            // while the parent thread drains stdout/stderr in wait_with_output.
             if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(prompt.as_bytes());
+                let prompt_bytes = prompt.as_bytes().to_vec();
+                std::thread::spawn(move || {
+                    let _ = stdin.write_all(&prompt_bytes);
+                });
             }
 
             let output = child.wait_with_output()?;
 
             // Driver rescue pattern: non-zero driver exit codes are logged as warnings
             // but do not abort daemon execution, allowing verification gate to determine outcome.
+            // Captured stderr is bounded to 1,000 characters to prevent state file bloating.
             if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .chars()
+                    .take(1000)
+                    .collect::<String>();
                 let code = output
                     .status
                     .code()
