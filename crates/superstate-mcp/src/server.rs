@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use superstate_core::daemon::{daemon_paths_for_state, is_pid_alive};
+use superstate_core::impact::infer_impacted_tests;
 use superstate_core::ledger::{append_ledger_note, read_ledger};
 use superstate_core::maintenance::{diagnose, metrics, repair, resume_briefing, sync_with_plan};
 use superstate_core::models::{ExecutionStatus, LedgerEntry, MilestoneSpec};
@@ -60,6 +62,14 @@ pub struct PreflightResult {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonStatusInfo {
+    pub pid: i32,
+    pub running: bool,
+    pub slug: String,
+    pub log_file: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchStateSummary {
     pub branch: String,
@@ -69,6 +79,33 @@ pub struct BranchStateSummary {
     pub total_steps: usize,
     pub base_branch: Option<String>,
     pub state_file: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonStatusInfo>,
+}
+
+/// Resolves current daemon execution status for a given state machine path.
+pub fn resolve_daemon_status(state_path: &Path) -> Option<DaemonStatusInfo> {
+    let d_paths = daemon_paths_for_state(state_path);
+    let pid_file = if d_paths.pid_file.exists() {
+        d_paths.pid_file.clone()
+    } else {
+        let parent = state_path.parent().unwrap_or_else(|| Path::new("."));
+        let local_pid = parent.join("daemon.pid");
+        if local_pid.exists() {
+            local_pid
+        } else {
+            return None;
+        }
+    };
+
+    let pid_str = std::fs::read_to_string(&pid_file).ok()?;
+    let pid = pid_str.trim().parse::<i32>().ok()?;
+    Some(DaemonStatusInfo {
+        pid,
+        running: is_pid_alive(pid),
+        slug: d_paths.slug,
+        log_file: d_paths.log_file,
+    })
 }
 
 fn save_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
@@ -215,6 +252,26 @@ pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> Result<PreflightResult
     execute_preflight_with_timeout(verify_cmd, cwd, std::time::Duration::from_secs(15))
 }
 
+fn resolve_superstate_binary() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        let name = exe.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if (name == "superstate" || name == "superstate.exe") && !name.contains('-') {
+            return exe;
+        }
+        if let Some(parent) = exe.parent() {
+            if parent.file_name().and_then(|s| s.to_str()) == Some("deps") {
+                if let Some(target_dir) = parent.parent() {
+                    let cand = target_dir.join("superstate");
+                    if cand.exists() {
+                        return cand;
+                    }
+                }
+            }
+        }
+    }
+    PathBuf::from("superstate")
+}
+
 /// Dynamically resolve state path for MCP operations.
 ///
 /// 1. If explicit state path is provided and non-empty, resolves relative to `repo_root` (or absolute).
@@ -227,11 +284,18 @@ pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) ->
         let trimmed = s.trim();
         if !trimmed.is_empty() {
             let p = Path::new(trimmed);
-            return if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                repo_root.join(p)
-            };
+            if p.is_absolute() {
+                return p.to_path_buf();
+            }
+            let direct = repo_root.join(p);
+            if direct.exists() {
+                return direct;
+            }
+            let under_state_dir = repo_root.join(STATE_DIR).join(p);
+            if under_state_dir.exists() {
+                return under_state_dir;
+            }
+            return direct;
         }
     }
 
@@ -529,6 +593,84 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             save_state_atomic(&state_path, &state)
                 .map_err(|e| format!("Failed to save state: {}", e))?;
 
+            let detach = args.get("detach").and_then(Value::as_bool).unwrap_or(false);
+            let driver = args.get("driver").and_then(Value::as_str);
+
+            if detach {
+                let bin = resolve_superstate_binary();
+                let mut cmd = std::process::Command::new(bin);
+                cmd.arg("state").arg("daemon");
+                cmd.arg("--state").arg(&state_path);
+                cmd.arg("--detach");
+                if let Some(d) = driver {
+                    cmd.arg("--driver").arg(d);
+                }
+                cmd.current_dir(&repo_root);
+
+                let output = cmd
+                    .output()
+                    .map_err(|e| format!("Failed to spawn daemon process: {}", e))?;
+
+                if !output.status.success() {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("Daemon spawn failed: {}", err));
+                }
+
+                let daemon_paths = daemon_paths_for_state(&state_path);
+
+                // Wait briefly for PID file if not immediately visible
+                for _ in 0..10 {
+                    if daemon_paths.pid_file.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+
+                let pid = if daemon_paths.pid_file.exists() {
+                    std::fs::read_to_string(&daemon_paths.pid_file)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<i32>().ok())
+                } else {
+                    let state_dir = state_path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let pid_file = state_dir.join("daemon.pid");
+                    let fallback_pid_file = repo_root.join(".agent-state").join("daemon.pid");
+                    if pid_file.exists() {
+                        std::fs::read_to_string(&pid_file)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok())
+                    } else if fallback_pid_file.exists() {
+                        std::fs::read_to_string(&fallback_pid_file)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok())
+                    } else {
+                        None
+                    }
+                };
+
+                let job_id = pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "detached".to_string());
+
+                return Ok(serde_json::json!({
+                    "status": "detached",
+                    "slug": daemon_paths.slug,
+                    "job_id": job_id,
+                    "pid": pid,
+                    "log_path": daemon_paths.log_file.display().to_string(),
+                    "state_path": state_path.display().to_string(),
+                    "worktree_path": state.active_worktree.as_ref().map(|p| p.display().to_string()),
+                    "branch": state.active_branch,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": format!("Autonomous daemon launched in background for '{}' (PID: {}). Track progress with superstate state status or superstate state logs.", daemon_paths.slug, job_id)
+                        }
+                    ]
+                }));
+            }
+
             // Generate turnkey prompt for the active task
             let is_in_place = no_worktree || state.no_worktree;
             let turnkey_prompt =
@@ -654,9 +796,22 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             }))
         }
         "state_next" | "state_step" => {
+            let verify_stage = args
+                .get("verify_stage")
+                .and_then(|v| v.as_str())
+                .unwrap_or("milestone");
+
+            if verify_stage != "milestone" && verify_stage != "final" {
+                return Err(format!(
+                    "Invalid verify_stage '{}'. Must be 'milestone' or 'final'",
+                    verify_stage
+                ));
+            }
+
             let verify_cmd = args
                 .get("verify_cmd")
                 .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
                 .map(ToString::to_string);
 
             let verify_git_clean = args
@@ -700,6 +855,56 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .filter(|p| p.exists())
                 .cloned()
                 .unwrap_or_else(|| repo_root.clone());
+
+            // Progressive staged verification: infer impacted tests for milestone stage when verification_cmd is empty
+            let mut impacted_tests_list: Vec<String> = Vec::new();
+            let mut synthesized_verify_cmd_opt: Option<String> = None;
+
+            if verify_stage == "milestone"
+                && task_to_verify
+                    .verification_cmd
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            {
+                // Discover impacted tests against base branch in target directory or repository root
+                let check_dir = if target_dir.exists() {
+                    &target_dir
+                } else {
+                    &repo_root
+                };
+
+                let mut impacted = infer_impacted_tests(check_dir, state.base_branch.as_deref());
+                // Fall back to repo_root discovery if target_dir returned no impacted tests
+                if impacted.is_empty() && check_dir != &repo_root {
+                    impacted = infer_impacted_tests(&repo_root, None);
+                }
+
+                if !impacted.is_empty() {
+                    // Extract relative path strings for response payload
+                    let rel_tests: Vec<String> = impacted
+                        .iter()
+                        .map(|p| {
+                            p.strip_prefix(check_dir)
+                                .or_else(|_| p.strip_prefix(&repo_root))
+                                .unwrap_or(p)
+                                .display()
+                                .to_string()
+                        })
+                        .collect();
+
+                    synthesized_verify_cmd_opt =
+                        synthesize_targeted_test_command(check_dir, &impacted);
+
+                    impacted_tests_list = rel_tests;
+
+                    // Enforce synthesized targeted test command as a blocking verification gate
+                    if let Some(ref synth_cmd) = synthesized_verify_cmd_opt {
+                        task_to_verify.verification_cmd = Some(synth_cmd.clone());
+                    }
+                }
+            }
 
             let results = execute_all_gates_filtered(
                 &target_dir,
@@ -791,10 +996,21 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let mut res_obj = serde_json::json!({
                 "status": "success",
                 "step": state.step,
+                "stage": verify_stage,
                 "active_task": state.active_task,
                 "active_worktree": state.active_worktree.as_ref().map(|p| p.display().to_string()),
                 "active_branch": state.active_branch,
             });
+
+            // Note impacted tests discovered during milestone verification
+            if !impacted_tests_list.is_empty() {
+                res_obj["impacted_tests"] = serde_json::json!(impacted_tests_list);
+            }
+
+            // Include synthesized targeted test runner command if constructed
+            if let Some(ref synth) = synthesized_verify_cmd_opt {
+                res_obj["synthesized_verify_cmd"] = serde_json::json!(synth);
+            }
 
             if let Some(ref prompt) = turnkey_prompt_opt {
                 res_obj["turnkey_prompt"] = serde_json::Value::String(prompt.clone());
@@ -910,12 +1126,27 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let ledger_entries = read_ledger(&state_path);
             let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
 
+            let daemon_status = resolve_daemon_status(&state_path);
+            let daemon_info = daemon_status.as_ref().map(|d| {
+                serde_json::json!({
+                    "pid": d.pid,
+                    "running": d.running,
+                    "slug": d.slug,
+                    "log_file": d.log_file.display().to_string(),
+                })
+            });
+
             if as_json {
                 // Machine-readable format: serializes execution state directly matching CLI parity
-                let pretty = serde_json::to_string_pretty(&state)
-                    .map_err(|e| format!("Failed to serialize state: {}", e))?;
                 let mut val = serde_json::to_value(&state)
                     .map_err(|e| format!("Failed to convert state to JSON value: {}", e))?;
+                if let Some(ref d) = daemon_info {
+                    if let Value::Object(ref mut map) = val {
+                        map.insert("daemon".to_string(), d.clone());
+                    }
+                }
+                let pretty = serde_json::to_string_pretty(&val)
+                    .map_err(|e| format!("Failed to serialize state: {}", e))?;
                 if let Value::Object(ref mut map) = val {
                     map.insert(
                         "state".to_string(),
@@ -932,6 +1163,19 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 let mut text = String::new();
                 text.push_str(&format!("State Status: {:?}\n", state.status));
                 text.push_str(&format!("Step: {}\n", state.step));
+                if let Some(ref d) = daemon_status {
+                    if d.running {
+                        text.push_str(&format!(
+                            "Daemon Status: Running (PID: {}, Slug: {})\n",
+                            d.pid, d.slug
+                        ));
+                    } else {
+                        text.push_str(&format!(
+                            "Daemon Status: Stopped (Stale PID: {}, Slug: {})\n",
+                            d.pid, d.slug
+                        ));
+                    }
+                }
                 if let Some(ref task) = state.active_task {
                     text.push_str(&format!("Active Task: {}: {}\n", task.id, task.title));
                 } else {
@@ -952,7 +1196,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     }
                 }
 
-                Ok(serde_json::json!({
+                let mut ret = serde_json::json!({
                     "status": "success",
                     "output": text,
                     "text": text,
@@ -962,7 +1206,11 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                             "text": text
                         }
                     ]
-                }))
+                });
+                if let Some(ref d) = daemon_info {
+                    ret["daemon"] = d.clone();
+                }
+                Ok(ret)
             }
         }
         "state_show" => {
@@ -1567,9 +1815,31 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Merge worktree branch");
+            let verify_full_suite = args
+                .get("verify_full_suite")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty());
 
             let isolated = resolve_worktree_for_merge(&repo_root, branch, base)?;
             let _ = isolated.auto_commit_if_dirty(message);
+
+            // Enforce pre-merge verification gate if a full suite check command is specified.
+            // If verification fails (non-zero exit), abort before merging into base so the
+            // isolated worktree remains intact for debugging and regressions are kept out of base.
+            if let Some(cmd) = verify_full_suite {
+                let gate_res = execute_preflight_with_timeout(
+                    cmd,
+                    &isolated.path,
+                    std::time::Duration::from_secs(600),
+                )?;
+                if gate_res.exit_code != 0 {
+                    return Err(format!(
+                        "Pre-merge verification failed (exit code {}):\nSTDOUT:\n{}\nSTDERR:\n{}",
+                        gate_res.exit_code, gate_res.stdout, gate_res.stderr
+                    ));
+                }
+            }
+
             isolated
                 .merge_into_base(message)
                 .map_err(|e| format!("Failed to merge worktree: {}", e))?;
@@ -2151,6 +2421,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                             } else {
                                 st.step.min(total_steps)
                             };
+                            let daemon = resolve_daemon_status(&path);
                             summaries.push(BranchStateSummary {
                                 branch: slug,
                                 status: st.status,
@@ -2159,6 +2430,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                                 total_steps,
                                 base_branch: st.base_branch,
                                 state_file: path,
+                                daemon,
                             });
                         }
                     }
@@ -2185,6 +2457,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     } else {
                         st.step.min(total_steps)
                     };
+                    let daemon = resolve_daemon_status(&default_state_file);
                     summaries.push(BranchStateSummary {
                         branch: branch_display,
                         status: st.status,
@@ -2193,6 +2466,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                         total_steps,
                         base_branch: st.base_branch.or(Some(default_branch_name)),
                         state_file: default_state_file,
+                        daemon,
                     });
                 }
             }
@@ -2223,6 +2497,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                                     } else {
                                         st.step.min(total_steps)
                                     };
+                                    let daemon = resolve_daemon_status(&wt_state);
                                     summaries.push(BranchStateSummary {
                                         branch: format!("{} (worktree)", wt_name),
                                         status: st.status,
@@ -2231,6 +2506,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                                         total_steps,
                                         base_branch: st.base_branch,
                                         state_file: wt_state,
+                                        daemon,
                                     });
                                 }
                             }
@@ -2246,7 +2522,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let summaries_val: Vec<Value> = summaries
                 .iter()
                 .map(|s| {
-                    serde_json::json!({
+                    let mut obj = serde_json::json!({
                         "branch": s.branch,
                         "status": format!("{:?}", s.status),
                         "active_task": s.active_task,
@@ -2254,14 +2530,25 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                         "total_steps": s.total_steps,
                         "base_branch": s.base_branch,
                         "state_file": s.state_file.display().to_string(),
-                    })
+                    });
+                    if let Some(ref d) = s.daemon {
+                        obj["daemon"] = serde_json::json!({
+                            "pid": d.pid,
+                            "running": d.running,
+                            "slug": d.slug,
+                            "log_file": d.log_file.display().to_string(),
+                        });
+                    } else {
+                        obj["daemon"] = Value::Null;
+                    }
+                    obj
                 })
                 .collect();
 
             let mut text = String::from("Active & Completed Branches:\n");
             text.push_str(&format!(
-                "  {:<26} {:<12} {:<24} {:<6} {:<20}\n",
-                "Branch", "Status", "Active Task", "Step", "Base Branch"
+                "  {:<26} {:<12} {:<24} {:<6} {:<20} {:<16}\n",
+                "Branch", "Status", "Active Task", "Step", "Base Branch", "Daemon"
             ));
             for s in &summaries {
                 let status_str = match s.status {
@@ -2274,8 +2561,13 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 let task_str = s.active_task.as_deref().unwrap_or("-");
                 let step_str = format!("{}/{}", s.step, s.total_steps);
                 let base_str = s.base_branch.as_deref().unwrap_or("-");
+                let daemon_str = match &s.daemon {
+                    Some(d) if d.running => format!("Running ({})", d.pid),
+                    Some(d) => format!("Stopped ({})", d.pid),
+                    None => "-".to_string(),
+                };
                 text.push_str(&format!(
-                    "  {:<26} {:<12} {:<24} {:<6} {:<20}\n",
+                    "  {:<26} {:<12} {:<24} {:<6} {:<20} {:<16}\n",
                     s.branch,
                     status_str,
                     if task_str.len() > 22 {
@@ -2284,7 +2576,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                         task_str
                     },
                     step_str,
-                    base_str
+                    base_str,
+                    daemon_str
                 ));
             }
 
@@ -2546,6 +2839,94 @@ fn clean_orphaned_worktrees(repo_root: &Path, force: bool) -> Result<(usize, Vec
         .output();
 
     Ok((cleaned_count, cleaned_branches))
+}
+
+/// Synthesizes a targeted test runner command based on inferred test file paths.
+///
+/// Discovers the project test language family (Python, Rust, JavaScript/TypeScript, Go)
+/// from the provided test files and formats a targeted runner invocation referencing
+/// only the impacted test files.
+///
+/// # Parameters
+/// - `repo_root`: Repository root path used to relativize test file paths.
+/// - `tests`: Slice of absolute or relative test file paths to execute.
+///
+/// # Returns
+/// An `Option<String>` containing the synthesized runner command, or `None` if
+/// `tests` is empty or no valid files can be referenced.
+fn synthesize_targeted_test_command(repo_root: &Path, tests: &[PathBuf]) -> Option<String> {
+    // Guard clause: Return early if no candidate test files exist
+    if tests.is_empty() {
+        return None;
+    }
+
+    // Relativize all candidate paths against repo_root for clean command line strings
+    let rel_paths: Vec<PathBuf> = tests
+        .iter()
+        .map(|p| p.strip_prefix(repo_root).unwrap_or(p).to_path_buf())
+        .collect();
+
+    // Inspect file extensions to identify test runner ecosystem
+    let has_py = rel_paths
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("py"));
+    let has_rs = rel_paths
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"));
+    let has_js = rel_paths.iter().any(|p| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e == "ts" || e == "tsx" || e == "js" || e == "jsx")
+            .unwrap_or(false)
+    });
+    let has_go = rel_paths
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("go"));
+
+    if has_py {
+        // Python ecosystem: construct pytest invocation targeting impacted test modules
+        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
+        Some(format!("pytest {}", paths.join(" ")))
+    } else if has_rs {
+        // Rust ecosystem: construct cargo test invocation targeting integration test binaries
+        let mut test_targets = Vec::new();
+        for p in &rel_paths {
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                test_targets.push(format!("--test {}", stem));
+            }
+        }
+        if !test_targets.is_empty() {
+            Some(format!("cargo test {}", test_targets.join(" ")))
+        } else {
+            Some("cargo test".to_string())
+        }
+    } else if has_js {
+        // JavaScript/TypeScript ecosystem: pass test paths to npm test runner
+        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
+        Some(format!("npm test -- {}", paths.join(" ")))
+    } else if has_go {
+        // Go ecosystem: execute go test on parent package directories of impacted files
+        let mut dirs: Vec<String> = rel_paths
+            .iter()
+            .filter_map(|p| {
+                p.parent().map(|d| {
+                    let s = d.display().to_string();
+                    if s.is_empty() {
+                        ".".to_string()
+                    } else {
+                        format!("./{}", s)
+                    }
+                })
+            })
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        Some(format!("go test {}", dirs.join(" ")))
+    } else {
+        // Generic fallback: invoke test command with relative file paths
+        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
+        Some(format!("test {}", paths.join(" ")))
+    }
 }
 
 /// Returns list of paths that git rollback/clean operations must never delete.

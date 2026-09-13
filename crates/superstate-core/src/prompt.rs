@@ -216,3 +216,39 @@ pub fn render_turnkey_prompt(
 
     Ok(rendered)
 }
+
+/// Formats previous attempt failure diagnostics for retry prompts.
+///
+/// Clips the failure output to 2,000 characters to prevent prompt context bloat
+/// while preserving essential compiler/test error messages needed for self-remediation.
+///
+/// # Arguments
+/// * `verify_cmd` - The verification command that failed.
+/// * `attempt` - The upcoming attempt number (1-indexed).
+/// * `max_retries` - The maximum configured retries.
+/// * `failure_output` - Unflattened stderr/output from the failed verification run.
+///
+/// # Returns
+/// Markdown section string to inject into the turnkey prompt.
+pub fn format_retry_failure_section(
+    verify_cmd: &str,
+    attempt: usize,
+    max_retries: usize,
+    failure_output: &str,
+) -> String {
+    // Truncate to at most 2,000 characters to prevent unbounded context consumption
+    // while ensuring compiler error locations and stack traces remain visible.
+    let trimmed = failure_output.trim();
+    let clipped: String = trimmed.chars().take(2000).collect();
+
+    // Construct Markdown notification with clear alert styling for the subagent
+    format!(
+        "\n## 🚨 PREVIOUS ATTEMPT VERIFICATION FAILURE (Attempt {} of {})\n\
+        The verification command `{}` failed:\n\
+        ```\n\
+        {}\n\
+        ```\n\
+        Please diagnose and correct this failure before concluding your turn.\n",
+        attempt, max_retries, verify_cmd, clipped
+    )
+}

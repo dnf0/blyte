@@ -1,4 +1,6 @@
 pub mod checkpoint;
+pub mod daemon;
+pub mod impact;
 pub mod ledger;
 pub mod maintenance;
 pub mod models;
@@ -8,10 +10,16 @@ pub mod prompt;
 pub mod state_machine;
 pub mod verifier;
 
+pub use daemon::{
+    CompletionReport, DaemonConfig, DaemonError, DaemonRunner, DaemonStepOutcome, StepAdvancer,
+};
 pub use ledger::append_ledger_note;
 pub use models::{ExecutionState, ExecutionStatus, LedgerEntry, MilestoneSpec, TaskSpec};
 pub use plan_parser::{init_state_from_plan, parse_plan_markdown, ParseError};
-pub use prompt::{compact_ledger_note, render_turnkey_prompt, resolve_project_root, select_task};
+pub use prompt::{
+    compact_ledger_note, format_retry_failure_section, render_turnkey_prompt, resolve_project_root,
+    select_task,
+};
 pub use state_machine::{
     advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
     init_state_milestones, load_state, sanitize_branch_slug, save_state_atomic, StateError,

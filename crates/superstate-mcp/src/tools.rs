@@ -82,7 +82,7 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
         },
         McpTool {
             name: "state_status".to_string(),
-            description: "Display state machine status and epistemic ledger".to_string(),
+            description: "Display state machine status, daemon execution status, and epistemic ledger".to_string(),
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
@@ -92,6 +92,8 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 required: vec![],
             },
         },
+        // Advance active task in state machine with verification gates.
+        // Note: `state_step` is supported in runtime JSON-RPC dispatch as a backward-compatible alias.
         McpTool {
             name: "state_next".to_string(),
             description: "Advance active task in state machine with verification gates".to_string(),
@@ -99,6 +101,11 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
                     "state": { "type": "string", "description": "Path to state JSON file (default: .agent-state/state.json)" },
+                    "verify_stage": {
+                        "type": "string",
+                        "enum": ["milestone", "final"],
+                        "description": "Verification stage: 'milestone' (default) executes scoped checks; 'final' enforces comprehensive verification before completing execution state"
+                    },
                     "verify_cmd": { "type": "string", "description": "Optional shell command to verify" },
                     "verify_git_clean": { "type": "boolean", "description": "Require clean git working tree" },
                     "ignore_untracked_glob": { "type": "string", "description": "Optional glob pattern of untracked files to ignore during git clean verification" }
@@ -256,7 +263,7 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
         },
         McpTool {
             name: "state_list".to_string(),
-            description: "List active and completed branch-scoped states".to_string(),
+            description: "List active and completed branch-scoped states and daemon fleet status".to_string(),
             input_schema: McpToolInputSchema {
                 r#type: "object".to_string(),
                 properties: serde_json::json!({
@@ -308,7 +315,11 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                     "branch": { "type": "string", "description": "Branch name of the worktree to merge" },
                     "base": { "type": "string", "description": "Optional base branch to merge into" },
                     "message": { "type": "string", "description": "Optional commit message for the merge" },
-                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" }
+                    "repo": { "type": "string", "description": "Base repository root (defaults to current dir)" },
+                    "verify_full_suite": {
+                        "type": "string",
+                        "description": "Optional pre-merge verification command executed in the isolated worktree before merging into base"
+                    }
                 }),
                 required: vec!["branch".to_string()],
             },
@@ -423,9 +434,18 @@ pub fn list_all_mcp_tools() -> Vec<McpTool> {
                     "no_worktree": {
                         "type": "boolean",
                         "description": "If true, execute in-place without creating a worktree"
+                    },
+                    "detach": {
+                        "type": "boolean",
+                        "description": "If true, launch background daemon runner and return immediately (default: false)"
+                    },
+                    "driver": {
+                        "type": "string",
+                        "description": "Headless coding driver command or agent (e.g. claude, agy, or command)"
                     }
                 }),
                 required: vec![],
+
             },
         },
     ]

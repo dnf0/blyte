@@ -51,6 +51,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::worktree::WorktreeCommands,
     },
+    /// Run autonomous background daemon over milestones
+    /// Run autonomous background daemon over milestones
+    Daemon(superstate_cli::state_cli::DaemonArgs),
+    /// Cancel a running background daemon process
+    Cancel(superstate_cli::state_cli::CancelArgs),
+    /// Inspect background daemon logs
+    Logs(superstate_cli::state_cli::LogsArgs),
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -84,6 +91,36 @@ fn main() {
         } => commands::init::cmd_init_rules(&dest, &language, &strictness),
         Commands::State { cmd } => superstate_cli::state_cli::dispatch(cmd),
         Commands::Worktree { cmd } => commands::worktree::dispatch_worktree(cmd),
+        Commands::Daemon(args) => match args.command {
+            Some(superstate_cli::state_cli::DaemonSubcommands::List { repo, json }) => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let repo_root = repo.unwrap_or_else(|| {
+                    let mut cur = Some(cwd.as_path());
+                    while let Some(d) = cur {
+                        if d.join(".agent-state").exists() || d.join(".git").exists() {
+                            return d.to_path_buf();
+                        }
+                        cur = d.parent();
+                    }
+                    cwd
+                });
+                commands::daemon::cmd_daemon_list(&repo_root, json)
+            }
+            None => commands::daemon::cmd_daemon(
+                &args.state,
+                args.driver.as_deref(),
+                args.detach,
+                args.max_retries,
+                args.timeout,
+            ),
+        },
+        Commands::Cancel(args) => {
+            commands::daemon::cmd_cancel(args.state.as_deref(), args.branch.as_deref(), args.all)
+        }
+        Commands::Logs(args) => {
+            commands::daemon::cmd_logs(args.state.as_deref(), args.branch.as_deref(), args.tail)
+                .map(|_| ())
+        }
     };
 
     if let Err(e) = result {
