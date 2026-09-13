@@ -183,36 +183,59 @@ pub fn is_pid_alive(pid: i32) -> bool {
 /// An expanded command string ensuring headless execution flags are present if targeting Claude or AGY,
 /// or the original unmodified command string for custom driver workers.
 pub fn resolve_driver_command(driver: &str) -> String {
-    // Determine whether this command targets Claude or AGY drivers
-    let trimmed = driver.trim_start();
-    let is_claude = trimmed.starts_with("claude");
-    let is_agy = trimmed.starts_with("agy");
+    // Tokenize command line to inspect executable token and already-configured operational flags
+    let tokens: Vec<&str> = driver.split_whitespace().collect();
+    let first_token = match tokens.first() {
+        Some(&t) => t,
+        None => {
+            // Guard against empty or whitespace-only driver commands by returning input untouched
+            return driver.to_string();
+        }
+    };
+
+    // Extract binary basename so custom binaries sharing a prefix (e.g. claude-code, agyd)
+    // are not misidentified as Claude or AGY presets, while allowing path prefixes (e.g. /usr/bin/claude).
+    let binary_name = std::path::Path::new(first_token)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(first_token);
+    let is_claude = binary_name == "claude";
+    let is_agy = binary_name == "agy";
 
     // Pass through custom or non-preset driver commands unmodified
     if !is_claude && !is_agy {
         return driver.to_string();
     }
 
-    // Tokenize command line to detect already-configured operational flags
-    let tokens: Vec<&str> = driver.split_whitespace().collect();
-
     // Check for headless non-interactive print mode flag (-p or --print)
     let has_print = tokens.iter().any(|&t| t == "-p" || t == "--print");
 
-    // Check for autonomous permission bypass flag (--dangerously-skip-permissions or --permission-mode bypassPermissions)
-    let has_perms = tokens.iter().any(|&t| {
-        t == "--dangerously-skip-permissions"
-            || t == "--permission-mode=bypassPermissions"
-            || t.strip_prefix("--permission-mode=")
-                .map(|val| val.trim_matches('\'').trim_matches('"') == "bypassPermissions")
-                .unwrap_or(false)
-    }) || tokens.windows(2).any(|w| {
-        w[0] == "--permission-mode"
-            && w[1].trim_matches('\'').trim_matches('"') == "bypassPermissions"
-    });
+    // Check for autonomous permission bypass flag:
+    // Claude accepts --dangerously-skip-permissions or --permission-mode bypassPermissions.
+    // AGY specifically requires --dangerously-skip-permissions.
+    let has_perms = if is_claude {
+        tokens.iter().any(|&t| {
+            t == "--dangerously-skip-permissions"
+                || t == "--permission-mode=bypassPermissions"
+                || t.strip_prefix("--permission-mode=")
+                    .map(|val| val.trim_matches('\'').trim_matches('"') == "bypassPermissions")
+                    .unwrap_or(false)
+        }) || tokens.windows(2).any(|w| {
+            w[0] == "--permission-mode"
+                && w[1].trim_matches('\'').trim_matches('"') == "bypassPermissions"
+        })
+    } else {
+        // AGY driver preset requires --dangerously-skip-permissions specifically
+        tokens.contains(&"--dangerously-skip-permissions")
+    };
 
-    // Append missing autonomous execution flags while preserving original flags and arguments
-    let mut expanded = driver.to_string();
+    // If both headless and permission bypass flags are satisfied, preserve command unmodified
+    if has_print && has_perms {
+        return driver.to_string();
+    }
+
+    // Trim trailing whitespace before appending missing autonomous flags to avoid double spaces
+    let mut expanded = driver.trim_end().to_string();
     if !has_print {
         expanded.push_str(" -p");
     }

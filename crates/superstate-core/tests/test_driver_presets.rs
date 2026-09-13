@@ -71,6 +71,83 @@ fn test_custom_command_unchanged() {
 }
 
 #[test]
+fn test_custom_command_with_claude_or_agy_prefix_unchanged() {
+    // Ensure custom binaries that share a prefix with presets (e.g. claude-code, agyd)
+    // are not mistakenly expanded as standard Claude or AGY presets.
+    let custom_cmds = [
+        "claude-code --model sonnet",
+        "claudette --some-flag",
+        "agy-daemon --port 8080",
+        "agyd start",
+    ];
+    for cmd in custom_cmds {
+        let result = resolve_driver_command(cmd);
+        assert_eq!(result, cmd);
+    }
+}
+
+#[test]
+fn test_claude_partial_flags_expansion() {
+    // When partial autonomous flags are present, only the missing flags should be appended
+    assert_eq!(
+        resolve_driver_command("claude -p"),
+        "claude -p --dangerously-skip-permissions"
+    );
+    assert_eq!(
+        resolve_driver_command("claude --print"),
+        "claude --print --dangerously-skip-permissions"
+    );
+    assert_eq!(
+        resolve_driver_command("claude --dangerously-skip-permissions"),
+        "claude --dangerously-skip-permissions -p"
+    );
+    assert_eq!(
+        resolve_driver_command("claude --permission-mode bypassPermissions"),
+        "claude --permission-mode bypassPermissions -p"
+    );
+    assert_eq!(
+        resolve_driver_command("claude --permission-mode=bypassPermissions"),
+        "claude --permission-mode=bypassPermissions -p"
+    );
+}
+
+#[test]
+fn test_agy_does_not_accept_claude_permission_mode() {
+    // Claude's --permission-mode bypassPermissions must not satisfy AGY's permission requirement
+    let cmd = "agy -p --permission-mode bypassPermissions";
+    let result = resolve_driver_command(cmd);
+    assert_eq!(
+        result,
+        "agy -p --permission-mode bypassPermissions --dangerously-skip-permissions"
+    );
+
+    let cmd_bare = "agy --permission-mode bypassPermissions";
+    let result_bare = resolve_driver_command(cmd_bare);
+    assert_eq!(
+        result_bare,
+        "agy --permission-mode bypassPermissions -p --dangerously-skip-permissions"
+    );
+}
+
+#[test]
+fn test_empty_or_whitespace_driver() {
+    // Empty strings, whitespace-only commands, and trailing whitespace should be handled safely
+    assert_eq!(resolve_driver_command(""), "");
+    assert_eq!(resolve_driver_command("   "), "   ");
+    assert_eq!(resolve_driver_command("\t\n "), "\t\n ");
+
+    // Preset with trailing whitespace must trim before appending to avoid double spaces
+    assert_eq!(
+        resolve_driver_command("claude "),
+        "claude -p --dangerously-skip-permissions"
+    );
+    assert_eq!(
+        resolve_driver_command("claude -p "),
+        "claude -p --dangerously-skip-permissions"
+    );
+}
+
+#[test]
 fn test_daemon_runner_exports_superstate_worktree_path() {
     // Verify SUPERSTATE_WORKTREE_PATH is exported to child driver processes
     let dir = tempfile::tempdir().unwrap();
