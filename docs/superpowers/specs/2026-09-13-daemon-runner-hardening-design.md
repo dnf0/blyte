@@ -1,4 +1,4 @@
-# Design Specification: DaemonRunner Hardening & Production Lifecycle
+# Design Specification: DaemonRunner Hardening & Multi-Daemon Fleet Lifecycle
 
 **Date:** 2026-09-13  
 **Status:** Approved  
@@ -15,19 +15,27 @@ In benchmark evaluations (`superstate-eval`), the Category B Deterministic State
 4. Atomic state advancement, worktree merging, and next-task worktree provisioning.
 5. High-fidelity feedback on retries if verification fails.
 
-The initial implementation of `DaemonRunner` in `superstate-core` proved the concept of a detached daemon, but had 6 production gaps:
-1. Worktree lifecycle missing (did not merge completed worktree or provision next worktree).
-2. Fragile driver exit (non-zero driver exit aborted the entire daemon instead of checking gate/retrying).
-3. Low-fidelity failure feedback (retries only saw a 250-char flattened note).
-4. No milestone git checkpoints (uncommitted changes left dirty in working tree).
-5. No PID concurrency guard (allowed spawning competing daemons against the same state).
-6. Single-channel prompt delivery (only via env var `SUPERSTATE_PROMPT`).
+To support real developer workflows and multi-agent systems, Superstate requires:
+1. Hardened autonomous execution (resilient driver execution, rich retry diagnostics, worktree merge/provisioning, git checkpoints).
+2. **Multi-Daemon Concurrent Execution:** Running multiple autonomous background daemons simultaneously across different feature branches without PID collisions, log overwrites, or git index lockups.
 
 ---
 
 ## 2. Architecture & Components
 
-### 2.1 Pluggable Step Advancement (`StepAdvancer`)
+### 2.1 Multi-Daemon Fleet Scoping & File Layout
+Every daemon is keyed to its state file or branch slug. Rather than global singleton PID and log files, all runtime artifacts are scoped per job:
+
+| Resource | Path Template | Description |
+| :--- | :--- | :--- |
+| **State File** | `.agent-state/branches/<slug>.json` | State machine DAG and task history |
+| **Daemon PID** | `.agent-state/daemons/<slug>.pid` | Process ID for liveness and cancellation |
+| **Daemon Log** | `.agent-state/logs/<slug>.log` | Stored stdout/stderr of daemon and driver |
+| **Prompt File**| `.agent-state/prompts/<slug>.md` | Current active milestone prompt |
+
+*(For trunk/default `.agent-state/state.json`, slug defaults to `default`).*
+
+### 2.2 Pluggable Step Advancement (`StepAdvancer`)
 - **Crate:** `superstate-core` (`daemon.rs`)
 - **Type Definition:**
   ```rust
@@ -42,17 +50,17 @@ The initial implementation of `DaemonRunner` in `superstate-core` proved the con
             superstate_cli::commands::state::cmd_next(state_path, None, false, None)
         }));
     ```
-  - In `run_step()`: when gate passes, invoke the configured advancer if present. If None, fall back to in-process `advance_step(&mut state)` and `save_state_atomic(...)`.
+  - In `run_step()`: when verification passes, invoke the configured advancer if present. It merges the task worktree, advances the task, and provisions the next task worktree. If None, falls back to in-process `advance_step(&mut state)` and `save_state_atomic(...)`.
 
-### 2.2 Resilient Driver Execution & Rescue Pattern
+### 2.3 Resilient Driver Execution & Rescue Pattern
 - In `DaemonRunner::run_step()`:
-  - Spawn driver with stdout/stderr piped or captured.
-  - If driver exit code != 0, do not abort immediately. Record `[driver-warn]` in ledger.
+  - Spawn driver with stdout/stderr piped and prompt delivered via `SUPERSTATE_PROMPT`, `SUPERSTATE_PROMPT_FILE`, and child `stdin`.
+  - If driver exit code != 0, do not abort the daemon immediately. Record `[driver-warn]` in the epistemic ledger.
   - Always evaluate `run_verification_cmd`.
   - If gate passes, the milestone succeeds (rescues agent from minor tooling exit quirks).
   - If gate fails, record error output and increment retry count.
 
-### 2.3 High-Fidelity Failure Feedback on Retries
+### 2.4 High-Fidelity Failure Feedback on Retries
 - `DaemonRunner` stores `last_failure_output: HashMap<String, String>`.
 - When rendering prompt for retry attempt > 0:
   - Append formatted Markdown section:
@@ -65,22 +73,19 @@ The initial implementation of `DaemonRunner` in `superstate-core` proved the con
     Please diagnose and correct this failure before concluding your turn.
     ```
 
-### 2.4 Milestone Git Checkpoint in In-Place Mode
+### 2.5 Milestone Git Checkpoint in In-Place Mode
 - When `state.no_worktree` is true and `.git` exists:
   - Upon gate pass, run `git status --porcelain`.
   - If changes detected: `git add -A && git commit -m "chore(superstate): checkpoint completed milestone {id}: {title}"`.
 
-### 2.5 PID Concurrency Guard
-- In `superstate-cli` (`cmd_daemon`):
-  - Check if `daemon.pid` exists.
-  - If exists: read PID, call `is_pid_alive(pid)`.
-  - If alive: return `Err("A superstate daemon is already running (PID: ...)")`.
-  - If stale: remove file and continue.
-
-### 2.6 Multi-Channel Prompt Delivery
-- Write prompt to `.agent-state/current_prompt.md` (or branch-scoped directory).
-- Export `SUPERSTATE_PROMPT_FILE` containing path to file.
-- Pipe prompt bytes to driver's `stdin`.
+### 2.6 Multi-Daemon Management CLI & MCP
+- **Per-Job PID Lock Guard:** Check `.agent-state/daemons/<slug>.pid`. Only error if a daemon is already active for *the same slug*.
+- **Daemon Fleet Listing (`superstate state daemon list`):**
+  Inspects `.agent-state/daemons/*.pid` and matching `.agent-state/branches/*.json` to report all running, completed, or failed daemons with PID, status, active task, and log path.
+- **Targeted Logs (`superstate state logs [--state <path> | --branch <slug>] [--tail <n>]`):**
+  Tails the log file for that specific job.
+- **Targeted & Mass Cancellation (`superstate state cancel [--state <path> | --branch <slug> | --all]`):**
+  Terminates target PID(s) via SIGTERM followed by SIGKILL and cleans up PID file(s).
 
 ---
 
@@ -90,7 +95,8 @@ The initial implementation of `DaemonRunner` in `superstate-core` proved the con
    - Test resilient driver rescue (driver fails with code 1, but creates target file -> gate passes -> step advances).
    - Test rich retry prompt generation on verification failure.
 2. **CLI Integration Tests:**
-   - Test PID lock guard blocking concurrent spawns.
-   - Test worktree merge & next-worktree provisioning under `DaemonRunner`.
+   - Test multi-daemon concurrent execution: spawn two daemons on distinct branch states simultaneously, verify independent PIDs, distinct logs, and `daemon list`.
+   - Test per-job PID lock guard (prevents duplicate daemon on same branch while allowing different branches).
+   - Test `superstate cancel --all`.
 3. **E2E Shell Script:**
-   - Update `tests/e2e_detached_handoff.sh` to exercise worktree mode, stdin piping, and PID lock verification.
+   - Update `tests/e2e_detached_handoff.sh` to test worktree mode, stdin piping, and multi-daemon fleet listing.
