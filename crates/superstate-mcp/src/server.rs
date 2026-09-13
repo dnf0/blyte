@@ -573,7 +573,9 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     return Err(format!("Daemon spawn failed: {}", err));
                 }
 
-                let state_dir = state_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let state_dir = state_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 let pid_file = state_dir.join("daemon.pid");
                 let fallback_pid_file = repo_root.join(".agent-state").join("daemon.pid");
 
@@ -589,7 +591,9 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     None
                 };
 
-                let job_id = pid.map(|p| p.to_string()).unwrap_or_else(|| "detached".to_string());
+                let job_id = pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "detached".to_string());
 
                 return Ok(serde_json::json!({
                     "status": "detached",

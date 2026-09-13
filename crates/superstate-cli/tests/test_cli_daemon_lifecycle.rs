@@ -5,7 +5,6 @@ use superstate_core::models::MilestoneSpec;
 use superstate_core::state_machine::{init_state_milestones, save_state_atomic};
 use tempfile::tempdir;
 
-
 #[test]
 fn test_cli_daemon_lifecycle() {
     let dir = tempdir().unwrap();
@@ -48,9 +47,6 @@ fn test_cli_daemon_lifecycle() {
         }
     }
     let pid_file = state_dir.join("daemon.pid");
-
-
-
 
     assert!(pid_file.exists());
     let pid_str = fs::read_to_string(&pid_file).unwrap();

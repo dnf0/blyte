@@ -2,7 +2,6 @@ use std::time::Duration;
 use superstate_mcp::server::handle_tool_call;
 use tempfile::tempdir;
 
-
 fn setup_test_repo(branch_name: &str) -> tempfile::TempDir {
     let temp = tempdir().unwrap();
     let repo_root = temp.path();

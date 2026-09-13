@@ -105,7 +105,6 @@ impl DaemonRunner {
         )
         .map_err(DaemonError::Driver)?;
 
-
         // Execute headless driver worker if provided
         if let Some(ref driver) = self.config.driver_cmd {
             let output = Command::new("sh")
@@ -126,10 +125,7 @@ impl DaemonRunner {
         }
 
         // Execute verification gate
-        let verify_cmd = active_task
-            .verification_cmd
-            .as_deref()
-            .unwrap_or("true");
+        let verify_cmd = active_task.verification_cmd.as_deref().unwrap_or("true");
 
         let gate_res = run_verification_cmd(verify_cmd, &working_dir, self.config.timeout_secs)?;
 
@@ -154,7 +150,10 @@ impl DaemonRunner {
 
             state.notes.push(LedgerEntry::new(
                 "superstate-daemon",
-                format!("[verify-fail] Task {} failed: {}", active_task.id, fail_reason),
+                format!(
+                    "[verify-fail] Task {} failed: {}",
+                    active_task.id, fail_reason
+                ),
             ));
 
             if *retries >= self.config.max_retries {

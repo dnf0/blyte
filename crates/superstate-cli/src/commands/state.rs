@@ -634,7 +634,6 @@ pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
     Ok(())
 }
 
-
 /// Show execution state as formatted markdown or machine-readable JSON.
 ///
 /// # Arguments

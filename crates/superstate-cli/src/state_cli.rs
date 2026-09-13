@@ -412,4 +412,3 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
         }
     }
 }
-

@@ -120,19 +120,10 @@ fn main() {
             detach,
             max_retries,
             timeout,
-        } => commands::daemon::cmd_daemon(
-            &state,
-            driver.as_deref(),
-            detach,
-            max_retries,
-            timeout,
-        ),
+        } => commands::daemon::cmd_daemon(&state, driver.as_deref(), detach, max_retries, timeout),
         Commands::Cancel { state } => commands::daemon::cmd_cancel(&state),
-        Commands::Logs { state, tail } => {
-            commands::daemon::cmd_logs(&state, tail).map(|_| ())
-        }
+        Commands::Logs { state, tail } => commands::daemon::cmd_logs(&state, tail).map(|_| ()),
     };
-
 
     if let Err(e) = result {
         eprintln!("Error: {}", e);

@@ -68,8 +68,6 @@ pub fn cmd_daemon(
 
         let mut cmd = std::process::Command::new(current_exe);
 
-
-
         cmd.arg("state").arg("daemon");
         cmd.arg("--state").arg(state_path);
         if let Some(d) = driver {
@@ -94,8 +92,6 @@ pub fn cmd_daemon(
             }
         }
 
-
-
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn background daemon: {}", e))?;
@@ -116,8 +112,6 @@ pub fn cmd_daemon(
         let _ = std::io::stdout().flush();
 
         let config = DaemonConfig {
-
-
             state_path: state_path.to_path_buf(),
             driver_cmd: driver.map(ToString::to_string),
             max_retries,
