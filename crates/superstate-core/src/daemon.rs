@@ -155,8 +155,19 @@ pub fn is_pid_alive(pid: i32) -> bool {
 }
 
 #[cfg(not(unix))]
-pub fn is_pid_alive(_pid: i32) -> bool {
-    false
+pub fn is_pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output();
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.contains(&pid.to_string())
+    } else {
+        false
+    }
 }
 
 pub struct DaemonRunner {
@@ -457,7 +468,7 @@ impl DaemonRunner {
 
         // Resolve slug to prevent cross-daemon collision on completion artifacts.
         // Default state machines write to `completion.json`, while branch-scoped daemons
-        // write to `completion-<slug>.json`.
+        // exclusively write to `completion-<slug>.json` to eliminate concurrent write races.
         let (slug, _) = resolve_daemon_slug_and_state_dir(&self.config.state_path);
         let parent = self
             .config
@@ -480,12 +491,6 @@ impl DaemonRunner {
 
         let serialized = serde_json::to_string_pretty(&report)?;
         fs::write(&completion_file, &serialized)?;
-
-        // For backwards compatibility with single-branch callers expecting completion.json,
-        // also maintain a secondary copy at completion.json when scoped.
-        if slug != "default" {
-            let _ = fs::write(parent.join("completion.json"), &serialized);
-        }
 
         Ok(report)
     }

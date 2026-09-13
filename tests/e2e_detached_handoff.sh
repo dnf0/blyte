@@ -143,8 +143,8 @@ if [ ! -f "$COMPLETION_JSON" ]; then
     exit 1
 fi
 LEGACY_COMPLETION_JSON="$TMP_DIR/.agent-state/branches/completion.json"
-if [ ! -f "$LEGACY_COMPLETION_JSON" ]; then
-    echo "Error: backwards compatible completion report not found at $LEGACY_COMPLETION_JSON" >&2
+if [ -f "$LEGACY_COMPLETION_JSON" ]; then
+    echo "Error: completion.json must NOT be created for branch-scoped daemons" >&2
     exit 1
 fi
 

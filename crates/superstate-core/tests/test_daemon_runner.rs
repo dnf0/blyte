@@ -163,8 +163,8 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
 
     let legacy_completion_file = state_path.parent().unwrap().join("completion.json");
     assert!(
-        legacy_completion_file.exists(),
-        "secondary completion.json must also exist for backwards compatibility"
+        !legacy_completion_file.exists(),
+        "secondary completion.json must NOT exist for branch-scoped daemons to eliminate race conditions"
     );
 }
 

@@ -103,3 +103,18 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
         "daemon.pid must be removed on daemon completion"
     );
 }
+
+#[test]
+fn test_kill_pid_terminates_process() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id() as i32;
+    assert!(is_pid_alive(pid));
+
+    let res = superstate_cli::commands::daemon::kill_pid(pid);
+    assert!(res.is_ok());
+    assert!(!is_pid_alive(pid));
+    let _ = child.wait();
+}

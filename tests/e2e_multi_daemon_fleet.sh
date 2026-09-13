@@ -253,6 +253,11 @@ if [ ! -f "$BETA_COMPLETION" ]; then
     exit 1
 fi
 
+if [ -f "$TMP_DIR/.agent-state/branches/completion.json" ]; then
+    echo "Error: Unscoped completion.json must NOT exist when running branch fleet daemons" >&2
+    exit 1
+fi
+
 echo "==> Alpha completion report:"
 cat "$ALPHA_COMPLETION"
 if ! grep -q '"base_branch": "feat/fleet-alpha"' "$ALPHA_COMPLETION"; then

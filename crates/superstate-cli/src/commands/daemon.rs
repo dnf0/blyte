@@ -6,7 +6,8 @@ use superstate_core::state_machine::{load_state, sanitize_branch_slug, STATE_DIR
 pub use superstate_core::daemon::{daemon_paths_for_state, is_pid_alive, DaemonPaths};
 
 /// Sends SIGTERM, waits up to 500ms, and escalates to SIGKILL if process remains alive.
-pub fn kill_pid(pid: i32) {
+#[cfg(unix)]
+pub fn kill_pid(pid: i32) -> Result<(), String> {
     if is_pid_alive(pid) {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
@@ -29,6 +30,15 @@ pub fn kill_pid(pid: i32) {
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn kill_pid(pid: i32) -> Result<(), String> {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
+    Ok(())
 }
 
 fn resolve_superstate_binary() -> PathBuf {
@@ -403,7 +413,7 @@ pub fn cmd_cancel(
                             if let Ok(pid) = pid_str.trim().parse::<i32>() {
                                 // Deduplicate PIDs so a process tracked by multiple PID files is only killed and counted once
                                 if killed_pids.insert(pid) {
-                                    kill_pid(pid);
+                                    let _ = kill_pid(pid);
                                     println!("Terminated daemon '{}' (PID: {})", slug, pid);
                                     cancelled_count += 1;
                                 }
@@ -422,7 +432,7 @@ pub fn cmd_cancel(
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
                     // Deduplicate against PIDs already terminated from daemons/
                     if killed_pids.insert(pid) {
-                        kill_pid(pid);
+                        let _ = kill_pid(pid);
                         println!("Terminated legacy daemon (PID: {})", pid);
                         cancelled_count += 1;
                     }
@@ -462,7 +472,7 @@ pub fn cmd_cancel(
             .trim()
             .parse()
             .map_err(|e: std::num::ParseIntError| e.to_string())?;
-        kill_pid(pid);
+        let _ = kill_pid(pid);
         let _ = fs::remove_file(&pid_file);
 
         // If cancelling default daemon via main/master branch, also clean up legacy daemon.pid
@@ -487,7 +497,7 @@ pub fn cmd_cancel(
             .trim()
             .parse()
             .map_err(|e: std::num::ParseIntError| e.to_string())?;
-        kill_pid(pid);
+        let _ = kill_pid(pid);
         let _ = fs::remove_file(&paths.pid_file);
 
         // Remove legacy fallback daemon.pid if this was the default daemon
@@ -507,7 +517,7 @@ pub fn cmd_cancel(
             .trim()
             .parse()
             .map_err(|e: std::num::ParseIntError| e.to_string())?;
-        kill_pid(pid);
+        let _ = kill_pid(pid);
         let _ = fs::remove_file(&legacy_file);
         println!("Daemon process {} terminated.", pid);
         return Ok(());
