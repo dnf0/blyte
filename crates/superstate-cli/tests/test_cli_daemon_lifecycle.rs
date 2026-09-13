@@ -1,5 +1,7 @@
 use std::fs;
-use superstate_cli::commands::daemon::{cmd_cancel, cmd_daemon, cmd_logs, is_pid_alive};
+use superstate_cli::commands::daemon::{
+    cmd_cancel, cmd_daemon, cmd_logs, daemon_paths_for_state, is_pid_alive,
+};
 use superstate_cli::commands::state::cmd_status;
 use superstate_core::models::MilestoneSpec;
 use superstate_core::state_machine::{init_state_milestones, save_state_atomic};
@@ -28,6 +30,8 @@ fn test_cli_daemon_lifecycle() {
     let state = init_state_milestones(Some("Daemon Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
 
+    let paths = daemon_paths_for_state(&state_path);
+
     // Start daemon detached
     cmd_daemon(
         &state_path,
@@ -39,14 +43,14 @@ fn test_cli_daemon_lifecycle() {
     .unwrap();
 
     // Allow spawned background process to start and flush initial banner
-    let log_file = state_dir.join("logs").join("daemon.log");
+    let log_file = paths.log_file;
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_millis(50));
         if !fs::read_to_string(&log_file).unwrap_or_default().is_empty() {
             break;
         }
     }
-    let pid_file = state_dir.join("daemon.pid");
+    let pid_file = paths.pid_file;
 
     assert!(pid_file.exists());
     let pid_str = fs::read_to_string(&pid_file).unwrap();
@@ -58,11 +62,11 @@ fn test_cli_daemon_lifecycle() {
     cmd_status(&state_path, true).unwrap();
 
     // Cancel daemon
-    cmd_cancel(&state_path).unwrap();
+    cmd_cancel(Some(&state_path), None, false).unwrap();
 
     assert!(!is_pid_alive(pid));
 
     // Inspect logs
-    let logs_output = cmd_logs(&state_path, Some(10)).unwrap();
+    let logs_output = cmd_logs(Some(&state_path), None, Some(10)).unwrap();
     assert!(!logs_output.is_empty());
 }

@@ -263,35 +263,69 @@ pub enum StateCommands {
     /// List active and completed branch-scoped states
     List(ListArgs),
     /// Run autonomous background daemon over milestones
-    Daemon {
-        #[arg(short, long, default_value = DEFAULT_STATE)]
-        state: PathBuf,
-        /// Headless coding driver (e.g. claude, agy, or command)
-        #[arg(long)]
-        driver: Option<String>,
-        /// Detach execution into a background daemon process
-        #[arg(long)]
-        detach: bool,
-        /// Maximum verification retries per milestone
-        #[arg(long, default_value_t = 3)]
-        max_retries: usize,
-        /// Timeout in seconds per verification attempt
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-    },
+    Daemon(DaemonArgs),
     /// Cancel a running background daemon process
-    Cancel {
-        #[arg(short, long, default_value = DEFAULT_STATE)]
-        state: PathBuf,
-    },
+    Cancel(CancelArgs),
     /// Inspect background daemon logs
-    Logs {
-        #[arg(short, long, default_value = DEFAULT_STATE)]
-        state: PathBuf,
-        /// Number of lines to tail
+    Logs(LogsArgs),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DaemonSubcommands {
+    /// List active and managed daemon processes
+    List {
+        /// Repository root or state directory path
         #[arg(short, long)]
-        tail: Option<usize>,
+        repo: Option<PathBuf>,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct DaemonArgs {
+    #[command(subcommand)]
+    pub command: Option<DaemonSubcommands>,
+
+    #[arg(short, long, default_value = DEFAULT_STATE)]
+    pub state: PathBuf,
+    /// Headless coding driver (e.g. claude, agy, or command)
+    #[arg(long)]
+    pub driver: Option<String>,
+    /// Detach execution into a background daemon process
+    #[arg(long)]
+    pub detach: bool,
+    /// Maximum verification retries per milestone
+    #[arg(long, default_value_t = 3)]
+    pub max_retries: usize,
+    /// Timeout in seconds per verification attempt
+    #[arg(long, default_value_t = 300)]
+    pub timeout: u64,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct CancelArgs {
+    #[arg(short, long)]
+    pub state: Option<PathBuf>,
+    /// Cancel daemon for a specific branch
+    #[arg(short, long)]
+    pub branch: Option<String>,
+    /// Cancel all running daemons
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct LogsArgs {
+    #[arg(short, long)]
+    pub state: Option<PathBuf>,
+    /// Inspect logs for a specific branch
+    #[arg(short, long)]
+    pub branch: Option<String>,
+    /// Number of lines to tail
+    #[arg(short, long)]
+    pub tail: Option<usize>,
 }
 
 /// Find the project's state, dynamically resolving branch-scoped states and worktrees.
@@ -393,22 +427,37 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             state,
             author,
         } => commands::state::cmd_note(&resolve(state), &note, &author),
-        StateCommands::Daemon {
-            state,
-            driver,
-            detach,
-            max_retries,
-            timeout,
-        } => commands::daemon::cmd_daemon(
-            &resolve(state),
-            driver.as_deref(),
-            detach,
-            max_retries,
-            timeout,
-        ),
-        StateCommands::Cancel { state } => commands::daemon::cmd_cancel(&resolve(state)),
-        StateCommands::Logs { state, tail } => {
-            commands::daemon::cmd_logs(&resolve(state), tail).map(|_| ())
+        StateCommands::Daemon(args) => match args.command {
+            Some(DaemonSubcommands::List { repo, json }) => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let repo_root = repo.unwrap_or_else(|| {
+                    let mut cur = Some(cwd.as_path());
+                    while let Some(d) = cur {
+                        if d.join(".agent-state").exists() || d.join(".git").exists() {
+                            return d.to_path_buf();
+                        }
+                        cur = d.parent();
+                    }
+                    cwd
+                });
+                commands::daemon::cmd_daemon_list(&repo_root, json)
+            }
+            None => commands::daemon::cmd_daemon(
+                &resolve(args.state),
+                args.driver.as_deref(),
+                args.detach,
+                args.max_retries,
+                args.timeout,
+            ),
+        },
+        StateCommands::Cancel(args) => {
+            let state_path = args.state.map(resolve);
+            commands::daemon::cmd_cancel(state_path.as_deref(), args.branch.as_deref(), args.all)
+        }
+        StateCommands::Logs(args) => {
+            let state_path = args.state.map(resolve);
+            commands::daemon::cmd_logs(state_path.as_deref(), args.branch.as_deref(), args.tail)
+                .map(|_| ())
         }
     }
 }

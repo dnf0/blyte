@@ -570,10 +570,15 @@ pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
     let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
 
-    let pid_file = state_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("daemon.pid");
+    let daemon_paths = crate::commands::daemon::daemon_paths_for_state(state_path);
+    let pid_file = if daemon_paths.pid_file.exists() {
+        daemon_paths.pid_file
+    } else {
+        state_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("daemon.pid")
+    };
     let daemon_info = if pid_file.exists() {
         if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {

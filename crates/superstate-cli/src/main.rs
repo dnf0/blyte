@@ -52,35 +52,12 @@ enum Commands {
         cmd: commands::worktree::WorktreeCommands,
     },
     /// Run autonomous background daemon over milestones
-    Daemon {
-        #[arg(short, long, default_value = ".agent-state/state.json")]
-        state: PathBuf,
-        /// Headless coding driver (e.g. claude, agy, or command)
-        #[arg(long)]
-        driver: Option<String>,
-        /// Detach execution into a background daemon process
-        #[arg(long)]
-        detach: bool,
-        /// Maximum verification retries per milestone
-        #[arg(long, default_value_t = 3)]
-        max_retries: usize,
-        /// Timeout in seconds per verification attempt
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-    },
+    /// Run autonomous background daemon over milestones
+    Daemon(superstate_cli::state_cli::DaemonArgs),
     /// Cancel a running background daemon process
-    Cancel {
-        #[arg(short, long, default_value = ".agent-state/state.json")]
-        state: PathBuf,
-    },
+    Cancel(superstate_cli::state_cli::CancelArgs),
     /// Inspect background daemon logs
-    Logs {
-        #[arg(short, long, default_value = ".agent-state/state.json")]
-        state: PathBuf,
-        /// Number of lines to tail
-        #[arg(short, long)]
-        tail: Option<usize>,
-    },
+    Logs(superstate_cli::state_cli::LogsArgs),
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -114,15 +91,27 @@ fn main() {
         } => commands::init::cmd_init_rules(&dest, &language, &strictness),
         Commands::State { cmd } => superstate_cli::state_cli::dispatch(cmd),
         Commands::Worktree { cmd } => commands::worktree::dispatch_worktree(cmd),
-        Commands::Daemon {
-            state,
-            driver,
-            detach,
-            max_retries,
-            timeout,
-        } => commands::daemon::cmd_daemon(&state, driver.as_deref(), detach, max_retries, timeout),
-        Commands::Cancel { state } => commands::daemon::cmd_cancel(&state),
-        Commands::Logs { state, tail } => commands::daemon::cmd_logs(&state, tail).map(|_| ()),
+        Commands::Daemon(args) => match args.command {
+            Some(superstate_cli::state_cli::DaemonSubcommands::List { repo, json }) => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let repo_root = repo.unwrap_or(cwd);
+                commands::daemon::cmd_daemon_list(&repo_root, json)
+            }
+            None => commands::daemon::cmd_daemon(
+                &args.state,
+                args.driver.as_deref(),
+                args.detach,
+                args.max_retries,
+                args.timeout,
+            ),
+        },
+        Commands::Cancel(args) => {
+            commands::daemon::cmd_cancel(args.state.as_deref(), args.branch.as_deref(), args.all)
+        }
+        Commands::Logs(args) => {
+            commands::daemon::cmd_logs(args.state.as_deref(), args.branch.as_deref(), args.tail)
+                .map(|_| ())
+        }
     };
 
     if let Err(e) = result {
