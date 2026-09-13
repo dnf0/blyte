@@ -1,5 +1,6 @@
 pub mod checkpoint;
 pub mod daemon;
+pub mod handoff;
 pub mod impact;
 pub mod ledger;
 pub mod maintenance;
@@ -12,6 +13,9 @@ pub mod verifier;
 
 pub use daemon::{
     CompletionReport, DaemonConfig, DaemonError, DaemonRunner, DaemonStepOutcome, StepAdvancer,
+};
+pub use handoff::{
+    generate_handoff_markdown, generate_resumption_command, write_handoff_package, HandoffSpec,
 };
 pub use ledger::append_ledger_note;
 pub use models::{ExecutionState, ExecutionStatus, LedgerEntry, MilestoneSpec, TaskSpec};
