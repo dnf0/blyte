@@ -560,7 +560,7 @@ fn preserved(state_path: &Path) -> Vec<&str> {
 }
 
 /// The repository the state file belongs to (.agent-state/state.json -> root).
-fn repo_root_for(state_path: &Path) -> std::path::PathBuf {
+pub fn repo_root_for(state_path: &Path) -> std::path::PathBuf {
     resolve_project_root(state_path)
 }
 
