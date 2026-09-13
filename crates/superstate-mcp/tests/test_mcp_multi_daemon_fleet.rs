@@ -5,6 +5,26 @@ use std::time::Duration;
 use superstate_mcp::server::handle_tool_call;
 use tempfile::tempdir;
 
+struct ProcessGuard(Option<i32>);
+
+impl ProcessGuard {
+    fn new(pid: i32) -> Self {
+        Self(Some(pid))
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
 fn init_git_repo(path: &Path) {
     let run = |args: &[&str]| {
         let status = Command::new("git")
@@ -40,7 +60,7 @@ fn test_mcp_multi_daemon_fleet_tracking() {
 
     let args_alpha = serde_json::json!({
         "goal": "Build alpha feature",
-        "verify_cmd": "sleep 10 && true",
+        "verify_cmd": "true",
         "detach": true,
         "driver": "sleep 10",
         "repo_root": repo_root.to_str().unwrap()
@@ -56,6 +76,7 @@ fn test_mcp_multi_daemon_fleet_tracking() {
     assert!(res_alpha["log_path"].is_string());
 
     let alpha_pid = res_alpha["pid"].as_i64().unwrap() as i32;
+    let _guard_alpha = ProcessGuard::new(alpha_pid);
     let alpha_log = res_alpha["log_path"].as_str().unwrap().to_string();
 
     // 2. Checkout feat/beta and launch detached handoff
@@ -68,7 +89,7 @@ fn test_mcp_multi_daemon_fleet_tracking() {
 
     let args_beta = serde_json::json!({
         "goal": "Build beta feature",
-        "verify_cmd": "sleep 10 && true",
+        "verify_cmd": "true",
         "detach": true,
         "driver": "sleep 10",
         "repo_root": repo_root.to_str().unwrap()
@@ -84,6 +105,7 @@ fn test_mcp_multi_daemon_fleet_tracking() {
     assert!(res_beta["log_path"].is_string());
 
     let beta_pid = res_beta["pid"].as_i64().unwrap() as i32;
+    let _guard_beta = ProcessGuard::new(beta_pid);
     let beta_log = res_beta["log_path"].as_str().unwrap().to_string();
 
     assert_ne!(alpha_pid, beta_pid, "Daemon PIDs must be distinct");
@@ -148,11 +170,40 @@ fn test_mcp_multi_daemon_fleet_tracking() {
     assert_eq!(status_res_beta["daemon"]["slug"], "feat-beta");
     assert_eq!(status_res_beta["daemon"]["log_file"], beta_log);
 
-    // Clean up background processes
+    // 5. Test stale / stopped daemon reporting when PID is terminated
     let _ = Command::new("kill")
         .args(["-9", &alpha_pid.to_string()])
         .status();
-    let _ = Command::new("kill")
-        .args(["-9", &beta_pid.to_string()])
-        .status();
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Machine-readable format should report running: false
+    let status_res_alpha_stopped = handle_tool_call("state_status", &status_args_alpha)
+        .expect("state_status on stopped feat-alpha should succeed");
+    assert_eq!(status_res_alpha_stopped["daemon"]["pid"], alpha_pid);
+    assert_eq!(status_res_alpha_stopped["daemon"]["running"], false);
+
+    // Human-readable format should render "Daemon Status: Stopped (Stale PID: ...)"
+    let status_args_text = serde_json::json!({
+        "repo_root": repo_root.to_str().unwrap(),
+        "state": "branches/feat-alpha.json",
+        "json": false
+    });
+    let status_res_text = handle_tool_call("state_status", &status_args_text)
+        .expect("state_status text on stopped feat-alpha should succeed");
+    let text_out = status_res_text["output"].as_str().unwrap();
+    assert!(text_out.contains(&format!(
+        "Daemon Status: Stopped (Stale PID: {}, Slug: feat-alpha)",
+        alpha_pid
+    )));
+
+    // state_list text output should display "Stopped (<pid>)" and "Running (<pid>)"
+    let list_args_text = serde_json::json!({
+        "repo_root": repo_root.to_str().unwrap(),
+        "json": false
+    });
+    let list_res_text =
+        handle_tool_call("state_list", &list_args_text).expect("state_list text should succeed");
+    let list_text = list_res_text["output"].as_str().unwrap();
+    assert!(list_text.contains(&format!("Stopped ({})", alpha_pid)));
+    assert!(list_text.contains(&format!("Running ({})", beta_pid)));
 }

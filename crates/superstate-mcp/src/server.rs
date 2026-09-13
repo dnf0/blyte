@@ -83,6 +83,31 @@ pub struct BranchStateSummary {
     pub daemon: Option<DaemonStatusInfo>,
 }
 
+/// Resolves current daemon execution status for a given state machine path.
+pub fn resolve_daemon_status(state_path: &Path) -> Option<DaemonStatusInfo> {
+    let d_paths = daemon_paths_for_state(state_path);
+    let pid_file = if d_paths.pid_file.exists() {
+        d_paths.pid_file.clone()
+    } else {
+        let parent = state_path.parent().unwrap_or_else(|| Path::new("."));
+        let local_pid = parent.join("daemon.pid");
+        if local_pid.exists() {
+            local_pid
+        } else {
+            return None;
+        }
+    };
+
+    let pid_str = std::fs::read_to_string(&pid_file).ok()?;
+    let pid = pid_str.trim().parse::<i32>().ok()?;
+    Some(DaemonStatusInfo {
+        pid,
+        running: is_pid_alive(pid),
+        slug: d_paths.slug,
+        log_file: d_paths.log_file,
+    })
+}
+
 fn save_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -1101,34 +1126,15 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let ledger_entries = read_ledger(&state_path);
             let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
 
-            let daemon_paths = daemon_paths_for_state(&state_path);
-            let pid_file = if daemon_paths.pid_file.exists() {
-                daemon_paths.pid_file.clone()
-            } else {
-                state_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join("daemon.pid")
-            };
-            let daemon_info = if pid_file.exists() {
-                if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
-                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                        let running = is_pid_alive(pid);
-                        Some(serde_json::json!({
-                            "pid": pid,
-                            "running": running,
-                            "slug": daemon_paths.slug,
-                            "log_file": daemon_paths.log_file.display().to_string(),
-                        }))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let daemon_status = resolve_daemon_status(&state_path);
+            let daemon_info = daemon_status.as_ref().map(|d| {
+                serde_json::json!({
+                    "pid": d.pid,
+                    "running": d.running,
+                    "slug": d.slug,
+                    "log_file": d.log_file.display().to_string(),
+                })
+            });
 
             if as_json {
                 // Machine-readable format: serializes execution state directly matching CLI parity
@@ -1157,18 +1163,16 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 let mut text = String::new();
                 text.push_str(&format!("State Status: {:?}\n", state.status));
                 text.push_str(&format!("Step: {}\n", state.step));
-                if let Some(ref d) = daemon_info {
-                    let pid = d["pid"].as_i64().unwrap_or(0);
-                    let running = d["running"].as_bool().unwrap_or(false);
-                    if running {
+                if let Some(ref d) = daemon_status {
+                    if d.running {
                         text.push_str(&format!(
                             "Daemon Status: Running (PID: {}, Slug: {})\n",
-                            pid, daemon_paths.slug
+                            d.pid, d.slug
                         ));
                     } else {
                         text.push_str(&format!(
                             "Daemon Status: Stopped (Stale PID: {}, Slug: {})\n",
-                            pid, daemon_paths.slug
+                            d.pid, d.slug
                         ));
                     }
                 }
@@ -2417,20 +2421,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                             } else {
                                 st.step.min(total_steps)
                             };
-                            let d_paths = daemon_paths_for_state(&path);
-                            let daemon = if d_paths.pid_file.exists() {
-                                std::fs::read_to_string(&d_paths.pid_file)
-                                    .ok()
-                                    .and_then(|s| s.trim().parse::<i32>().ok())
-                                    .map(|pid| DaemonStatusInfo {
-                                        pid,
-                                        running: is_pid_alive(pid),
-                                        slug: d_paths.slug.clone(),
-                                        log_file: d_paths.log_file.clone(),
-                                    })
-                            } else {
-                                None
-                            };
+                            let daemon = resolve_daemon_status(&path);
                             summaries.push(BranchStateSummary {
                                 branch: slug,
                                 status: st.status,
@@ -2466,33 +2457,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                     } else {
                         st.step.min(total_steps)
                     };
-                    let d_paths = daemon_paths_for_state(&default_state_file);
-                    let daemon = if d_paths.pid_file.exists() {
-                        std::fs::read_to_string(&d_paths.pid_file)
-                            .ok()
-                            .and_then(|s| s.trim().parse::<i32>().ok())
-                            .map(|pid| DaemonStatusInfo {
-                                pid,
-                                running: is_pid_alive(pid),
-                                slug: d_paths.slug.clone(),
-                                log_file: d_paths.log_file.clone(),
-                            })
-                    } else {
-                        let fallback = state_dir.join("daemon.pid");
-                        if fallback.exists() {
-                            std::fs::read_to_string(&fallback)
-                                .ok()
-                                .and_then(|s| s.trim().parse::<i32>().ok())
-                                .map(|pid| DaemonStatusInfo {
-                                    pid,
-                                    running: is_pid_alive(pid),
-                                    slug: d_paths.slug.clone(),
-                                    log_file: d_paths.log_file.clone(),
-                                })
-                        } else {
-                            None
-                        }
-                    };
+                    let daemon = resolve_daemon_status(&default_state_file);
                     summaries.push(BranchStateSummary {
                         branch: branch_display,
                         status: st.status,
@@ -2532,20 +2497,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                                     } else {
                                         st.step.min(total_steps)
                                     };
-                                    let d_paths = daemon_paths_for_state(&wt_state);
-                                    let daemon = if d_paths.pid_file.exists() {
-                                        std::fs::read_to_string(&d_paths.pid_file)
-                                            .ok()
-                                            .and_then(|s| s.trim().parse::<i32>().ok())
-                                            .map(|pid| DaemonStatusInfo {
-                                                pid,
-                                                running: is_pid_alive(pid),
-                                                slug: d_paths.slug.clone(),
-                                                log_file: d_paths.log_file.clone(),
-                                            })
-                                    } else {
-                                        None
-                                    };
+                                    let daemon = resolve_daemon_status(&wt_state);
                                     summaries.push(BranchStateSummary {
                                         branch: format!("{} (worktree)", wt_name),
                                         status: st.status,

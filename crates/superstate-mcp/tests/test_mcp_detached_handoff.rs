@@ -3,6 +3,26 @@ use std::time::Duration;
 use superstate_mcp::server::handle_tool_call;
 use tempfile::tempdir;
 
+struct ProcessGuard(Option<i32>);
+
+impl ProcessGuard {
+    fn new(pid: i32) -> Self {
+        Self(Some(pid))
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
 fn setup_test_repo(branch_name: &str) -> tempfile::TempDir {
     let temp = tempdir().unwrap();
     let repo_root = temp.path();
@@ -63,6 +83,8 @@ fn test_mcp_detached_handoff_lifecycle() {
     assert!(res["pid"].is_number());
     assert!(res["log_path"].is_string());
 
+    let _guard = res["pid"].as_i64().map(|p| ProcessGuard::new(p as i32));
+
     let state_path = repo_root
         .join(".agent-state")
         .join("branches")
@@ -85,9 +107,4 @@ fn test_mcp_detached_handoff_lifecycle() {
 
     // Let the daemon run briefly
     std::thread::sleep(Duration::from_millis(50));
-
-    // Clean up background daemon
-    if let Some(pid) = res["pid"].as_i64() {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-    }
 }
