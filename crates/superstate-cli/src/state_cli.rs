@@ -262,6 +262,36 @@ pub enum StateCommands {
     },
     /// List active and completed branch-scoped states
     List(ListArgs),
+    /// Run autonomous background daemon over milestones
+    Daemon {
+        #[arg(short, long, default_value = DEFAULT_STATE)]
+        state: PathBuf,
+        /// Headless coding driver (e.g. claude, agy, or command)
+        #[arg(long)]
+        driver: Option<String>,
+        /// Detach execution into a background daemon process
+        #[arg(long)]
+        detach: bool,
+        /// Maximum verification retries per milestone
+        #[arg(long, default_value_t = 3)]
+        max_retries: usize,
+        /// Timeout in seconds per verification attempt
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
+    /// Cancel a running background daemon process
+    Cancel {
+        #[arg(short, long, default_value = DEFAULT_STATE)]
+        state: PathBuf,
+    },
+    /// Inspect background daemon logs
+    Logs {
+        #[arg(short, long, default_value = DEFAULT_STATE)]
+        state: PathBuf,
+        /// Number of lines to tail
+        #[arg(short, long)]
+        tail: Option<usize>,
+    },
 }
 
 /// Find the project's state, dynamically resolving branch-scoped states and worktrees.
@@ -363,5 +393,23 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             state,
             author,
         } => commands::state::cmd_note(&resolve(state), &note, &author),
+        StateCommands::Daemon {
+            state,
+            driver,
+            detach,
+            max_retries,
+            timeout,
+        } => commands::daemon::cmd_daemon(
+            &resolve(state),
+            driver.as_deref(),
+            detach,
+            max_retries,
+            timeout,
+        ),
+        StateCommands::Cancel { state } => commands::daemon::cmd_cancel(&resolve(state)),
+        StateCommands::Logs { state, tail } => {
+            commands::daemon::cmd_logs(&resolve(state), tail).map(|_| ())
+        }
     }
 }
+

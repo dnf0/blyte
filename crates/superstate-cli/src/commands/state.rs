@@ -569,14 +569,49 @@ pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
     let effective = resolve_effective_state_path(state_path, &cwd);
     let state_path = &effective;
     let state = load_state(state_path).map_err(|e| format!("Failed to load state: {}", e))?;
+
+    let pid_file = state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("daemon.pid");
+    let daemon_info = if pid_file.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                let alive = crate::commands::daemon::is_pid_alive(pid);
+                Some((pid, alive))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if as_json {
-        let rendered = serde_json::to_string_pretty(&state)
+        let mut val = serde_json::to_value(&state)
             .map_err(|e| format!("Failed to serialize state: {}", e))?;
+        if let Some((pid, alive)) = daemon_info {
+            val["daemon"] = serde_json::json!({
+                "pid": pid,
+                "running": alive,
+            });
+        }
+        let rendered = serde_json::to_string_pretty(&val)
+            .map_err(|e| format!("Failed to serialize state JSON: {}", e))?;
         println!("{}", rendered);
         return Ok(());
     }
     println!("State Status: {:?}", state.status);
     println!("Step: {}", state.step);
+    if let Some((pid, alive)) = daemon_info {
+        if alive {
+            println!("Daemon Status: Running (PID: {})", pid);
+        } else {
+            println!("Daemon Status: Stopped (Stale PID: {})", pid);
+        }
+    }
     if let Some(ref task) = state.active_task {
         println!("Active Task: {}: {}", task.id, task.title);
     } else {
@@ -598,6 +633,7 @@ pub fn cmd_status(state_path: &Path, as_json: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
 
 /// Show execution state as formatted markdown or machine-readable JSON.
 ///

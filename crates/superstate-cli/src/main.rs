@@ -51,6 +51,36 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::worktree::WorktreeCommands,
     },
+    /// Run autonomous background daemon over milestones
+    Daemon {
+        #[arg(short, long, default_value = ".agent-state/state.json")]
+        state: PathBuf,
+        /// Headless coding driver (e.g. claude, agy, or command)
+        #[arg(long)]
+        driver: Option<String>,
+        /// Detach execution into a background daemon process
+        #[arg(long)]
+        detach: bool,
+        /// Maximum verification retries per milestone
+        #[arg(long, default_value_t = 3)]
+        max_retries: usize,
+        /// Timeout in seconds per verification attempt
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
+    /// Cancel a running background daemon process
+    Cancel {
+        #[arg(short, long, default_value = ".agent-state/state.json")]
+        state: PathBuf,
+    },
+    /// Inspect background daemon logs
+    Logs {
+        #[arg(short, long, default_value = ".agent-state/state.json")]
+        state: PathBuf,
+        /// Number of lines to tail
+        #[arg(short, long)]
+        tail: Option<usize>,
+    },
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -84,7 +114,25 @@ fn main() {
         } => commands::init::cmd_init_rules(&dest, &language, &strictness),
         Commands::State { cmd } => superstate_cli::state_cli::dispatch(cmd),
         Commands::Worktree { cmd } => commands::worktree::dispatch_worktree(cmd),
+        Commands::Daemon {
+            state,
+            driver,
+            detach,
+            max_retries,
+            timeout,
+        } => commands::daemon::cmd_daemon(
+            &state,
+            driver.as_deref(),
+            detach,
+            max_retries,
+            timeout,
+        ),
+        Commands::Cancel { state } => commands::daemon::cmd_cancel(&state),
+        Commands::Logs { state, tail } => {
+            commands::daemon::cmd_logs(&state, tail).map(|_| ())
+        }
     };
+
 
     if let Err(e) = result {
         eprintln!("Error: {}", e);
