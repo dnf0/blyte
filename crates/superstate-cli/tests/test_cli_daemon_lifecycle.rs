@@ -31,10 +31,10 @@ fn test_cli_daemon_lifecycle() {
 
     let paths = daemon_paths_for_state(&state_path);
 
-    // Start daemon detached
+    // Start daemon detached with long-running driver to test active cancellation
     cmd_daemon(
         &state_path,
-        Some("echo 'working'"),
+        Some("sleep 30"),
         true, // detach
         3,
         10,
