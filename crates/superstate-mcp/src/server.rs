@@ -503,13 +503,15 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let state_path =
                 resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
+            // WHY: Per ADR 0002, isolated worktrees prevent unverified agent modifications from polluting trunk.
+            // WHAT: Evaluate no_worktree flag, defaulting to isolated worktree enabled (false for no_worktree).
+            // HOW: Check explicit no_worktree arg first, then inverse of worktree arg, defaulting to false.
             let no_worktree = if let Some(nw) = args.get("no_worktree").and_then(Value::as_bool) {
                 nw
+            } else if let Some(w) = args.get("worktree").and_then(Value::as_bool) {
+                !w
             } else {
-                !args
-                    .get("worktree")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
+                false // Default to isolated worktree enabled!
             };
 
             // Ensure baseline repository setup and git exclude invariants
