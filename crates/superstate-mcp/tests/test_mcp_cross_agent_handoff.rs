@@ -60,6 +60,7 @@ fn test_mcp_cross_agent_handoff() {
         "from_agent": "claude",
         "to_agent": "agy",
         "no_worktree": true,
+        "detach": false,
         "repo_root": repo_root.to_str().unwrap()
     });
 

@@ -1,9 +1,17 @@
 //! Native Model Context Protocol (MCP) server for Superstate.
 //!
 //! Provides JSON-RPC 2.0 stdio transport handling tool listing and execution
-//! for agentic workflows (Claude Code, Antigravity, Cursor).
+//! for agentic workflows (Claude Code, Google Antigravity, Cursor).
+//!
+//! Per ADR 0002, the MCP server acts strictly as a detached Gateway exposing 4 tools:
+//! 1. `superstate_handoff`: Autonomous worktree creation and background daemon launch.
+//! 2. `superstate_status`: Observability into state machine progress and daemon health.
+//! 3. `superstate_cancel`: Graceful termination signal for background runners.
+//! 4. `superstate_doctor`: Fail-closed environment and preflight diagnostic probe.
+//!
+//! All in-loop state mutation tools have been permanently deprecated from the MCP catalog.
 
-use crate::tools::list_all_mcp_tools;
+use crate::tools::{list_all_mcp_tools, McpTool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, Write};
@@ -12,26 +20,19 @@ use superstate_core::daemon::{
     daemon_paths_for_state, is_pid_alive, resolve_daemon_slug_and_state_dir, resolve_driver_command,
 };
 use superstate_core::handoff::{generate_resumption_command, write_handoff_package, HandoffSpec};
-use superstate_core::impact::infer_impacted_tests;
 use superstate_core::ledger::{append_ledger_note, read_ledger};
-use superstate_core::maintenance::{diagnose, metrics, repair, resume_briefing, sync_with_plan};
-use superstate_core::models::{ExecutionStatus, LedgerEntry, MilestoneSpec};
-use superstate_core::patching::{apply_patch, validate_state};
-use superstate_core::plan_parser::init_state_from_plan;
+use superstate_core::maintenance::{diagnose, repair};
+use superstate_core::models::{LedgerEntry, MilestoneSpec};
 use superstate_core::prompt::render_turnkey_prompt;
-use superstate_core::resolve_project_root;
 use superstate_core::state_machine::{
-    advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
-    init_state_milestones, load_state, ready_tasks, sanitize_branch_slug, save_state_atomic,
+    branch_scoped_state_path, enclosing_state_root, find_branch_state_for_worktree,
+    init_state_direct, init_state_milestones, load_state, sanitize_branch_slug, save_state_atomic,
     STATE_DIR,
 };
-use superstate_core::verifier::execute_all_gates_filtered;
-use superstate_worktree::manager::{
-    ensure_git_baseline, ensure_git_exclude, IsolatedWorktree, WorktreeManager,
-};
-use superstate_worktree::types::WorktreeConfig;
+use superstate_worktree::manager::{ensure_git_baseline, ensure_git_exclude, WorktreeManager};
 use thiserror::Error;
 
+/// Error variants encountered during MCP JSON-RPC protocol execution.
 #[derive(Error, Debug)]
 pub enum McpError {
     #[error("I/O error: {0}")]
@@ -40,6 +41,7 @@ pub enum McpError {
     Json(#[from] serde_json::Error),
 }
 
+/// Incoming JSON-RPC 2.0 request structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -48,6 +50,7 @@ pub struct JsonRpcRequest {
     pub params: Option<Value>,
 }
 
+/// Outgoing JSON-RPC 2.0 response structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
@@ -58,6 +61,7 @@ pub struct JsonRpcResponse {
     pub error: Option<Value>,
 }
 
+/// Result of executing a preflight command dry-run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightResult {
     pub executable: bool,
@@ -66,6 +70,7 @@ pub struct PreflightResult {
     pub stderr: String,
 }
 
+/// Telemetry metadata capturing background daemon execution state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStatusInfo {
     pub pid: i32,
@@ -74,30 +79,28 @@ pub struct DaemonStatusInfo {
     pub log_file: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BranchStateSummary {
-    pub branch: String,
-    pub status: ExecutionStatus,
-    pub active_task: Option<String>,
-    pub step: usize,
-    pub total_steps: usize,
-    pub base_branch: Option<String>,
-    pub state_file: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub daemon: Option<DaemonStatusInfo>,
-}
-
 /// Resolves current daemon execution status for a given state machine path.
+///
+/// # Arguments
+/// * `state_path` - Path to the active state JSON file.
+///
+/// # Returns
+/// `Some(DaemonStatusInfo)` if a PID file is located, or `None` if unmanaged.
 pub fn resolve_daemon_status(state_path: &Path) -> Option<DaemonStatusInfo> {
+    // WHY: Daemon telemetry is keyed by branch slug under .agent-state/daemons/.
+    // WHAT: Inspects the modern daemon path first, falling back to legacy daemon.pid.
+    // HOW: Reads PID file, parses integer, and queries OS process table for liveness.
     let d_paths = daemon_paths_for_state(state_path);
     let pid_file = if d_paths.pid_file.exists() {
         d_paths.pid_file.clone()
     } else {
+        // Fallback: Check local directory for legacy single-daemon setup
         let parent = state_path.parent().unwrap_or_else(|| Path::new("."));
         let local_pid = parent.join("daemon.pid");
         if local_pid.exists() {
             local_pid
         } else {
+            // Guard clause: Return early if no PID record exists for this state file
             return None;
         }
     };
@@ -112,25 +115,59 @@ pub fn resolve_daemon_status(state_path: &Path) -> Option<DaemonStatusInfo> {
     })
 }
 
-fn save_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+/// Gracefully terminates a process by PID using SIGTERM with fallback to SIGKILL.
+///
+/// # Arguments
+/// * `pid` - Process ID of the background daemon to terminate.
+///
+/// # Returns
+/// `Ok(())` on successful termination, or `Err(String)` if signalling fails.
+#[cfg(unix)]
+pub fn kill_pid(pid: i32) -> Result<(), String> {
+    // WHY: Graceful shutdown allows processes to flush logs and release git lockfiles.
+    // WHAT: Dispatches SIGTERM (-15); if process remains alive after 500ms, escalates to SIGKILL (-9).
+    // HOW: Polls process liveness via is_pid_alive() in 50ms intervals across both signal phases.
+    if is_pid_alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-15", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if !is_pid_alive(pid) {
+                return Ok(());
+            }
+        }
+
+        if is_pid_alive(pid) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
         }
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_file_path = parent.join(format!(".state.{}.tmp", std::process::id()));
-    let serialized = serde_json::to_string_pretty(value)
-        .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
-    std::fs::write(&temp_file_path, serialized)
-        .map_err(|e| format!("Failed to write temp file: {}", e))?;
-    std::fs::rename(&temp_file_path, path)
-        .map_err(|e| format!("Failed to atomically save {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn kill_pid(pid: i32) -> Result<(), String> {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
     Ok(())
 }
 
 /// Safely clip a string to a maximum byte length on valid UTF-8 character boundaries.
+///
+/// # Arguments
+/// * `s` - Source string to truncate.
+/// * `max_len` - Maximum allowed byte length.
+///
+/// # Returns
+/// Truncated string with ellipsis appended if clipped.
 fn clip_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
@@ -149,11 +186,17 @@ fn clip_string(s: &str, max_len: usize) -> String {
 /// * `verify_cmd` - Shell command to execute.
 /// * `cwd` - Working directory to run the command in.
 /// * `timeout` - Maximum duration to allow before timing out.
+///
+/// # Returns
+/// `Ok(PreflightResult)` with exit code and captured stdio, or `Err(String)` on timeout.
 pub fn execute_preflight_with_timeout(
     verify_cmd: &str,
     cwd: &Path,
     timeout: std::time::Duration,
 ) -> Result<PreflightResult, String> {
+    // WHY: Commands must be evaluated against the host shell to detect broken verify invariants.
+    // WHAT: Spawns the verification command as a subprocess with piped stdout/stderr.
+    // HOW: Monitors execution against a wall-clock timeout, terminating runaway children.
     #[cfg(not(windows))]
     let mut cmd = std::process::Command::new("sh");
     #[cfg(not(windows))]
@@ -171,6 +214,7 @@ pub fn execute_preflight_with_timeout(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
+            // Guard clause: Return non-executable result if binary or shell cannot be spawned
             return Ok(PreflightResult {
                 executable: false,
                 exit_code: -1,
@@ -252,10 +296,21 @@ pub fn execute_preflight_with_timeout(
 }
 
 /// Execute a shell command in a dry-run fashion with a 15-second timeout.
+///
+/// # Arguments
+/// * `verify_cmd` - Shell command to execute.
+/// * `cwd` - Working directory.
+///
+/// # Returns
+/// `Ok(PreflightResult)` on completed execution or `Err(String)` on timeout.
 pub fn execute_preflight(verify_cmd: &str, cwd: &Path) -> Result<PreflightResult, String> {
     execute_preflight_with_timeout(verify_cmd, cwd, std::time::Duration::from_secs(15))
 }
 
+/// Locates the compiled `superstate` CLI binary for spawning background runners.
+///
+/// # Returns
+/// `PathBuf` pointing to the superstate executable.
 fn resolve_superstate_binary() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         let name = exe.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -283,6 +338,13 @@ fn resolve_superstate_binary() -> PathBuf {
 /// 3. If in a git repository on a feature branch (not `main`, `master`, and not starting with `wt/` or `superstate/`),
 ///    returns `branch_scoped_state_path(repo_root, &branch)`.
 /// 4. Fallback: returns `repo_root.join(STATE_DIR).join("state.json")`.
+///
+/// # Arguments
+/// * `repo_root` - Base repository path.
+/// * `explicit_state` - Optional explicit state path string from caller.
+///
+/// # Returns
+/// Resolved state file `PathBuf`.
 pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) -> PathBuf {
     if let Some(s) = explicit_state {
         let trimmed = s.trim();
@@ -298,6 +360,10 @@ pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) ->
             let under_state_dir = repo_root.join(STATE_DIR).join(p);
             if under_state_dir.exists() {
                 return under_state_dir;
+            }
+            let under_branches = repo_root.join(STATE_DIR).join("branches").join(p);
+            if under_branches.exists() {
+                return under_branches;
             }
             return direct;
         }
@@ -336,7 +402,7 @@ pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) ->
                 && !branch.starts_with("wt/")
                 && !branch.starts_with("superstate/");
             if is_feature_branch {
-                let root = superstate_core::state_machine::enclosing_state_root(repo_root)
+                let root = enclosing_state_root(repo_root)
                     .or_else(|| {
                         let mut d = Some(repo_root);
                         while let Some(cur) = d {
@@ -364,6 +430,18 @@ pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) ->
     repo_root.join(STATE_DIR).join("state.json")
 }
 
+/// Returns the list of tools exposed by the Superstate MCP server.
+///
+/// In strict accordance with ADR 0002, this registers only the 4 Gateway tools:
+/// `superstate_handoff`, `superstate_status`, `superstate_cancel`, and `superstate_doctor`.
+/// All internal in-loop mutation tools have been permanently removed.
+///
+/// # Returns
+/// Vector of active MCP tool definitions.
+pub fn handle_list_tools() -> Vec<McpTool> {
+    list_all_mcp_tools()
+}
+
 /// Dispatch a tool execution by name and arguments.
 ///
 /// # Arguments
@@ -371,106 +449,49 @@ pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) ->
 /// * `args` - The arguments JSON object.
 ///
 /// # Errors
-/// Returns an error message string if required arguments are missing or tool execution fails.
+/// Returns an error message string if required arguments are missing, if a deprecated
+/// tool is called, or if tool execution fails.
 pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "superstate_preflight" => {
-            let cwd = args
-                .get("cwd")
-                .or_else(|| args.get("repo_root"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let _state_path =
-                resolve_mcp_state_path(&cwd, args.get("state").and_then(Value::as_str));
-
-            // If verify_cmds array is provided, iterate and dry-run each command
-            if let Some(cmds_val) = args.get("verify_cmds") {
-                let cmds: Vec<String> = cmds_val
-                    .as_array()
-                    .ok_or_else(|| "'verify_cmds' must be an array of strings".to_string())?
-                    .iter()
-                    .map(|v| {
-                        v.as_str().map(ToString::to_string).ok_or_else(|| {
-                            "Each entry in 'verify_cmds' must be a string".to_string()
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-
-                let mut results = Vec::new();
-                let mut all_executable = true;
-                let mut all_passed = true;
-                let mut aggregate_stdout = String::new();
-                let mut aggregate_stderr = String::new();
-
-                // Validate each verification command independently and aggregate outcomes
-                for cmd in &cmds {
-                    let res = execute_preflight(cmd, &cwd)?;
-                    if !res.executable {
-                        all_executable = false;
-                        all_passed = false;
-                    }
-                    if res.exit_code != 0 {
-                        all_passed = false;
-                    }
-                    if !res.stdout.is_empty() {
-                        if !aggregate_stdout.is_empty() {
-                            aggregate_stdout.push('\n');
-                        }
-                        aggregate_stdout.push_str(&res.stdout);
-                    }
-                    if !res.stderr.is_empty() {
-                        if !aggregate_stderr.is_empty() {
-                            aggregate_stderr.push('\n');
-                        }
-                        aggregate_stderr.push_str(&res.stderr);
-                    }
-                    results.push(serde_json::json!({
-                        "command": cmd,
-                        "executable": res.executable,
-                        "exit_code": res.exit_code,
-                        "stdout": res.stdout,
-                        "stderr": res.stderr,
-                    }));
-                }
-
-                return Ok(serde_json::json!({
-                    "executable": all_executable,
-                    "exit_code": if all_passed { 0 } else { 1 },
-                    "all_passed": all_passed,
-                    "results": results,
-                    "stdout": aggregate_stdout,
-                    "stderr": aggregate_stderr,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": format!("preflight executed {} commands, all_passed: {}", results.len(), all_passed)
-                        }
-                    ]
-                }));
-            }
-
-            let verify_cmd = args
-                .get("verify_cmd")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
-
-            let res = execute_preflight(verify_cmd, &cwd)?;
-
-            Ok(serde_json::json!({
-                "executable": res.executable,
-                "exit_code": res.exit_code,
-                "stdout": res.stdout,
-                "stderr": res.stderr,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": format!("executable: {}, exit_code: {}", res.executable, res.exit_code)
-                    }
-                ]
-            }))
+        // Deprecated legacy in-loop execution tools per ADR 0002.
+        // WHY: Empirical benchmarks proved in-loop stepping causes catastrophic context window bloating.
+        // WHAT: Rejects calls to obsolete in-loop tools with explicit migration instructions.
+        // HOW: Returns descriptive deprecation error pointing callers to superstate_handoff.
+        "state_init"
+        | "state_show"
+        | "state_status"
+        | "state_next"
+        | "state_step"
+        | "state_get"
+        | "state_ready"
+        | "state_checkpoint"
+        | "state_rollback"
+        | "state_prompt"
+        | "state_sync"
+        | "state_exec"
+        | "state_doctor"
+        | "state_validate"
+        | "state_apply"
+        | "state_resume"
+        | "state_metrics"
+        | "state_list"
+        | "state_note"
+        | "worktree_create"
+        | "worktree_merge"
+        | "worktree_list"
+        | "worktree_remove"
+        | "worktree_clean"
+        | "superstate_review"
+        | "superstate_preflight" => {
+            Err(format!(
+                "The tool '{}' has been deprecated. In-loop MCP execution is an anti-pattern. Use 'superstate_handoff' to initiate autonomous detached execution in an isolated worktree.",
+                name
+            ))
         }
+
+        // Gateway Tool 1: superstate_handoff
+        // The sole execution entrypoint. Validates verification invariant, provisions
+        // isolated git worktree, and launches native Rust background daemon.
         "superstate_handoff" => {
             let repo_root = args
                 .get("repo_root")
@@ -531,7 +552,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                         let wt = manager
                             .ensure_task_worktree(&active.id, base_branch.as_deref())
                             .map_err(|e| {
-                                format!("Failed to ensure worktree for task {}: {}", active.id, e)
+                                format!("Failed to create isolated worktree for milestone: {}", e)
                             })?;
                         st.active_worktree = Some(wt.path.clone());
                         st.active_branch = Some(wt.branch.clone());
@@ -595,7 +616,7 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 );
             };
 
-            // Ensure parent directory exists for branch-scoped state
+            // Ensure parent directory for state file exists
             if let Some(parent) = state_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create state directory: {}", e))?;
@@ -676,7 +697,8 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 &state_path,
             );
 
-            let detach = args.get("detach").and_then(Value::as_bool).unwrap_or(false);
+            // Per ADR 0002, detach MUST default to true unless explicitly overridden
+            let detach = args.get("detach").and_then(Value::as_bool).unwrap_or(true);
 
             if detach {
                 let bin = resolve_superstate_binary();
@@ -784,7 +806,12 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 ]
             }))
         }
-        "state_init" => {
+
+        // Gateway Tool 2: superstate_status
+        // WHY: Operators and client agents require real-time visibility into detached runs.
+        // WHAT: Interrogates execution progress, active milestone, daemon status, and notes.
+        // HOW: Reads branch-scoped state file, epistemic ledger, and daemon PID files.
+        "superstate_status" => {
             let repo_root = args
                 .get("repo_root")
                 .or_else(|| args.get("cwd"))
@@ -795,443 +822,36 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let state_path =
                 resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
-            if let Some(parent) = state_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create state directory: {}", e))?;
-            }
-
-            ensure_git_baseline(&repo_root);
-
-            let no_worktree = if let Some(nw) = args.get("no_worktree").and_then(Value::as_bool) {
-                nw
-            } else {
-                !args
-                    .get("worktree")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            };
-
-            let base_branch = if repo_root.join(".git").exists() {
-                WorktreeManager::new(&repo_root)
-                    .ok()
-                    .and_then(|m| m.current_branch().ok())
-            } else {
-                None
-            };
-
-            let mut state = if let Some(plan) = args.get("plan").and_then(|v| v.as_str()) {
-                let plan_path = PathBuf::from(plan);
-                let mut st = init_state_from_plan(&plan_path, &state_path)
-                    .map_err(|e| format!("Plan parse error: {}", e))?;
-                if st.base_branch.is_none() {
-                    st.base_branch = base_branch.clone();
-                }
-                st.no_worktree = no_worktree;
-                st
-            } else if let Some(milestones_val) = args.get("milestones") {
-                let milestones: Vec<MilestoneSpec> = serde_json::from_value(milestones_val.clone())
-                    .map_err(|e| format!("Invalid milestones array: {}", e))?;
-                let goal = args.get("goal").and_then(|v| v.as_str());
-                init_state_milestones(goal, milestones, base_branch.as_deref(), no_worktree)
-                    .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?
-            } else if let Some(goal) = args.get("goal").and_then(|v| v.as_str()) {
-                let verify_cmd = args
-                    .get("verify_cmd")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
-                let files_modify: Vec<PathBuf> = args
-                    .get("files")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s.as_str())
-                            .map(PathBuf::from)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let mut st = init_state_direct(goal, verify_cmd, files_modify, no_worktree);
-                st.base_branch = base_branch.clone();
-                st
-            } else {
-                return Err(
-                    "Must provide either 'plan', 'goal' with 'verify_cmd', or 'milestones'"
-                        .to_string(),
-                );
-            };
-
-            if !no_worktree && repo_root.join(".git").exists() {
-                ensure_git_exclude(&repo_root);
-                let manager = WorktreeManager::new(&repo_root)
-                    .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
-                if let Some(ref active) = state.active_task {
-                    let wt = manager
-                        .ensure_task_worktree(&active.id, base_branch.as_deref())
-                        .map_err(|e| {
-                            format!("Failed to ensure worktree for task {}: {}", active.id, e)
-                        })?;
-                    state.active_worktree = Some(wt.path.clone());
-                    state.active_branch = Some(wt.branch.clone());
-                }
-            }
-
-            save_state_atomic(&state_path, &state)
-                .map_err(|e| format!("Failed to save state: {}", e))?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "step": state.step,
-                "active_task": state.active_task
-            }))
-        }
-        "state_next" | "state_step" => {
-            let verify_stage = args
-                .get("verify_stage")
-                .and_then(|v| v.as_str())
-                .unwrap_or("milestone");
-
-            if verify_stage != "milestone" && verify_stage != "final" {
-                return Err(format!(
-                    "Invalid verify_stage '{}'. Must be 'milestone' or 'final'",
-                    verify_stage
-                ));
-            }
-
-            let verify_cmd = args
-                .get("verify_cmd")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty())
-                .map(ToString::to_string);
-
-            let verify_git_clean = args
-                .get("verify_git_clean")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let ignore_untracked_glob = args
-                .get("ignore_untracked_glob")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string);
-
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let mut state =
-                load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
-
-            let active_task = match state.active_task.clone() {
-                Some(t) => t,
-                None => return Err("No active task to advance".to_string()),
-            };
-
-            let mut task_to_verify = active_task.clone();
-            if let Some(cmd) = verify_cmd {
-                task_to_verify.verification_cmd = Some(cmd);
-            }
-
-            ensure_git_exclude(&repo_root);
-
-            let target_dir = state
-                .active_worktree
-                .as_ref()
-                .filter(|p| p.exists())
-                .cloned()
-                .unwrap_or_else(|| repo_root.clone());
-
-            // Progressive staged verification: infer impacted tests for milestone stage when verification_cmd is empty
-            let mut impacted_tests_list: Vec<String> = Vec::new();
-            let mut synthesized_verify_cmd_opt: Option<String> = None;
-
-            if verify_stage == "milestone"
-                && task_to_verify
-                    .verification_cmd
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim()
-                    .is_empty()
-            {
-                // Discover impacted tests against base branch in target directory or repository root
-                let check_dir = if target_dir.exists() {
-                    &target_dir
-                } else {
-                    &repo_root
-                };
-
-                let mut impacted = infer_impacted_tests(check_dir, state.base_branch.as_deref());
-                // Fall back to repo_root discovery if target_dir returned no impacted tests
-                if impacted.is_empty() && check_dir != &repo_root {
-                    impacted = infer_impacted_tests(&repo_root, None);
-                }
-
-                if !impacted.is_empty() {
-                    // Extract relative path strings for response payload
-                    let rel_tests: Vec<String> = impacted
-                        .iter()
-                        .map(|p| {
-                            p.strip_prefix(check_dir)
-                                .or_else(|_| p.strip_prefix(&repo_root))
-                                .unwrap_or(p)
-                                .display()
-                                .to_string()
-                        })
-                        .collect();
-
-                    synthesized_verify_cmd_opt =
-                        synthesize_targeted_test_command(check_dir, &impacted);
-
-                    impacted_tests_list = rel_tests;
-
-                    // Enforce synthesized targeted test command as a blocking verification gate
-                    if let Some(ref synth_cmd) = synthesized_verify_cmd_opt {
-                        task_to_verify.verification_cmd = Some(synth_cmd.clone());
-                    }
-                }
-            }
-
-            let results = execute_all_gates_filtered(
-                &target_dir,
-                &task_to_verify,
-                verify_git_clean,
-                ignore_untracked_glob.as_deref(),
-            )
-            .map_err(|e| format!("Gate execution error: {}", e))?;
-
-            for res in &results {
-                if !res.passed {
-                    let reason = res
-                        .failure_reason
-                        .clone()
-                        .unwrap_or_else(|| res.output.clone());
-                    state.errors.push(reason.clone());
-                    let _ = save_state_atomic(&state_path, &state);
-
-                    return Err(format!(
-                        "Verification gate '{}' FAILED:\n{}",
-                        res.gate_name, reason
-                    ));
-                }
-            }
-
-            // Resolve base branch from state.base_branch, falling back to manager's current_branch or default_branch
-            let base_branch = state.base_branch.clone().unwrap_or_else(|| {
-                WorktreeManager::new(&repo_root)
-                    .map(|m| m.current_branch().unwrap_or_else(|_| m.default_branch()))
-                    .unwrap_or_else(|_| "main".to_string())
-            });
-
-            // Merge active worktree into base branch and cleanup
-            if let Some(ref wt_path) = state.active_worktree.clone() {
-                if wt_path.exists() {
-                    let branch = state.active_branch.clone().unwrap_or_else(|| {
-                        superstate_worktree::manager::task_worktree_names(
-                            &repo_root,
-                            &active_task.id,
-                            state.base_branch.as_deref(),
-                        )
-                        .0
-                    });
-                    let wt = IsolatedWorktree {
-                        branch,
-                        path: wt_path.clone(),
-                        base_branch: base_branch.clone(),
-                        repo_root: repo_root.clone(),
-                    };
-                    let commit_msg = format!("feat({}): {}", active_task.id, active_task.title);
-                    wt.merge_and_cleanup(&commit_msg)
-                        .map_err(|e| format!("Failed to merge and cleanup worktree: {}", e))?;
-                    state.active_worktree = None;
-                    state.active_branch = None;
-                }
-            }
-
-            advance_step(&mut state).map_err(|e| format!("Advance step error: {}", e))?;
-
-            // Provision worktree for the next task if isolation is enabled
-            if !state.no_worktree && repo_root.join(".git").exists() {
-                if let Some(ref next_task) = state.active_task {
-                    let manager = WorktreeManager::new(&repo_root)
-                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
-                    let wt = manager
-                        .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
-                        .map_err(|e| {
-                            format!("Failed to ensure worktree for task {}: {}", next_task.id, e)
-                        })?;
-                    state.active_worktree = Some(wt.path.clone());
-                    state.active_branch = Some(wt.branch.clone());
-                }
-            }
-
-            // Render turnkey prompt for the newly active task if one exists
-            let mut turnkey_prompt_opt = None;
-            if state.active_task.is_some() {
-                let is_in_place = state.no_worktree;
-                if let Ok(prompt) =
-                    render_turnkey_prompt(&state, &state_path, None, is_in_place, false)
-                {
-                    turnkey_prompt_opt = Some(prompt);
-                }
-            }
-
-            save_state_atomic(&state_path, &state)
-                .map_err(|e| format!("Save state error: {}", e))?;
-
-            let mut res_obj = serde_json::json!({
-                "status": "success",
-                "step": state.step,
-                "stage": verify_stage,
-                "active_task": state.active_task,
-                "active_worktree": state.active_worktree.as_ref().map(|p| p.display().to_string()),
-                "active_branch": state.active_branch,
-            });
-
-            // Note impacted tests discovered during milestone verification
-            if !impacted_tests_list.is_empty() {
-                res_obj["impacted_tests"] = serde_json::json!(impacted_tests_list);
-            }
-
-            // Include synthesized targeted test runner command if constructed
-            if let Some(ref synth) = synthesized_verify_cmd_opt {
-                res_obj["synthesized_verify_cmd"] = serde_json::json!(synth);
-            }
-
-            if let Some(ref prompt) = turnkey_prompt_opt {
-                res_obj["turnkey_prompt"] = serde_json::Value::String(prompt.clone());
-                res_obj["content"] = serde_json::json!([
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]);
-            }
-
-            Ok(res_obj)
-        }
-        "state_prompt" => {
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
-            let task = args.get("task").and_then(|v| v.as_str());
-            let with_graph = args
-                .get("with_graph")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let no_worktree = args
-                .get("no_worktree")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(state.no_worktree);
-            let prompt = render_turnkey_prompt(&state, &state_path, task, no_worktree, with_graph)?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "turnkey_prompt": &prompt,
-                "prompt": &prompt,
-                "content": [{ "type": "text", "text": &prompt }]
-            }))
-        }
-        "state_note" => {
-            let note = args
-                .get("note")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'note'".to_string())?;
-
-            let author = args
-                .get("author")
-                .and_then(|v| v.as_str())
-                .unwrap_or("agent");
-
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            append_ledger_note(&state_path, LedgerEntry::new(author, note))
-                .map_err(|e| format!("Note error: {}", e))?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "note_recorded": true
-            }))
-        }
-        "state_get" => {
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let state = load_state(&state_path).map_err(|e| format!("Load state error: {}", e))?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "state": state,
-                "state_path": state_path.display().to_string(),
-                "content": [
-                    {
-                        "type": "text",
-                        "text": serde_json::to_string_pretty(&state).unwrap_or_default()
-                    }
-                ]
-            }))
-        }
-        "state_status" => {
-            // Resolve repository context and effective branch-scoped state path
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            // Load execution state and associated epistemic ledger history
             let state =
                 load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
             let ledger_entries = read_ledger(&state_path);
             let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
 
             let daemon_status = resolve_daemon_status(&state_path);
-            let daemon_info = daemon_status.as_ref().map(|d| {
-                serde_json::json!({
-                    "pid": d.pid,
-                    "running": d.running,
-                    "slug": d.slug,
-                    "log_file": d.log_file.display().to_string(),
+            let daemon_info = daemon_status
+                .as_ref()
+                .map(|d| {
+                    serde_json::json!({
+                        "pid": d.pid,
+                        "running": d.running,
+                        "slug": d.slug,
+                        "log_file": d.log_file.display().to_string(),
+                    })
                 })
-            });
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "pid": serde_json::Value::Null,
+                        "running": false,
+                        "slug": serde_json::Value::Null,
+                        "log_file": serde_json::Value::Null,
+                    })
+                });
 
             if as_json {
-                // Machine-readable format: serializes execution state directly matching CLI parity
                 let mut val = serde_json::to_value(&state)
                     .map_err(|e| format!("Failed to convert state to JSON value: {}", e))?;
-                if let Some(ref d) = daemon_info {
-                    if let Value::Object(ref mut map) = val {
-                        map.insert("daemon".to_string(), d.clone());
-                    }
+                if let Value::Object(ref mut map) = val {
+                    map.insert("daemon".to_string(), daemon_info.clone());
                 }
                 let pretty = serde_json::to_string_pretty(&val)
                     .map_err(|e| format!("Failed to serialize state: {}", e))?;
@@ -1247,7 +867,6 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 }
                 Ok(val)
             } else {
-                // Human-readable summary: renders step, task progress, and recent epistemic notes
                 let mut text = String::new();
                 text.push_str(&format!("State Status: {:?}\n", state.status));
                 text.push_str(&format!("Step: {}\n", state.step));
@@ -1295,14 +914,16 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                         }
                     ]
                 });
-                if let Some(ref d) = daemon_info {
-                    ret["daemon"] = d.clone();
-                }
+                ret["daemon"] = daemon_info;
                 Ok(ret)
             }
         }
-        "state_show" => {
-            // Resolve repository root and state path based on branch isolation
+
+        // Gateway Tool 3: superstate_cancel
+        // WHY: Operators need to abort errant or runaway background workers cleanly.
+        // WHAT: Dispatches termination signal (SIGTERM escalating to SIGKILL) and unlinks PID.
+        // HOW: Targets by explicit state file, branch slug, or --all fleet cancellation.
+        "superstate_cancel" => {
             let repo_root = args
                 .get("repo_root")
                 .or_else(|| args.get("cwd"))
@@ -1310,776 +931,114 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+            let state_dir = repo_root.join(STATE_DIR);
+            let cancel_all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+            let branch = args
+                .get("branch")
+                .or_else(|| args.get("slug"))
+                .and_then(Value::as_str);
 
-            let state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
-
-            if as_json {
-                // Provide raw execution state in JSON format matching CLI show --json
-                let pretty = serde_json::to_string_pretty(&state)
-                    .map_err(|e| format!("Failed to serialize state: {}", e))?;
-                let mut val = serde_json::to_value(&state)
-                    .map_err(|e| format!("Failed to convert state to JSON value: {}", e))?;
-                if let Value::Object(ref mut map) = val {
-                    map.insert(
-                        "state".to_string(),
-                        serde_json::to_value(&state).unwrap_or_default(),
-                    );
-                    map.insert(
-                        "content".to_string(),
-                        serde_json::json!([{ "type": "text", "text": pretty }]),
-                    );
-                }
-                Ok(val)
-            } else {
-                // Markdown executive overview: summarizes active task, worktree, and verification command
-                let mut md = String::new();
-                md.push_str("# Superstate Execution Status\n");
-                md.push_str(&format!(
-                    "- **Status:** {:?} (Step {})\n",
-                    state.status, state.step
-                ));
-                if let Some(ref base) = state.base_branch {
-                    md.push_str(&format!("- **Base Branch:** `{}`\n", base));
-                }
-                if let Some(ref task) = state.active_task {
-                    md.push_str(&format!("- **Active Task:** {}: {}\n", task.id, task.title));
-                    if let Some(ref cmd) = task.verification_cmd {
-                        md.push_str(&format!("- **Verification Command:** `{}`\n", cmd));
+            if cancel_all {
+                let mut cancelled = Vec::new();
+                let daemons_dir = state_dir.join("daemons");
+                if daemons_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&daemons_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("pid") {
+                                if let Ok(pid_str) = std::fs::read_to_string(&path) {
+                                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                                        let _ = kill_pid(pid);
+                                        cancelled.push(pid);
+                                        let _ = std::fs::remove_file(&path);
+                                    }
+                                }
+                            }
+                        }
                     }
+                }
+                let legacy_pid = state_dir.join("daemon.pid");
+                if legacy_pid.exists() {
+                    if let Ok(pid_str) = std::fs::read_to_string(&legacy_pid) {
+                        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                            let _ = kill_pid(pid);
+                            cancelled.push(pid);
+                            let _ = std::fs::remove_file(&legacy_pid);
+                        }
+                    }
+                }
+                return Ok(serde_json::json!({
+                    "status": "cancelled",
+                    "cancelled_pids": cancelled,
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Cancelled {} daemon processes.", cancelled.len())
+                    }]
+                }));
+            }
+
+            if let Some(branch_name) = branch {
+                let slug = sanitize_branch_slug(branch_name);
+                let pid_file = state_dir.join("daemons").join(format!("{}.pid", slug));
+                if pid_file.exists() {
+                    let pid_str = std::fs::read_to_string(&pid_file).map_err(|e| e.to_string())?;
+                    let pid: i32 = pid_str.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                    let _ = kill_pid(pid);
+                    let _ = std::fs::remove_file(&pid_file);
+                    return Ok(serde_json::json!({
+                        "status": "cancelled",
+                        "slug": slug,
+                        "pid": pid,
+                        "content": [{
+                            "type": "text",
+                            "text": format!("Daemon for branch '{}' (PID: {}) terminated.", branch_name, pid)
+                        }]
+                    }));
                 } else {
-                    md.push_str("- **Active Task:** None\n");
-                }
-                if let Some(ref wt) = state.active_worktree {
-                    if let Some(ref branch) = state.active_branch {
-                        md.push_str(&format!(
-                            "- **Active Worktree:** `{}` (branch `{}`)\n",
-                            wt.display(),
-                            branch
-                        ));
-                    } else {
-                        md.push_str(&format!("- **Active Worktree:** `{}`\n", wt.display()));
-                    }
-                }
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "markdown": md,
-                    "output": md,
-                    "text": md,
-                    "content": [
-                        {
+                    return Ok(serde_json::json!({
+                        "status": "not_running",
+                        "slug": slug,
+                        "content": [{
                             "type": "text",
-                            "text": md
-                        }
-                    ]
-                }))
-            }
-        }
-        "state_resume" => {
-            // Resolve project root and locate state file
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-            let root = if repo_root.join(".git").exists() {
-                repo_root
-            } else {
-                resolve_project_root(&state_path)
-            };
-
-            // Query recent git history to ground context for resumed agent session
-            let commits = std::process::Command::new("git")
-                .args(["log", "--oneline", "-5"])
-                .current_dir(&root)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            let notes = read_ledger(&state_path);
-            let briefing = resume_briefing(&state, &notes, &commits);
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "briefing": briefing,
-                "output": briefing,
-                "text": briefing,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": briefing
-                    }
-                ]
-            }))
-        }
-        "state_metrics" => {
-            // Resolve state path and load execution state
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-            let notes = read_ledger(&state_path);
-
-            // Compute performance and completion telemetry metrics
-            let m = metrics(&state, notes.len());
-            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
-
-            if as_json {
-                let pretty = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
-                let mut val = serde_json::to_value(&m)
-                    .map_err(|e| format!("Failed to convert metrics to JSON value: {}", e))?;
-                if let Value::Object(ref mut map) = val {
-                    map.insert(
-                        "metrics".to_string(),
-                        serde_json::to_value(&m).unwrap_or_default(),
-                    );
-                    map.insert(
-                        "content".to_string(),
-                        serde_json::json!([{ "type": "text", "text": pretty }]),
-                    );
-                }
-                Ok(val)
-            } else {
-                let mut text = String::new();
-                text.push_str(&format!("Step:            {}\n", m.step));
-                text.push_str(&format!("Status:          {}\n", m.status));
-                text.push_str(&format!(
-                    "Tasks:           {}/{} complete ({}%)\n",
-                    m.tasks_completed, m.tasks_total, m.completion_pct
-                ));
-                text.push_str(&format!("Remaining:       {}\n", m.tasks_remaining));
-                text.push_str(&format!("Notes recorded:  {}\n", m.notes_recorded));
-                text.push_str(&format!("Errors recorded: {}\n", m.errors_recorded));
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "metrics": m,
-                    "output": text,
-                    "text": text,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": text
-                        }
-                    ]
-                }))
-            }
-        }
-        "state_checkpoint" => {
-            // Resolve repository root and state path
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            // Load execution state to determine current step
-            let state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-            let root = repo_root_for(&state_path, &repo_root);
-
-            // Create git checkpoint tag guarding this step
-            let tag = superstate_core::checkpoint::create_checkpoint(&root, state.step)
-                .map_err(|e| format!("Failed to create checkpoint: {}", e))?;
-
-            Ok(serde_json::json!({
-                "checkpoint": tag,
-                "step": state.step,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": format!("Checkpoint created: {}", tag)
-                    }
-                ]
-            }))
-        }
-        "state_rollback" => {
-            // Resolve repository root and state path
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            // Load state to inspect worktree and step
-            let mut state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-            let root = repo_root_for(&state_path, &repo_root);
-
-            // If an isolated worktree was active for this step, abort it cleanly before restoring
-            // the git checkpoint, preventing dangling branches or worktrees.
-            if let Some(ref wt_path) = state.active_worktree.clone() {
-                if wt_path.exists() {
-                    let base_branch = WorktreeManager::new(&root)
-                        .map(|m| m.default_branch())
-                        .unwrap_or_else(|_| "main".to_string());
-                    let branch = state
-                        .active_branch
-                        .clone()
-                        .unwrap_or_else(|| "wt/task".to_string());
-                    let wt = IsolatedWorktree {
-                        branch,
-                        path: wt_path.clone(),
-                        base_branch,
-                        repo_root: root.clone(),
-                    };
-                    wt.abort()
-                        .map_err(|e| format!("Failed to abort worktree on rollback: {}", e))?;
-                }
-                state.active_worktree = None;
-                state.active_branch = None;
-                save_state_atomic(&state_path, &state)
-                    .map_err(|e| format!("Failed to update state after worktree abort: {}", e))?;
-            }
-
-            let reference = args.get("reference").and_then(Value::as_str);
-            let preserved_paths = preserved(&state_path);
-            let preserve_refs: Vec<&str> = preserved_paths.iter().map(String::as_str).collect();
-
-            // Perform hard reset and clean untracked debris while preserving state file
-            let target = superstate_core::checkpoint::rollback_to(
-                &root,
-                state.step,
-                reference,
-                &preserve_refs,
-            )
-            .map_err(|e| format!("Failed to roll back: {}", e))?;
-
-            Ok(serde_json::json!({
-                "target": target,
-                "step": state.step,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": format!("Working tree cleanly rolled back to {}", target)
-                    }
-                ]
-            }))
-        }
-        "state_exec" => {
-            let verify_cmd = args
-                .get("verify_cmd")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "Missing required argument 'verify_cmd'".to_string())?;
-
-            // Resolve repository context and effective branch-scoped state path
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let mut state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-            let root = repo_root_for(&state_path, &repo_root);
-            let step = state.step;
-
-            let checkpoint = args
-                .get("checkpoint")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let rollback_on_fail = args
-                .get("rollback_on_fail")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let advance = args.get("advance").and_then(Value::as_bool).unwrap_or(true);
-            let verify_git_clean = args
-                .get("verify_git_clean")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
-
-            // Optional checkpoint creation before running verification command
-            if checkpoint {
-                superstate_core::checkpoint::create_checkpoint(&root, step)
-                    .map_err(|e| format!("Failed to checkpoint before exec: {}", e))?;
-            }
-
-            // Target directory: active worktree if present, else repository root
-            let target_dir = state
-                .active_worktree
-                .as_ref()
-                .filter(|p| p.exists())
-                .cloned()
-                .unwrap_or_else(|| root.clone());
-
-            // Run verification command with standard 600s timeout
-            let gate =
-                superstate_core::verifier::run_verification_cmd(verify_cmd, &target_dir, 600)
-                    .map_err(|e| format!("Verification could not run: {}", e))?;
-
-            // Check git clean status if requested and verification command passed
-            let mut git_clean_passed = true;
-            if gate.passed && verify_git_clean {
-                ensure_git_exclude(&root);
-                let clean = superstate_core::verifier::verify_git_clean(&target_dir)
-                    .map_err(|e| format!("git clean check failed: {}", e))?;
-                git_clean_passed = clean.passed;
-            }
-
-            let passed = gate.passed && git_clean_passed;
-            let mut rolled_back = false;
-            let mut advanced = false;
-
-            if passed && advance {
-                // Merge active worktree into base branch and cleanup if present
-                if let Some(ref wt_path) = state.active_worktree.clone() {
-                    if wt_path.exists() {
-                        let base_branch = state.base_branch.clone().unwrap_or_else(|| {
-                            WorktreeManager::new(&root)
-                                .map(|m| m.current_branch().unwrap_or_else(|_| m.default_branch()))
-                                .unwrap_or_else(|_| "main".to_string())
-                        });
-                        let branch = state.active_branch.clone().unwrap_or_else(|| {
-                            superstate_worktree::manager::task_worktree_names(
-                                &root,
-                                state
-                                    .active_task
-                                    .as_ref()
-                                    .map(|t| t.id.as_str())
-                                    .unwrap_or("task"),
-                                state.base_branch.as_deref(),
-                            )
-                            .0
-                        });
-                        let wt = IsolatedWorktree {
-                            branch,
-                            path: wt_path.clone(),
-                            base_branch,
-                            repo_root: root.clone(),
-                        };
-                        let commit_msg = format!(
-                            "feat({}): {}",
-                            state
-                                .active_task
-                                .as_ref()
-                                .map(|t| t.id.as_str())
-                                .unwrap_or("task"),
-                            state
-                                .active_task
-                                .as_ref()
-                                .map(|t| t.title.as_str())
-                                .unwrap_or("task"),
-                        );
-                        wt.merge_and_cleanup(&commit_msg)
-                            .map_err(|e| format!("Failed to merge and cleanup worktree: {}", e))?;
-                        state.active_worktree = None;
-                        state.active_branch = None;
-                    }
-                }
-
-                advance_step(&mut state).map_err(|e| format!("Advance step error: {}", e))?;
-
-                // Provision worktree for the next task if isolation is enabled
-                if !state.no_worktree && root.join(".git").exists() {
-                    if let Some(ref next_task) = state.active_task {
-                        let manager = WorktreeManager::new(&root)
-                            .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
-                        let wt = manager
-                            .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
-                            .map_err(|e| {
-                                format!(
-                                    "Failed to ensure worktree for task {}: {}",
-                                    next_task.id, e
-                                )
-                            })?;
-                        state.active_worktree = Some(wt.path.clone());
-                        state.active_branch = Some(wt.branch.clone());
-                    }
-                }
-
-                save_state_atomic(&state_path, &state)
-                    .map_err(|e| format!("Save state error: {}", e))?;
-                advanced = true;
-            } else if !passed {
-                // Record why, so the failure survives in the state
-                let mut failed_state = load_state(&state_path)
-                    .map_err(|e| format!("Failed to reload state: {}", e))?;
-                failed_state.errors.push(format!(
-                    "step {}: verification failed for `{}`: {}",
-                    step,
-                    verify_cmd,
-                    gate.failure_reason.clone().unwrap_or_else(|| {
-                        if git_clean_passed {
-                            "non-zero exit".into()
-                        } else {
-                            "working tree not clean".into()
-                        }
-                    })
-                ));
-                save_state_atomic(&state_path, &failed_state)
-                    .map_err(|e| format!("Failed to save state after error: {}", e))?;
-
-                if rollback_on_fail {
-                    // Abort isolated worktree if active
-                    if let Some(ref wt_path) = failed_state.active_worktree {
-                        if wt_path.exists() {
-                            let base_branch = WorktreeManager::new(&root)
-                                .map(|m| m.default_branch())
-                                .unwrap_or_else(|_| "main".to_string());
-                            let branch = failed_state.active_branch.clone().unwrap_or_else(|| {
-                                format!(
-                                    "wt/{}",
-                                    superstate_worktree::manager::sanitize_slug(
-                                        failed_state
-                                            .active_task
-                                            .as_ref()
-                                            .map(|t| t.id.as_str())
-                                            .unwrap_or("task"),
-                                    )
-                                )
-                            });
-                            let wt = IsolatedWorktree {
-                                branch,
-                                path: wt_path.clone(),
-                                base_branch,
-                                repo_root: root.clone(),
-                            };
-                            let _ = wt.abort();
-                            failed_state.active_worktree = None;
-                            failed_state.active_branch = None;
-                            let _ = save_state_atomic(&state_path, &failed_state);
-                        }
-                    }
-                    let preserved_paths = preserved(&state_path);
-                    let preserve_refs: Vec<&str> =
-                        preserved_paths.iter().map(String::as_str).collect();
-                    superstate_core::checkpoint::rollback_to(&root, step, None, &preserve_refs)
-                        .map_err(|e| format!("Failed to roll back after failure: {}", e))?;
-                    rolled_back = true;
+                            "text": format!("No active daemon found for branch '{}'.", branch_name)
+                        }]
+                    }));
                 }
             }
 
-            let text = if passed {
-                format!(
-                    "Verification passed{}",
-                    if advanced {
-                        " and state advanced."
-                    } else {
-                        "."
-                    }
-                )
-            } else {
-                format!(
-                    "Verification failed{}",
-                    if rolled_back {
-                        "; working tree rolled back."
-                    } else {
-                        "; failure recorded in state."
-                    }
-                )
-            };
-
-            let mut res = serde_json::json!({
-                "passed": passed,
-                "advanced": advanced,
-                "rolled_back": rolled_back,
-                "step": step,
-                "verify_cmd": verify_cmd,
-                "output": gate.output,
-            });
-
-            if as_json {
-                let pretty = serde_json::to_string_pretty(&res).unwrap_or_default();
-                res["content"] = serde_json::json!([{ "type": "text", "text": pretty }]);
-            } else {
-                res["text"] = serde_json::Value::String(text.clone());
-                res["content"] = serde_json::json!([{ "type": "text", "text": text }]);
-            }
-
-            Ok(res)
-        }
-        "superstate_review" => {
-            let repo_root = args
-                .get("repo")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let commit_range = args.get("commit_range").and_then(|v| v.as_str());
-            let diff =
-                superstate_review::get_git_diff(&repo_root, commit_range).unwrap_or_default();
-            let prompt = superstate_review::build_review_system_prompt();
-
-            Ok(serde_json::json!({
-                "diff_lines": diff.lines().count(),
-                "review_prompt": prompt,
-                "diff": diff
-            }))
-        }
-        "worktree_create" => {
-            let branch = args
-                .get("branch")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
-
-            let repo_root = args
-                .get("repo")
-                .or_else(|| args.get("repo_root"))
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let base = args.get("base").and_then(|v| v.as_str());
-            let custom_path = args.get("path").and_then(|v| v.as_str()).map(PathBuf::from);
-
-            ensure_git_exclude(&repo_root);
-            let manager = WorktreeManager::new(&repo_root)
-                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
-
-            let config = WorktreeConfig {
-                base_path: repo_root.clone(),
-                branch: branch.to_string(),
-                base_branch: base.map(ToString::to_string),
-                worktree_path: custom_path,
-                cache_dirs: vec![],
-            };
-
-            let isolated = manager
-                .create(&config)
-                .map_err(|e| format!("Failed to create worktree: {}", e))?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "branch": isolated.branch,
-                "worktree_path": isolated.path.display().to_string(),
-            }))
-        }
-        "worktree_merge" => {
-            let branch = args
-                .get("branch")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
-
-            let repo_root = args
-                .get("repo")
-                .or_else(|| args.get("repo_root"))
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let base = args.get("base").and_then(|v| v.as_str());
-            let message = args
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Merge worktree branch");
-            let verify_full_suite = args
-                .get("verify_full_suite")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty());
-
-            let isolated = resolve_worktree_for_merge(&repo_root, branch, base)?;
-            let _ = isolated.auto_commit_if_dirty(message);
-
-            // Enforce pre-merge verification gate if a full suite check command is specified.
-            // If verification fails (non-zero exit), abort before merging into base so the
-            // isolated worktree remains intact for debugging and regressions are kept out of base.
-            if let Some(cmd) = verify_full_suite {
-                let gate_res = execute_preflight_with_timeout(
-                    cmd,
-                    &isolated.path,
-                    std::time::Duration::from_secs(600),
-                )?;
-                if gate_res.exit_code != 0 {
-                    return Err(format!(
-                        "Pre-merge verification failed (exit code {}):\nSTDOUT:\n{}\nSTDERR:\n{}",
-                        gate_res.exit_code, gate_res.stdout, gate_res.stderr
-                    ));
-                }
-            }
-
-            isolated
-                .merge_into_base(message)
-                .map_err(|e| format!("Failed to merge worktree: {}", e))?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "branch": branch,
-                "base": isolated.base_branch,
-            }))
-        }
-        "worktree_list" => {
-            let repo_root = args
-                .get("repo")
-                .or_else(|| args.get("repo_root"))
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
-
-            let manager = WorktreeManager::new(&repo_root)
-                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
-            let list = manager
-                .list()
-                .map_err(|e| format!("Failed to list worktrees: {}", e))?;
-
-            let json_list: Vec<Value> = list
-                .iter()
-                .map(|wt| {
-                    serde_json::json!({
-                        "branch": wt.branch,
-                        "path": wt.path.display().to_string(),
-                        "head": wt.commit_sha,
-                        "commit_sha": wt.commit_sha,
-                        "is_main": wt.is_main,
-                        "active": wt.is_main,
-                    })
-                })
-                .collect();
-
-            let mut text = String::new();
-            if list.is_empty() {
-                text.push_str("No active worktrees.\n");
-            } else {
-                text.push_str(&format!("{:<25} {:<10} {:<40}\n", "BRANCH", "HEAD", "PATH"));
-                text.push_str(&format!("{:-<25} {:-<10} {:-<40}\n", "", "", ""));
-                for wt in &list {
-                    let branch_display = wt
-                        .branch
-                        .clone()
-                        .unwrap_or_else(|| "(detached HEAD)".to_string())
-                        + if wt.is_main { " [main]" } else { "" };
-                    let short_sha = if wt.commit_sha.len() >= 7 {
-                        &wt.commit_sha[..7]
-                    } else {
-                        &wt.commit_sha
-                    };
-                    text.push_str(&format!(
-                        "{:<25} {:<10} {:<40}\n",
-                        branch_display,
-                        short_sha,
-                        wt.path.display()
-                    ));
-                }
-            }
-
-            if as_json {
-                let pretty = serde_json::to_string_pretty(&json_list)
-                    .map_err(|e| format!("Failed to serialize worktree list: {}", e))?;
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "worktrees": json_list,
+            // Single state target resolution
+            let state_path = resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
+            let d_paths = daemon_paths_for_state(&state_path);
+            if d_paths.pid_file.exists() {
+                let pid_str = std::fs::read_to_string(&d_paths.pid_file).map_err(|e| e.to_string())?;
+                let pid: i32 = pid_str.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                let _ = kill_pid(pid);
+                let _ = std::fs::remove_file(&d_paths.pid_file);
+                return Ok(serde_json::json!({
+                    "status": "cancelled",
+                    "slug": d_paths.slug,
+                    "pid": pid,
                     "content": [{
                         "type": "text",
-                        "text": pretty
+                        "text": format!("Daemon '{}' (PID: {}) terminated.", d_paths.slug, pid)
                     }]
-                }))
-            } else {
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "worktrees": json_list,
-                    "output": text,
-                    "text": text,
-                    "content": [{
-                        "type": "text",
-                        "text": text
-                    }]
-                }))
-            }
-        }
-        "worktree_remove" => {
-            let branch = args
-                .get("branch")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing required argument 'branch'".to_string())?;
-
-            let repo_root = args
-                .get("repo")
-                .or_else(|| args.get("repo_root"))
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-
-            let isolated = resolve_worktree_for_remove(&repo_root, branch)?;
-            let wt_path = isolated.path.clone();
-            isolated
-                .destroy(force)
-                .map_err(|e| format!("Failed to remove worktree: {}", e))?;
-
-            if wt_path.exists() {
-                let _ = std::fs::remove_dir_all(&wt_path);
+                }));
             }
 
             Ok(serde_json::json!({
-                "status": "success",
-                "branch": branch,
-                "removed": true,
+                "status": "not_running",
                 "content": [{
                     "type": "text",
-                    "text": format!("Removed worktree for branch '{}'", branch)
+                    "text": "No active daemon found for state path."
                 }]
             }))
         }
-        "worktree_clean" => {
-            let repo_root = args
-                .get("repo")
-                .or_else(|| args.get("repo_root"))
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-
-            let (cleaned_count, cleaned_branches) = clean_orphaned_worktrees(&repo_root, force)
-                .map_err(|e| format!("Failed to clean worktrees: {}", e))?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "cleaned": cleaned_count,
-                "branches": cleaned_branches,
-                "content": [{
-                    "type": "text",
-                    "text": format!("Cleaned {} orphaned worktree(s)", cleaned_count)
-                }]
-            }))
-        }
-        "state_ready" => {
+        // Gateway Tool 4: superstate_doctor
+        // WHY: Fail-closed architecture demands verifying runtime prerequisites before work begins.
+        // WHAT: Performs diagnostic checks across binary integrity, git repository, and state health.
+        // HOW: Inspects binary paths, evaluates git tree, and validates/repairs state machines.
+        "superstate_doctor" => {
             let repo_root = args
                 .get("repo_root")
                 .or_else(|| args.get("cwd"))
@@ -2090,129 +1049,17 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             let state_path =
                 resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
-            let state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-            let ready = ready_tasks(&state);
-            let ready_titles: Vec<String> = ready
-                .iter()
-                .map(|t| format!("{}: {}", t.id, t.title))
-                .collect();
-            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
-
-            let text = if ready.is_empty() {
-                "No tasks are currently unblocked (all remaining tasks have unsatisfied dependencies).".to_string()
-            } else {
-                let mut out = format!("Unblocked tasks ({}):\n", ready.len());
-                for task in &ready {
-                    out.push_str(&format!("  - {}: {}\n", task.id, task.title));
-                }
-                out
-            };
-
-            if as_json {
-                let pretty =
-                    serde_json::to_string_pretty(&serde_json::json!({ "ready": &ready_titles }))
-                        .map_err(|e| e.to_string())?;
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "ready": ready_titles,
-                    "content": [{ "type": "text", "text": pretty }]
-                }))
-            } else {
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "ready": ready_titles,
-                    "output": text,
-                    "text": text,
-                    "content": [{ "type": "text", "text": text }]
-                }))
+            if !state_path.exists() {
+                return Ok(serde_json::json!({
+                    "status": "healthy",
+                    "is_healthy": true,
+                    "issues": Vec::<String>::new(),
+                    "warnings": Vec::<String>::new(),
+                    "repaired_actions": Vec::<String>::new(),
+                    "output": "Doctor: state file does not exist yet. Environment baseline is clean.",
+                    "content": [{ "type": "text", "text": "Doctor: state file does not exist yet. Environment baseline is clean." }]
+                }));
             }
-        }
-        "state_sync" => {
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let plan_str = args
-                .get("plan")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "Missing required parameter 'plan' for state_sync".to_string())?;
-
-            let plan_path = if Path::new(plan_str).is_absolute() {
-                PathBuf::from(plan_str)
-            } else {
-                repo_root.join(plan_str)
-            };
-
-            let plan_content = std::fs::read_to_string(&plan_path)
-                .map_err(|e| format!("Failed to read plan at {}: {}", plan_path.display(), e))?;
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let mut state =
-                load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
-
-            let report = sync_with_plan(&mut state, &plan_content)?;
-            state.plan_path = Some(plan_path.clone());
-
-            let target_path = if let Some(out_str) = args.get("out").and_then(Value::as_str) {
-                if Path::new(out_str).is_absolute() {
-                    PathBuf::from(out_str)
-                } else {
-                    repo_root.join(out_str)
-                }
-            } else {
-                state_path.clone()
-            };
-
-            save_state_atomic(&target_path, &state)
-                .map_err(|e| format!("Failed to write state: {}", e))?;
-
-            let mut text = format!("State synced with plan '{}':\n", plan_path.display());
-            for a in &report.added {
-                text.push_str(&format!("  + {}\n", a));
-            }
-            for r in &report.removed {
-                text.push_str(&format!("  - {}\n", r));
-            }
-            if report.preserved_completed > 0 {
-                text.push_str(&format!(
-                    "  {} completed task(s) preserved.\n",
-                    report.preserved_completed
-                ));
-            }
-            if let Some(ref active) = report.active_task {
-                text.push_str(&format!("Active: {}\n", active));
-            }
-            text.push_str(&format!("Pending: {}\n", report.pending));
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "report": &report,
-                "added": &report.added,
-                "removed": &report.removed,
-                "preserved_completed": report.preserved_completed,
-                "active_task": &report.active_task,
-                "pending": report.pending,
-                "output": text,
-                "text": text,
-                "content": [{ "type": "text", "text": text }]
-            }))
-        }
-        "state_doctor" => {
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
 
             let mut state =
                 load_state(&state_path).map_err(|e| format!("Failed to load state: {}", e))?;
@@ -2295,770 +1142,18 @@ pub fn handle_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 }))
             }
         }
-        "state_validate" => {
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let body = std::fs::read_to_string(&state_path)
-                .map_err(|e| format!("Failed to read {}: {}", state_path.display(), e))?;
-            let raw: Value = serde_json::from_str(&body)
-                .map_err(|e| format!("Failed to parse {}: {}", state_path.display(), e))?;
-
-            let errors = validate_state(&raw);
-            if errors.is_empty() {
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "valid": true,
-                    "errors": Vec::<String>::new(),
-                    "output": "State is valid.",
-                    "text": "State is valid.",
-                    "content": [{ "type": "text", "text": "State is valid." }]
-                }))
-            } else {
-                let msg = format!("State is invalid ({} problem(s)).", errors.len());
-                let mut text = format!("State is invalid ({} problem(s)):\n", errors.len());
-                for err in &errors {
-                    text.push_str(&format!("  - {}\n", err));
-                }
-                Ok(serde_json::json!({
-                    "status": "error",
-                    "valid": false,
-                    "errors": errors,
-                    "output": text,
-                    "text": text,
-                    "content": [{ "type": "text", "text": msg }]
-                }))
-            }
-        }
-        "state_apply" => {
-            let repo_root = args
-                .get("repo_root")
-                .or_else(|| args.get("cwd"))
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            let patch_val =
-                if let Some(p_val) = args.get("patch") {
-                    if let Some(s) = p_val.as_str() {
-                        let candidate = if Path::new(s).is_absolute() {
-                            PathBuf::from(s)
-                        } else {
-                            repo_root.join(s)
-                        };
-                        if candidate.is_file() {
-                            let content = std::fs::read_to_string(&candidate).map_err(|e| {
-                                format!("Failed to read patch file {}: {}", candidate.display(), e)
-                            })?;
-                            Some(serde_json::from_str::<Value>(&content).map_err(|e| {
-                                format!("Failed to parse patch file as JSON: {}", e)
-                            })?)
-                        } else {
-                            Some(serde_json::from_str::<Value>(s).map_err(|e| {
-                                format!("Failed to parse patch string as JSON: {}", e)
-                            })?)
-                        }
-                    } else if p_val.is_object() {
-                        Some(p_val.clone())
-                    } else {
-                        return Err(
-                            "Invalid 'patch' argument: must be JSON object or string".to_string()
-                        );
-                    }
-                } else {
-                    None
-                };
-
-            let note = args.get("note").and_then(Value::as_str);
-
-            if patch_val.is_none() && note.is_none() {
-                return Err("Nothing to apply: pass patch and/or note.".to_string());
-            }
-
-            let state_path =
-                resolve_mcp_state_path(&repo_root, args.get("state").and_then(Value::as_str));
-
-            let body = std::fs::read_to_string(&state_path)
-                .map_err(|e| format!("Failed to read {}: {}", state_path.display(), e))?;
-            let mut state_val: Value = serde_json::from_str(&body)
-                .map_err(|e| format!("Failed to parse {}: {}", state_path.display(), e))?;
-
-            if let Some(ref p) = patch_val {
-                apply_patch(&mut state_val, p);
-            }
-
-            if let Some(n) = note {
-                append_ledger_note(&state_path, LedgerEntry::new("agent", n))
-                    .map_err(|e| format!("Failed to record note: {}", e))?;
-            }
-
-            let errors = validate_state(&state_val);
-            if !errors.is_empty() {
-                return Err(format!(
-                    "Patch would produce an invalid state; nothing written ({} problem(s)): {}",
-                    errors.len(),
-                    errors.join(", ")
-                ));
-            }
-
-            let save_path = if let Some(out_str) = args.get("out").and_then(Value::as_str) {
-                if Path::new(out_str).is_absolute() {
-                    PathBuf::from(out_str)
-                } else {
-                    repo_root.join(out_str)
-                }
-            } else {
-                state_path.clone()
-            };
-
-            save_json_atomic(&save_path, &state_val)?;
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "applied": true,
-                "note": note,
-                "output": "State updated.",
-                "text": "State updated.",
-                "content": [{ "type": "text", "text": "State updated." }]
-            }))
-        }
-        "state_list" => {
-            let repo_root = if let Some(arg) = args.get("state").and_then(Value::as_str) {
-                let p = if Path::new(arg).is_absolute() {
-                    PathBuf::from(arg)
-                } else {
-                    let base = args
-                        .get("repo_root")
-                        .or_else(|| args.get("cwd"))
-                        .and_then(Value::as_str)
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| {
-                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                        });
-                    base.join(arg)
-                };
-                if p.is_dir() {
-                    if p.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
-                        p.parent().unwrap_or(&p).to_path_buf()
-                    } else if p.file_name().and_then(|s| s.to_str()) == Some("branches")
-                        && p.parent()
-                            .and_then(|pp| pp.file_name())
-                            .and_then(|s| s.to_str())
-                            == Some(STATE_DIR)
-                    {
-                        p.parent()
-                            .and_then(|pp| pp.parent())
-                            .unwrap_or(&p)
-                            .to_path_buf()
-                    } else {
-                        p
-                    }
-                } else {
-                    superstate_core::prompt::resolve_project_root(&p)
-                }
-            } else {
-                args.get("repo_root")
-                    .or_else(|| args.get("cwd"))
-                    .and_then(|v| v.as_str())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    })
-            };
-
-            let state_dir = repo_root.join(STATE_DIR);
-            let mut summaries = Vec::new();
-
-            // 1. Scan .agent-state/branches/*.json
-            let branches_dir = state_dir.join("branches");
-            if branches_dir.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&branches_dir) {
-                    let mut paths: Vec<PathBuf> = entries
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .filter(|p| {
-                            p.is_file()
-                                && p.extension().and_then(|ext| ext.to_str()) == Some("json")
-                        })
-                        .collect();
-                    paths.sort();
-
-                    for path in paths {
-                        if let Ok(st) = load_state(&path) {
-                            let slug = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let total_steps = st.completed_tasks.len()
-                                + if st.active_task.is_some() { 1 } else { 0 }
-                                + st.pending_tasks.len();
-                            let active_task = st
-                                .active_task
-                                .as_ref()
-                                .map(|t| format!("{}: {}", t.id, t.title));
-                            let display_step = if st.status == ExecutionStatus::Completed {
-                                total_steps
-                            } else {
-                                st.step.min(total_steps)
-                            };
-                            let daemon = resolve_daemon_status(&path);
-                            summaries.push(BranchStateSummary {
-                                branch: slug,
-                                status: st.status,
-                                active_task,
-                                step: display_step,
-                                total_steps,
-                                base_branch: st.base_branch,
-                                state_file: path,
-                                daemon,
-                            });
-                        }
-                    }
-                }
-            }
-
-            // 2. Scan .agent-state/state.json if present
-            let default_state_file = state_dir.join("state.json");
-            if default_state_file.is_file() {
-                if let Ok(st) = load_state(&default_state_file) {
-                    let total_steps = st.completed_tasks.len()
-                        + if st.active_task.is_some() { 1 } else { 0 }
-                        + st.pending_tasks.len();
-                    let active_task = st
-                        .active_task
-                        .as_ref()
-                        .map(|t| format!("{}: {}", t.id, t.title));
-                    let default_branch_name = WorktreeManager::new(&repo_root)
-                        .map(|m| m.default_branch())
-                        .unwrap_or_else(|_| "main".to_string());
-                    let branch_display = format!("{} (default)", default_branch_name);
-                    let display_step = if st.status == ExecutionStatus::Completed {
-                        total_steps
-                    } else {
-                        st.step.min(total_steps)
-                    };
-                    let daemon = resolve_daemon_status(&default_state_file);
-                    summaries.push(BranchStateSummary {
-                        branch: branch_display,
-                        status: st.status,
-                        active_task,
-                        step: display_step,
-                        total_steps,
-                        base_branch: st.base_branch.or(Some(default_branch_name)),
-                        state_file: default_state_file,
-                        daemon,
-                    });
-                }
-            }
-
-            // 3. Scan .wt/* worktree directories if repo exists
-            let wt_dir = repo_root.join(".wt");
-            if wt_dir.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&wt_dir) {
-                    for entry in entries.filter_map(|e| e.ok()) {
-                        let p = entry.path();
-                        if p.is_dir() {
-                            let wt_state = p.join(STATE_DIR).join("state.json");
-                            if wt_state.is_file()
-                                && !summaries.iter().any(|s| s.state_file == wt_state)
-                            {
-                                if let Ok(st) = load_state(&wt_state) {
-                                    let wt_name =
-                                        p.file_name().and_then(|s| s.to_str()).unwrap_or("wt");
-                                    let total_steps = st.completed_tasks.len()
-                                        + if st.active_task.is_some() { 1 } else { 0 }
-                                        + st.pending_tasks.len();
-                                    let active_task = st
-                                        .active_task
-                                        .as_ref()
-                                        .map(|t| format!("{}: {}", t.id, t.title));
-                                    let display_step = if st.status == ExecutionStatus::Completed {
-                                        total_steps
-                                    } else {
-                                        st.step.min(total_steps)
-                                    };
-                                    let daemon = resolve_daemon_status(&wt_state);
-                                    summaries.push(BranchStateSummary {
-                                        branch: format!("{} (worktree)", wt_name),
-                                        status: st.status,
-                                        active_task,
-                                        step: display_step,
-                                        total_steps,
-                                        base_branch: st.base_branch,
-                                        state_file: wt_state,
-                                        daemon,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            summaries.sort_by(|a, b| a.branch.cmp(&b.branch));
-
-            let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
-
-            let summaries_val: Vec<Value> = summaries
-                .iter()
-                .map(|s| {
-                    let mut obj = serde_json::json!({
-                        "branch": s.branch,
-                        "status": format!("{:?}", s.status),
-                        "active_task": s.active_task,
-                        "step": s.step,
-                        "total_steps": s.total_steps,
-                        "base_branch": s.base_branch,
-                        "state_file": s.state_file.display().to_string(),
-                    });
-                    if let Some(ref d) = s.daemon {
-                        obj["daemon"] = serde_json::json!({
-                            "pid": d.pid,
-                            "running": d.running,
-                            "slug": d.slug,
-                            "log_file": d.log_file.display().to_string(),
-                        });
-                    } else {
-                        obj["daemon"] = Value::Null;
-                    }
-                    obj
-                })
-                .collect();
-
-            let mut text = String::from("Active & Completed Branches:\n");
-            text.push_str(&format!(
-                "  {:<26} {:<12} {:<24} {:<6} {:<20} {:<16}\n",
-                "Branch", "Status", "Active Task", "Step", "Base Branch", "Daemon"
-            ));
-            for s in &summaries {
-                let status_str = match s.status {
-                    ExecutionStatus::NotStarted => "NotStarted",
-                    ExecutionStatus::InProgress => "InProgress",
-                    ExecutionStatus::Completed => "Completed",
-                    ExecutionStatus::Failed => "Failed",
-                    ExecutionStatus::Blocked => "Blocked",
-                };
-                let task_str = s.active_task.as_deref().unwrap_or("-");
-                let step_str = format!("{}/{}", s.step, s.total_steps);
-                let base_str = s.base_branch.as_deref().unwrap_or("-");
-                let daemon_str = match &s.daemon {
-                    Some(d) if d.running => format!("Running ({})", d.pid),
-                    Some(d) => format!("Stopped ({})", d.pid),
-                    None => "-".to_string(),
-                };
-                text.push_str(&format!(
-                    "  {:<26} {:<12} {:<24} {:<6} {:<20} {:<16}\n",
-                    s.branch,
-                    status_str,
-                    if task_str.len() > 22 {
-                        &task_str[..22]
-                    } else {
-                        task_str
-                    },
-                    step_str,
-                    base_str,
-                    daemon_str
-                ));
-            }
-
-            if as_json {
-                let pretty = serde_json::to_string_pretty(&summaries_val)
-                    .map_err(|e| format!("Failed to serialize summaries: {}", e))?;
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "states": summaries_val,
-                    "branches": summaries_val,
-                    "content": [{ "type": "text", "text": pretty }]
-                }))
-            } else {
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "states": summaries_val,
-                    "branches": summaries_val,
-                    "output": text,
-                    "text": text,
-                    "content": [{ "type": "text", "text": text }]
-                }))
-            }
-        }
         unknown => Err(format!("Unknown tool: {}", unknown)),
     }
 }
 
-fn resolve_worktree_for_merge(
-    repo: &Path,
-    branch: &str,
-    expected_base: Option<&str>,
-) -> Result<IsolatedWorktree, String> {
-    let manager = WorktreeManager::new(repo).map_err(|e| e.to_string())?;
-    let list = manager.list().map_err(|e| e.to_string())?;
-
-    let primary_wt = list
-        .iter()
-        .find(|w| w.is_main)
-        .cloned()
-        .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
-
-    let wt = list
-        .into_iter()
-        .find(|w| w.branch.as_deref() == Some(branch))
-        .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
-
-    if wt.is_main {
-        return Err(format!("Cannot merge primary worktree branch '{}'", branch));
-    }
-
-    let base_branch = expected_base
-        .map(|s| s.to_string())
-        .or_else(|| primary_wt.branch.clone())
-        .unwrap_or_else(|| "main".to_string());
-
-    if primary_wt.branch.is_none() {
-        return Err(
-            "Cannot merge: primary repository worktree is in a detached HEAD state".to_string(),
-        );
-    }
-    if primary_wt.branch.as_deref() != Some(&base_branch) {
-        return Err(format!(
-            "Primary worktree is checked out to {:?}, expected target base branch '{}'",
-            primary_wt.branch, base_branch
-        ));
-    }
-
-    Ok(IsolatedWorktree {
-        branch: branch.to_string(),
-        path: wt.path,
-        base_branch,
-        repo_root: primary_wt.path,
-    })
-}
-
-fn resolve_worktree_for_remove(repo: &Path, branch: &str) -> Result<IsolatedWorktree, String> {
-    let manager = WorktreeManager::new(repo).map_err(|e| e.to_string())?;
-    let list = manager.list().map_err(|e| e.to_string())?;
-
-    let primary_wt = list
-        .iter()
-        .find(|w| w.is_main)
-        .cloned()
-        .ok_or_else(|| "Could not identify primary repository worktree".to_string())?;
-
-    let wt = list
-        .into_iter()
-        .find(|w| {
-            w.branch.as_deref() == Some(branch)
-                || w.branch.as_deref() == Some(&format!("wt/{}", branch))
-                || branch
-                    .strip_prefix("wt/")
-                    .map(|b| w.branch.as_deref() == Some(b))
-                    .unwrap_or(false)
-        })
-        .ok_or_else(|| format!("Worktree branch '{}' not found", branch))?;
-
-    if wt.is_main {
-        return Err(format!(
-            "Cannot remove primary worktree branch '{}'",
-            branch
-        ));
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        let is_inside = match (cwd.canonicalize(), wt.path.canonicalize()) {
-            (Ok(c), Ok(w)) => c.starts_with(&w),
-            _ => cwd.starts_with(&wt.path),
-        };
-        if is_inside {
-            return Err(format!(
-                "Cannot remove worktree '{}' while current working directory is inside it",
-                branch
-            ));
-        }
-    }
-
-    let actual_branch = wt.branch.unwrap_or_else(|| branch.to_string());
-    let base_branch = primary_wt
-        .branch
-        .clone()
-        .unwrap_or_else(|| "main".to_string());
-
-    Ok(IsolatedWorktree {
-        branch: actual_branch,
-        path: wt.path,
-        base_branch,
-        repo_root: primary_wt.path,
-    })
-}
-
-fn clean_orphaned_worktrees(repo_root: &Path, force: bool) -> Result<(usize, Vec<String>), String> {
-    let mut cleaned_count = 0;
-    let mut cleaned_branches = Vec::new();
-
-    // 1. Run git worktree prune to eliminate stale worktree references in git metadata
-    let _ = std::process::Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(repo_root)
-        .output();
-
-    // 2. Fetch active worktree list from WorktreeManager
-    let manager = WorktreeManager::new(repo_root).map_err(|e| e.to_string())?;
-    let active_worktrees = manager.list().unwrap_or_default();
-
-    let mut active_paths: Vec<PathBuf> = Vec::new();
-    let mut active_branches: Vec<String> = Vec::new();
-
-    for wt in &active_worktrees {
-        if let Ok(canon) = wt.path.canonicalize() {
-            active_paths.push(canon);
-        } else {
-            active_paths.push(wt.path.clone());
-        }
-        if let Some(ref b) = wt.branch {
-            active_branches.push(b.clone());
-        }
-    }
-
-    let del_flag = if force { "-D" } else { "-d" };
-
-    // 3. Inspect .wt/ directory in the repository for orphaned directories
-    let wt_dir = repo_root.join(".wt");
-    if wt_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&wt_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
-                    if !active_paths.contains(&canon) {
-                        // Orphaned worktree directory
-                        let dir_name = entry.file_name().to_string_lossy().to_string();
-                        // Remove directory from disk
-                        let _ = std::fs::remove_dir_all(&path);
-
-                        // Check if an orphaned branch corresponding to this dir exists
-                        let mut candidate_branches =
-                            vec![format!("wt/{}", dir_name), dir_name.clone()];
-                        if let Some(stripped) = dir_name.strip_prefix("wt-") {
-                            candidate_branches.push(format!("wt/{}", stripped));
-                            candidate_branches.push(stripped.to_string());
-                        }
-                        let mut branch_deleted = false;
-                        for cand in &candidate_branches {
-                            if !active_branches.contains(cand) {
-                                let check = std::process::Command::new("git")
-                                    .args(["rev-parse", "--verify", cand])
-                                    .current_dir(repo_root)
-                                    .output();
-                                if let Ok(out) = check {
-                                    if out.status.success() {
-                                        let del = std::process::Command::new("git")
-                                            .args(["branch", del_flag, cand])
-                                            .current_dir(repo_root)
-                                            .output();
-                                        if let Ok(del_out) = del {
-                                            if del_out.status.success()
-                                                && !cleaned_branches.contains(cand)
-                                            {
-                                                cleaned_branches.push(cand.clone());
-                                                branch_deleted = true;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if !branch_deleted && !cleaned_branches.contains(&dir_name) {
-                            cleaned_branches.push(dir_name);
-                        }
-                        cleaned_count += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    // 4. Inspect git branches starting with wt/ that have no active worktree
-    let branch_out = std::process::Command::new("git")
-        .args([
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads/wt/*",
-        ])
-        .current_dir(repo_root)
-        .output();
-
-    if let Ok(out) = branch_out {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for line in stdout.lines() {
-            let branch = line.trim();
-            if branch.is_empty() {
-                continue;
-            }
-            if !active_branches.iter().any(|ab| ab == branch) {
-                // Delete orphaned branch
-                let del_out = std::process::Command::new("git")
-                    .args(["branch", del_flag, branch])
-                    .current_dir(repo_root)
-                    .output();
-                if let Ok(del) = del_out {
-                    if del.status.success() {
-                        let branch_str = branch.to_string();
-                        if !cleaned_branches.contains(&branch_str) {
-                            cleaned_branches.push(branch_str);
-                            cleaned_count += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 5. Run git worktree prune one more time
-    let _ = std::process::Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(repo_root)
-        .output();
-
-    Ok((cleaned_count, cleaned_branches))
-}
-
-/// Synthesizes a targeted test runner command based on inferred test file paths.
+/// JSON-RPC request dispatcher.
 ///
-/// Discovers the project test language family (Python, Rust, JavaScript/TypeScript, Go)
-/// from the provided test files and formats a targeted runner invocation referencing
-/// only the impacted test files.
-///
-/// # Parameters
-/// - `repo_root`: Repository root path used to relativize test file paths.
-/// - `tests`: Slice of absolute or relative test file paths to execute.
+/// # Arguments
+/// * `req` - Parsed JSON-RPC request.
 ///
 /// # Returns
-/// An `Option<String>` containing the synthesized runner command, or `None` if
-/// `tests` is empty or no valid files can be referenced.
-fn synthesize_targeted_test_command(repo_root: &Path, tests: &[PathBuf]) -> Option<String> {
-    // Guard clause: Return early if no candidate test files exist
-    if tests.is_empty() {
-        return None;
-    }
-
-    // Relativize all candidate paths against repo_root for clean command line strings
-    let rel_paths: Vec<PathBuf> = tests
-        .iter()
-        .map(|p| p.strip_prefix(repo_root).unwrap_or(p).to_path_buf())
-        .collect();
-
-    // Inspect file extensions to identify test runner ecosystem
-    let has_py = rel_paths
-        .iter()
-        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("py"));
-    let has_rs = rel_paths
-        .iter()
-        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"));
-    let has_js = rel_paths.iter().any(|p| {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e == "ts" || e == "tsx" || e == "js" || e == "jsx")
-            .unwrap_or(false)
-    });
-    let has_go = rel_paths
-        .iter()
-        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("go"));
-
-    if has_py {
-        // Python ecosystem: construct pytest invocation targeting impacted test modules
-        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
-        Some(format!("pytest {}", paths.join(" ")))
-    } else if has_rs {
-        // Rust ecosystem: construct cargo test invocation targeting integration test binaries
-        let mut test_targets = Vec::new();
-        for p in &rel_paths {
-            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                test_targets.push(format!("--test {}", stem));
-            }
-        }
-        if !test_targets.is_empty() {
-            Some(format!("cargo test {}", test_targets.join(" ")))
-        } else {
-            Some("cargo test".to_string())
-        }
-    } else if has_js {
-        // JavaScript/TypeScript ecosystem: pass test paths to npm test runner
-        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
-        Some(format!("npm test -- {}", paths.join(" ")))
-    } else if has_go {
-        // Go ecosystem: execute go test on parent package directories of impacted files
-        let mut dirs: Vec<String> = rel_paths
-            .iter()
-            .filter_map(|p| {
-                p.parent().map(|d| {
-                    let s = d.display().to_string();
-                    if s.is_empty() {
-                        ".".to_string()
-                    } else {
-                        format!("./{}", s)
-                    }
-                })
-            })
-            .collect();
-        dirs.sort();
-        dirs.dedup();
-        Some(format!("go test {}", dirs.join(" ")))
-    } else {
-        // Generic fallback: invoke test command with relative file paths
-        let paths: Vec<String> = rel_paths.iter().map(|p| p.display().to_string()).collect();
-        Some(format!("test {}", paths.join(" ")))
-    }
-}
-
-/// Returns list of paths that git rollback/clean operations must never delete.
-///
-/// Ensures both the `.agent-state` directory and the specific state file name
-/// are preserved during git clean so failure records and task progress survive.
-///
-/// # Parameters
-/// - `state_path`: The absolute or canonical path to the active state file.
-///
-/// # Returns
-/// A `Vec<String>` containing paths/patterns to pass into git's exclude flags.
-fn preserved(state_path: &Path) -> Vec<String> {
-    let mut keep = vec![".agent-state".to_string()];
-    if let Some(name) = state_path.file_name().and_then(|n| n.to_str()) {
-        if !keep.iter().any(|p| p == name) {
-            keep.push(name.to_string());
-        }
-    }
-    keep
-}
-
-/// Resolves the repository root that owns the specified state file.
-///
-/// Traverses up from `state_path` looking for a `.git` directory, and falls back
-/// to `fallback` if `resolve_project_root` does not find a repository marker.
-///
-/// # Parameters
-/// - `state_path`: Path to the state file being executed against.
-/// - `fallback`: Fallback repository root path if discovery fails.
-///
-/// # Returns
-/// The resolved repository root `PathBuf`.
-fn repo_root_for(state_path: &Path, fallback: &Path) -> PathBuf {
-    let pr = resolve_project_root(state_path);
-    if pr.join(".git").exists() {
-        pr
-    } else if fallback.join(".git").exists() {
-        fallback.to_path_buf()
-    } else {
-        pr
-    }
-}
-
+/// Corresponding JSON-RPC response.
 pub fn handle_json_rpc(req: JsonRpcRequest) -> JsonRpcResponse {
     match req.method.as_str() {
         "initialize" => JsonRpcResponse {
@@ -3077,7 +1172,7 @@ pub fn handle_json_rpc(req: JsonRpcRequest) -> JsonRpcResponse {
             error: None,
         },
         "tools/list" => {
-            let tools = list_all_mcp_tools();
+            let tools = handle_list_tools();
             JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id: req.id,
@@ -3159,6 +1254,10 @@ pub fn handle_json_rpc(req: JsonRpcRequest) -> JsonRpcResponse {
     }
 }
 
+/// Runs the standard I/O line-delimited JSON-RPC loop for MCP servers.
+///
+/// # Errors
+/// Returns `McpError` on fatal standard I/O failures.
 pub fn run_stdio_mcp_server() -> Result<(), McpError> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
