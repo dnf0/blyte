@@ -5,8 +5,10 @@ use crate::state_machine::{
 };
 use crate::verifier::{run_verification_cmd, GateError};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,6 +16,38 @@ use thiserror::Error;
 
 /// Closure callback hook for pluggable step advancement across workspace and worktree lifecycles.
 pub type StepAdvancer = Box<dyn FnMut(&Path) -> Result<(), String> + Send + 'static>;
+
+/// Hard ceiling on attempts per task, as a multiple of `max_retries`.
+///
+/// `max_retries` counts *consecutive attempts that changed nothing*, so an agent that
+/// keeps editing keeps earning attempts. This bounds that generosity so a worker that
+/// churns the tree forever without ever passing its gate still terminates.
+const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
+
+/// Fingerprint of the working tree: HEAD, the set of pending changes, and their content.
+///
+/// Used to distinguish "the worker changed something" from "the worker spun without
+/// effect". Content is included because an agent re-editing one file produces identical
+/// `git status` output on every attempt, which would otherwise read as no progress.
+fn workspace_fingerprint(dir: &Path) -> String {
+    let capture = |args: &[&str]| -> String {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    };
+
+    let head = capture(&["rev-parse", "HEAD"]);
+    let status = capture(&["status", "--porcelain"]);
+    let mut hasher = DefaultHasher::new();
+    capture(&["diff", "HEAD"]).hash(&mut hasher);
+
+    format!("{}|{}|{:x}", head.trim(), status.trim(), hasher.finish())
+}
 
 #[derive(Error, Debug)]
 pub enum DaemonError {
@@ -253,7 +287,12 @@ pub fn resolve_driver_command(driver: &str) -> String {
 
 pub struct DaemonRunner {
     config: DaemonConfig,
+    /// Consecutive attempts that changed nothing. Reset whenever the worker makes progress.
     retry_counts: HashMap<String, usize>,
+    /// Every attempt, progress or not, bounded by `PROGRESS_ATTEMPT_MULTIPLIER`.
+    total_attempts: HashMap<String, usize>,
+    /// Working-tree fingerprint at the end of the previous attempt.
+    last_fingerprint: HashMap<String, String>,
     step_advancer: Option<StepAdvancer>,
     last_failure_output: HashMap<String, String>,
 }
@@ -270,6 +309,8 @@ impl DaemonRunner {
         Ok(Self {
             config,
             retry_counts: HashMap::new(),
+            total_attempts: HashMap::new(),
+            last_fingerprint: HashMap::new(),
             step_advancer: None,
             last_failure_output: HashMap::new(),
         })
@@ -371,6 +412,12 @@ impl DaemonRunner {
         fs::create_dir_all(&prompts_dir)?;
         let prompt_file = prompts_dir.join(format!("{}.md", slug));
         fs::write(&prompt_file, &prompt)?;
+
+        // Baseline the working tree before the worker touches it, so the first attempt's
+        // changes count as progress rather than being charged as a stall.
+        self.last_fingerprint
+            .entry(active_task.id.clone())
+            .or_insert_with(|| workspace_fingerprint(&working_dir));
 
         // Execute headless driver worker if provided
         if let Some(ref driver) = self.config.driver_cmd {
@@ -484,9 +531,41 @@ impl DaemonRunner {
                 })
             }
         } else {
-            // Verification gate failed: record failure diagnostics and update retry budget
+            // Verification gate failed: record failure diagnostics and update retry budget.
+            //
+            // A fixed attempt cap gives up on an agent that is visibly converging while
+            // wall-clock budget remains. `max_retries` therefore counts only consecutive
+            // attempts that changed nothing: demonstrable progress buys a fresh budget,
+            // the same way the surrounding harness grants lease extensions on new commits.
+            // `PROGRESS_ATTEMPT_MULTIPLIER` bounds an agent that churns without converging.
+            let fingerprint = workspace_fingerprint(&working_dir);
+            let made_progress = self
+                .last_fingerprint
+                .get(&active_task.id)
+                .is_some_and(|prev| prev != &fingerprint);
+            self.last_fingerprint
+                .insert(active_task.id.clone(), fingerprint);
+
+            let attempts = self
+                .total_attempts
+                .entry(active_task.id.clone())
+                .or_insert(0);
+            *attempts += 1;
+            let attempts_spent = *attempts;
+
             let retries = self.retry_counts.entry(active_task.id.clone()).or_insert(0);
-            *retries += 1;
+            if made_progress {
+                *retries = 0;
+                state.notes.push(LedgerEntry::new(
+                    "superstate-daemon",
+                    format!(
+                        "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
+                        active_task.id, attempts_spent
+                    ),
+                ));
+            } else {
+                *retries += 1;
+            }
 
             let fail_reason = gate_res
                 .failure_reason
@@ -510,12 +589,22 @@ impl DaemonRunner {
                 ),
             ));
 
-            if *retries >= self.config.max_retries {
+            let stalled = *retries >= self.config.max_retries;
+            let exhausted = attempts_spent >= self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+            if stalled || exhausted {
                 state.status = ExecutionStatus::Blocked;
                 save_state_atomic(&self.config.state_path, &state)?;
+                let reason = if stalled {
+                    format!(
+                        "Exceeded maximum retries ({}) without changing the working tree",
+                        self.config.max_retries
+                    )
+                } else {
+                    format!("Exceeded maximum attempts ({})", attempts_spent)
+                };
                 Ok(DaemonStepOutcome::Blocked {
                     task_id: active_task.id,
-                    reason: format!("Exceeded maximum retries ({})", self.config.max_retries),
+                    reason,
                 })
             } else {
                 save_state_atomic(&self.config.state_path, &state)?;
