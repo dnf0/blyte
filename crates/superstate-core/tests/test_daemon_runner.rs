@@ -486,3 +486,89 @@ fn test_daemon_auto_commit_on_pass_in_place() {
         commit_msg
     );
 }
+
+/// A worker that keeps changing the tree must keep earning attempts.
+///
+/// `max_retries` counts consecutive attempts that change nothing. A fixed total cap
+/// abandoned agents that were visibly converging while wall-clock budget remained --
+/// the daemon gave up on a Cython build after 3 attempts having used 46% of its budget,
+/// on a task the turn-based arm solved.
+#[test]
+fn test_progress_renews_the_retry_budget() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Never satisfied".to_string(),
+        verify_cmd: "false".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    // Each attempt writes a distinct file, so every attempt registers as progress.
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("date +%s%N > progress-$$.txt".to_string()),
+        max_retries: 2,
+        timeout_secs: 10,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+
+    // With a fixed cap this would block on attempt 2. Progress must carry it past that.
+    for attempt in 1..=4 {
+        let outcome = runner.run_step().unwrap();
+        assert!(
+            matches!(outcome, DaemonStepOutcome::Failed { .. }),
+            "attempt {attempt} should keep going while the worker makes progress, got {outcome:?}"
+        );
+    }
+}
+
+/// A worker that changes nothing must still be cut off at `max_retries`.
+#[test]
+fn test_stalled_worker_still_blocks() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Never satisfied".to_string(),
+        verify_cmd: "false".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    // A driver that touches nothing: every attempt is a stall.
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("true".to_string()),
+        max_retries: 2,
+        timeout_secs: 10,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+
+    assert!(matches!(
+        runner.run_step().unwrap(),
+        DaemonStepOutcome::Failed { .. }
+    ));
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Blocked { .. }
+        ),
+        "a worker that changes nothing must still be cut off"
+    );
+}
