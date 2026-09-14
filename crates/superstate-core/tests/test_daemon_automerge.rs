@@ -231,3 +231,64 @@ fn test_daemon_completion_in_place_mode() {
     assert_eq!(completion_json["status"], "completed");
     assert_eq!(completion_json["worktree_merged"], false);
 }
+
+#[test]
+fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let repo_root = temp_dir.path();
+    setup_temp_git_repo(repo_root);
+
+    let state_dir = repo_root.join(".agent-state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let state_path = state_dir.join("state.json");
+
+    let state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(TaskSpec {
+            id: "task-1".to_string(),
+            title: "Autonomous task".to_string(),
+            verification_cmd: Some("test -f README.md".to_string()),
+            ..Default::default()
+        }),
+        pending_tasks: Vec::new(),
+        active_worktree: None,
+        active_branch: None,
+        base_branch: Some("main".to_string()),
+        no_worktree: true,
+        ..Default::default()
+    };
+
+    save_state_atomic(&state_path, &state).expect("save initial state");
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: None,
+        max_retries: 2,
+        timeout_secs: 10,
+    };
+
+    let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+    let report = runner
+        .run_to_completion()
+        .expect("run_to_completion must succeed");
+
+    assert_eq!(report.status, ExecutionStatus::Completed);
+    assert_eq!(report.milestones_completed, 1);
+    assert!(report.completion_file.exists());
+
+    // Calling run_to_completion again when already completed reuses existing artifact
+    let mut runner2 = DaemonRunner::new(DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: None,
+        max_retries: 2,
+        timeout_secs: 10,
+    })
+    .expect("create second runner");
+
+    let report2 = runner2
+        .run_to_completion()
+        .expect("second run_to_completion should return existing report");
+    assert_eq!(report2.status, ExecutionStatus::Completed);
+    assert_eq!(report2.completed_at, report.completed_at);
+}

@@ -558,6 +558,34 @@ impl DaemonRunner {
         }
 
         let final_state = load_state(&self.config.state_path)?;
+        if final_state.status != ExecutionStatus::Completed {
+            return Err(DaemonError::Driver(format!(
+                "Cannot finalize execution: state status is {:?}, expected Completed",
+                final_state.status
+            )));
+        }
+
+        // Avoid redundant duplicate finalization if run_step already finalized and produced completion artifact
+        let (slug, _) = resolve_daemon_slug_and_state_dir(&self.config.state_path);
+        let parent = self
+            .config
+            .state_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let primary_completion_file = if slug == "default" {
+            parent.join("completion.json")
+        } else {
+            parent.join(format!("completion-{}.json", slug))
+        };
+
+        if primary_completion_file.exists() {
+            if let Ok(content) = fs::read_to_string(&primary_completion_file) {
+                if let Ok(report) = serde_json::from_str::<CompletionReport>(&content) {
+                    return Ok(report);
+                }
+            }
+        }
+
         finalize_completed_execution(&self.config.state_path, &final_state)
     }
 }
