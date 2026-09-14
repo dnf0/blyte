@@ -24,29 +24,72 @@ pub type StepAdvancer = Box<dyn FnMut(&Path) -> Result<(), String> + Send + 'sta
 /// churns the tree forever without ever passing its gate still terminates.
 const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
 
-/// Fingerprint of the working tree: HEAD, the set of pending changes, and their content.
+/// Directories never counted as progress.
 ///
-/// Used to distinguish "the worker changed something" from "the worker spun without
-/// effect". Content is included because an agent re-editing one file produces identical
-/// `git status` output on every attempt, which would otherwise read as no progress.
+/// `.agent-state` is written by the daemon itself on every attempt (prompts, logs, driver
+/// turns), so including it would make every attempt look like progress and the retry
+/// budget would never expire.
+const FINGERPRINT_SKIP_DIRS: [&str; 2] = [".git", ".agent-state"];
+
+/// Upper bound on files walked, so a pathological tree cannot stall the daemon.
+const FINGERPRINT_MAX_FILES: usize = 20_000;
+
+/// Fingerprint of the working tree, used to distinguish "the worker changed something"
+/// from "the worker spun without effect".
+///
+/// This walks the filesystem rather than asking git, because git cannot see the changes
+/// that matter here. It collapses an untracked directory to a single `?? dir/` line no
+/// matter what happens inside it, and `git diff HEAD` covers neither untracked files nor
+/// a repository without a HEAD. A worker unpacking and editing a freshly cloned source
+/// tree therefore produced a byte-identical git fingerprint on every attempt and was
+/// blocked as stalled while it was in fact progressing.
 fn workspace_fingerprint(dir: &Path) -> String {
-    let capture = |args: &[&str]| -> String {
-        Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default()
-    };
-
-    let head = capture(&["rev-parse", "HEAD"]);
-    let status = capture(&["status", "--porcelain"]);
     let mut hasher = DefaultHasher::new();
-    capture(&["diff", "HEAD"]).hash(&mut hasher);
+    let mut entries: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
 
-    format!("{}|{}|{:x}", head.trim(), status.trim(), hasher.finish())
+    while let Some(current) = stack.pop() {
+        let Ok(read_dir) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(meta) = entry.metadata() else { continue };
+
+            if meta.is_dir() {
+                if !FINGERPRINT_SKIP_DIRS.contains(&name.as_ref()) {
+                    stack.push(path);
+                }
+            } else if entries.len() < FINGERPRINT_MAX_FILES {
+                let rel = path.strip_prefix(dir).unwrap_or(&path).to_path_buf();
+                entries.push((rel, meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+
+    // Directory iteration order is not stable across calls, so sort before hashing.
+    entries.sort();
+    for (path, size, modified) in &entries {
+        path.hash(&mut hasher);
+        size.hash(&mut hasher);
+        if let Some(mtime) = modified {
+            mtime.hash(&mut hasher);
+        }
+    }
+
+    // Commits are progress even when they leave the tree byte-identical.
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    format!("{}|{}|{:x}", head, entries.len(), hasher.finish())
 }
 
 #[derive(Error, Debug)]
@@ -388,13 +431,21 @@ impl DaemonRunner {
 
         let verify_cmd = active_task.verification_cmd.as_deref().unwrap_or("true");
 
-        // High-fidelity retry feedback: inject previous attempt diagnostics if retrying
-        let retry_count = self.retry_counts.get(&active_task.id).copied().unwrap_or(0);
-        if retry_count > 0 {
+        // High-fidelity retry feedback: inject previous attempt diagnostics if retrying.
+        //
+        // Keyed on there being a previous failure, NOT on the stall counter: progress
+        // resets that counter to zero, and gating on it would suppress the diagnostic in
+        // exactly the case where the worker is converging and most needs the error back.
+        let attempts_so_far = self
+            .total_attempts
+            .get(&active_task.id)
+            .copied()
+            .unwrap_or(0);
+        {
             if let Some(prev_err) = self.last_failure_output.get(&active_task.id) {
                 let retry_section = format_retry_failure_section(
                     verify_cmd,
-                    retry_count + 1,
+                    attempts_so_far + 1,
                     self.config.max_retries,
                     prev_err,
                 );
