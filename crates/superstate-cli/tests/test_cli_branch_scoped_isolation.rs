@@ -306,3 +306,68 @@ fn test_cli_state_list() {
         assert!(item["active_task"].is_string() || item["active_task"].is_object());
     }
 }
+
+#[test]
+fn test_cli_fallback_to_root_state_on_feature_branch_when_branch_state_missing() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Initialize state on main
+    let init_out = Command::new(bin())
+        .args([
+            "state",
+            "init",
+            "--goal",
+            "Initial trunk task",
+            "--verify-cmd",
+            "true",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run superstate state init on main");
+    assert!(init_out.status.success());
+
+    // Verify .agent-state/state.json exists
+    let root_state = dir.path().join(".agent-state").join("state.json");
+    assert!(root_state.exists(), "Root state.json must exist");
+
+    // Checkout new feature branch without initializing a new branch-scoped state
+    let status = Command::new("git")
+        .args(["checkout", "-b", "feat/agent-branch"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Branch state does NOT exist
+    let branch_state = dir
+        .path()
+        .join(".agent-state")
+        .join("branches")
+        .join("feat-agent-branch.json");
+    assert!(!branch_state.exists(), "Branch state should not exist yet");
+
+    // Running `state prompt` from the feature branch must succeed and resolve root state.json!
+    let prompt_out = Command::new(bin())
+        .args(["state", "prompt", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run state prompt on feature branch");
+    assert!(
+        prompt_out.status.success(),
+        "state prompt should succeed via fallback to root state.json: {}",
+        String::from_utf8_lossy(&prompt_out.stderr)
+    );
+
+    // Running `state next` with verification must also succeed via fallback to root state.json!
+    let next_out = Command::new(bin())
+        .args(["state", "next", "--verify-cmd", "true"])
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run state next on feature branch");
+    assert!(
+        next_out.status.success(),
+        "state next should succeed via fallback to root state.json: {}",
+        String::from_utf8_lossy(&next_out.stderr)
+    );
+}

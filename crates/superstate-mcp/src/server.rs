@@ -348,7 +348,15 @@ pub fn resolve_mcp_state_path(repo_root: &Path, explicit_state: Option<&str>) ->
                         None
                     })
                     .unwrap_or_else(|| repo_root.to_path_buf());
-                return branch_scoped_state_path(&root, &branch);
+                let candidate = branch_scoped_state_path(&root, &branch);
+                if candidate.exists() {
+                    return candidate;
+                }
+                let default_state = repo_root.join(STATE_DIR).join("state.json");
+                if default_state.exists() {
+                    return default_state;
+                }
+                return candidate;
             }
         }
     }

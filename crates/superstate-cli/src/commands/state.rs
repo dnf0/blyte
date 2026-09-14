@@ -116,7 +116,15 @@ pub fn resolve_effective_state_path(state_arg: &Path, cwd: &Path) -> PathBuf {
                         None
                     })
                     .unwrap_or_else(|| cwd.to_path_buf());
-                return branch_scoped_state_path(&repo_root, &branch);
+                let candidate = branch_scoped_state_path(&repo_root, &branch);
+                if candidate.exists() {
+                    return candidate;
+                }
+                let default_state = repo_root.join(STATE_DIR).join("state.json");
+                if default_state.exists() {
+                    return default_state;
+                }
+                return candidate;
             }
         }
     }
