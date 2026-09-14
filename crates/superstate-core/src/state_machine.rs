@@ -205,22 +205,26 @@ pub fn init_state_milestones(
 
 /// Advances execution state to the next task, completing the current active task.
 ///
-/// Resets active worktree and branch tracking fields to None so that subsequent tasks
-/// start with clean worktree state unless explicitly provisioned.
+/// When intermediate tasks advance, active worktree and branch fields are reset so
+/// that subsequent tasks start clean unless explicitly provisioned.
+/// When the entire milestone graph reaches completion, worktree references are preserved
+/// so that the completion lifecycle can cleanly auto-merge and remove them.
 pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
     if let Some(completed) = state.active_task.take() {
         state.completed_tasks.push(completed);
     }
 
-    // Reset active worktree and branch tracking for the completed task
-    state.active_worktree = None;
-    state.active_branch = None;
-
     if !state.pending_tasks.is_empty() {
+        // Reset active worktree and branch tracking for intermediate tasks to ensure
+        // subsequent sequential milestones provision their own clean workspaces
+        state.active_worktree = None;
+        state.active_branch = None;
         state.active_task = Some(state.pending_tasks.remove(0));
         state.step += 1;
         state.status = ExecutionStatus::InProgress;
     } else {
+        // Milestone DAG completed: preserve active_worktree and active_branch intact
+        // so that the daemon completion lifecycle can execute auto-merge and workspace cleanup
         state.active_task = None;
         state.step += 1;
         state.status = ExecutionStatus::Completed;

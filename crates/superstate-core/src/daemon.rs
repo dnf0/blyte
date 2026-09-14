@@ -1,4 +1,4 @@
-use crate::models::{ExecutionStatus, LedgerEntry};
+use crate::models::{ExecutionState, ExecutionStatus, LedgerEntry};
 use crate::prompt::{format_retry_failure_section, render_turnkey_prompt, resolve_project_root};
 use crate::state_machine::{
     advance_step, load_state, sanitize_branch_slug, save_state_atomic, StateError, STATE_DIR,
@@ -60,11 +60,16 @@ pub enum DaemonStepOutcome {
     },
 }
 
+/// Structured completion artifact persisted upon task graph completion.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompletionReport {
     pub status: ExecutionStatus,
-    pub milestones_completed: usize,
+    pub slug: String,
     pub base_branch: Option<String>,
+    pub milestones_completed: usize,
+    pub completed_at: String,
+    pub worktree_merged: bool,
+    #[serde(default)]
     pub completion_file: PathBuf,
 }
 
@@ -458,6 +463,9 @@ impl DaemonRunner {
                 advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
                 let updated_state = load_state(&self.config.state_path)?;
                 let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
+                if updated_state.status == ExecutionStatus::Completed {
+                    finalize_completed_execution(&self.config.state_path, &updated_state)?;
+                }
                 Ok(DaemonStepOutcome::Advanced {
                     completed_task_id: active_task.id,
                     next_task_id,
@@ -467,6 +475,9 @@ impl DaemonRunner {
                 save_state_atomic(&self.config.state_path, &state)?;
 
                 let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                if state.status == ExecutionStatus::Completed {
+                    finalize_completed_execution(&self.config.state_path, &state)?;
+                }
                 Ok(DaemonStepOutcome::Advanced {
                     completed_task_id: active_task.id,
                     next_task_id,
@@ -517,6 +528,7 @@ impl DaemonRunner {
         }
     }
 
+    /// Runs daemon milestone execution loop until all tasks reach terminal completion or failure.
     pub fn run_to_completion(&mut self) -> Result<CompletionReport, DaemonError> {
         loop {
             let state = load_state(&self.config.state_path)?;
@@ -546,33 +558,316 @@ impl DaemonRunner {
         }
 
         let final_state = load_state(&self.config.state_path)?;
+        if final_state.status != ExecutionStatus::Completed {
+            return Err(DaemonError::Driver(format!(
+                "Cannot finalize execution: state status is {:?}, expected Completed",
+                final_state.status
+            )));
+        }
 
-        // Resolve slug to prevent cross-daemon collision on completion artifacts.
-        // Default state machines write to `completion.json`, while branch-scoped daemons
-        // exclusively write to `completion-<slug>.json` to eliminate concurrent write races.
+        // Avoid redundant duplicate finalization if run_step already finalized and produced completion artifact
         let (slug, _) = resolve_daemon_slug_and_state_dir(&self.config.state_path);
         let parent = self
             .config
             .state_path
             .parent()
             .unwrap_or_else(|| Path::new("."));
-
-        let completion_file = if slug == "default" {
+        let primary_completion_file = if slug == "default" {
             parent.join("completion.json")
         } else {
             parent.join(format!("completion-{}.json", slug))
         };
 
-        let report = CompletionReport {
-            status: final_state.status.clone(),
-            milestones_completed: final_state.completed_tasks.len(),
-            base_branch: final_state.base_branch.clone(),
-            completion_file: completion_file.clone(),
-        };
+        if primary_completion_file.exists() {
+            if let Ok(content) = fs::read_to_string(&primary_completion_file) {
+                if let Ok(report) = serde_json::from_str::<CompletionReport>(&content) {
+                    return Ok(report);
+                }
+            }
+        }
 
-        let serialized = serde_json::to_string_pretty(&report)?;
-        fs::write(&completion_file, &serialized)?;
-
-        Ok(report)
+        finalize_completed_execution(&self.config.state_path, &final_state)
     }
+}
+
+/// Finalizes execution when all milestones in the task graph reach completion.
+///
+/// If worktree isolation was active (`!state.no_worktree` and worktree was provisioned),
+/// this automatically:
+/// 1. Auto-commits any uncommitted changes inside the worktree checkout.
+/// 2. Merges the worktree branch back into `base_branch` in the repository root.
+/// 3. Cleans up the temporary worktree directory and branch.
+/// 4. Updates state so `active_worktree = None` and `active_branch = None`.
+/// 5. Atomically writes completion artifacts to `.agent-state/completion.json`
+///    and `.agent-state/completions/<slug>.json`.
+///
+/// # Arguments
+/// * `state_path` - Path to the state machine JSON file.
+/// * `state` - The current execution state.
+///
+/// # Returns
+/// A populated `CompletionReport` or `DaemonError`.
+pub fn finalize_completed_execution(
+    state_path: &Path,
+    state: &ExecutionState,
+) -> Result<CompletionReport, DaemonError> {
+    // WHY: Auto-merge and completion artifact should only be finalized upon reaching terminal Completed status.
+    // WHAT: Return an error if caller invokes finalization on uncompleted state.
+    // HOW: Guard check status field against ExecutionStatus::Completed.
+    if state.status != ExecutionStatus::Completed {
+        return Err(DaemonError::Driver(format!(
+            "Cannot finalize execution: state status is {:?}, expected Completed",
+            state.status
+        )));
+    }
+
+    let (slug, base_dir) = resolve_daemon_slug_and_state_dir(state_path);
+    let state_dir = if base_dir.file_name().and_then(|s| s.to_str()) == Some(STATE_DIR) {
+        base_dir
+    } else {
+        base_dir.join(STATE_DIR)
+    };
+    let repo_root = resolve_project_root(state_path);
+
+    let mut worktree_merged = false;
+
+    // WHY: In worktree isolation mode, the verified branch must be merged into base_branch before completion.
+    // WHAT: Auto-commit uncommitted changes in worktree, checkout base_branch in repo_root, merge, and clean up.
+    // HOW: Execute git commands via std::process::Command and clean up filesystem directories.
+    if !state.no_worktree {
+        if let Some(ref wt_path) = state.active_worktree {
+            if wt_path.exists() {
+                // Check if worktree checkout contains uncommitted changes
+                let status_res = Command::new("git")
+                    .args(["status", "--porcelain"])
+                    .current_dir(wt_path)
+                    .output();
+                if let Ok(status_output) = status_res {
+                    if !status_output.stdout.is_empty() {
+                        let _ = Command::new("git")
+                            .args(["add", "-A"])
+                            .current_dir(wt_path)
+                            .output();
+                        let commit_msg =
+                            format!("chore({}): auto-commit before daemon completion", slug);
+                        let _ = Command::new("git")
+                            .args(["commit", "-m", &commit_msg])
+                            .current_dir(wt_path)
+                            .output();
+                    }
+                }
+
+                // Resolve branch name to merge
+                let branch = state.active_branch.clone().unwrap_or_else(|| {
+                    Command::new("git")
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .current_dir(wt_path)
+                        .output()
+                        .ok()
+                        .and_then(|o| {
+                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if s.is_empty() || s == "HEAD" {
+                                None
+                            } else {
+                                Some(s)
+                            }
+                        })
+                        .unwrap_or_else(|| format!("wt/{}", slug))
+                });
+
+                let base_branch = state
+                    .base_branch
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string());
+
+                if repo_root.join(".git").exists() {
+                    // Ensure repository root is on base_branch before merging
+                    let head_out = Command::new("git")
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .current_dir(&repo_root)
+                        .output();
+                    if let Ok(out) = head_out {
+                        let curr = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if curr != base_branch {
+                            let co = Command::new("git")
+                                .args(["checkout", &base_branch])
+                                .current_dir(&repo_root)
+                                .output();
+                            if let Ok(co_out) = co {
+                                if !co_out.status.success() {
+                                    return Err(DaemonError::Driver(format!(
+                                        "Failed to checkout base branch '{}': {}",
+                                        base_branch,
+                                        String::from_utf8_lossy(&co_out.stderr)
+                                    )));
+                                }
+                            }
+                        }
+                    }
+
+                    // Execute merge into base_branch
+                    let merge_msg =
+                        format!("chore(superstate): merge {} into {}", branch, base_branch);
+                    let merge_res = Command::new("git")
+                        .args(["merge", "--no-ff", "-m", &merge_msg, &branch])
+                        .current_dir(&repo_root)
+                        .output();
+
+                    if let Ok(merge_out) = merge_res {
+                        if !merge_out.status.success() {
+                            let stderr = String::from_utf8_lossy(&merge_out.stderr).to_string();
+
+                            // Handle conflicting untracked files in repo root
+                            let status_output = Command::new("git")
+                                .args(["status", "--porcelain"])
+                                .current_dir(&repo_root)
+                                .output()
+                                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                                .unwrap_or_default();
+                            let untracked_files: Vec<String> = status_output
+                                .lines()
+                                .filter(|l| l.starts_with("?? "))
+                                .map(|l| l[3..].trim().to_string())
+                                .collect();
+
+                            let diff_cmd = format!("{}...{}", base_branch, branch);
+                            let branch_files_output = Command::new("git")
+                                .args(["diff", "--name-only", &diff_cmd])
+                                .current_dir(&repo_root)
+                                .output()
+                                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                                .unwrap_or_default();
+                            let branch_files: Vec<&str> =
+                                branch_files_output.lines().map(|l| l.trim()).collect();
+
+                            let mut cleaned_any = false;
+                            for u in &untracked_files {
+                                if branch_files.contains(&u.as_str()) {
+                                    let target = repo_root.join(u);
+                                    if target.is_file() {
+                                        let _ = fs::remove_file(&target);
+                                        cleaned_any = true;
+                                    } else if target.is_dir() {
+                                        let _ = fs::remove_dir_all(&target);
+                                        cleaned_any = true;
+                                    }
+                                }
+                            }
+
+                            if cleaned_any {
+                                let retry = Command::new("git")
+                                    .args(["merge", "--no-ff", "-m", &merge_msg, &branch])
+                                    .current_dir(&repo_root)
+                                    .output();
+                                if let Ok(retry_out) = retry {
+                                    if !retry_out.status.success() {
+                                        let _ = Command::new("git")
+                                            .args(["merge", "--abort"])
+                                            .current_dir(&repo_root)
+                                            .output();
+                                        return Err(DaemonError::Driver(format!(
+                                            "Failed to merge worktree branch '{}': {}",
+                                            branch,
+                                            String::from_utf8_lossy(&retry_out.stderr)
+                                        )));
+                                    }
+                                }
+                            } else {
+                                let _ = Command::new("git")
+                                    .args(["merge", "--abort"])
+                                    .current_dir(&repo_root)
+                                    .output();
+                                return Err(DaemonError::Driver(format!(
+                                    "Failed to merge worktree branch '{}': {}",
+                                    branch, stderr
+                                )));
+                            }
+                        }
+                    }
+
+                    // Remove temporary worktree checkout via git
+                    let _ = Command::new("git")
+                        .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
+                        .current_dir(&repo_root)
+                        .output();
+
+                    // Remove directory if residual files remain
+                    if wt_path.exists() {
+                        let _ = fs::remove_dir_all(wt_path);
+                    }
+
+                    let _ = Command::new("git")
+                        .args(["worktree", "prune"])
+                        .current_dir(&repo_root)
+                        .output();
+
+                    // Delete feature branch if not identical to base_branch
+                    if branch != base_branch {
+                        let _ = Command::new("git")
+                            .args(["branch", "-D", &branch])
+                            .current_dir(&repo_root)
+                            .output();
+                    }
+
+                    // Update state file on disk to reflect that worktree is cleaned up
+                    if let Ok(mut current_state) = load_state(state_path) {
+                        current_state.active_worktree = None;
+                        current_state.active_branch = None;
+                        let _ = save_state_atomic(state_path, &current_state);
+                    }
+
+                    worktree_merged = true;
+                }
+            } else {
+                // Checkout directory already cleaned up
+                worktree_merged = true;
+            }
+        } else {
+            // Worktree was already merged and cleaned up (e.g. by step advancer)
+            worktree_merged = true;
+        }
+    }
+
+    // WHY: ADR 0002 mandates dual completion artifacts: single default and scoped per-job.
+    // WHAT: Persist primary completion artifact (completion.json for default, completion-<slug>.json for branch)
+    // and scoped completion in .agent-state/completions/<slug>.json.
+    // HOW: Serialize CompletionReport to pretty JSON and write via temporary files atomically.
+    let parent = state_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let primary_completion_file = if slug == "default" {
+        parent.join("completion.json")
+    } else {
+        parent.join(format!("completion-{}.json", slug))
+    };
+
+    let completions_dir = state_dir.join("completions");
+    let _ = fs::create_dir_all(&completions_dir);
+    let slug_completion_file = completions_dir.join(format!("{}.json", slug));
+
+    let report = CompletionReport {
+        status: state.status.clone(),
+        slug: slug.clone(),
+        base_branch: state
+            .base_branch
+            .clone()
+            .or_else(|| Some("main".to_string())),
+        milestones_completed: state.completed_tasks.len(),
+        completed_at: chrono::Utc::now().to_rfc3339(),
+        worktree_merged,
+        completion_file: primary_completion_file.clone(),
+    };
+
+    let serialized = serde_json::to_string_pretty(&report)?;
+
+    // Atomically persist primary completion file
+    let tmp_primary = primary_completion_file.with_extension("tmp");
+    fs::write(&tmp_primary, &serialized)?;
+    fs::rename(&tmp_primary, &primary_completion_file)?;
+
+    // Atomically persist scoped completion file
+    let tmp_slug = slug_completion_file.with_extension("tmp");
+    fs::write(&tmp_slug, &serialized)?;
+    fs::rename(&tmp_slug, &slug_completion_file)?;
+
+    Ok(report)
 }

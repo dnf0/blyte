@@ -12,7 +12,8 @@ pub mod state_machine;
 pub mod verifier;
 
 pub use daemon::{
-    CompletionReport, DaemonConfig, DaemonError, DaemonRunner, DaemonStepOutcome, StepAdvancer,
+    finalize_completed_execution, CompletionReport, DaemonConfig, DaemonError, DaemonRunner,
+    DaemonStepOutcome, StepAdvancer,
 };
 pub use handoff::{
     generate_handoff_markdown, generate_resumption_command, write_handoff_package, HandoffSpec,

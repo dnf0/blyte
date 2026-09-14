@@ -8,7 +8,8 @@
 - 🌳 **Polyglot Code Intelligence (`superstate-syntax`):** Native Tree-sitter AST symbol extractor across Rust, Python, TypeScript, and Go.
 - 🛡️ **Daemon-less Adversarial Review (`superstate-review`):** Zero-noise static analysis and LLM review integration without background daemons.
 - 📜 **Guidance Generator (`superstate-rules`):** Minijinja template renderer for `AGENTS.md`, `CLAUDE.md`, and Cursor rules.
-- 🔌 **Native Stdio MCP Server (`superstate-mcp`):** Zero-dependency JSON-RPC 2.0 stdio server providing seamless integration with Cursor, Claude Code, and Antigravity.
+- 🔌 **Detached Handoff Gateway (`superstate-mcp`):** Strict 4-tool JSON-RPC 2.0 stdio gateway connecting chat sessions into autonomous background worktrees (Cursor, Claude Code, Antigravity).
+- 🚀 **Native Daemon Harness (`superstate state daemon`):** Autonomous, out-of-loop worker driver with OS verification gates, retry error-injection, and automatic worktree merge.
 - 🩺 **5-Step Fail-Closed Doctor Handshake:** Automated end-to-end verification verifying binary integrity, MCP loopback, client configs, and file locks.
 
 ## Quick Start

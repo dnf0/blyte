@@ -46,6 +46,7 @@ fn test_mcp_handoff_creates_branch_scoped_state() {
         "goal": "Build service A",
         "verify_cmd": "echo 'service-a ok'",
         "no_worktree": true,
+        "detach": false,
         "repo_root": repo_root.to_str().unwrap()
     });
 
@@ -93,6 +94,7 @@ fn test_mcp_concurrent_agents_independent_states() {
         "goal": "Implement Service A",
         "verify_cmd": "echo 'Service A ok'",
         "no_worktree": true,
+        "detach": false,
         "repo_root": repo_root.to_str().unwrap()
     });
     let res_a = handle_tool_call("superstate_handoff", &args_a)
@@ -105,6 +107,7 @@ fn test_mcp_concurrent_agents_independent_states() {
         "goal": "Implement Service B",
         "verify_cmd": "echo 'Service B ok'",
         "no_worktree": true,
+        "detach": false,
         "repo_root": repo_root.to_str().unwrap()
     });
     let res_b = handle_tool_call("superstate_handoff", &args_b)
@@ -142,28 +145,14 @@ fn test_mcp_concurrent_agents_independent_states() {
     assert_eq!(state_a_initial.status, ExecutionStatus::InProgress);
     assert_eq!(state_b_initial.status, ExecutionStatus::InProgress);
 
-    // Agent A calls state_next on branch feat/service-a
+    // Agent A calls state_next on branch feat/service-a and verifies deprecation error
     run(&["checkout", "feat/service-a"]);
     let next_args_a = serde_json::json!({
         "repo_root": repo_root.to_str().unwrap()
     });
-    let next_res_a =
-        handle_tool_call("state_next", &next_args_a).expect("Agent A state_next should succeed");
-    assert_eq!(next_res_a["status"], "success");
-
-    // Verify Agent A's state was advanced
-    let state_a_after = load_state(&state_file_a).expect("load state A after next");
-    assert_eq!(state_a_after.step, 2);
-    assert_eq!(state_a_after.status, ExecutionStatus::Completed);
-
-    // Verify Agent B's state was NOT modified
-    let state_b_after = load_state(&state_file_b).expect("load state B after next");
-    assert_eq!(state_b_after.step, 1);
-    assert_eq!(state_b_after.status, ExecutionStatus::InProgress);
-    assert_eq!(
-        state_b_after.active_task.as_ref().map(|t| &t.title),
-        state_b_initial.active_task.as_ref().map(|t| &t.title)
-    );
+    let next_err_a = handle_tool_call("state_next", &next_args_a).unwrap_err();
+    assert!(next_err_a.contains("deprecated"));
+    assert!(next_err_a.contains("superstate_handoff"));
 }
 
 #[test]
@@ -187,34 +176,20 @@ fn test_mcp_state_get_and_step_resolve_branch_scoped_state() {
         "goal": "Build calc engine",
         "verify_cmd": "true",
         "no_worktree": true,
+        "detach": false,
         "repo_root": repo_root.to_str().unwrap()
     });
     let handoff_res = handle_tool_call("superstate_handoff", &handoff_args)
         .expect("superstate_handoff should succeed");
     assert_eq!(handoff_res["status"], "ready");
 
-    // Call state_get without state argument
+    // Calling legacy state_show / state_next returns deprecation error
     let get_args = serde_json::json!({
         "repo_root": repo_root.to_str().unwrap()
     });
-    let get_res = handle_tool_call("state_get", &get_args).expect("state_get should succeed");
-    assert_eq!(get_res["status"], "success");
-    assert_eq!(get_res["state"]["step"], 1);
-    assert!(get_res["state_path"]
-        .as_str()
-        .unwrap()
-        .ends_with("feat-calc-engine.json"));
+    let get_err = handle_tool_call("state_show", &get_args).unwrap_err();
+    assert!(get_err.contains("deprecated"));
 
-    // Call state_step alias without state argument
-    let step_args = serde_json::json!({
-        "repo_root": repo_root.to_str().unwrap()
-    });
-    let step_res = handle_tool_call("state_step", &step_args).expect("state_step should succeed");
-    assert_eq!(step_res["status"], "success");
-    assert_eq!(step_res["step"], 2);
-
-    // Call state_get again to verify updated step
-    let get_res_after =
-        handle_tool_call("state_get", &get_args).expect("state_get after step should succeed");
-    assert_eq!(get_res_after["state"]["step"], 2);
+    let next_err = handle_tool_call("state_next", &get_args).unwrap_err();
+    assert!(next_err.contains("deprecated"));
 }

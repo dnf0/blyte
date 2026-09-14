@@ -248,10 +248,14 @@ pub fn cmd_daemon(
 
         match res {
             Ok(report) => {
+                // WHY: Provide clear operator feedback on daemon milestone completion and artifact location.
+                // WHAT: Print milestone tally, completion status, and the filesystem path of the completion report.
+                // HOW: Query report fields and display via stdout.
                 println!(
                     "Daemon completed for '{}': {} milestones completed (status: {:?})",
                     paths.slug, report.milestones_completed, report.status
                 );
+                println!("Completion artifact: {}", report.completion_file.display());
                 Ok(())
             }
             Err(e) => {

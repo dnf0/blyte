@@ -114,45 +114,23 @@ fn test_mcp_multi_daemon_fleet_tracking() {
     // Allow daemons to stabilize
     std::thread::sleep(Duration::from_millis(50));
 
-    // 3. Query state_list and verify both branch daemons are reported
+    // 3. Verify state_list returns deprecation error directing to superstate_handoff
     let list_args = serde_json::json!({
         "repo_root": repo_root.to_str().unwrap(),
         "json": true
     });
-    let list_res = handle_tool_call("state_list", &list_args).expect("state_list should succeed");
+    let list_err = handle_tool_call("state_list", &list_args).unwrap_err();
+    assert!(list_err.contains("deprecated"));
+    assert!(list_err.contains("superstate_handoff"));
 
-    let states = list_res
-        .get("states")
-        .or_else(|| list_res.get("branches"))
-        .and_then(|v| v.as_array())
-        .expect("states array");
-
-    let alpha_state = states
-        .iter()
-        .find(|s| s["branch"].as_str() == Some("feat-alpha"))
-        .expect("feat-alpha branch state must be present in state_list");
-    assert_eq!(alpha_state["daemon"]["pid"], alpha_pid);
-    assert_eq!(alpha_state["daemon"]["running"], true);
-    assert_eq!(alpha_state["daemon"]["slug"], "feat-alpha");
-    assert_eq!(alpha_state["daemon"]["log_file"], alpha_log);
-
-    let beta_state = states
-        .iter()
-        .find(|s| s["branch"].as_str() == Some("feat-beta"))
-        .expect("feat-beta branch state must be present in state_list");
-    assert_eq!(beta_state["daemon"]["pid"], beta_pid);
-    assert_eq!(beta_state["daemon"]["running"], true);
-    assert_eq!(beta_state["daemon"]["slug"], "feat-beta");
-    assert_eq!(beta_state["daemon"]["log_file"], beta_log);
-
-    // 4. Query state_status for branch 1 and branch 2 and verify independent logs
+    // 4. Query superstate_status for branch 1 and branch 2 and verify independent logs
     let status_args_alpha = serde_json::json!({
         "repo_root": repo_root.to_str().unwrap(),
         "state": "branches/feat-alpha.json",
         "json": true
     });
-    let status_res_alpha = handle_tool_call("state_status", &status_args_alpha)
-        .expect("state_status on feat-alpha should succeed");
+    let status_res_alpha = handle_tool_call("superstate_status", &status_args_alpha)
+        .expect("superstate_status on feat-alpha should succeed");
     assert_eq!(status_res_alpha["daemon"]["pid"], alpha_pid);
     assert_eq!(status_res_alpha["daemon"]["running"], true);
     assert_eq!(status_res_alpha["daemon"]["slug"], "feat-alpha");
@@ -163,47 +141,26 @@ fn test_mcp_multi_daemon_fleet_tracking() {
         "state": "branches/feat-beta.json",
         "json": true
     });
-    let status_res_beta = handle_tool_call("state_status", &status_args_beta)
-        .expect("state_status on feat-beta should succeed");
+    let status_res_beta = handle_tool_call("superstate_status", &status_args_beta)
+        .expect("superstate_status on feat-beta should succeed");
     assert_eq!(status_res_beta["daemon"]["pid"], beta_pid);
     assert_eq!(status_res_beta["daemon"]["running"], true);
     assert_eq!(status_res_beta["daemon"]["slug"], "feat-beta");
     assert_eq!(status_res_beta["daemon"]["log_file"], beta_log);
 
-    // 5. Test stale / stopped daemon reporting when PID is terminated
-    let _ = Command::new("kill")
-        .args(["-9", &alpha_pid.to_string()])
-        .status();
+    // 5. Test superstate_cancel terminates alpha daemon
+    let cancel_args_alpha = serde_json::json!({
+        "repo_root": repo_root.to_str().unwrap(),
+        "slug": "feat-alpha"
+    });
+    let cancel_res = handle_tool_call("superstate_cancel", &cancel_args_alpha)
+        .expect("superstate_cancel should succeed");
+    assert_eq!(cancel_res["status"], "cancelled");
+
     std::thread::sleep(Duration::from_millis(50));
 
     // Machine-readable format should report running: false
-    let status_res_alpha_stopped = handle_tool_call("state_status", &status_args_alpha)
-        .expect("state_status on stopped feat-alpha should succeed");
-    assert_eq!(status_res_alpha_stopped["daemon"]["pid"], alpha_pid);
+    let status_res_alpha_stopped = handle_tool_call("superstate_status", &status_args_alpha)
+        .expect("superstate_status on stopped feat-alpha should succeed");
     assert_eq!(status_res_alpha_stopped["daemon"]["running"], false);
-
-    // Human-readable format should render "Daemon Status: Stopped (Stale PID: ...)"
-    let status_args_text = serde_json::json!({
-        "repo_root": repo_root.to_str().unwrap(),
-        "state": "branches/feat-alpha.json",
-        "json": false
-    });
-    let status_res_text = handle_tool_call("state_status", &status_args_text)
-        .expect("state_status text on stopped feat-alpha should succeed");
-    let text_out = status_res_text["output"].as_str().unwrap();
-    assert!(text_out.contains(&format!(
-        "Daemon Status: Stopped (Stale PID: {}, Slug: feat-alpha)",
-        alpha_pid
-    )));
-
-    // state_list text output should display "Stopped (<pid>)" and "Running (<pid>)"
-    let list_args_text = serde_json::json!({
-        "repo_root": repo_root.to_str().unwrap(),
-        "json": false
-    });
-    let list_res_text =
-        handle_tool_call("state_list", &list_args_text).expect("state_list text should succeed");
-    let list_text = list_res_text["output"].as_str().unwrap();
-    assert!(list_text.contains(&format!("Stopped ({})", alpha_pid)));
-    assert!(list_text.contains(&format!("Running ({})", beta_pid)));
 }

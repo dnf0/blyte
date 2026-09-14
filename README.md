@@ -91,7 +91,7 @@ terminal output, so a session resumed later can still explain why it stopped.
 - 🔀 **Branch-Scoped State Isolation & Multi-Agent Concurrency**: Partitioned branch state storage (`.agent-state/branches/<branch>.json`) and reverse worktree discovery, allowing multiple autonomous agents or developer sessions to run in parallel on distinct feature branches with zero state collisions.
 - 🛡️ **Zero-Noise Code Review (`superstate-review`)**: Daemon-less, git diff-driven adversarial code review system returning structured JSON findings.
 - 📜 **Guidance & Rule Engine (`superstate-rules`)**: Deterministic Minijinja templates for generating universal agent guidance (`AGENTS.md`, `.cursor/rules`).
-- 🔌 **Native Stdio MCP Server (`superstate-mcp`)**: Lightweight JSON-RPC 2.0 stdio server connecting state engine tools directly into Cursor, Claude Code, and Antigravity.
+- 🔌 **Detached Handoff Gateway (`superstate-mcp`)**: Strict 4-tool JSON-RPC 2.0 stdio gateway initiating autonomous, out-of-loop background execution in isolated git worktrees (Cursor, Claude Code, Antigravity).
 - 🩺 **5-Step Fail-Closed Doctor Handshake**: Automated verification probe ensuring binary integrity, active MCP loopback, client configurations, and file locks.
 
 ## Installation
@@ -255,13 +255,16 @@ Superstate is built from the ground up for concurrent multi-agent development wh
 - **Explicit Turnkey Prompt Contracts:** Turnkey prompts produced by `superstate state prompt` explicitly declare `- **State File:** <path>` and `- **Next Gate Command:** superstate state next --state "<path>"`, eliminating ambiguity when orchestrating across agent boundaries.
 - **Repository-Wide Visibility:** Orchestrators can invoke `superstate state list [--json]` at any time from any worktree or repository root to monitor the real-time status, active tasks, and progression steps across all concurrent agent runs.
 
-## MCP Server Integration (`superstate-mcp`)
+## Detached Handoff Gateway (`superstate-mcp`)
 
-Superstate exposes a full JSON-RPC 2.0 stdio MCP server for direct agent orchestration in Cursor, Claude Code, and Antigravity:
+Per **[ADR 0002](docs/adr/0002-detached-handoff-and-native-rust-harness.md)**, Superstate permanently deprecates in-loop MCP state-machine execution as an anti-pattern. Instead of trapping LLMs inside the chat session with in-loop state mutation tools, `superstate-mcp` exposes strictly **4 Gateway tools** designed to validate intent, provision isolated workspaces, and hand off execution to the native Rust daemon harness:
 
-- **`superstate_preflight`**: Validates verification commands before state initialization to catch environment issues early. Supports both single command execution (`verify_cmd: "..."`) and batch validation (`verify_cmds: ["...", "..."]`).
-- **`superstate_handoff`**: Direct handoff from chat into Superstate without markdown plan files. Supports single-task goals (`goal`, `verify_cmd`) or multi-milestone specifications (`milestones: [{title, verify_cmd, files}]`). Captures the active feature branch, initializes in-memory state, provisions `.wt/task-1`, and returns a turnkey prompt.
-- **`state_next`**: Verifies the active milestone, merges the worktree back into the active feature branch, advances to the next milestone, and automatically provisions the next worktree (`.wt/task-2`), returning the next turnkey prompt.
+- **`superstate_handoff`**: The sole execution entrypoint. Validates verification commands, provisions an isolated worktree (`.wt/<task-slug>`), initializes in-memory state, and detaches the background native daemon (`detach: true` by default). The chat agent is released immediately.
+- **`superstate_status`**: Clean observability into active background jobs, milestone DAG progress, and daemon health without mutating state.
+- **`superstate_cancel`**: Sends a graceful termination signal (`SIGTERM` -> `SIGKILL`) to running background workers and reaps PID records.
+- **`superstate_doctor`**: Fail-closed diagnostic probe validating binary integrity, driver availability, and environment readiness.
+
+All legacy in-loop tools (`state_init`, `state_next`, `state_prompt`, `state_apply`, `worktree_*`) have been removed from the MCP catalog and return descriptive migration errors directing callers to `superstate_handoff`.
 
 ## Development & Verification
 

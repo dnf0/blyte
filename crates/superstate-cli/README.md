@@ -156,3 +156,23 @@ Superstate CLI natively supports concurrent multi-agent and multi-session develo
 - **Worktree Reverse Lookup:** Subagents invoked inside `.wt/<task_slug>` can run commands like `superstate state show` or `superstate state next --verify-cmd "..."` directly without specifying `--state`. Superstate automatically inspects the candidate branch state files and binds to the worktree's owner.
 - **Deterministic Turnkey Handoffs:** Prompts produced by `superstate state prompt` contain explicit `- **State File:**` paths and `- **Next Gate Command:**` lines, enabling multi-agent orchestrators to cleanly dispatch tasks to independent worker agents with complete execution contracts.
 - **Fleet Visibility:** Run `superstate state list --json` to aggregate status and progression metrics across all parallel agent sessions in the repository.
+
+## Autonomous Detached Execution (`superstate state daemon`)
+
+Per **[ADR 0002](../../docs/adr/0002-detached-handoff-and-native-rust-harness.md)**, the native Rust daemon harness is the singular execution engine for autonomous tasks:
+
+```bash
+# Launch daemon in the background (detached)
+superstate state daemon --detach --driver "claude -p --dangerously-skip-permissions"
+
+# Run foreground loop with custom driver
+superstate state daemon --driver "agy -p --dangerously-skip-permissions"
+```
+
+### Daemon Features:
+1. **Turnkey Zero-Context Prompts**: Before each milestone, renders a clean, focused prompt delivered to the driver via stdin or `SUPERSTATE_PROMPT_FILE`. No conversational drift or token bloat.
+2. **Deterministic OS Verification Gates**: The daemon evaluates `--verify-cmd` directly via the OS. The LLM cannot hallucinate its own pass condition.
+3. **Automated Error Diagnostic Injection**: On gate failure, injects stdout/stderr failures directly into the retry prompt.
+4. **Automatic Worktree Auto-Merge**: Upon task graph completion, uncommitted worktree changes are staged and committed, the worktree feature branch is cleanly merged into the base branch (`--no-ff`), and the ephemeral `.wt/<slug>` worktree is deleted.
+5. **Structured Completion Artifact**: Persists `.agent-state/completion.json` containing timing, milestone count, base branch, and merge confirmation.
+
