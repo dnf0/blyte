@@ -20,7 +20,7 @@ Autonomous AI coding agents operate across two fundamentally opposing cognitive 
 
 Previously, Superstate exposed over 20 low-level state-machine tools over the Model Context Protocol (MCP): `state_init`, `state_next`, `state_prompt`, `state_apply`, `state_exec`, `worktree_create`, `worktree_merge`, `state_note`, etc.
 
-Empirical evaluation across the 25 executable tasks of the DataCurve / TerminalBench Frontier Benchmark demonstrated that exposing in-loop state tools directly to an agent inside its active chat session is an architectural anti-pattern:
+Empirical evaluation conducted on 2026-09-13 across the DataCurve / TerminalBench Frontier Benchmark (30 evaluation tasks running on driver `agy` / Gemini 3.8 Flash High) compared an in-loop MCP state-machine workflow against a prototype out-of-loop detached CLI harness:
 
 * **The Chat Trap (Context Bloat & Drift):**
   When an agent is equipped with in-loop state tools, it attempts to execute multi-step implementation plans *inside its original chat window*. It carries 40,000 to 60,000+ tokens of initial exploratory dialogue, schema dumps, and compiler logs into every single coding turn. As context length increases, reasoning accuracy degrades precipitously.
@@ -28,11 +28,10 @@ Empirical evaluation across the 25 executable tasks of the DataCurve / TerminalB
   An LLM cannot reliably police its own verification gates. When an agent calls `state_next` in-loop, it frequently negotiates with failed assertions, rationalizes partial failures, skips verification, or hallucinates completion.
 * **Tool Dithering & Latency:**
   Models burn 15–20% of their token budget and multiple round-trip turns simply deliberating over which state tool to call next (`state_show` vs `state_status` vs `state_prompt`), inflating wall-clock time and cost.
-* **Empirical Benchmark Proof:**
-  * **In-Loop MCP (`Condition A`):** **64.0% pass rate** ($0.25 / solve, 1,225,025 input tokens / solve).
-  * **Detached Native Runtime (`Condition B`):** **76.0% pass rate** ($0.21 / solve, 1,045,102 input tokens / solve).
-
-Condition B achieved a **+12.0 percentage point accuracy advantage** at **lower cost** and **higher token efficiency** by enforcing zero-turn prompt injection and out-of-band deterministic gating.
+* **Empirical Benchmark Evidence (2026-09-13 Run):**
+  * *Executable Subset (25 tasks):* Excluding 5 tasks that failed uniformly across all arms due to upstream Docker Hub 404 image resolution errors, the prototype detached CLI harness (`Condition B`) achieved **76.0% pass rate (19/25)** at **$0.21 / solve** (1,045,102 input tokens / solve), compared to **64.0% pass rate (16/25)** at **$0.25 / solve** (1,225,025 input tokens / solve) for in-loop MCP (`Condition A`).
+  * *Full Suite (30 tasks):* Across all 30 attempted tasks including the 5 infrastructure failures, Condition B achieved **63.3% (19/30)** vs **53.3% (16/30)** for Condition A.
+  * *Historical Context & Attribution:* The 2026-09-13 benchmark evaluated a prototype external CLI harness that orchestrated `agy -p` using out-of-loop prompt injection and external OS test gating. The observed +12.0 percentage point advantage of this prototype demonstrated the superiority of out-of-loop execution and directly motivated standardizing and productionizing the logic into the native Rust `DaemonRunner` and Detached Gateway in PR #23.
 
 ---
 
@@ -134,6 +133,6 @@ The `DaemonRunner` in `crates/superstate-core/src/daemon.rs` serves as the autho
 ---
 
 ## 5. References
-* [Definitive Benchmark Report: Superstate Native Runtime vs. Superpowers & Vanilla](file:///Users/danielfisher/.gemini/antigravity-cli/brain/40d9a6a9-9f83-47fb-8967-d564a56e3b2f/frontier-4arm-definitive-benchmark-report.md)
-* [Superstate Detached Handoff Protocol & Execution Engine Spec](file:///Users/danielfisher/.gemini/antigravity-cli/brain/40d9a6a9-9f83-47fb-8967-d564a56e3b2f/superstate-detached-handoff-spec.md)
-* [ADR 0001: Progressive Staged Verification & Regression Quarantine](file:///Users/danielfisher/repos/superstate/docs/adr/0001-progressive-staged-verification.md)
+* Internal Benchmark Report: *"Frontier 4-Arm Definitive Benchmark Report"* (DataCurve/TerminalBench 30-task evaluation, 2026-09-13).
+* Internal Design Spec: *"Superstate Detached Handoff Protocol & Execution Engine Specification"* (2026-09-13).
+* [ADR 0001: Progressive Staged Verification & Regression Quarantine](0001-progressive-staged-verification.md)
