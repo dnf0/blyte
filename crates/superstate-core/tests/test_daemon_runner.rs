@@ -572,3 +572,95 @@ fn test_stalled_worker_still_blocks() {
         "a worker that changes nothing must still be cut off"
     );
 }
+
+/// Edits inside an untracked directory must count as progress.
+///
+/// Regression: the first progress-aware implementation asked git for the working-tree
+/// state. Git collapses an untracked directory to a single `?? dir/` line regardless of
+/// what changes inside it, and `git diff HEAD` covers neither untracked files nor a repo
+/// with no HEAD. A worker editing a freshly cloned source tree therefore produced an
+/// identical fingerprint every attempt and was blocked as stalled while progressing --
+/// exactly what happened to build-cython-ext, whose whole job is to fix a cloned package.
+#[test]
+fn test_progress_inside_an_untracked_directory_counts() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    std::fs::create_dir_all(repo.join("vendored")).unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Never satisfied".to_string(),
+        verify_cmd: "false".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    // Writes only ever land inside the untracked `vendored/` directory, so `git status`
+    // reports the same single line on every attempt.
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("date +%s%N > vendored/edit-$$.txt".to_string()),
+        max_retries: 2,
+        timeout_secs: 10,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+
+    for attempt in 1..=4 {
+        let outcome = runner.run_step().unwrap();
+        assert!(
+            matches!(outcome, DaemonStepOutcome::Failed { .. }),
+            "attempt {attempt}: edits inside an untracked directory are progress, got {outcome:?}"
+        );
+    }
+}
+
+/// The daemon's own `.agent-state` writes must never count as progress.
+///
+/// It rewrites prompts, logs and driver turns on every attempt. Counting those would
+/// renew the retry budget forever and the daemon would never stop.
+#[test]
+fn test_daemon_own_state_writes_are_not_progress() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Never satisfied".to_string(),
+        verify_cmd: "false".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    // The driver touches nothing outside .agent-state, which the daemon itself rewrites.
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("true".to_string()),
+        max_retries: 2,
+        timeout_secs: 10,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+
+    assert!(matches!(
+        runner.run_step().unwrap(),
+        DaemonStepOutcome::Failed { .. }
+    ));
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Blocked { .. }
+        ),
+        "daemon-authored state must not renew the retry budget"
+    );
+}
