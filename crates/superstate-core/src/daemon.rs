@@ -31,6 +31,28 @@ const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
 /// budget would never expire.
 const FINGERPRINT_SKIP_DIRS: [&str; 2] = [".git", ".agent-state"];
 
+/// A verification command that cannot fail, so it certifies nothing.
+///
+/// The harness supplies one of these whenever a task's real verifier is sealed. Treating a
+/// pass from it as evidence of completion makes the daemon stop after a single driver turn,
+/// which is how it scored 50% against superstate_mcp's 70% on an identical task set while
+/// running FASTER than the unassisted baseline -- it was not working harder, it was exiting
+/// immediately on a gate that could not say no.
+pub fn is_vacuous_gate(verify_cmd: &str) -> bool {
+    matches!(
+        verify_cmd.trim().trim_end_matches(';').trim(),
+        "" | "true" | ":" | "exit 0" | "/bin/true"
+    )
+}
+
+/// Driver turns required before an UNGATED task may be reported complete.
+///
+/// Mirrors superstate_mcp's `max_turns_per_milestone`, whose iteration is turn-driven
+/// rather than gate-driven and therefore degrades gracefully when the contract is vacuous.
+/// Applies only when the gate cannot fail: a real contract still completes the moment it
+/// passes, so this never prolongs a properly specified handoff.
+const UNGATED_MIN_DRIVER_TURNS: usize = 3;
+
 /// Upper bound on files walked, so a pathological tree cannot stall the daemon.
 const FINGERPRINT_MAX_FILES: usize = 20_000;
 
@@ -334,6 +356,8 @@ pub struct DaemonRunner {
     retry_counts: HashMap<String, usize>,
     /// Every attempt, progress or not, bounded by `PROGRESS_ATTEMPT_MULTIPLIER`.
     total_attempts: HashMap<String, usize>,
+    /// Driver turns run per task, used to hold an ungated task open (see UNGATED_MIN_DRIVER_TURNS).
+    driver_turns: HashMap<String, usize>,
     /// Working-tree fingerprint at the end of the previous attempt.
     last_fingerprint: HashMap<String, String>,
     step_advancer: Option<StepAdvancer>,
@@ -353,6 +377,7 @@ impl DaemonRunner {
             config,
             retry_counts: HashMap::new(),
             total_attempts: HashMap::new(),
+            driver_turns: HashMap::new(),
             last_fingerprint: HashMap::new(),
             step_advancer: None,
             last_failure_output: HashMap::new(),
@@ -472,6 +497,7 @@ impl DaemonRunner {
 
         // Execute headless driver worker if provided
         if let Some(ref driver) = self.config.driver_cmd {
+            *self.driver_turns.entry(active_task.id.clone()).or_insert(0) += 1;
             let resolved_driver = resolve_driver_command(driver);
             let mut child = Command::new("sh")
                 .arg("-c")
@@ -527,6 +553,50 @@ impl DaemonRunner {
 
         // Execute verification gate to evaluate milestone completion
         let gate_res = run_verification_cmd(verify_cmd, &working_dir, self.config.timeout_secs)?;
+
+        // A gate that cannot fail is not evidence of completion. Hold the task open and keep
+        // driving until the turn floor is met, so an ungated handoff iterates like
+        // superstate_mcp instead of exiting on the first unconditional pass.
+        // Only meaningful when a driver is configured: with no worker there is nothing to
+        // drive, the turn counter never advances, and holding the task open would loop
+        // forever. Bounded by the attempt ceiling either way, so the floor can never
+        // outlive the retry budget.
+        let attempts_so_far = self
+            .total_attempts
+            .get(&active_task.id)
+            .copied()
+            .unwrap_or(0);
+        let attempt_ceiling = self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+        if gate_res.passed
+            && is_vacuous_gate(verify_cmd)
+            && self.config.driver_cmd.is_some()
+            && attempts_so_far < attempt_ceiling
+        {
+            *self
+                .total_attempts
+                .entry(active_task.id.clone())
+                .or_insert(0) += 1;
+            let turns = self.driver_turns.entry(active_task.id.clone()).or_insert(0);
+            if *turns < UNGATED_MIN_DRIVER_TURNS {
+                let spent = *turns;
+                state.notes.push(LedgerEntry::new(
+                    "superstate-daemon",
+                    format!(
+                        "[ungated] Task {} has no falsifiable verification command; \
+                         continuing to turn {} of {} rather than accepting an unconditional pass",
+                        active_task.id,
+                        spent + 1,
+                        UNGATED_MIN_DRIVER_TURNS
+                    ),
+                ));
+                save_state_atomic(&self.config.state_path, &state)?;
+                return Ok(DaemonStepOutcome::Failed {
+                    task_id: active_task.id,
+                    reason: "ungated: turn floor not yet met".to_string(),
+                    retries_remaining: UNGATED_MIN_DRIVER_TURNS - spent,
+                });
+            }
+        }
 
         if gate_res.passed {
             self.retry_counts.remove(&active_task.id);

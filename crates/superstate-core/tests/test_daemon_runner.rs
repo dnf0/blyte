@@ -13,12 +13,12 @@ fn test_daemon_run_step_success() {
     let milestones = vec![
         MilestoneSpec {
             title: "Milestone 1".to_string(),
-            verify_cmd: "true".to_string(),
+            verify_cmd: "test -f worker-ran.txt".to_string(),
             files: vec![PathBuf::from("file1.txt")],
         },
         MilestoneSpec {
             title: "Milestone 2".to_string(),
-            verify_cmd: "true".to_string(),
+            verify_cmd: "test -f worker-ran.txt".to_string(),
             files: vec![PathBuf::from("file2.txt")],
         },
     ];
@@ -28,7 +28,7 @@ fn test_daemon_run_step_success() {
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
-        driver_cmd: Some("echo 'worker output'".to_string()),
+        driver_cmd: Some("touch worker-ran.txt".to_string()),
         max_retries: 3,
         timeout_secs: 10,
     };
@@ -175,7 +175,7 @@ fn test_daemon_step_advancer_invoked() {
 
     let milestones = vec![MilestoneSpec {
         title: "Advancer Milestone".to_string(),
-        verify_cmd: "true".to_string(),
+        verify_cmd: "test -f worker-ran.txt".to_string(),
         files: vec![],
     }];
 
@@ -184,7 +184,7 @@ fn test_daemon_step_advancer_invoked() {
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
-        driver_cmd: Some("echo 'worker output'".to_string()),
+        driver_cmd: Some("touch worker-ran.txt".to_string()),
         max_retries: 3,
         timeout_secs: 10,
     };
@@ -217,7 +217,7 @@ fn test_daemon_step_advancer_error_propagation() {
 
     let milestones = vec![MilestoneSpec {
         title: "Advancer Failure Milestone".to_string(),
-        verify_cmd: "true".to_string(),
+        verify_cmd: "test -f worker-ran.txt".to_string(),
         files: vec![],
     }];
 
@@ -227,7 +227,7 @@ fn test_daemon_step_advancer_error_propagation() {
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
-        driver_cmd: Some("echo 'worker output'".to_string()),
+        driver_cmd: Some("touch worker-ran.txt".to_string()),
         max_retries: 3,
         timeout_secs: 10,
     };
@@ -662,5 +662,127 @@ fn test_daemon_own_state_writes_are_not_progress() {
             DaemonStepOutcome::Blocked { .. }
         ),
         "daemon-authored state must not renew the retry budget"
+    );
+}
+
+/// A gate that cannot fail must not end the run after one turn.
+///
+/// Regression: with the harness supplying `verify_cmd = "true"` (every task whose real
+/// verifier is sealed), the daemon ran one driver turn, saw an unconditional pass, recorded
+/// completion and exited. It scored 50% against superstate_mcp's 70% on an identical
+/// 20-task set while running FASTER than the unassisted baseline -- not working harder,
+/// just exiting on a gate that could not say no. superstate_mcp's iteration is turn-driven
+/// and degrades gracefully; the daemon's was gate-driven and did not.
+#[test]
+fn test_ungated_task_keeps_driving_past_the_first_pass() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Ungated".to_string(),
+        verify_cmd: "true".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("date +%s%N > turn-$$.txt".to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+
+    // The first two turns must NOT complete, despite `true` passing every time.
+    for turn in 1..=2 {
+        let outcome = runner.run_step().unwrap();
+        assert!(
+            matches!(outcome, DaemonStepOutcome::Failed { .. }),
+            "turn {turn}: an unconditional pass must not be accepted as completion, got {outcome:?}"
+        );
+    }
+    // The third satisfies the floor and is allowed to advance.
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Advanced { .. }
+        ),
+        "the turn floor should be satisfied by the third turn"
+    );
+}
+
+/// A real contract still completes the moment it passes -- the floor must not prolong it.
+#[test]
+fn test_real_gate_completes_immediately() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Gated".to_string(),
+        verify_cmd: "test -f produced.txt".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("touch produced.txt".to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Advanced { .. }
+        ),
+        "a falsifiable gate that passes must complete on the first turn"
+    );
+}
+
+/// The ungated turn floor must terminate when there is no driver to advance it.
+///
+/// Regression: the floor returned Failed before the retry accounting ran, so with
+/// `driver_cmd: None` the turn counter never incremented, the floor was never reached, and
+/// run_to_completion looped forever. It hung test_cli_daemon_lifecycle.
+#[test]
+fn test_ungated_floor_terminates_without_a_driver() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Ungated, no driver".to_string(),
+        verify_cmd: "true".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: None,
+        max_retries: 1,
+        timeout_secs: 5,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Advanced { .. }
+        ),
+        "with no driver the floor cannot apply, so the task must advance"
     );
 }
