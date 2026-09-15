@@ -28,10 +28,10 @@ Empirical evaluation conducted on 2026-09-13 across the DataCurve / TerminalBenc
   An LLM cannot reliably police its own verification gates. When an agent calls `state_next` in-loop, it frequently negotiates with failed assertions, rationalizes partial failures, skips verification, or hallucinates completion.
 * **Tool Dithering & Latency:**
   Models burn 15–20% of their token budget and multiple round-trip turns simply deliberating over which state tool to call next (`state_show` vs `state_status` vs `state_prompt`), inflating wall-clock time and cost.
-* **Empirical Benchmark Evidence (2026-09-13 Run):**
-  * *Executable Subset (25 tasks):* Excluding 5 tasks that failed uniformly across all arms due to upstream Docker Hub 404 image resolution errors, the prototype detached CLI harness (`Condition B`) achieved **76.0% pass rate (19/25)** at **$0.21 / solve** (1,045,102 input tokens / solve), compared to **64.0% pass rate (16/25)** at **$0.25 / solve** (1,225,025 input tokens / solve) for in-loop MCP (`Condition A`).
-  * *Full Suite (30 tasks):* Across all 30 attempted tasks including the 5 infrastructure failures, Condition B achieved **63.3% (19/30)** vs **53.3% (16/30)** for Condition A.
-  * *Historical Context & Attribution:* The 2026-09-13 benchmark evaluated a prototype external CLI harness that orchestrated `agy -p` using out-of-loop prompt injection and external OS test gating. The observed +12.0 percentage point advantage of this prototype demonstrated the superiority of out-of-loop execution and directly motivated standardizing and productionizing the logic into the native Rust `DaemonRunner` and Detached Gateway in PR #23.
+* **Empirical Benchmark Evidence (superseded -- see Addendum, 2026-09-15):**
+  * *Executable Subset (25 tasks):* Excluding 5 tasks that failed uniformly across all arms due to upstream Docker Hub 404 image resolution errors, the prototype detached CLI harness (`Condition B`) achieved **76.0% pass rate (19/25)** at **$0.21 / solve**, compared to **64.0% (16/25)** at **$0.25 / solve** for in-loop MCP (`Condition A`).
+  * *Full Suite (30 tasks):* **63.3% (19/30)** vs **53.3% (16/30)**.
+  * These figures remain accurate as recorded, but the 2026-09-15 addendum below establishes that they were measured against baselines that received no prompt support while the Superstate arms did, and that the comparison against `vanilla` is the more informative one.
 
 ---
 
@@ -136,3 +136,80 @@ The `DaemonRunner` in `crates/superstate-core/src/daemon.rs` serves as the autho
 * Internal Benchmark Report: *"Frontier 4-Arm Definitive Benchmark Report"* (DataCurve/TerminalBench 30-task evaluation, 2026-09-13).
 * Internal Design Spec: *"Superstate Detached Handoff Protocol & Execution Engine Specification"* (2026-09-13).
 * [ADR 0001: Progressive Staged Verification & Regression Quarantine](0001-progressive-staged-verification.md)
+
+---
+
+## Addendum: What Actually Drives the Result (2026-09-15)
+
+The original evidence compared `Condition B` against `Condition A` -- two Superstate
+variants. It did not isolate what produced the advantage. A controlled 2x2 was run on
+2026-09-15 to answer that, because a confound had been identified: arm-specific prompt
+contracts (`TARGETED_EXECUTION_CONTRACT`, 10 behavioural rules) were injected into the
+Superstate arms and into no baseline. `vanilla` has no prompt construction at all. So the
+published lift measured *control plane + hand-tuned prompt* against *neither*.
+
+### Method
+
+20 TerminalBench tasks, driver `agy` / Gemini 3.8 Flash High, `superstate_mcp` (the arm
+that produced the 76%) against `vanilla`, each run with the prompt contracts disabled and
+enabled. 80 runs, no infrastructure failures. `sqlite-db-truncate` was excluded: it ships
+no verifier, so its grader exits 127 for every arm regardless of the work done.
+
+### Result
+
+| Arm | contracts OFF | contracts ON | matched delta |
+|---|---|---|---|
+| `vanilla` | 9/20 (45%) | 13/20 (65%) | **+4 tasks** |
+| `superstate_mcp` | **14/20 (70%)** | 14/20 (70%) | **0 tasks** |
+
+### Findings
+
+1. **The control plane owns the effect.** With no prompt engineering of any kind,
+   `superstate_mcp` solves 70% against `vanilla`'s 45% -- a 25 percentage point lift. This
+   is the claim the architecture should rest on, and it is cleaner than the original
+   Condition A/B comparison because the treatment is the control plane alone.
+
+2. **The prompt contracts contribute nothing to Superstate.** Zero change across 20
+   matched tasks. They are inert where they are currently applied.
+
+3. **They are a partial substitute for the control plane, not a complement.** They lift
+   `vanilla` by 4 tasks, toward but not to Superstate's level. Prompt discipline supplies
+   some of what the state machine supplies; the state machine supplies more, and does so
+   without prompt tuning.
+
+4. **They are unsafe off short tasks.** On the 9 DataCurve repo tasks (~30 min each, where
+   instructions explicitly direct the agent to "explore the codebase first"), the same
+   rules took `vanilla` from 4/9 to 1/9. Several rules -- "zero global exploration", "never
+   cat entire files" -- are a bet that the work has already been located. On a short
+   self-contained task that bet pays; on a repository-scale task it is fatal. The control
+   plane's advantage held on both families; the prompt's reversed sign.
+
+### Mechanism
+
+Across the 30-task run, wall clock tracks solve rate almost monotonically
+(vanilla 10.4 min -> 13 solves; superpowers 10.2 -> 14; Condition A 13.3 -> 16;
+Condition B 18.6 -> 19), while turn counts are flat across all four arms (0.83-1.00).
+Budget is not the constraint: `vanilla` was granted 43 minutes and used 10.4, stopping
+voluntarily with three quarters of its allowance unspent, and every `vanilla` failure
+recorded `turns=1`.
+
+The candidate mechanism is that the state machine denies the agent an easy exit. An
+unassisted agent decides for itself when it is done and is frequently wrong; Superstate
+defines "done" externally, against a named verification command, so the agent keeps working
+past the point at which it would have self-terminated. Among runs where real work occurred
+(cost >= $0.05), Condition B converted 69% against `vanilla`'s 47%, so it is not only
+persistence -- the additional work also lands better.
+
+This mechanism is consistent with the data but not yet established causally.
+
+### Consequences
+
+* The arm-specific prompt contracts should be removed. They add nothing to Superstate, they
+  are harmful outside it, and removing them makes the headline claim strictly cleaner.
+* The claim to make is **"external state and verification produce a substantial solve-rate
+  lift over an unassisted agent, with no prompt engineering"**, not a single headline
+  percentage. The 76% figure is a filtered 19/25 and should not be quoted alone.
+* Statistical caution: n=20 per cell puts the headline gap at p~0.10 in isolation. Its
+  weight comes from being the third independent run in the same direction (19/30, 16/30,
+  14/20), not from any single sample.
+
