@@ -327,3 +327,52 @@ model pinning, usage telemetry and the container execution guidance. Each produc
 plausible-looking architectural finding that dissolved on inspection. Any arm that bypasses
 the shared driver needs its invocation diffed against that driver before its numbers are
 trusted -- the failures are silent and they all look like weaknesses of the thing under test.
+
+---
+
+## Addendum 4: Daemon and `superstate_mcp` Are Equivalent (2026-09-16)
+
+Addendum 3 withdrew the daemon's measured deficit and said it needed re-measuring before any
+claim. That is now done, on 20 TerminalBench tasks each carrying a hand-authored verification
+command, with both arms verified to receive identical inputs before the numbers were read.
+
+| Arm | Solved | Mean wall | Cost/run | Total |
+|---|---|---|---|---|
+| `superstate_daemon` | **12/20 (60%)** | 6.3 min | **$0.25** | $4.99 |
+| `superstate_mcp` | **12/20 (60%)** | 6.2 min | $0.33 | $6.51 |
+
+Across 20 paired tasks the two arms **disagree on none**. Not similar totals -- the same
+tasks solved and the same tasks failed, with the daemon 23% cheaper overall.
+
+### Every earlier daemon deficit was harness, not architecture
+
+| Previously reported | Actual cause |
+|---|---|
+| 2x cost premium | the worker wrapper never set `--print-timeout`, so agy truncated every turn at its 5-minute default |
+| losing 5-0 on gated tasks | `superstate_mcp` was missed when fixtures were wired in, so it ran on `true` while the daemon ran on a strict gate |
+| 60% vs 67.5% on 20 tasks | both of the above |
+
+All three were differences in what the arms received, not in how they execute. The daemon is
+the recurring offender because it spawns its own worker and so bypasses `AgyCliDriver`, which
+performs that setup for every other arm. `tests/test_arm_input_parity.py` in superstate-eval
+now fails when the arms diverge.
+
+### Decision
+
+* **The detached daemon is a legitimate default.** It matches the harness-driven arm exactly
+  on accuracy, costs less, and additionally supports genuine fire-and-forget handoff.
+* **The reasoning in this ADR still needs correcting.** The case for the daemon is not that
+  in-loop state tools are an anti-pattern in general -- it is that the daemon is equivalent
+  and cheaper. The anti-pattern critique applies specifically to `superstate_agent_mcp`
+  (Condition A, 64%), where the *agent* drives its own state loop.
+* **`superstate_mcp` should not have been removed.** It is harness-driven, it produced the
+  76% result, and an orchestrator needs the `state_*` tools it depends on. Gate those tools
+  by caller rather than deleting them: available to an orchestrator, closed to an agent
+  running them inside its own chat session.
+
+### Caveats
+
+* One repeat per task. The arms agreeing on all 20 is strong, but the absolute 60% is a
+  single sample.
+* `vanilla` was not in this run. The control-plane lift over an unassisted agent rests on the
+  earlier 40-runs-per-arm measurement (67.5% vs 45.0%, p=0.037).
