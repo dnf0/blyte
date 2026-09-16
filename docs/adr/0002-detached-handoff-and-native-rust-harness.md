@@ -28,10 +28,10 @@ Empirical evaluation conducted on 2026-09-13 across the DataCurve / TerminalBenc
   An LLM cannot reliably police its own verification gates. When an agent calls `state_next` in-loop, it frequently negotiates with failed assertions, rationalizes partial failures, skips verification, or hallucinates completion.
 * **Tool Dithering & Latency:**
   Models burn 15–20% of their token budget and multiple round-trip turns simply deliberating over which state tool to call next (`state_show` vs `state_status` vs `state_prompt`), inflating wall-clock time and cost.
-* **Empirical Benchmark Evidence (2026-09-13 Run):**
-  * *Executable Subset (25 tasks):* Excluding 5 tasks that failed uniformly across all arms due to upstream Docker Hub 404 image resolution errors, the prototype detached CLI harness (`Condition B`) achieved **76.0% pass rate (19/25)** at **$0.21 / solve** (1,045,102 input tokens / solve), compared to **64.0% pass rate (16/25)** at **$0.25 / solve** (1,225,025 input tokens / solve) for in-loop MCP (`Condition A`).
-  * *Full Suite (30 tasks):* Across all 30 attempted tasks including the 5 infrastructure failures, Condition B achieved **63.3% (19/30)** vs **53.3% (16/30)** for Condition A.
-  * *Historical Context & Attribution:* The 2026-09-13 benchmark evaluated a prototype external CLI harness that orchestrated `agy -p` using out-of-loop prompt injection and external OS test gating. The observed +12.0 percentage point advantage of this prototype demonstrated the superiority of out-of-loop execution and directly motivated standardizing and productionizing the logic into the native Rust `DaemonRunner` and Detached Gateway in PR #23.
+* **Empirical Benchmark Evidence (superseded -- see Addendum, 2026-09-15):**
+  * *Executable Subset (25 tasks):* Excluding 5 tasks that failed uniformly across all arms due to upstream Docker Hub 404 image resolution errors, the prototype detached CLI harness (`Condition B`) achieved **76.0% pass rate (19/25)** at **$0.21 / solve**, compared to **64.0% (16/25)** at **$0.25 / solve** for in-loop MCP (`Condition A`).
+  * *Full Suite (30 tasks):* **63.3% (19/30)** vs **53.3% (16/30)**.
+  * These figures remain accurate as recorded, but the 2026-09-15 addendum below establishes that they were measured against baselines that received no prompt support while the Superstate arms did, and that the comparison against `vanilla` is the more informative one.
 
 ---
 
@@ -136,3 +136,141 @@ The `DaemonRunner` in `crates/superstate-core/src/daemon.rs` serves as the autho
 * Internal Benchmark Report: *"Frontier 4-Arm Definitive Benchmark Report"* (DataCurve/TerminalBench 30-task evaluation, 2026-09-13).
 * Internal Design Spec: *"Superstate Detached Handoff Protocol & Execution Engine Specification"* (2026-09-13).
 * [ADR 0001: Progressive Staged Verification & Regression Quarantine](0001-progressive-staged-verification.md)
+
+---
+
+## Addendum: What Actually Drives the Result (2026-09-15)
+
+The original evidence compared `Condition B` against `Condition A` -- two Superstate
+variants. It did not isolate what produced the advantage. A controlled 2x2 was run on
+2026-09-15 to answer that, because a confound had been identified: arm-specific prompt
+contracts (`TARGETED_EXECUTION_CONTRACT`, 10 behavioural rules) were injected into the
+Superstate arms and into no baseline. `vanilla` has no prompt construction at all. So the
+published lift measured *control plane + hand-tuned prompt* against *neither*.
+
+### Method
+
+20 TerminalBench tasks, driver `agy` / Gemini 3.8 Flash High, `superstate_mcp` (the arm
+that produced the 76%) against `vanilla`, each run with the prompt contracts disabled and
+enabled. 80 runs, no infrastructure failures. `sqlite-db-truncate` was excluded: it ships
+no verifier, so its grader exits 127 for every arm regardless of the work done.
+
+### Result
+
+| Arm | contracts OFF | contracts ON | matched delta |
+|---|---|---|---|
+| `vanilla` | 9/20 (45%) | 13/20 (65%) | **+4 tasks** |
+| `superstate_mcp` | **14/20 (70%)** | 14/20 (70%) | **0 tasks** |
+
+### Findings
+
+1. **The control plane owns the effect.** With no prompt engineering of any kind,
+   `superstate_mcp` solves 70% against `vanilla`'s 45% -- a 25 percentage point lift. This
+   is the claim the architecture should rest on, and it is cleaner than the original
+   Condition A/B comparison because the treatment is the control plane alone.
+
+2. **The prompt contracts contribute nothing to Superstate.** Zero change across 20
+   matched tasks. They are inert where they are currently applied.
+
+3. **They are a partial substitute for the control plane, not a complement.** They lift
+   `vanilla` by 4 tasks, toward but not to Superstate's level. Prompt discipline supplies
+   some of what the state machine supplies; the state machine supplies more, and does so
+   without prompt tuning.
+
+4. **They are unsafe off short tasks.** On the 9 DataCurve repo tasks (~30 min each, where
+   instructions explicitly direct the agent to "explore the codebase first"), the same
+   rules took `vanilla` from 4/9 to 1/9. Several rules -- "zero global exploration", "never
+   cat entire files" -- are a bet that the work has already been located. On a short
+   self-contained task that bet pays; on a repository-scale task it is fatal. The control
+   plane's advantage held on both families; the prompt's reversed sign.
+
+### Mechanism
+
+Across the 30-task run, wall clock tracks solve rate almost monotonically
+(vanilla 10.4 min -> 13 solves; superpowers 10.2 -> 14; Condition A 13.3 -> 16;
+Condition B 18.6 -> 19), while turn counts are flat across all four arms (0.83-1.00).
+Budget is not the constraint: `vanilla` was granted 43 minutes and used 10.4, stopping
+voluntarily with three quarters of its allowance unspent, and every `vanilla` failure
+recorded `turns=1`.
+
+The candidate mechanism is that the state machine denies the agent an easy exit. An
+unassisted agent decides for itself when it is done and is frequently wrong; Superstate
+defines "done" externally, against a named verification command, so the agent keeps working
+past the point at which it would have self-terminated. Among runs where real work occurred
+(cost >= $0.05), Condition B converted 69% against `vanilla`'s 47%, so it is not only
+persistence -- the additional work also lands better.
+
+This mechanism is consistent with the data but not yet established causally.
+
+### Consequences
+
+* The arm-specific prompt contracts should be removed. They add nothing to Superstate, they
+  are harmful outside it, and removing them makes the headline claim strictly cleaner.
+* The claim to make is **"external state and verification produce a substantial solve-rate
+  lift over an unassisted agent, with no prompt engineering"**, not a single headline
+  percentage. The 76% figure is a filtered 19/25 and should not be quoted alone.
+* Statistical caution: n=20 per cell puts the headline gap at p~0.10 in isolation. Its
+  weight comes from being the third independent run in the same direction (19/30, 16/30,
+  14/20), not from any single sample.
+
+
+---
+
+## Addendum 2: The Daemon Does Not Replace `superstate_mcp` (2026-09-16)
+
+This ADR deprecates the in-loop state tools in favour of the detached daemon. The evidence
+now says that swaps out the best-performing arm for a worse one.
+
+### The distinction the original decision missed
+
+The critique in section 1 -- the chat trap, the self-supervision paradox, tool dithering --
+is about **an agent driving its own state loop**. That is `superstate_agent_mcp`
+(Condition A, 64%), and the reasoning holds: it should be deprecated.
+
+`superstate_mcp` (Condition B, the arm that produced the 76%) is a different thing. The
+**harness** drives the loop; the agent only takes turns. It never had the pathology the ADR
+describes. Removing the `state_*` tools wholesale took away the capability the winning arm
+depends on, in order to fix a problem that arm did not have.
+
+The axis that matters is **who drives the loop**, not which transport is used.
+
+### Measurements
+
+Driver `agy` / Gemini 3.8 Flash High throughout, prompt contracts off, no infrastructure
+failures.
+
+| Comparison | `superstate_mcp` | `superstate_daemon` |
+|---|---|---|
+| 20 TerminalBench tasks, 2 repeats (40 runs/arm) | **67.5%** | 60.0% |
+| 3 tasks with real verification commands, 5 repeats | **15/15** | 10/15 |
+| cost per run | **$0.20** | $0.42 |
+
+Three independent measurements, all in the same direction: the daemon is equal or worse at
+roughly double the cost. `superstate_mcp` is also the only arm that beats `vanilla`
+significantly (67.5% vs 45.0%, p=0.037) while matching its cost and running faster.
+
+The daemon's deficit is concentrated rather than uniform -- it matches `superstate_mcp` on
+most tasks and fails badly on a few. It is gate-driven, so it must satisfy its verification
+command to complete, whereas `superstate_mcp` checks the gate after the agent concludes and
+moves on within a turn budget. That makes the daemon far more sensitive to the quality of
+the verification command it is handed.
+
+### Decision
+
+1. **Do not deprecate `superstate_mcp`.** Restore the `state_*` tools for orchestrator use.
+   Gate them by **caller**: available to a harness or orchestrator driving the loop, closed
+   to an agent running them inside its own chat session.
+2. **Deprecate `superstate_agent_mcp`.** The ADR's original reasoning applies here and the
+   benchmark supports it (64% against Condition B's 76%).
+3. **Keep the daemon as a deployment mode**, not the sole execution path. It is the right
+   shape for genuine fire-and-forget handoff, and its cost premium may be acceptable when
+   nobody is waiting. It should not be the only way to run Superstate.
+
+### What is not established
+
+* Why the daemon fails the small number of tasks it fails. It is not the stopping rule: a
+  run with advisory gating enabled never triggered the advisory branch, and the tasks that
+  passed did so by satisfying their verification command after several retries. The 0/5 that
+  prompted that investigation was run-to-run variance, not a mechanism.
+* Whether the daemon's cost premium narrows with better verification commands. It persisted
+  across both gated and ungated conditions, but the gated sample is only three tasks.
