@@ -213,3 +213,64 @@ This mechanism is consistent with the data but not yet established causally.
   weight comes from being the third independent run in the same direction (19/30, 16/30,
   14/20), not from any single sample.
 
+
+---
+
+## Addendum 2: The Daemon Does Not Replace `superstate_mcp` (2026-09-16)
+
+This ADR deprecates the in-loop state tools in favour of the detached daemon. The evidence
+now says that swaps out the best-performing arm for a worse one.
+
+### The distinction the original decision missed
+
+The critique in section 1 -- the chat trap, the self-supervision paradox, tool dithering --
+is about **an agent driving its own state loop**. That is `superstate_agent_mcp`
+(Condition A, 64%), and the reasoning holds: it should be deprecated.
+
+`superstate_mcp` (Condition B, the arm that produced the 76%) is a different thing. The
+**harness** drives the loop; the agent only takes turns. It never had the pathology the ADR
+describes. Removing the `state_*` tools wholesale took away the capability the winning arm
+depends on, in order to fix a problem that arm did not have.
+
+The axis that matters is **who drives the loop**, not which transport is used.
+
+### Measurements
+
+Driver `agy` / Gemini 3.8 Flash High throughout, prompt contracts off, no infrastructure
+failures.
+
+| Comparison | `superstate_mcp` | `superstate_daemon` |
+|---|---|---|
+| 20 TerminalBench tasks, 2 repeats (40 runs/arm) | **67.5%** | 60.0% |
+| 3 tasks with real verification commands, 5 repeats | **15/15** | 10/15 |
+| cost per run | **$0.20** | $0.42 |
+
+Three independent measurements, all in the same direction: the daemon is equal or worse at
+roughly double the cost. `superstate_mcp` is also the only arm that beats `vanilla`
+significantly (67.5% vs 45.0%, p=0.037) while matching its cost and running faster.
+
+The daemon's deficit is concentrated rather than uniform -- it matches `superstate_mcp` on
+most tasks and fails badly on a few. It is gate-driven, so it must satisfy its verification
+command to complete, whereas `superstate_mcp` checks the gate after the agent concludes and
+moves on within a turn budget. That makes the daemon far more sensitive to the quality of
+the verification command it is handed.
+
+### Decision
+
+1. **Do not deprecate `superstate_mcp`.** Restore the `state_*` tools for orchestrator use.
+   Gate them by **caller**: available to a harness or orchestrator driving the loop, closed
+   to an agent running them inside its own chat session.
+2. **Deprecate `superstate_agent_mcp`.** The ADR's original reasoning applies here and the
+   benchmark supports it (64% against Condition B's 76%).
+3. **Keep the daemon as a deployment mode**, not the sole execution path. It is the right
+   shape for genuine fire-and-forget handoff, and its cost premium may be acceptable when
+   nobody is waiting. It should not be the only way to run Superstate.
+
+### What is not established
+
+* Why the daemon fails the small number of tasks it fails. It is not the stopping rule: a
+  run with advisory gating enabled never triggered the advisory branch, and the tasks that
+  passed did so by satisfying their verification command after several retries. The 0/5 that
+  prompted that investigation was run-to-run variance, not a mechanism.
+* Whether the daemon's cost premium narrows with better verification commands. It persisted
+  across both gated and ungated conditions, but the gated sample is only three tasks.
