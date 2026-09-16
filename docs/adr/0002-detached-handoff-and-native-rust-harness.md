@@ -216,7 +216,7 @@ This mechanism is consistent with the data but not yet established causally.
 
 ---
 
-## Addendum 2: The Daemon Does Not Replace `superstate_mcp` (2026-09-16)
+## Addendum 2: The Daemon Does Not Replace `superstate_mcp` (2026-09-16) — SUPERSEDED, see Addendum 3
 
 This ADR deprecates the in-loop state tools in favour of the detached daemon. The evidence
 now says that swaps out the best-performing arm for a worse one.
@@ -274,3 +274,56 @@ the verification command it is handed.
   prompted that investigation was run-to-run variance, not a mechanism.
 * Whether the daemon's cost premium narrows with better verification commands. It persisted
   across both gated and ungated conditions, but the gated sample is only three tasks.
+
+
+---
+
+## Addendum 3: Addendum 2 Was Measuring a Harness Bug (2026-09-16)
+
+Addendum 2 concluded that `superstate_daemon` is equal or worse than `superstate_mcp` at
+roughly double the cost. **That conclusion is withdrawn.** The deficit it measured was a
+defect in the evaluation harness, not in the architecture.
+
+### The bug
+
+`agy` truncates any turn longer than its own `--print-timeout`, which defaults to 5 minutes.
+`AgyCliDriver` sets it from the granted budget for every arm it drives, with a source comment
+stating the consequence plainly: *"every turn longer than that is truncated by the CLI
+regardless of the budget the harness granted, and the arm is scored as having failed."*
+
+The daemon spawns its own worker through a wrapper and never set it. Every daemon turn was
+capped at 5 minutes no matter what budget the task was granted.
+
+### What that did to the numbers
+
+The failure was entirely length-dependent, which is why it looked like a task-specific
+weakness rather than a harness fault:
+
+| Task | Typical length | Before | After |
+|---|---|---|---|
+| `openssl-selfsigned-cert` | ~2 min | 5/5 | 5/5 |
+| `db-wal-recovery` | ~2.5 min | 5/5 | 5/5 |
+| `build-cython-ext` | 30-45 min | **0/5** | **5/5** |
+
+With the fix the daemon scores **15/15** on the gated set against `superstate_mcp`'s 15/15,
+at **$0.34/run against $0.48**. It also completes `build-cython-ext` in 11.6 minutes rather
+than the 32-42 it previously spent re-attempting work that kept being truncated.
+
+### Consequences
+
+* Addendum 2's cost and accuracy comparison is void. So is the 60% figure for the daemon in
+  the 20-task run, and every other daemon measurement taken before this fix.
+* The daemon needs re-measuring across the full task set before any claim is made about it.
+* **The rest of Addendum 2 stands**, because it never depended on the daemon's scores: the
+  ADR's critique applies to an agent driving its own state loop (`superstate_agent_mcp`,
+  64%), not to `superstate_mcp`, which is harness-driven and scored 76%. Removing the
+  `state_*` tools wholesale still took away the winning arm's capability to fix a problem it
+  did not have, and they should be gated by caller rather than deleted.
+
+### Note on method
+
+This was the fourth thing the daemon's wrapper dropped relative to `AgyCliDriver`, after
+model pinning, usage telemetry and the container execution guidance. Each produced a
+plausible-looking architectural finding that dissolved on inspection. Any arm that bypasses
+the shared driver needs its invocation diffed against that driver before its numbers are
+trusted -- the failures are silent and they all look like weaknesses of the thing under test.
