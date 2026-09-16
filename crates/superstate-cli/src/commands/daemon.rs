@@ -229,6 +229,12 @@ pub fn cmd_daemon(
             driver_cmd: driver.map(ToString::to_string),
             max_retries,
             timeout_secs,
+            // Experimental: advance on a still-failing verification command rather than
+            // blocking, mirroring superstate_mcp's turn-bounded loop. Opt-in, because it
+            // trades away the guarantee that completion means verified.
+            advisory_gate: std::env::var("SUPERSTATE_GATE_MODE")
+                .map(|v| v.trim().eq_ignore_ascii_case("advisory"))
+                .unwrap_or(false),
         };
 
         let mut runner = DaemonRunner::new(config)

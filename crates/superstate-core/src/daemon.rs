@@ -140,6 +140,11 @@ pub struct DaemonConfig {
     pub driver_cmd: Option<String>,
     pub max_retries: usize,
     pub timeout_secs: u64,
+    /// Treat a failing verification command as advisory once the retry budget is spent:
+    /// advance anyway and leave the verdict to whatever grades the work, as
+    /// `superstate_mcp` does. Default false -- completion should mean verified.
+    #[serde(default)]
+    pub advisory_gate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -712,6 +717,46 @@ impl DaemonRunner {
 
             let stalled = *retries >= self.config.max_retries;
             let exhausted = attempts_spent >= self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+            if (stalled || exhausted) && self.config.advisory_gate {
+                // Advisory: the verification command failed and the budget is spent, but the
+                // work is submitted anyway, as superstate_mcp does. The sealed grader, not
+                // the daemon, decides whether it was good enough.
+                state.notes.push(LedgerEntry::new(
+                    "superstate-daemon",
+                    format!(
+                        "[advisory-gate] Task {} advancing with its verification command still \
+                         failing after {} attempts; completion here does NOT mean verified",
+                        active_task.id, attempts_spent
+                    ),
+                ));
+                self.retry_counts.remove(&active_task.id);
+                self.last_failure_output.remove(&active_task.id);
+
+                if let Some(ref mut advancer) = self.step_advancer {
+                    save_state_atomic(&self.config.state_path, &state)?;
+                    advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
+                    let updated_state = load_state(&self.config.state_path)?;
+                    let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
+                    if updated_state.status == ExecutionStatus::Completed {
+                        finalize_completed_execution(&self.config.state_path, &updated_state)?;
+                    }
+                    return Ok(DaemonStepOutcome::Advanced {
+                        completed_task_id: active_task.id,
+                        next_task_id,
+                    });
+                }
+                advance_step(&mut state)?;
+                save_state_atomic(&self.config.state_path, &state)?;
+                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                if state.status == ExecutionStatus::Completed {
+                    finalize_completed_execution(&self.config.state_path, &state)?;
+                }
+                return Ok(DaemonStepOutcome::Advanced {
+                    completed_task_id: active_task.id,
+                    next_task_id,
+                });
+            }
+
             if stalled || exhausted {
                 state.status = ExecutionStatus::Blocked;
                 save_state_atomic(&self.config.state_path, &state)?;
