@@ -13,12 +13,12 @@ fn test_daemon_run_step_success() {
     let milestones = vec![
         MilestoneSpec {
             title: "Milestone 1".to_string(),
-            verify_cmd: "true".to_string(),
+            verify_cmd: "test -f worker-ran.txt".to_string(),
             files: vec![PathBuf::from("file1.txt")],
         },
         MilestoneSpec {
             title: "Milestone 2".to_string(),
-            verify_cmd: "true".to_string(),
+            verify_cmd: "test -f worker-ran.txt".to_string(),
             files: vec![PathBuf::from("file2.txt")],
         },
     ];
@@ -28,9 +28,10 @@ fn test_daemon_run_step_success() {
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
-        driver_cmd: Some("echo 'worker output'".to_string()),
+        driver_cmd: Some("touch worker-ran.txt".to_string()),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -64,6 +65,7 @@ fn test_daemon_run_step_verification_failure() {
         driver_cmd: Some("echo 'worker trying'".to_string()),
         max_retries: 2,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -104,6 +106,7 @@ fn test_daemon_run_to_completion() {
         driver_cmd: Some("echo 'worker completed'".to_string()),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -140,6 +143,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
         driver_cmd: Some("echo 'worker completed'".to_string()),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -175,7 +179,7 @@ fn test_daemon_step_advancer_invoked() {
 
     let milestones = vec![MilestoneSpec {
         title: "Advancer Milestone".to_string(),
-        verify_cmd: "true".to_string(),
+        verify_cmd: "test -f worker-ran.txt".to_string(),
         files: vec![],
     }];
 
@@ -184,9 +188,10 @@ fn test_daemon_step_advancer_invoked() {
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
-        driver_cmd: Some("echo 'worker output'".to_string()),
+        driver_cmd: Some("touch worker-ran.txt".to_string()),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     use std::sync::{Arc, Mutex};
@@ -217,7 +222,7 @@ fn test_daemon_step_advancer_error_propagation() {
 
     let milestones = vec![MilestoneSpec {
         title: "Advancer Failure Milestone".to_string(),
-        verify_cmd: "true".to_string(),
+        verify_cmd: "test -f worker-ran.txt".to_string(),
         files: vec![],
     }];
 
@@ -227,9 +232,10 @@ fn test_daemon_step_advancer_error_propagation() {
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
-        driver_cmd: Some("echo 'worker output'".to_string()),
+        driver_cmd: Some("touch worker-ran.txt".to_string()),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     // Configure a StepAdvancer that simulates downstream failure during advancement
@@ -277,6 +283,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
         driver_cmd: Some(driver_cmd),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -334,6 +341,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
         driver_cmd: Some(driver_cmd),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -379,6 +387,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
         driver_cmd: Some(driver_cmd),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -465,6 +474,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
         driver_cmd: Some("echo 'done' > feature.txt".to_string()),
         max_retries: 3,
         timeout_secs: 10,
+        advisory_gate: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -518,6 +528,7 @@ fn test_progress_renews_the_retry_budget() {
         driver_cmd: Some("date +%s%N > progress-$$.txt".to_string()),
         max_retries: 2,
         timeout_secs: 10,
+        advisory_gate: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -557,6 +568,7 @@ fn test_stalled_worker_still_blocks() {
         driver_cmd: Some("true".to_string()),
         max_retries: 2,
         timeout_secs: 10,
+        advisory_gate: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -608,6 +620,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
         driver_cmd: Some("date +%s%N > vendored/edit-$$.txt".to_string()),
         max_retries: 2,
         timeout_secs: 10,
+        advisory_gate: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -649,6 +662,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
         driver_cmd: Some("true".to_string()),
         max_retries: 2,
         timeout_secs: 10,
+        advisory_gate: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -662,5 +676,191 @@ fn test_daemon_own_state_writes_are_not_progress() {
             DaemonStepOutcome::Blocked { .. }
         ),
         "daemon-authored state must not renew the retry budget"
+    );
+}
+
+/// A gate that cannot fail must not end the run after one turn.
+///
+/// Regression: with the harness supplying `verify_cmd = "true"` (every task whose real
+/// verifier is sealed), the daemon ran one driver turn, saw an unconditional pass, recorded
+/// completion and exited. It scored 50% against superstate_mcp's 70% on an identical
+/// 20-task set while running FASTER than the unassisted baseline -- not working harder,
+/// just exiting on a gate that could not say no. superstate_mcp's iteration is turn-driven
+/// and degrades gracefully; the daemon's was gate-driven and did not.
+#[test]
+fn test_ungated_task_keeps_driving_past_the_first_pass() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Ungated".to_string(),
+        verify_cmd: "true".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("date +%s%N > turn-$$.txt".to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+        advisory_gate: false,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+
+    // The first two turns must NOT complete, despite `true` passing every time.
+    for turn in 1..=2 {
+        let outcome = runner.run_step().unwrap();
+        assert!(
+            matches!(outcome, DaemonStepOutcome::Failed { .. }),
+            "turn {turn}: an unconditional pass must not be accepted as completion, got {outcome:?}"
+        );
+    }
+    // The third satisfies the floor and is allowed to advance.
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Advanced { .. }
+        ),
+        "the turn floor should be satisfied by the third turn"
+    );
+}
+
+/// A real contract still completes the moment it passes -- the floor must not prolong it.
+#[test]
+fn test_real_gate_completes_immediately() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let state_path = repo.join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Gated".to_string(),
+        verify_cmd: "test -f produced.txt".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("touch produced.txt".to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+        advisory_gate: false,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Advanced { .. }
+        ),
+        "a falsifiable gate that passes must complete on the first turn"
+    );
+}
+
+/// The ungated turn floor must terminate when there is no driver to advance it.
+///
+/// Regression: the floor returned Failed before the retry accounting ran, so with
+/// `driver_cmd: None` the turn counter never incremented, the floor was never reached, and
+/// run_to_completion looped forever. It hung test_cli_daemon_lifecycle.
+#[test]
+fn test_ungated_floor_terminates_without_a_driver() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join(".agent-state/state.json");
+    let milestones = vec![MilestoneSpec {
+        title: "Ungated, no driver".to_string(),
+        verify_cmd: "true".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: None,
+        max_retries: 1,
+        timeout_secs: 5,
+        advisory_gate: false,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+    assert!(
+        matches!(
+            runner.run_step().unwrap(),
+            DaemonStepOutcome::Advanced { .. }
+        ),
+        "with no driver the floor cannot apply, so the task must advance"
+    );
+}
+
+/// Advisory gate mode mirrors superstate_mcp: bounded by turns, not by gate satisfaction.
+///
+/// superstate_mcp runs the agent, checks the gate afterwards, feeds a failure back while
+/// turns remain, then moves on regardless -- and it is the highest-scoring arm on the
+/// benchmark. The daemon instead refuses to complete until its gate passes, and on gated
+/// tasks scored 0/4 at 42 min and $1.77 a run while satisfying that gate. This mode tests
+/// whether the difference is the stopping rule rather than the execution model.
+///
+/// Carried on DaemonConfig rather than an env var: the first draft used one, and because
+/// Rust runs tests in parallel threads of a single process it leaked into a sibling test.
+#[test]
+fn test_advisory_gate_advances_despite_a_failing_gate() {
+    fn run(advisory: bool) -> bool {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let state_path = repo.join(".agent-state/state.json");
+        let state = init_state_milestones(
+            Some("Goal"),
+            vec![MilestoneSpec {
+                title: "Never satisfiable".to_string(),
+                verify_cmd: "false".to_string(),
+                files: vec![],
+            }],
+            None,
+            true,
+        )
+        .unwrap();
+        save_state_atomic(&state_path, &state).unwrap();
+        let mut runner = DaemonRunner::new(DaemonConfig {
+            state_path: state_path.clone(),
+            driver_cmd: Some("true".to_string()),
+            max_retries: 1,
+            timeout_secs: 5,
+            advisory_gate: advisory,
+        })
+        .unwrap();
+        for _ in 0..4 {
+            match runner.run_step().unwrap() {
+                DaemonStepOutcome::Advanced { .. } => return true,
+                DaemonStepOutcome::Blocked { .. } => return false,
+                DaemonStepOutcome::Failed { .. } => continue,
+            }
+        }
+        false
+    }
+
+    assert!(
+        !run(false),
+        "strict mode must refuse to complete work that failed its gate"
+    );
+    assert!(
+        run(true),
+        "advisory mode must advance despite the gate still failing"
     );
 }
