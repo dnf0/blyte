@@ -1,83 +1,47 @@
-# Task 3 Brief: Daemon Advisory Review Loop in `crates/superstate-core`
+# Task 3 Brief: CLI Flag `--review-blocking` in `crates/superstate-cli`
 
-- **Repository Directory**: `/Users/danielfisher/repos/superstate`
-- **Current Branch**: `feat/advisory-code-review`
-- **Depends on:** Task 1, Task 2
+## Context
+Working directory: `/Users/danielfisher/repos/superstate`
+Branch: `feat/blocking-code-review`
+Plan: `docs/superpowers/plans/2026-09-17-advisory-review-diff-and-blocking.md`
 
-## Goal
-Wire advisory code review into the background daemon loop in `crates/superstate-core/src/daemon.rs` and expose `--advisory-review` in `superstate daemon`.
-When a milestone gate passes:
-- If `--advisory-review` is enabled, extract the git diff for the milestone and run `superstate_review::execute_review`.
-- If blocking issues (`Critical` or `High`) are detected:
-  - Record an advisory ledger note:
-    `[review-advisory] Task <id>: <summary>. Finding: <problem> (<suggested_fix>)`
-  - If the verification gate was vacuous (`is_vacuous_gate(verify_cmd)`):
-    Hold the task open for another driver turn (up to `UNGATED_MIN_DRIVER_TURNS` or attempt ceiling) by returning `DaemonStepOutcome::Failed { task_id, reason: "advisory-review: blocking issues detected on vacuous gate", retries_remaining }` so the driver receives the critique in `state prompt` and can fix the issue rather than accepting an uncertified completion.
-  - If the verification gate was non-vacuous (a strict verifier):
-    Record the advisory note to the ledger for downstream diagnostic context, but allow the milestone to complete (avoiding the 60.5% benchmark false-alarm trap).
+## What to Implement
 
-## Files to Touch
-- Modify: `crates/superstate-core/Cargo.toml` (add `superstate-review = { path = "../superstate-review" }`)
-- Modify: `crates/superstate-core/src/daemon.rs`
-- Modify: `crates/superstate-cli/src/state_cli.rs`
-- Create: `crates/superstate-core/tests/test_daemon_advisory_review.rs`
-
-## Detailed Requirements & Interfaces
-1. In `crates/superstate-core/Cargo.toml`:
-   Add dependency:
-   ```toml
-   superstate-review = { path = "../superstate-review" }
+1. **CLI Flag `--review-blocking` for Daemon**:
+   In `crates/superstate-cli/src/main.rs`:
+   Add `--review-blocking` argument to `StateCommands::Daemon`:
+   ```rust
+   #[arg(long, help = "Treat Critical and High severity review findings as blocking failures requiring retry")]
+   review_blocking: bool,
    ```
-2. In `crates/superstate-core/src/daemon.rs`:
-   - In `DaemonConfig`:
-     Add field: `pub advisory_review: bool`.
-     In `Default for DaemonConfig`, default `advisory_review: false`.
-   - In `DaemonRunner::step`:
-     After:
-     ```rust
-     let gate_res = run_verification_cmd(verify_cmd, &working_dir, self.config.timeout_secs)?;
-     ```
-     Around lines 606 (where `if gate_res.passed` is handled):
-     If `gate_res.passed && self.config.advisory_review && working_dir.join(".git").exists()`:
-     - Compute the git diff of changes made for this milestone (e.g. `superstate_review::get_git_diff(&working_dir, None)`).
-     - Run `superstate_review::execute_review(&working_dir, &diff, None, &ReviewConfig { driver: self.config.driver_cmd.clone(), timeout_secs: self.config.timeout_secs })`.
-     - If the review succeeds and `report.has_blocking_issues`:
-       - Construct advisory note:
-         ```rust
-         let first_finding = report.findings.first().map(|f| format!("{}: {}", f.file.display(), f.problem)).unwrap_or_else(|| report.summary.clone());
-         let note = format!("[review-advisory] Task {}: {}. Problem: {}", active_task.id, report.summary, first_finding);
-         state.notes.push(LedgerEntry::new("superstate-daemon", note));
-         save_state_atomic(&self.config.state_path, &state)?;
-         ```
-       - If `is_vacuous_gate(verify_cmd)` and `self.config.driver_cmd.is_some()`:
-         - Check attempt ceiling and turn floor:
-           Hold task open:
-           ```rust
-           return Ok(DaemonStepOutcome::Failed {
-               task_id: active_task.id,
-               reason: "advisory-review: blocking issues detected on vacuous gate".to_string(),
-               retries_remaining: self.config.max_retries.saturating_sub(attempts_so_far),
-           });
-           ```
-3. In `crates/superstate-cli/src/state_cli.rs`:
-   - In `DaemonArgs`:
-     Add flag:
-     ```rust
-     /// Run advisory adversarial code review on milestone completion
-     #[arg(long)]
-     pub advisory_review: bool,
-     ```
-   - In daemon runner construction (`dispatch_daemon` / `DaemonConfig` initialization):
-     Pass `advisory_review: args.advisory_review`.
+   Pass `review_blocking` to `cmd_daemon` in `crates/superstate-cli/src/commands/daemon.rs`.
+   In `cmd_daemon`, assign `review_blocking: args.review_blocking` into `DaemonConfig`.
 
-4. Tests (`crates/superstate-core/tests/test_daemon_advisory_review.rs`):
-   - Test daemon step with `advisory_review: true` on clean diff (proceeds without failure).
-   - Test daemon step with `advisory_review: true` with a mock driver reporting blocking issues on a vacuous gate (`verify_cmd: "true"`), confirming the advisory note is appended to `state.notes` and the step returns `DaemonStepOutcome::Failed`.
-   - Test daemon step with `advisory_review: true` with a mock driver reporting blocking issues on a non-vacuous gate (`verify_cmd: "exit 0"` or custom command), confirming the note is recorded and milestone completes.
+2. **Update `cmd_review` in `crates/superstate-cli/src/commands/review.rs`**:
+   Replace the old diff extraction logic with `superstate_review::diff::get_milestone_diff`:
+   ```rust
+   let diff = match args.commit_range.as_deref() {
+       Some(range) => get_git_diff(&args.repo, Some(range))
+           .map_err(|e| format!("Failed to get git diff: {}", e))?,
+       None => {
+           get_milestone_diff(&args.repo, None)
+               .map_err(|e| format!("Failed to get git diff: {}", e))?
+       }
+   };
+   ```
+   This ensures `superstate review` without arguments automatically reviews the last commit (`HEAD~1..HEAD`) if working tree is clean, or working tree + untracked files if dirty!
+
+3. **Install and Verify**:
+   - Write integration tests in `crates/superstate-cli/tests/test_cli_blocking_review.rs` verifying `--review-blocking` flag is parsed and passed into daemon runner.
+   - Run `cargo test -p superstate-cli`.
+   - Install binary: `cargo install --path crates/superstate-cli --locked --force`.
+   - Verify `superstate state daemon --help` outputs `--review-blocking`.
 
 ## TDD Instructions
-- Step 1: Write failing tests in `crates/superstate-core/tests/test_daemon_advisory_review.rs`.
-- Step 2: Run `cargo test -p superstate-core --test test_daemon_advisory_review` (verify FAIL).
-- Step 3: Implement `advisory_review` in `Cargo.toml`, `daemon.rs`, and `state_cli.rs`.
-- Step 4: Run `cargo test --all` (verify PASS).
-- Step 5: Commit changes with message `feat(daemon): wire advisory review into milestone gate evaluation`.
+1. Write failing integration tests in `crates/superstate-cli/tests/test_cli_blocking_review.rs`.
+2. Run `cargo test -p superstate-cli --test test_cli_blocking_review` and verify RED failure.
+3. Implement in `crates/superstate-cli/src/main.rs`, `crates/superstate-cli/src/commands/daemon.rs`, and `crates/superstate-cli/src/commands/review.rs`.
+4. Run `cargo test -p superstate-cli` and verify all tests pass GREEN.
+5. Reinstall CLI binary (`cargo install --path crates/superstate-cli --locked --force`).
+6. Commit with conventional commit message `feat(cli): wire --review-blocking CLI flag and milestone diff in review` (skip GPG with `--no-gpg-sign`).
+7. Write full report to `docs/superpowers/plans/task-3-report.md`.

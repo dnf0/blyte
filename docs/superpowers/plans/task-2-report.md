@@ -1,83 +1,98 @@
-# Task 2 Report: CLI Command `superstate review` in `crates/superstate-cli`
+# Task 2 Report: Milestone Base Commit Tracking & `--review-blocking` in `crates/superstate-core`
 
-## Summary
-Successfully implemented Task 2 of the advisory code review system. Replaced the stub `ReviewReport::clean(...)` in `crates/superstate-cli/src/commands/review.rs` and wired `Commands::Review` in `crates/superstate-cli/src/main.rs` with driver execution, working tree / commit-range diff detection, JSON output, epistemic ledger recording, and fail-on-blocking support.
+**Status:** Completed  
+**Commit SHA:** `8ffd98c`  
+**Branch:** `feat/blocking-code-review`  
+**Repository:** `/Users/danielfisher/repos/superstate`  
+**Date:** 2026-09-17  
 
-## Changes Made
-1. **`crates/superstate-cli/src/main.rs`**:
-   - Updated `Commands::Review` clap enum variant with all required flags:
-     - Positional `commit_range: Option<String>`
-     - `--repo <PathBuf>` (default: `"."`)
-     - `--driver <String>` (custom reviewer driver command)
-     - `--state-path <PathBuf>` (explicit path to `.agent-state/state.json`)
-     - `--record` (record advisory findings to epistemic ledger)
-     - `--json` (format output as JSON `ReviewReport`)
-     - `--fail-on-blocking` (exit with code 1 if blocking issues exist)
-   - Updated `main()` command match to construct `ReviewArgs` and dispatch to `commands::review::cmd_review`.
+---
 
-2. **`crates/superstate-cli/src/commands/review.rs`**:
-   - Defined `pub struct ReviewArgs`.
-   - Implemented `pub fn cmd_review(args: ReviewArgs) -> Result<(), String>`.
-   - Git Diff extraction:
-     - When `commit_range` is provided, executes `get_git_diff(&args.repo, Some(range))`.
-     - When `commit_range` is omitted, checks `get_git_diff(&args.repo, Some("HEAD"))` to capture both staged and unstaged working tree diffs relative to HEAD, falling back to `get_git_diff(&args.repo, None)` if HEAD is not yet present.
-   - Handled empty diffs:
-     - If `--json`, outputs JSON serialized `ReviewReport::clean("No changes detected in diff.")`.
-     - Else outputs `"No changes detected in diff. Review clean."`.
-   - Configured and executed `execute_review(&args.repo, &diff, None, &config)` with 120s default timeout and driver override.
-   - Implemented `--record`:
-     - Resolves state file path using `resolve_state_path` against `args.state_path` or default `.agent-state/state.json`.
-     - Appends findings to epistemic ledger via `append_ledger_note` using author `"reviewer"` and format: `[review-advisory] {finding.file}:{range.0}-{range.1}: {finding.problem} (Fix: {finding.suggested_fix})`.
-   - Implemented output formatting:
-     - If `--json`: pretty-printed JSON.
-     - Else: human-readable report via `Display` implementation.
-   - Handled `--fail-on-blocking`: returns `Err("Review failed: blocking issues detected".to_string())` if `args.fail_on_blocking && report.has_blocking_issues`.
+## Executive Summary
 
-3. **`crates/superstate-cli/tests/test_cli_review.rs`**:
-   - Created comprehensive integration tests:
-     - `test_review_empty_diff_text_and_json`: tests text and `--json` outputs when diff is clean.
-     - `test_review_mock_driver_with_json`: tests mock driver returning structured review findings with `--json`.
-     - `test_review_record_to_ledger`: tests `--record` recording advisory notes to `.agent-state/state.json` via `read_ledger`.
-     - `test_review_fail_on_blocking`: tests `--fail-on-blocking` exiting non-zero when blocking issues exist, and succeeding without the flag.
-     - `test_review_explicit_commit_range`: tests commit range arguments (e.g. `HEAD~1..HEAD`).
-     - `test_review_explicit_state_path`: tests `--state-path` explicit override with `--record`.
+Task 2 implemented milestone base commit tracking and blocking review enforcement in `crates/superstate-core` as specified in `docs/superpowers/plans/task-2-brief.md` and `docs/superpowers/plans/2026-09-17-advisory-review-diff-and-blocking.md`.
 
-## TDD Verification
+The implementation addresses the core requirements for autonomous milestone quality gates:
+1. **`review_blocking` Flag in `DaemonConfig`**: Added `pub review_blocking: bool` with `#[serde(default)]` defaulting to `false`.
+2. **Milestone Base Commit Tracking in `DaemonRunner`**: Added `milestone_start_commits: HashMap<String, String>` to `DaemonRunner` with public getter `milestone_start_commits(&self)`. When a milestone is entered before driver execution, `git rev-parse HEAD` is recorded if inside a git repository. The start commit persists across failed retry attempts to accumulate the full milestone diff, and is cleanly pruned upon milestone completion or advisory gate advancement.
+3. **Milestone Diff Extraction**: The daemon now uses `superstate_review::diff::get_milestone_diff(&working_dir, start_commit)` when reviewing milestone changes, correctly encompassing both committed milestone commits and working tree modifications.
+4. **Blocking Enforcement**: When `(self.config.advisory_review || self.config.review_blocking)` is enabled, the daemon runs the review engine. If `report.has_blocking_issues` is detected:
+   - When `self.config.review_blocking` is true (or when on a vacuous gate), the daemon rejects milestone advancement, increments the attempt count, and returns `DaemonStepOutcome::Failed` with reason `"code-review: {} blocking issue(s) detected"`.
+   - When only `advisory_review` is enabled without `review_blocking` and the verification gate is non-vacuous, the findings are recorded to the epistemic ledger (`state.notes`) while allowing milestone completion.
+   - When review findings are clean or non-blocking, the milestone advances normally.
 
-### RED Phase
-Executed `cargo test -p superstate --test test_cli_review`:
+---
+
+## TDD Execution
+
+### 1. Red Phase
+Created `crates/superstate-core/tests/test_daemon_blocking_review.rs` with 5 targeted integration tests:
+- `test_daemon_config_default_review_blocking_false`: Confirms default configuration has `review_blocking: false`.
+- `test_daemon_blocking_review_fails_on_blocking_issues`: Verifies that with `review_blocking: true` on a passing non-vacuous gate, critical/high findings cause `DaemonStepOutcome::Failed` with `"code-review: 1 blocking issue(s) detected"`.
+- `test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate`: Verifies that with `advisory_review: true` and `review_blocking: false`, blocking issues are recorded in notes but milestone advances.
+- `test_daemon_blocking_review_clean_report_advances`: Verifies that with `review_blocking: true`, clean review findings allow normal milestone advancement.
+- `test_daemon_tracks_milestone_start_commit_across_retries`: Verifies that `DaemonRunner` maintains the initial base commit across retries and removes it once the milestone completes.
+
+Ran test suite to capture RED failure:
 ```text
-failures:
-    test_review_empty_diff_text_and_json
-    test_review_fail_on_blocking
-    test_review_mock_driver_with_json
-    test_review_record_to_ledger
-
-test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
-```
-All tests failed as expected due to missing CLI flags and stub logic.
-
-### GREEN Phase
-Executed `cargo test -p superstate --test test_cli_review`:
-```text
-running 6 tests
-test test_review_empty_diff_text_and_json ... ok
-test test_review_mock_driver_with_json ... ok
-test test_review_explicit_commit_range ... ok
-test test_review_record_to_ledger ... ok
-test test_review_explicit_state_path ... ok
-test test_review_fail_on_blocking ... ok
-
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+$ cargo test -p superstate-core --test test_daemon_blocking_review
+error[E0560]: struct `DaemonConfig` has no field named `review_blocking`
+error[E0599]: no method named `milestone_start_commits` found for struct `DaemonRunner`
 ```
 
-### Full Workspace & Quality Checks
-- `cargo test --workspace`: All workspace tests passing across `superstate-core`, `superstate-review`, `superstate-rules`, `superstate-syntax`, `superstate-worktree`, `superstate-mcp`, and `superstate` (0 failures).
-- `cargo clippy -p superstate`: Clean (0 warnings).
-- `cargo fmt --check`: Clean (0 formatting diffs).
+### 2. Green Phase
+- Implemented `review_blocking` in `DaemonConfig` in `crates/superstate-core/src/daemon.rs`.
+- Added `milestone_start_commits` tracking and getter in `DaemonRunner`.
+- Integrated `superstate_review::diff::get_milestone_diff` and blocking evaluation in `DaemonRunner::step`.
+- Updated existing test fixtures across `superstate-core` tests (`test_daemon_advisory_review.rs`, `test_daemon_automerge.rs`, `test_daemon_runner.rs`, `test_driver_presets.rs`) and CLI (`superstate-cli/src/commands/daemon.rs`) to include `review_blocking: false`.
 
-## Commits Created
-- `d9de3a3`: `feat(cli): wire superstate review with driver execution, --json and --record`
+Ran `cargo test -p superstate-core --test test_daemon_blocking_review`:
+```text
+running 5 tests
+test test_daemon_config_default_review_blocking_false ... ok
+test test_daemon_blocking_review_clean_report_advances ... ok
+test test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate ... ok
+test test_daemon_blocking_review_fails_on_blocking_issues ... ok
+test test_daemon_tracks_milestone_start_commit_across_retries ... ok
 
-## Next Steps
-Task 2 is complete. Proceed to subsequent tasks in the plan or integration with workflow drivers.
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+```
+
+Ran full crate test suite `cargo test -p superstate-core`:
+```text
+test result: ok. 43 passed (unit); 19 passed (runner); 7 passed (advisory); 5 passed (blocking); 5 passed (automerge); all passed.
+```
+
+Ran entire workspace test suite `cargo test --all`:
+- `superstate_review`: 16 unit tests + 24 integration tests passed.
+- `superstate_core`: 43 unit tests + 77 integration tests passed.
+- `superstate_cli`: 74 unit tests + 90 integration tests passed.
+- All workspace crates compile and pass tests cleanly with 0 failures.
+
+---
+
+## File Changes Summary
+
+| File | Status | Description |
+|---|---|---|
+| `crates/superstate-core/src/daemon.rs` | Modified | Added `review_blocking` to `DaemonConfig`, `milestone_start_commits` tracking to `DaemonRunner`, integrated `get_milestone_diff`, and implemented blocking review logic |
+| `crates/superstate-core/tests/test_daemon_blocking_review.rs` | Created | Added 5 integration tests for `review_blocking`, advisory bypass, clean review advance, and commit tracking |
+| `crates/superstate-core/tests/test_daemon_advisory_review.rs` | Modified | Updated test fixture initializers with `review_blocking: false` |
+| `crates/superstate-core/tests/test_daemon_automerge.rs` | Modified | Updated test fixture initializers with `review_blocking: false` |
+| `crates/superstate-core/tests/test_daemon_runner.rs` | Modified | Updated test fixture initializers with `review_blocking: false` |
+| `crates/superstate-core/tests/test_driver_presets.rs` | Modified | Updated test fixture initializers with `review_blocking: false` |
+| `crates/superstate-cli/src/commands/daemon.rs` | Modified | Initialized `review_blocking: false` in `DaemonConfig` |
+
+---
+
+## Commit Details
+
+- **Commit:** `8ffd98c`
+- **Message:** `feat(daemon): track milestone start commit and support review_blocking`
+
+---
+
+## Readiness & Next Steps
+
+Task 2 is complete and verified. The foundation is ready for:
+- **Task 3: CLI Wire-up (`superstate review` & `superstate daemon --review-blocking`)**: Exposing `--review-blocking` flag in CLI daemon command, connecting CLI `superstate review` command with options (`--json`, `--record`, `--fail-on-blocking`), and adding end-to-end integration tests.

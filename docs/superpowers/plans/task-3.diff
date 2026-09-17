@@ -1,613 +1,306 @@
 diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
-index e80c8a2..419f2e0 100644
+index 425a93b..011d8c4 100644
 --- a/crates/superstate-cli/src/commands/daemon.rs
 +++ b/crates/superstate-cli/src/commands/daemon.rs
-@@ -110,6 +110,7 @@ pub fn cmd_daemon(
-     detach: bool,
+@@ -111,6 +111,7 @@ pub fn cmd_daemon(
      max_retries: usize,
      timeout_secs: u64,
-+    advisory_review: bool,
+     advisory_review: bool,
++    review_blocking: bool,
  ) -> Result<(), String> {
      let paths = daemon_paths_for_state(state_path);
  
-@@ -160,6 +161,9 @@ pub fn cmd_daemon(
+@@ -164,6 +165,9 @@ pub fn cmd_daemon(
+         if advisory_review {
+             cmd.arg("--advisory-review");
          }
-         cmd.arg("--max-retries").arg(max_retries.to_string());
-         cmd.arg("--timeout").arg(timeout_secs.to_string());
-+        if advisory_review {
-+            cmd.arg("--advisory-review");
++        if review_blocking {
++            cmd.arg("--review-blocking");
 +        }
          cmd.stdout(std::process::Stdio::from(log_out));
          cmd.stderr(std::process::Stdio::from(log_err));
          cmd.stdin(std::process::Stdio::null());
-@@ -235,6 +239,7 @@ pub fn cmd_daemon(
-             advisory_gate: std::env::var("SUPERSTATE_GATE_MODE")
+@@ -240,7 +244,7 @@ pub fn cmd_daemon(
                  .map(|v| v.trim().eq_ignore_ascii_case("advisory"))
                  .unwrap_or(false),
-+            advisory_review,
+             advisory_review,
+-            review_blocking: false,
++            review_blocking,
          };
  
          let mut runner = DaemonRunner::new(config)
 diff --git a/crates/superstate-cli/src/commands/handoff.rs b/crates/superstate-cli/src/commands/handoff.rs
-index aaf87a2..689fc7d 100644
+index 689fc7d..577a220 100644
 --- a/crates/superstate-cli/src/commands/handoff.rs
 +++ b/crates/superstate-cli/src/commands/handoff.rs
 @@ -170,7 +170,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
      // Route execution based on invocation mode: detached daemon, JSON output, or interactive text
      if args.detach {
          let driver_str = resolved_driver.as_deref().or(args.driver.as_deref());
--        cmd_daemon(&state_path, driver_str, true, 3, 300)
-+        cmd_daemon(&state_path, driver_str, true, 3, 300, false)
+-        cmd_daemon(&state_path, driver_str, true, 3, 300, false)
++        cmd_daemon(&state_path, driver_str, true, 3, 300, false, false)
      } else if args.json {
          let active_task_str = state
              .active_task
+diff --git a/crates/superstate-cli/src/commands/review.rs b/crates/superstate-cli/src/commands/review.rs
+index ff6e96b..9f1a2cb 100644
+--- a/crates/superstate-cli/src/commands/review.rs
++++ b/crates/superstate-cli/src/commands/review.rs
+@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
+ use superstate_core::ledger::append_ledger_note;
+ use superstate_core::models::LedgerEntry;
+ use superstate_core::state_machine::resolve_state_path;
+-use superstate_review::diff::get_git_diff;
++use superstate_review::diff::{get_git_diff, get_milestone_diff};
+ use superstate_review::runner::{execute_review, ReviewConfig};
+ use superstate_review::schema::{ReviewReport, Severity};
+ 
+@@ -21,19 +21,8 @@ pub fn cmd_review(args: ReviewArgs) -> Result<(), String> {
+         Some(range) => get_git_diff(&args.repo, Some(range))
+             .map_err(|e| format!("Failed to get git diff: {}", e))?,
+         None => {
+-            // If no commit range is provided, check if HEAD exists to get both staged and unstaged diff
+-            match get_git_diff(&args.repo, Some("HEAD")) {
+-                Ok(d) if !d.trim().is_empty() => d,
+-                Ok(_) => {
+-                    // HEAD exists but diff against HEAD is empty. Check unstaged diff as fallback.
+-                    get_git_diff(&args.repo, None).unwrap_or_default()
+-                }
+-                Err(_) => {
+-                    // HEAD does not exist (e.g. freshly initialized repo before first commit)
+-                    get_git_diff(&args.repo, None)
+-                        .map_err(|e| format!("Failed to get git diff: {}", e))?
+-                }
+-            }
++            get_milestone_diff(&args.repo, None)
++                .map_err(|e| format!("Failed to get git diff: {}", e))?
+         }
+     };
+ 
 diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
-index c7f2f5c..9147459 100644
+index 9147459..e265664 100644
 --- a/crates/superstate-cli/src/main.rs
 +++ b/crates/superstate-cli/src/main.rs
-@@ -142,6 +142,7 @@ fn main() {
-                 args.detach,
+@@ -143,6 +143,7 @@ fn main() {
                  args.max_retries,
                  args.timeout,
-+                args.advisory_review,
+                 args.advisory_review,
++                args.review_blocking,
              ),
          },
          Commands::Cancel(args) => {
 diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
-index a985855..902fb92 100644
+index 902fb92..53bd325 100644
 --- a/crates/superstate-cli/src/state_cli.rs
 +++ b/crates/superstate-cli/src/state_cli.rs
-@@ -304,6 +304,9 @@ pub struct DaemonArgs {
-     /// Timeout in seconds per verification attempt
-     #[arg(long, default_value_t = 300)]
-     pub timeout: u64,
-+    /// Run advisory adversarial code review on milestone completion
-+    #[arg(long)]
-+    pub advisory_review: bool,
+@@ -307,6 +307,9 @@ pub struct DaemonArgs {
+     /// Run advisory adversarial code review on milestone completion
+     #[arg(long)]
+     pub advisory_review: bool,
++    /// Treat Critical and High severity review findings as blocking failures requiring retry
++    #[arg(long, help = "Treat Critical and High severity review findings as blocking failures requiring retry")]
++    pub review_blocking: bool,
  }
  
  #[derive(clap::Args, Debug, Clone)]
-@@ -522,6 +525,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
-                 args.detach,
+@@ -526,6 +529,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                  args.max_retries,
                  args.timeout,
-+                args.advisory_review,
+                 args.advisory_review,
++                args.review_blocking,
              ),
          },
          StateCommands::Cancel(args) => {
-diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-index a2f3676..7a21f6e 100644
---- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-+++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-@@ -38,6 +38,7 @@ fn test_cli_daemon_lifecycle() {
-         true, // detach
-         3,
-         10,
-+        false,
-     )
-     .unwrap();
- 
-@@ -96,7 +97,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
-     fs::write(&legacy_pid, "99999").unwrap();
- 
-     // Run daemon to completion synchronously
--    cmd_daemon(&state_path, None, false, 1, 5).unwrap();
-+    cmd_daemon(&state_path, None, false, 1, 5, false).unwrap();
- 
-     assert!(
-         !legacy_pid.exists(),
-diff --git a/crates/superstate-core/Cargo.toml b/crates/superstate-core/Cargo.toml
-index ca97f58..ac17cbd 100644
---- a/crates/superstate-core/Cargo.toml
-+++ b/crates/superstate-core/Cargo.toml
-@@ -15,6 +15,7 @@ chrono.workspace = true
- thiserror.workspace = true
- fd-lock.workspace = true
- libc = "0.2"
-+superstate-review = { path = "../superstate-review" }
- 
- [dev-dependencies]
- tempfile.workspace = true
-diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
-index afc6e7b..92848d8 100644
---- a/crates/superstate-core/src/daemon.rs
-+++ b/crates/superstate-core/src/daemon.rs
-@@ -145,6 +145,22 @@ pub struct DaemonConfig {
-     /// `superstate_mcp` does. Default false -- completion should mean verified.
-     #[serde(default)]
-     pub advisory_gate: bool,
-+    /// Run advisory adversarial code review on milestone completion
-+    #[serde(default)]
-+    pub advisory_review: bool,
+diff --git a/crates/superstate-cli/tests/test_cli_blocking_review.rs b/crates/superstate-cli/tests/test_cli_blocking_review.rs
+new file mode 100644
+index 0000000..23bae69
+--- /dev/null
++++ b/crates/superstate-cli/tests/test_cli_blocking_review.rs
+@@ -0,0 +1,166 @@
++use std::fs;
++use std::path::Path;
++use std::process::Command;
++use tempfile::tempdir;
++
++fn bin() -> &'static str {
++    env!("CARGO_BIN_EXE_superstate")
 +}
 +
-+impl Default for DaemonConfig {
-+    fn default() -> Self {
-+        Self {
-+            state_path: PathBuf::from(".agent-state/state.json"),
-+            driver_cmd: None,
-+            max_retries: 3,
-+            timeout_secs: 120,
-+            advisory_gate: false,
-+            advisory_review: false,
-+        }
-+    }
- }
- 
- #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-@@ -425,6 +441,12 @@ impl DaemonRunner {
-     ///
-     /// # Errors
-     /// Returns `DaemonError` if state loading, driver spawning, or advancer execution fails.
-+    /// Executes a single autonomous daemon step for the currently active task.
-+    /// Alias for `run_step`.
-+    pub fn step(&mut self) -> Result<DaemonStepOutcome, DaemonError> {
-+        self.run_step()
-+    }
-+
-     pub fn run_step(&mut self) -> Result<DaemonStepOutcome, DaemonError> {
-         let mut state = load_state(&self.config.state_path)?;
- 
-@@ -572,6 +594,55 @@ impl DaemonRunner {
-             .copied()
-             .unwrap_or(0);
-         let attempt_ceiling = self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
-+
-+        if gate_res.passed && self.config.advisory_review && working_dir.join(".git").exists() {
-+            let diff = match superstate_review::get_git_diff(&working_dir, Some("HEAD")) {
-+                Ok(d) if !d.trim().is_empty() => d,
-+                _ => superstate_review::get_git_diff(&working_dir, None).unwrap_or_default(),
-+            };
-+            let review_cfg = superstate_review::ReviewConfig {
-+                driver: self.config.driver_cmd.clone(),
-+                timeout_secs: self.config.timeout_secs,
-+            };
-+            if let Ok(report) =
-+                superstate_review::execute_review(&working_dir, &diff, None, &review_cfg)
-+            {
-+                if report.has_blocking_issues {
-+                    let first_finding = report
-+                        .findings
-+                        .first()
-+                        .map(|f| format!("{}: {}", f.file.display(), f.problem))
-+                        .unwrap_or_else(|| report.summary.clone());
-+                    let note = format!(
-+                        "[review-advisory] Task {}: {}. Problem: {}",
-+                        active_task.id, report.summary, first_finding
-+                    );
-+                    state.notes.push(LedgerEntry::new("superstate-daemon", note));
-+                    save_state_atomic(&self.config.state_path, &state)?;
-+
-+                    if is_vacuous_gate(verify_cmd)
-+                        && self.config.driver_cmd.is_some()
-+                        && attempts_so_far < attempt_ceiling
-+                    {
-+                        *self
-+                            .total_attempts
-+                            .entry(active_task.id.clone())
-+                            .or_insert(0) += 1;
-+                        return Ok(DaemonStepOutcome::Failed {
-+                            task_id: active_task.id,
-+                            reason:
-+                                "advisory-review: blocking issues detected on vacuous gate"
-+                                    .to_string(),
-+                            retries_remaining: self
-+                                .config
-+                                .max_retries
-+                                .saturating_sub(attempts_so_far),
-+                        });
-+                    }
-+                }
-+            }
-+        }
-+
-         if gate_res.passed
-             && is_vacuous_gate(verify_cmd)
-             && self.config.driver_cmd.is_some()
-diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-new file mode 100644
-index 0000000..eac2c54
---- /dev/null
-+++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-@@ -0,0 +1,205 @@
-+use std::fs;
-+use std::process::Command;
-+use tempfile::{tempdir, TempDir};
-+
-+use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
-+use superstate_core::models::MilestoneSpec;
-+use superstate_core::state_machine::{init_state_milestones, load_state, save_state_atomic};
-+
-+fn setup_test_git_repo() -> TempDir {
-+    let dir = tempdir().unwrap();
-+    let repo = dir.path();
++fn init_git_repo(path: &Path) {
 +    Command::new("git")
-+        .args(["init", "-q"])
-+        .current_dir(repo)
++        .args(["init", "-b", "main"])
++        .current_dir(path)
 +        .output()
-+        .unwrap();
++        .expect("git init");
++
 +    Command::new("git")
-+        .args(["config", "user.name", "Test User"])
-+        .current_dir(repo)
++        .args(["config", "user.name", "Tester"])
++        .current_dir(path)
 +        .output()
-+        .unwrap();
++        .expect("git config user.name");
++
 +    Command::new("git")
 +        .args(["config", "user.email", "test@example.com"])
-+        .current_dir(repo)
++        .current_dir(path)
 +        .output()
-+        .unwrap();
++        .expect("git config user.email");
 +
-+    fs::write(repo.join("README.md"), "# Initial content\n").unwrap();
++    fs::write(path.join("README.md"), "initial baseline\n").expect("write README.md");
++    Command::new("git")
++        .args(["add", "."])
++        .current_dir(path)
++        .output()
++        .expect("git add");
++    Command::new("git")
++        .args(["commit", "-m", "chore: initial baseline", "--no-gpg-sign"])
++        .current_dir(path)
++        .output()
++        .expect("git commit");
++}
++
++#[test]
++fn test_cli_daemon_help_has_review_blocking() {
++    // Check `superstate state daemon --help`
++    let output = Command::new(bin())
++        .args(["state", "daemon", "--help"])
++        .output()
++        .expect("run superstate state daemon --help");
++    assert!(output.status.success());
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    assert!(
++        stdout.contains("--review-blocking"),
++        "`superstate state daemon --help` should mention --review-blocking, got:\n{}",
++        stdout
++    );
++    assert!(
++        stdout.contains("Treat Critical and High severity review findings as blocking failures requiring retry"),
++        "`superstate state daemon --help` should describe --review-blocking, got:\n{}",
++        stdout
++    );
++
++    // Also check `superstate daemon --help`
++    let output_alias = Command::new(bin())
++        .args(["daemon", "--help"])
++        .output()
++        .expect("run superstate daemon --help");
++    assert!(output_alias.status.success());
++    let stdout_alias = String::from_utf8_lossy(&output_alias.stdout);
++    assert!(
++        stdout_alias.contains("--review-blocking"),
++        "`superstate daemon --help` should mention --review-blocking, got:\n{}",
++        stdout_alias
++    );
++}
++
++#[test]
++fn test_cli_daemon_accepts_review_blocking_flag() {
++    let tmp = tempdir().unwrap();
++    let repo = tmp.path();
++    init_git_repo(repo);
++
++    let state_dir = repo.join(".agent-state");
++    fs::create_dir_all(&state_dir).unwrap();
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![superstate_core::models::MilestoneSpec {
++        title: "Test Task".to_string(),
++        verify_cmd: "true".to_string(),
++        files: vec![],
++    }];
++    let state = superstate_core::state_machine::init_state_milestones(
++        Some("Test Goal"),
++        milestones,
++        None,
++        true,
++    )
++    .unwrap();
++    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
++
++    let mock_driver = "echo '{\"summary\":\"Clean\",\"findings\":[],\"has_blocking_issues\":false}'";
++
++    // Call with --review-blocking
++    let output = Command::new(bin())
++        .args([
++            "state",
++            "daemon",
++            "--state",
++            state_path.to_str().unwrap(),
++            "--driver",
++            mock_driver,
++            "--review-blocking",
++        ])
++        .output()
++        .expect("run superstate state daemon with --review-blocking");
++
++    let stderr = String::from_utf8_lossy(&output.stderr);
++    assert!(
++        !stderr.contains("unexpected argument '--review-blocking'"),
++        "CLI must accept --review-blocking, got stderr:\n{}",
++        stderr
++    );
++}
++
++#[test]
++fn test_cli_review_without_args_reviews_last_commit_on_clean_working_tree() {
++    let tmp = tempdir().unwrap();
++    let repo = tmp.path();
++    init_git_repo(repo);
++
++    // Make a second commit modifying README.md
++    fs::write(repo.join("README.md"), "second commit content\n").expect("write update");
 +    Command::new("git")
 +        .args(["add", "README.md"])
 +        .current_dir(repo)
 +        .output()
-+        .unwrap();
++        .expect("git add");
 +    Command::new("git")
-+        .args(["commit", "-m", "initial commit"])
++        .args(["commit", "-m", "feat: second commit", "--no-gpg-sign"])
 +        .current_dir(repo)
 +        .output()
-+        .unwrap();
++        .expect("git commit");
 +
-+    dir
-+}
++    // Working tree is completely clean now.
++    // Calling `superstate review` without commit_range should review HEAD~1..HEAD
++    let mock_driver = "echo '{\"summary\":\"Inspected last commit\",\"has_blocking_issues\":false,\"findings\":[]}'";
 +
-+#[test]
-+fn test_daemon_config_default_advisory_review_false() {
-+    let config = DaemonConfig::default();
-+    assert!(!config.advisory_review);
-+}
++    let output = Command::new(bin())
++        .args([
++            "review",
++            "--repo",
++            repo.to_str().unwrap(),
++            "--driver",
++            mock_driver,
++            "--json",
++        ])
++        .output()
++        .expect("run superstate review");
 +
-+#[test]
-+fn test_daemon_advisory_review_clean_diff_advances() {
-+    let dir = setup_test_git_repo();
-+    let repo = dir.path();
-+    let state_path = repo.join(".agent-state/state.json");
-+
-+    let milestones = vec![MilestoneSpec {
-+        title: "Clean Milestone".to_string(),
-+        verify_cmd: "test -f README.md".to_string(),
-+        files: vec![],
-+    }];
-+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-+    save_state_atomic(&state_path, &state).unwrap();
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).unwrap();
-+    let outcome = runner.step().unwrap();
-+
++    assert!(output.status.success());
++    let stdout = String::from_utf8_lossy(&output.stdout);
 +    assert!(
-+        matches!(outcome, DaemonStepOutcome::Advanced { .. }),
-+        "Milestone on clean diff should advance without failure, got: {:?}",
-+        outcome
-+    );
-+
-+    let updated_state = load_state(&state_path).unwrap();
-+    assert!(
-+        !updated_state
-+            .notes
-+            .iter()
-+            .any(|n| n.note.contains("[review-advisory]")),
-+        "Clean diff must not produce advisory review notes"
++        stdout.contains("Inspected last commit"),
++        "superstate review without args should review HEAD~1..HEAD instead of clean early-exit, got:\n{}",
++        stdout
 +    );
 +}
-+
-+#[test]
-+fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
-+    let dir = setup_test_git_repo();
-+    let repo = dir.path();
-+    let state_path = repo.join(".agent-state/state.json");
-+
-+    let milestones = vec![MilestoneSpec {
-+        title: "Vacuous Gate Milestone".to_string(),
-+        verify_cmd: "true".to_string(),
-+        files: vec![],
-+    }];
-+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-+    save_state_atomic(&state_path, &state).unwrap();
-+
-+    // Modify a tracked file so diff exists
-+    fs::write(repo.join("README.md"), "# Flawed code\n").unwrap();
-+
-+    // Mock driver that outputs a ReviewReport JSON with a Critical blocking finding
-+    let mock_report_json = r#"{"summary":"Critical SQL injection detected","findings":[{"severity":"Critical","file":"README.md","line_range":[1,1],"problem":"Dangerous flaw","suggested_fix":"Sanitize input"}],"has_blocking_issues":true}"#;
-+    let mock_driver = format!("echo '{}'", mock_report_json);
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: Some(mock_driver),
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).unwrap();
-+    let outcome = runner.step().unwrap();
-+
-+    match outcome {
-+        DaemonStepOutcome::Failed { task_id, reason, .. } => {
-+            assert_eq!(task_id, "task-1");
-+            assert!(
-+                reason.contains("advisory-review: blocking issues detected on vacuous gate"),
-+                "Expected advisory-review failure reason, got: {}",
-+                reason
-+            );
-+        }
-+        other => panic!("Expected DaemonStepOutcome::Failed, got: {:?}", other),
-+    }
-+
-+    let updated_state = load_state(&state_path).unwrap();
-+    let has_advisory_note = updated_state.notes.iter().any(|n| {
-+        n.note.contains("[review-advisory]")
-+            && n.note.contains("Dangerous flaw")
-+            && n.note.contains("Task task-1")
-+    });
-+    assert!(
-+        has_advisory_note,
-+        "Expected [review-advisory] note in ledger notes, notes were: {:?}",
-+        updated_state.notes
-+    );
-+
-+    // Milestone must not have advanced
-+    assert_eq!(updated_state.step, 1);
-+    assert_eq!(updated_state.completed_tasks.len(), 0);
-+}
-+
-+#[test]
-+fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
-+    let dir = setup_test_git_repo();
-+    let repo = dir.path();
-+    let state_path = repo.join(".agent-state/state.json");
-+
-+    let milestones = vec![MilestoneSpec {
-+        title: "Strict Gate Milestone".to_string(),
-+        verify_cmd: "echo gate_ok".to_string(),
-+        files: vec![],
-+    }];
-+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-+    save_state_atomic(&state_path, &state).unwrap();
-+
-+    // Modify a tracked file so diff exists
-+    fs::write(repo.join("README.md"), "# Modified code\n").unwrap();
-+
-+    let mock_report_json = r#"{"summary":"Critical flaw detected by review","findings":[{"severity":"Critical","file":"README.md","line_range":[1,1],"problem":"Potential bug","suggested_fix":"Fix logic"}],"has_blocking_issues":true}"#;
-+    let mock_driver = format!("echo '{}'", mock_report_json);
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: Some(mock_driver),
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).unwrap();
-+    let outcome = runner.step().unwrap();
-+
-+    assert!(
-+        matches!(outcome, DaemonStepOutcome::Advanced { .. }),
-+        "Non-vacuous gate milestone must advance even with advisory findings, got: {:?}",
-+        outcome
-+    );
-+
-+    let updated_state = load_state(&state_path).unwrap();
-+    let has_advisory_note = updated_state.notes.iter().any(|n| {
-+        n.note.contains("[review-advisory]")
-+            && n.note.contains("Potential bug")
-+            && n.note.contains("Task task-1")
-+    });
-+    assert!(
-+        has_advisory_note,
-+        "Expected [review-advisory] note in ledger notes for diagnostic context, notes were: {:?}",
-+        updated_state.notes
-+    );
-+
-+    // Milestone completed and advanced
-+    assert_eq!(updated_state.completed_tasks.len(), 1);
-+}
-diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
-index 58b1717..4120b5c 100644
---- a/crates/superstate-core/tests/test_daemon_automerge.rs
-+++ b/crates/superstate-core/tests/test_daemon_automerge.rs
-@@ -119,6 +119,7 @@ fn test_daemon_automerge_on_completion() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
+diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+index 7a21f6e..42afef5 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
++++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+@@ -39,6 +39,7 @@ fn test_cli_daemon_lifecycle() {
+         3,
+         10,
+         false,
++        false,
+     )
+     .unwrap();
  
-     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
-@@ -211,6 +212,7 @@ fn test_daemon_completion_in_place_mode() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
+@@ -97,7 +98,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
+     fs::write(&legacy_pid, "99999").unwrap();
  
-     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
-@@ -269,6 +271,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
+     // Run daemon to completion synchronously
+-    cmd_daemon(&state_path, None, false, 1, 5, false).unwrap();
++    cmd_daemon(&state_path, None, false, 1, 5, false, false).unwrap();
  
-     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
-@@ -287,6 +290,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     })
-     .expect("create second runner");
- 
-diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
-index f5b98c7..a66f071 100644
---- a/crates/superstate-core/tests/test_daemon_runner.rs
-+++ b/crates/superstate-core/tests/test_daemon_runner.rs
-@@ -32,6 +32,7 @@ fn test_daemon_run_step_success() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -66,6 +67,7 @@ fn test_daemon_run_step_verification_failure() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -107,6 +109,7 @@ fn test_daemon_run_to_completion() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -144,6 +147,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -192,6 +196,7 @@ fn test_daemon_step_advancer_invoked() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     use std::sync::{Arc, Mutex};
-@@ -236,6 +241,7 @@ fn test_daemon_step_advancer_error_propagation() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     // Configure a StepAdvancer that simulates downstream failure during advancement
-@@ -284,6 +290,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -342,6 +349,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -388,6 +396,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -475,6 +484,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -529,6 +539,7 @@ fn test_progress_renews_the_retry_budget() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
- 
-@@ -569,6 +580,7 @@ fn test_stalled_worker_still_blocks() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
- 
-@@ -621,6 +633,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
- 
-@@ -663,6 +676,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
-         max_retries: 2,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
- 
-@@ -712,6 +726,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
- 
-@@ -759,6 +774,7 @@ fn test_real_gate_completes_immediately() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
      assert!(
-@@ -793,6 +809,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
-         max_retries: 1,
-         timeout_secs: 5,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-     assert!(
-@@ -843,6 +860,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
-             max_retries: 1,
-             timeout_secs: 5,
-             advisory_gate: advisory,
-+            advisory_review: false,
-         })
-         .unwrap();
-         for _ in 0..4 {
-diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
-index bd09c6a..b0108b2 100644
---- a/crates/superstate-core/tests/test_driver_presets.rs
-+++ b/crates/superstate-core/tests/test_driver_presets.rs
-@@ -176,6 +176,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
-         max_retries: 3,
-         timeout_secs: 10,
-         advisory_gate: false,
-+        advisory_review: false,
-     };
- 
-     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();
+         !legacy_pid.exists(),
