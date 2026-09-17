@@ -18,7 +18,6 @@ fn test_state_atomic_save_and_load() {
             title: "Initial Task".to_string(),
             depends_on: vec![],
             files_modify: vec![PathBuf::from("src/lib.rs")],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo test".to_string()),
         }),
         ..Default::default()
@@ -39,7 +38,6 @@ fn test_advance_step_lifecycle() {
         title: "Task 1".to_string(),
         depends_on: vec![],
         files_modify: vec![],
-        interfaces_produces: vec![],
         verification_cmd: None,
     };
     let task2 = TaskSpec {
@@ -47,7 +45,6 @@ fn test_advance_step_lifecycle() {
         title: "Task 2".to_string(),
         depends_on: vec!["task-1".to_string()],
         files_modify: vec![],
-        interfaces_produces: vec![],
         verification_cmd: None,
     };
 
@@ -83,7 +80,6 @@ fn test_worktree_tracking_serialization_and_advance_reset() {
         title: "Task 1".to_string(),
         depends_on: vec![],
         files_modify: vec![],
-        interfaces_produces: vec![],
         verification_cmd: None,
     };
     let task2 = TaskSpec {
@@ -91,7 +87,6 @@ fn test_worktree_tracking_serialization_and_advance_reset() {
         title: "Task 2".to_string(),
         depends_on: vec!["task-1".to_string()],
         files_modify: vec![],
-        interfaces_produces: vec![],
         verification_cmd: None,
     };
 
@@ -158,4 +153,58 @@ fn test_init_state_direct() {
         Some("cargo test -p parser".to_string())
     );
     assert_eq!(task.files_modify, vec![PathBuf::from("src/parser.rs")]);
+}
+
+#[test]
+fn test_advance_step_selects_ready_task_in_dag_order() {
+    let task1 = TaskSpec {
+        id: "task-1".to_string(),
+        title: "Setup foundation".to_string(),
+        depends_on: vec![],
+        files_modify: vec![],
+        verification_cmd: None,
+    };
+    // task-3 listed first in pending, but depends on task-2
+    let task3 = TaskSpec {
+        id: "task-3".to_string(),
+        title: "Final integration".to_string(),
+        depends_on: vec!["task-2".to_string()],
+        files_modify: vec![],
+        verification_cmd: None,
+    };
+    // task-2 listed second in pending, but depends on task-1 (which is active/completed first)
+    let task2 = TaskSpec {
+        id: "task-2".to_string(),
+        title: "Core logic".to_string(),
+        depends_on: vec!["task-1".to_string()],
+        files_modify: vec![],
+        verification_cmd: None,
+    };
+
+    let mut state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(task1),
+        pending_tasks: vec![task3, task2], // out of topological order
+        ..Default::default()
+    };
+
+    // Advancing should pick task-2 because task-1 is completed and task-2's dependency is satisfied,
+    // whereas task-3 is blocked waiting on task-2.
+    advance_step(&mut state).expect("Advance step failed");
+    assert_eq!(state.step, 2);
+    assert_eq!(state.active_task.as_ref().unwrap().id, "task-2");
+    assert_eq!(state.pending_tasks.len(), 1);
+    assert_eq!(state.pending_tasks[0].id, "task-3");
+
+    // Advancing again completes task-2, unblocking task-3
+    advance_step(&mut state).expect("Advance step failed");
+    assert_eq!(state.step, 3);
+    assert_eq!(state.active_task.as_ref().unwrap().id, "task-3");
+    assert_eq!(state.pending_tasks.len(), 0);
+
+    // Final advance finishes the plan
+    advance_step(&mut state).expect("Advance step failed");
+    assert_eq!(state.status, ExecutionStatus::Completed);
+    assert!(state.active_task.is_none());
 }

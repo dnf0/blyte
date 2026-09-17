@@ -83,7 +83,6 @@ pub fn init_state_direct(
         title: goal.to_string(),
         depends_on: Vec::new(),
         files_modify,
-        interfaces_produces: Vec::new(),
         verification_cmd: Some(verify_cmd.to_string()),
     };
 
@@ -165,7 +164,6 @@ pub fn init_state_milestones(
         title: first.title,
         depends_on: Vec::new(),
         files_modify: first.files,
-        interfaces_produces: Vec::new(),
         verification_cmd: Some(first.verify_cmd),
     };
 
@@ -179,7 +177,6 @@ pub fn init_state_milestones(
             title: milestone.title,
             depends_on: vec![format!("task-{}", prev_task_num)],
             files_modify: milestone.files,
-            interfaces_produces: Vec::new(),
             verification_cmd: Some(milestone.verify_cmd),
         });
     }
@@ -203,6 +200,16 @@ pub fn init_state_milestones(
     })
 }
 
+fn is_dependency_satisfied(dep: &str, completed: &[&str]) -> bool {
+    let dep = dep.trim();
+    if dep.is_empty() || dep.eq_ignore_ascii_case("none") {
+        return true;
+    }
+    completed
+        .iter()
+        .any(|done| done.eq_ignore_ascii_case(dep) || dep.starts_with(*done))
+}
+
 /// Advances execution state to the next task, completing the current active task.
 ///
 /// When intermediate tasks advance, active worktree and branch fields are reset so
@@ -215,11 +222,28 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
     }
 
     if !state.pending_tasks.is_empty() {
+        let completed: Vec<&str> = state
+            .completed_tasks
+            .iter()
+            .flat_map(|t| [t.id.as_str(), t.title.as_str()])
+            .collect();
+
+        // Advance to the first task whose dependencies are satisfied in DAG order
+        let next_idx = state
+            .pending_tasks
+            .iter()
+            .position(|task| {
+                task.depends_on
+                    .iter()
+                    .all(|dep| is_dependency_satisfied(dep, &completed))
+            })
+            .unwrap_or(0);
+
         // Reset active worktree and branch tracking for intermediate tasks to ensure
         // subsequent sequential milestones provision their own clean workspaces
         state.active_worktree = None;
         state.active_branch = None;
-        state.active_task = Some(state.pending_tasks.remove(0));
+        state.active_task = Some(state.pending_tasks.remove(next_idx));
         state.step += 1;
         state.status = ExecutionStatus::InProgress;
     } else {
@@ -249,24 +273,22 @@ pub fn ready_tasks(state: &ExecutionState) -> Vec<&TaskSpec> {
         .flat_map(|t| [t.id.as_str(), t.title.as_str()])
         .collect();
 
-    let is_satisfied = |dep: &String| -> bool {
-        let dep = dep.trim();
-        if dep.is_empty() || dep.eq_ignore_ascii_case("none") {
-            return true;
-        }
-        completed
-            .iter()
-            .any(|done| done.eq_ignore_ascii_case(dep) || dep.starts_with(*done))
-    };
-
     let mut ready: Vec<&TaskSpec> = Vec::new();
     if let Some(active) = state.active_task.as_ref() {
-        if active.depends_on.iter().all(is_satisfied) {
+        if active
+            .depends_on
+            .iter()
+            .all(|dep| is_dependency_satisfied(dep, &completed))
+        {
             ready.push(active);
         }
     }
     for task in state.pending_tasks.iter() {
-        if task.depends_on.iter().all(is_satisfied) {
+        if task
+            .depends_on
+            .iter()
+            .all(|dep| is_dependency_satisfied(dep, &completed))
+        {
             ready.push(task);
         }
     }

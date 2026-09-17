@@ -22,8 +22,6 @@ pub struct TaskSpec {
     #[serde(default)]
     pub files_modify: Vec<PathBuf>,
     #[serde(default)]
-    pub interfaces_produces: Vec<String>,
-    #[serde(default)]
     pub verification_cmd: Option<String>,
 }
 
@@ -41,8 +39,6 @@ impl<'de> Deserialize<'de> for TaskSpec {
             #[serde(default)]
             files_modify: Vec<PathBuf>,
             #[serde(default)]
-            interfaces_produces: Vec<String>,
-            #[serde(default)]
             verification_cmd: Option<String>,
         }
 
@@ -59,7 +55,6 @@ impl<'de> Deserialize<'de> for TaskSpec {
                 title: s,
                 depends_on: Vec::new(),
                 files_modify: Vec::new(),
-                interfaces_produces: Vec::new(),
                 verification_cmd: None,
             }),
             TaskSpecHelper::Obj(raw) => Ok(TaskSpec {
@@ -67,7 +62,6 @@ impl<'de> Deserialize<'de> for TaskSpec {
                 title: raw.title.unwrap_or_default(),
                 depends_on: raw.depends_on,
                 files_modify: raw.files_modify,
-                interfaces_produces: raw.interfaces_produces,
                 verification_cmd: raw.verification_cmd,
             }),
         }

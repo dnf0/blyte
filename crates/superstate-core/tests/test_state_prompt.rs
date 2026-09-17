@@ -14,7 +14,6 @@ fn test_render_turnkey_prompt_includes_global_goal() {
             title: "Add streaming buffer".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo test".to_string()),
         }),
         ..Default::default()
@@ -39,7 +38,6 @@ fn test_render_turnkey_prompt_without_goal() {
             title: "Add streaming buffer".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo test".to_string()),
         }),
         ..Default::default()
@@ -61,7 +59,6 @@ fn test_render_turnkey_prompt_with_empty_or_whitespace_goal() {
             title: "Add streaming buffer".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo test".to_string()),
         }),
         ..Default::default()
