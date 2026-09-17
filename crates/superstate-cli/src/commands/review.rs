@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use superstate_core::ledger::append_ledger_note;
 use superstate_core::models::LedgerEntry;
 use superstate_core::state_machine::resolve_state_path;
-use superstate_review::diff::get_git_diff;
+use superstate_review::diff::{get_git_diff, get_milestone_diff};
 use superstate_review::runner::{execute_review, ReviewConfig};
 use superstate_review::schema::{ReviewReport, Severity};
 
@@ -21,19 +21,8 @@ pub fn cmd_review(args: ReviewArgs) -> Result<(), String> {
         Some(range) => get_git_diff(&args.repo, Some(range))
             .map_err(|e| format!("Failed to get git diff: {}", e))?,
         None => {
-            // If no commit range is provided, check if HEAD exists to get both staged and unstaged diff
-            match get_git_diff(&args.repo, Some("HEAD")) {
-                Ok(d) if !d.trim().is_empty() => d,
-                Ok(_) => {
-                    // HEAD exists but diff against HEAD is empty. Check unstaged diff as fallback.
-                    get_git_diff(&args.repo, None).unwrap_or_default()
-                }
-                Err(_) => {
-                    // HEAD does not exist (e.g. freshly initialized repo before first commit)
-                    get_git_diff(&args.repo, None)
-                        .map_err(|e| format!("Failed to get git diff: {}", e))?
-                }
-            }
+            get_milestone_diff(&args.repo, None)
+                .map_err(|e| format!("Failed to get git diff: {}", e))?
         }
     };
 

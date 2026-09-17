@@ -307,6 +307,9 @@ pub struct DaemonArgs {
     /// Run advisory adversarial code review on milestone completion
     #[arg(long)]
     pub advisory_review: bool,
+    /// Treat Critical and High severity review findings as blocking failures requiring retry
+    #[arg(long, help = "Treat Critical and High severity review findings as blocking failures requiring retry")]
+    pub review_blocking: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -526,6 +529,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 args.max_retries,
                 args.timeout,
                 args.advisory_review,
+                args.review_blocking,
             ),
         },
         StateCommands::Cancel(args) => {

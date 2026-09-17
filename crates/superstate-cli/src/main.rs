@@ -143,6 +143,7 @@ fn main() {
                 args.max_retries,
                 args.timeout,
                 args.advisory_review,
+                args.review_blocking,
             ),
         },
         Commands::Cancel(args) => {

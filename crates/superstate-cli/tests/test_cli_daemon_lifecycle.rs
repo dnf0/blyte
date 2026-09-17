@@ -39,6 +39,7 @@ fn test_cli_daemon_lifecycle() {
         3,
         10,
         false,
+        false,
     )
     .unwrap();
 
@@ -97,7 +98,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
     fs::write(&legacy_pid, "99999").unwrap();
 
     // Run daemon to completion synchronously
-    cmd_daemon(&state_path, None, false, 1, 5, false).unwrap();
+    cmd_daemon(&state_path, None, false, 1, 5, false, false).unwrap();
 
     assert!(
         !legacy_pid.exists(),

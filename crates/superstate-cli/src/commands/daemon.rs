@@ -111,6 +111,7 @@ pub fn cmd_daemon(
     max_retries: usize,
     timeout_secs: u64,
     advisory_review: bool,
+    review_blocking: bool,
 ) -> Result<(), String> {
     let paths = daemon_paths_for_state(state_path);
 
@@ -163,6 +164,9 @@ pub fn cmd_daemon(
         cmd.arg("--timeout").arg(timeout_secs.to_string());
         if advisory_review {
             cmd.arg("--advisory-review");
+        }
+        if review_blocking {
+            cmd.arg("--review-blocking");
         }
         cmd.stdout(std::process::Stdio::from(log_out));
         cmd.stderr(std::process::Stdio::from(log_err));
@@ -240,7 +244,7 @@ pub fn cmd_daemon(
                 .map(|v| v.trim().eq_ignore_ascii_case("advisory"))
                 .unwrap_or(false),
             advisory_review,
-            review_blocking: false,
+            review_blocking,
         };
 
         let mut runner = DaemonRunner::new(config)
