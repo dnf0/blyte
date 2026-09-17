@@ -174,6 +174,9 @@ pub struct DaemonConfig {
     /// Run advisory adversarial code review on milestone completion
     #[serde(default)]
     pub advisory_review: bool,
+    /// Treat code review findings as blocking quality gates that fail milestone completion
+    #[serde(default)]
+    pub review_blocking: bool,
 }
 
 impl Default for DaemonConfig {
@@ -185,6 +188,7 @@ impl Default for DaemonConfig {
             timeout_secs: 120,
             advisory_gate: false,
             advisory_review: false,
+            review_blocking: false,
         }
     }
 }
@@ -407,6 +411,8 @@ pub struct DaemonRunner {
     driver_turns: HashMap<String, usize>,
     /// Working-tree fingerprint at the end of the previous attempt.
     last_fingerprint: HashMap<String, String>,
+    /// Git HEAD commit hash when each milestone was first entered.
+    pub milestone_start_commits: HashMap<String, String>,
     step_advancer: Option<StepAdvancer>,
     last_failure_output: HashMap<String, String>,
 }
@@ -426,6 +432,7 @@ impl DaemonRunner {
             total_attempts: HashMap::new(),
             driver_turns: HashMap::new(),
             last_fingerprint: HashMap::new(),
+            milestone_start_commits: HashMap::new(),
             step_advancer: None,
             last_failure_output: HashMap::new(),
         })
@@ -446,6 +453,11 @@ impl DaemonRunner {
     /// Returns a reference to the unflattened verification failure outputs from previous retries.
     pub fn last_failure_output(&self) -> &HashMap<String, String> {
         &self.last_failure_output
+    }
+
+    /// Returns a reference to the recorded start commits for milestones.
+    pub fn milestone_start_commits(&self) -> &HashMap<String, String> {
+        &self.milestone_start_commits
     }
 
     /// Executes a single autonomous daemon step for the currently active task.
@@ -548,6 +560,22 @@ impl DaemonRunner {
             .entry(active_task.id.clone())
             .or_insert_with(|| workspace_fingerprint(&working_dir));
 
+        // Record starting HEAD commit when entering milestone so milestone diff captures all changes
+        if !self.milestone_start_commits.contains_key(&active_task.id) && is_inside_git_repo(&working_dir) {
+            if let Ok(out) = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&working_dir)
+                .output()
+            {
+                if out.status.success() {
+                    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !head.is_empty() {
+                        self.milestone_start_commits.insert(active_task.id.clone(), head);
+                    }
+                }
+            }
+        }
+
         // Execute headless driver worker if provided
         if let Some(ref driver) = self.config.driver_cmd {
             *self.driver_turns.entry(active_task.id.clone()).or_insert(0) += 1;
@@ -621,8 +649,15 @@ impl DaemonRunner {
             .unwrap_or(0);
         let attempt_ceiling = self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
 
-        if gate_res.passed && self.config.advisory_review && is_inside_git_repo(&working_dir) {
-            let diff = match superstate_review::get_git_diff(&working_dir, Some("HEAD")) {
+        if gate_res.passed
+            && (self.config.advisory_review || self.config.review_blocking)
+            && is_inside_git_repo(&working_dir)
+        {
+            let start_commit = self
+                .milestone_start_commits
+                .get(&active_task.id)
+                .map(|s| s.as_str());
+            let diff = match superstate_review::diff::get_milestone_diff(&working_dir, start_commit) {
                 Ok(d) if !d.trim().is_empty() => d,
                 _ => superstate_review::get_git_diff(&working_dir, None).unwrap_or_default(),
             };
@@ -682,7 +717,10 @@ impl DaemonRunner {
                         .push(LedgerEntry::new("superstate-daemon", note));
                     save_state_atomic(&self.config.state_path, &state)?;
 
-                    if is_vacuous_gate(verify_cmd)
+                    let should_block = report.has_blocking_issues
+                        && (self.config.review_blocking || is_vacuous_gate(verify_cmd));
+
+                    if should_block
                         && self.config.driver_cmd.is_some()
                         && attempts_so_far < attempt_ceiling
                     {
@@ -690,10 +728,17 @@ impl DaemonRunner {
                             .total_attempts
                             .entry(active_task.id.clone())
                             .or_insert(0) += 1;
+                        let reason = if self.config.review_blocking {
+                            format!(
+                                "code-review: {} blocking issue(s) detected",
+                                report.findings.len()
+                            )
+                        } else {
+                            "advisory-review: blocking issues detected on vacuous gate".to_string()
+                        };
                         return Ok(DaemonStepOutcome::Failed {
                             task_id: active_task.id,
-                            reason: "advisory-review: blocking issues detected on vacuous gate"
-                                .to_string(),
+                            reason,
                             retries_remaining: self
                                 .config
                                 .max_retries
@@ -738,6 +783,7 @@ impl DaemonRunner {
         if gate_res.passed {
             self.retry_counts.remove(&active_task.id);
             self.last_failure_output.remove(&active_task.id);
+            self.milestone_start_commits.remove(&active_task.id);
 
             // Milestone git checkpoint in in-place mode when git repository exists
             if state.no_worktree && is_inside_git_repo(&working_dir) {
@@ -863,6 +909,7 @@ impl DaemonRunner {
                 ));
                 self.retry_counts.remove(&active_task.id);
                 self.last_failure_output.remove(&active_task.id);
+                self.milestone_start_commits.remove(&active_task.id);
 
                 if let Some(ref mut advancer) = self.step_advancer {
                     save_state_atomic(&self.config.state_path, &state)?;

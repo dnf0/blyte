@@ -240,6 +240,7 @@ pub fn cmd_daemon(
                 .map(|v| v.trim().eq_ignore_ascii_case("advisory"))
                 .unwrap_or(false),
             advisory_review,
+            review_blocking: false,
         };
 
         let mut runner = DaemonRunner::new(config)

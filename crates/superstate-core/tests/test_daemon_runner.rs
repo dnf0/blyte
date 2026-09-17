@@ -33,6 +33,7 @@ fn test_daemon_run_step_success() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -68,6 +69,7 @@ fn test_daemon_run_step_verification_failure() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -110,6 +112,7 @@ fn test_daemon_run_to_completion() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -148,6 +151,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -197,6 +201,7 @@ fn test_daemon_step_advancer_invoked() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     use std::sync::{Arc, Mutex};
@@ -242,6 +247,7 @@ fn test_daemon_step_advancer_error_propagation() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     // Configure a StepAdvancer that simulates downstream failure during advancement
@@ -291,6 +297,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -350,6 +357,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -397,6 +405,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -485,6 +494,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -540,6 +550,7 @@ fn test_progress_renews_the_retry_budget() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -581,6 +592,7 @@ fn test_stalled_worker_still_blocks() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -634,6 +646,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -677,6 +690,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -727,6 +741,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
 
@@ -775,6 +790,7 @@ fn test_real_gate_completes_immediately() {
         timeout_secs: 10,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
     assert!(
@@ -810,6 +826,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
         timeout_secs: 5,
         advisory_gate: false,
         advisory_review: false,
+        review_blocking: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
     assert!(
@@ -861,6 +878,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
             timeout_secs: 5,
             advisory_gate: advisory,
             advisory_review: false,
+            review_blocking: false,
         })
         .unwrap();
         for _ in 0..4 {
