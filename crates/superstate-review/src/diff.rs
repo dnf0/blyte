@@ -11,6 +11,12 @@ pub enum DiffError {
 }
 
 pub fn get_git_diff(repo_root: &Path, commit_range: Option<&str>) -> Result<String, DiffError> {
+    // Stage untracked files intent-to-add so newly created files are captured in diffs (e.g. against HEAD)
+    let _ = Command::new("git")
+        .args(["add", "-N", "."])
+        .current_dir(repo_root)
+        .output();
+
     let mut cmd = Command::new("git");
     cmd.arg("diff");
     if let Some(range) = commit_range {

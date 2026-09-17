@@ -122,7 +122,9 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
     let outcome = runner.step().unwrap();
 
     match outcome {
-        DaemonStepOutcome::Failed { task_id, reason, .. } => {
+        DaemonStepOutcome::Failed {
+            task_id, reason, ..
+        } => {
             assert_eq!(task_id, "task-1");
             assert!(
                 reason.contains("advisory-review: blocking issues detected on vacuous gate"),
@@ -258,3 +260,94 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix() 
     );
 }
 
+#[test]
+fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
+    let dir = setup_test_git_repo();
+    let repo = dir.path();
+    let state_path = repo.join(".agent-state/state.json");
+
+    let milestones = vec![MilestoneSpec {
+        title: "Multi Issue Milestone".to_string(),
+        verify_cmd: "echo ok".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    fs::write(repo.join("README.md"), "# Updated code\n").unwrap();
+
+    let mock_report_json = r#"{"summary":"Multiple security issues detected","findings":[{"severity":"Critical","file":"src/auth.rs","line_range":[10,12],"problem":"Hardcoded secret","suggested_fix":"Use env var"},{"severity":"High","file":"src/api.rs","line_range":[20,25],"problem":"Missing CSRF check","suggested_fix":"Add CSRF middleware"},{"severity":"High","file":"src/db.rs","line_range":[30,35],"problem":"Raw query used","suggested_fix":"Use ORM query"},{"severity":"Critical","file":"src/overflow.rs","line_range":[40,45],"problem":"Fourth issue beyond cap","suggested_fix":"Should be omitted"}],"has_blocking_issues":true}"#;
+    let mock_driver = format!("echo '{}'", mock_report_json);
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some(mock_driver),
+        max_retries: 3,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: true,
+    };
+
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let outcome = runner.step().unwrap();
+
+    assert!(matches!(outcome, DaemonStepOutcome::Advanced { .. }));
+
+    let updated_state = load_state(&state_path).unwrap();
+    let advisory_note = updated_state
+        .notes
+        .iter()
+        .find(|n| n.note.contains("[review-advisory]"))
+        .expect("Expected [review-advisory] note in ledger");
+
+    let expected_prefix = "[review-advisory] Task task-1: Multiple security issues detected. Issues: 1) src/auth.rs: Hardcoded secret (fix: Use env var); 2) src/api.rs: Missing CSRF check (fix: Add CSRF middleware); 3) src/db.rs: Raw query used (fix: Use ORM query)";
+    assert_eq!(advisory_note.note, expected_prefix);
+    assert!(!advisory_note.note.contains("Fourth issue beyond cap"));
+}
+
+#[test]
+fn test_daemon_advisory_review_works_in_git_subdirectory() {
+    let dir = setup_test_git_repo();
+    let repo = dir.path();
+    let sub = repo.join("subproject");
+    fs::create_dir_all(&sub).unwrap();
+    let state_path = sub.join(".agent-state/state.json");
+
+    let milestones = vec![MilestoneSpec {
+        title: "Subproject Milestone".to_string(),
+        verify_cmd: "echo ok".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    fs::write(sub.join("sub.txt"), "sub content\n").unwrap();
+
+    let mock_report_json = r#"{"summary":"Subproject review finding","findings":[{"severity":"High","file":"sub.txt","line_range":[1,1],"problem":"Missing header","suggested_fix":"Add header"}],"has_blocking_issues":true}"#;
+    let mock_driver = format!("echo '{}'", mock_report_json);
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some(mock_driver),
+        max_retries: 3,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: true,
+    };
+
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let outcome = runner.step().unwrap();
+
+    assert!(matches!(outcome, DaemonStepOutcome::Advanced { .. }));
+
+    let updated_state = load_state(&state_path).unwrap();
+    let advisory_note = updated_state
+        .notes
+        .iter()
+        .find(|n| n.note.contains("[review-advisory]"))
+        .expect("Expected [review-advisory] note even when running in git subdirectory");
+
+    assert!(advisory_note
+        .note
+        .contains("Issues: 1) sub.txt: Missing header (fix: Add header)"));
+}

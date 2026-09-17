@@ -159,6 +159,58 @@ fn test_review_record_to_ledger() {
 }
 
 #[test]
+fn test_review_records_only_critical_and_high_findings_to_ledger() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_git_repo(repo);
+
+    let state_path = repo.join(".agent-state/state.json");
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    let initial_state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 0,
+        ..Default::default()
+    };
+    save_state_atomic(&state_path, &initial_state).unwrap();
+
+    fs::write(repo.join("lib.rs"), "pub fn mixed() {}\n").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let mock_driver = "echo '{\"summary\":\"Mixed severity advisory\",\"has_blocking_issues\":true,\"findings\":[{\"severity\":\"Low\",\"file\":\"lib.rs\",\"line_range\":[1,1],\"problem\":\"Minor nit\",\"suggested_fix\":\"Ignore\"},{\"severity\":\"Medium\",\"file\":\"lib.rs\",\"line_range\":[1,1],\"problem\":\"Medium concern\",\"suggested_fix\":\"Improve\"},{\"severity\":\"High\",\"file\":\"lib.rs\",\"line_range\":[1,1],\"problem\":\"High vulnerability\",\"suggested_fix\":\"Fix auth\"},{\"severity\":\"Critical\",\"file\":\"lib.rs\",\"line_range\":[1,1],\"problem\":\"Critical exploit\",\"suggested_fix\":\"Patch immediately\"}]}'";
+
+    let output = Command::new(bin())
+        .args([
+            "review",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--driver",
+            mock_driver,
+            "--record",
+        ])
+        .output()
+        .expect("run superstate review --record");
+
+    assert!(output.status.success());
+
+    let entries = read_ledger(&state_path);
+    assert_eq!(
+        entries.len(),
+        2,
+        "Only Critical and High findings should be recorded"
+    );
+    assert!(entries
+        .iter()
+        .any(|e| e.note.contains("High vulnerability")));
+    assert!(entries.iter().any(|e| e.note.contains("Critical exploit")));
+    assert!(!entries.iter().any(|e| e.note.contains("Minor nit")));
+    assert!(!entries.iter().any(|e| e.note.contains("Medium concern")));
+}
+
+#[test]
 fn test_review_fail_on_blocking() {
     let tmp = tempdir().unwrap();
     let repo = tmp.path();

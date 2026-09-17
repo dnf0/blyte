@@ -4,7 +4,7 @@ use superstate_core::models::LedgerEntry;
 use superstate_core::state_machine::resolve_state_path;
 use superstate_review::diff::get_git_diff;
 use superstate_review::runner::{execute_review, ReviewConfig};
-use superstate_review::schema::ReviewReport;
+use superstate_review::schema::{ReviewReport, Severity};
 
 pub struct ReviewArgs {
     pub commit_range: Option<String>,
@@ -68,17 +68,19 @@ pub fn cmd_review(args: ReviewArgs) -> Result<(), String> {
 
         if state_file.exists() {
             for finding in &report.findings {
-                let note = format!(
-                    "[review-advisory] {}:{}-{}: {} (Fix: {})",
-                    finding.file.display(),
-                    finding.line_range.0,
-                    finding.line_range.1,
-                    finding.problem,
-                    finding.suggested_fix
-                );
-                let entry = LedgerEntry::new("reviewer", note);
-                append_ledger_note(&state_file, entry)
-                    .map_err(|e| format!("Failed to append review finding to ledger: {}", e))?;
+                if matches!(finding.severity, Severity::Critical | Severity::High) {
+                    let note = format!(
+                        "[review-advisory] {}:{}-{}: {} (Fix: {})",
+                        finding.file.display(),
+                        finding.line_range.0,
+                        finding.line_range.1,
+                        finding.problem,
+                        finding.suggested_fix
+                    );
+                    let entry = LedgerEntry::new("reviewer", note);
+                    append_ledger_note(&state_file, entry)
+                        .map_err(|e| format!("Failed to append review finding to ledger: {}", e))?;
+                }
             }
         }
     }

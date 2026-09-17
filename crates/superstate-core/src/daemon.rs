@@ -45,6 +45,29 @@ pub fn is_vacuous_gate(verify_cmd: &str) -> bool {
     )
 }
 
+/// Check whether a path resides inside a git repository or worktree.
+///
+/// Supports subdirectories, standard repositories, and worktrees where `.git` may be
+/// an ancestor directory or a gitlink file.
+pub fn is_inside_git_repo(path: &Path) -> bool {
+    let check_ancestors = |p: &Path| p.ancestors().any(|ancestor| ancestor.join(".git").exists());
+
+    if check_ancestors(path) {
+        return true;
+    }
+    if let Ok(canonical) = path.canonicalize() {
+        if check_ancestors(&canonical) {
+            return true;
+        }
+    }
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output()
+        .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
 /// Driver turns required before an UNGATED task may be reported complete.
 ///
 /// Mirrors superstate_mcp's `max_turns_per_milestone`, whose iteration is turn-driven
@@ -595,7 +618,7 @@ impl DaemonRunner {
             .unwrap_or(0);
         let attempt_ceiling = self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
 
-        if gate_res.passed && self.config.advisory_review && working_dir.join(".git").exists() {
+        if gate_res.passed && self.config.advisory_review && is_inside_git_repo(&working_dir) {
             let diff = match superstate_review::get_git_diff(&working_dir, Some("HEAD")) {
                 Ok(d) if !d.trim().is_empty() => d,
                 _ => superstate_review::get_git_diff(&working_dir, None).unwrap_or_default(),
@@ -611,31 +634,49 @@ impl DaemonRunner {
                 &review_cfg,
             ) {
                 if report.has_blocking_issues {
-                    let first_finding = report
+                    let mut blocking_findings: Vec<_> = report
                         .findings
                         .iter()
-                        .find(|f| {
+                        .filter(|f| {
                             matches!(
                                 f.severity,
                                 superstate_review::schema::Severity::Critical
                                     | superstate_review::schema::Severity::High
                             )
                         })
-                        .or_else(|| report.findings.first())
-                        .map(|f| {
-                            format!(
-                                "{}: {} (fix: {})",
-                                f.file.display(),
-                                f.problem,
-                                f.suggested_fix
-                            )
-                        })
-                        .unwrap_or_else(|| report.summary.clone());
-                    let note = format!(
-                        "[review-advisory] Task {}: {}. Problem: {}",
-                        active_task.id, report.summary, first_finding
-                    );
-                    state.notes.push(LedgerEntry::new("superstate-daemon", note));
+                        .take(3)
+                        .collect();
+
+                    if blocking_findings.is_empty() && !report.findings.is_empty() {
+                        blocking_findings = report.findings.iter().take(3).collect();
+                    }
+
+                    let summary = report.summary.trim_end_matches('.');
+                    let note = if blocking_findings.is_empty() {
+                        format!("[review-advisory] Task {}: {}", active_task.id, summary)
+                    } else {
+                        let issues = blocking_findings
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| {
+                                format!(
+                                    "{}) {}: {} (fix: {})",
+                                    i + 1,
+                                    f.file.display(),
+                                    f.problem,
+                                    f.suggested_fix
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        format!(
+                            "[review-advisory] Task {}: {}. Issues: {}",
+                            active_task.id, summary, issues
+                        )
+                    };
+                    state
+                        .notes
+                        .push(LedgerEntry::new("superstate-daemon", note));
                     save_state_atomic(&self.config.state_path, &state)?;
 
                     if is_vacuous_gate(verify_cmd)
@@ -648,9 +689,8 @@ impl DaemonRunner {
                             .or_insert(0) += 1;
                         return Ok(DaemonStepOutcome::Failed {
                             task_id: active_task.id,
-                            reason:
-                                "advisory-review: blocking issues detected on vacuous gate"
-                                    .to_string(),
+                            reason: "advisory-review: blocking issues detected on vacuous gate"
+                                .to_string(),
                             retries_remaining: self
                                 .config
                                 .max_retries
@@ -697,7 +737,7 @@ impl DaemonRunner {
             self.last_failure_output.remove(&active_task.id);
 
             // Milestone git checkpoint in in-place mode when git repository exists
-            if state.no_worktree && working_dir.join(".git").exists() {
+            if state.no_worktree && is_inside_git_repo(&working_dir) {
                 let status_res = Command::new("git")
                     .args(["status", "--porcelain"])
                     .current_dir(&working_dir)
@@ -1024,7 +1064,7 @@ pub fn finalize_completed_execution(
                     .clone()
                     .unwrap_or_else(|| "main".to_string());
 
-                if repo_root.join(".git").exists() {
+                if is_inside_git_repo(&repo_root) {
                     // Ensure repository root is on base_branch before merging
                     let head_out = Command::new("git")
                         .args(["rev-parse", "--abbrev-ref", "HEAD"])
