@@ -1,0 +1,605 @@
+diff --git a/crates/superstate-review/src/lib.rs b/crates/superstate-review/src/lib.rs
+index 830b128..a983e64 100644
+--- a/crates/superstate-review/src/lib.rs
++++ b/crates/superstate-review/src/lib.rs
+@@ -1,7 +1,12 @@
+ pub mod diff;
+ pub mod prompt;
++pub mod runner;
+ pub mod schema;
+ 
+ pub use diff::{get_git_diff, DiffError};
+ pub use prompt::build_review_system_prompt;
++pub use runner::{
++    clean_json_response, execute_review, parse_review_report, resolve_review_driver, ReviewConfig,
++    ReviewError,
++};
+ pub use schema::{ReviewFinding, ReviewReport, Severity};
+diff --git a/crates/superstate-review/src/runner.rs b/crates/superstate-review/src/runner.rs
+new file mode 100644
+index 0000000..ea38ef9
+--- /dev/null
++++ b/crates/superstate-review/src/runner.rs
+@@ -0,0 +1,290 @@
++use std::io::Write;
++use std::path::Path;
++use std::process::{Command, Stdio};
++use thiserror::Error;
++
++use crate::diff::DiffError;
++use crate::prompt::build_review_system_prompt;
++use crate::schema::{ReviewFinding, ReviewReport, Severity};
++
++#[derive(Debug, Clone)]
++pub struct ReviewConfig {
++    pub driver: Option<String>,
++    pub timeout_secs: u64,
++}
++
++impl Default for ReviewConfig {
++    fn default() -> Self {
++        Self {
++            driver: None,
++            timeout_secs: 120,
++        }
++    }
++}
++
++#[derive(Error, Debug)]
++pub enum ReviewError {
++    #[error("I/O error: {0}")]
++    Io(#[from] std::io::Error),
++    #[error("Diff error: {0}")]
++    Diff(#[from] DiffError),
++    #[error("Driver execution error: {0}")]
++    Driver(String),
++    #[error("Driver not found in PATH or environment")]
++    DriverNotFound,
++    #[error("JSON parse error: {0}")]
++    Json(String),
++}
++
++/// Expands driver commands for Claude and AGY to ensure headless non-interactive and permission flags.
++pub fn expand_driver_command(driver: &str) -> String {
++    let tokens: Vec<&str> = driver.split_whitespace().collect();
++    let first_token = match tokens.first() {
++        Some(&t) => t,
++        None => return driver.to_string(),
++    };
++
++    let binary_name = Path::new(first_token)
++        .file_name()
++        .and_then(|s| s.to_str())
++        .unwrap_or(first_token);
++    let is_claude = binary_name == "claude";
++    let is_agy = binary_name == "agy";
++
++    if !is_claude && !is_agy {
++        return driver.to_string();
++    }
++
++    let has_print = tokens.iter().any(|&t| t == "-p" || t == "--print");
++
++    let has_perms = if is_claude {
++        tokens.iter().any(|&t| {
++            t == "--dangerously-skip-permissions"
++                || t == "--permission-mode=bypassPermissions"
++                || t.strip_prefix("--permission-mode=")
++                    .map(|val| val.trim_matches('\'').trim_matches('"') == "bypassPermissions")
++                    .unwrap_or(false)
++        }) || tokens.windows(2).any(|w| {
++            w[0] == "--permission-mode"
++                && w[1].trim_matches('\'').trim_matches('"') == "bypassPermissions"
++        })
++    } else {
++        tokens.contains(&"--dangerously-skip-permissions")
++    };
++
++    if has_print && has_perms {
++        return driver.to_string();
++    }
++
++    let mut expanded = driver.trim_end().to_string();
++    if !has_print {
++        expanded.push_str(" -p");
++    }
++    if !has_perms {
++        expanded.push_str(" --dangerously-skip-permissions");
++    }
++
++    expanded
++}
++
++/// Helper to check if a binary exists and is executable in PATH.
++fn is_binary_in_path(binary: &str) -> bool {
++    if let Some(paths) = std::env::var_os("PATH") {
++        for dir in std::env::split_paths(&paths) {
++            let candidate = dir.join(binary);
++            if candidate.is_file() {
++                #[cfg(unix)]
++                {
++                    use std::os::unix::fs::PermissionsExt;
++                    if let Ok(metadata) = candidate.metadata() {
++                        if metadata.permissions().mode() & 0o111 != 0 {
++                            return true;
++                        }
++                    }
++                }
++                #[cfg(not(unix))]
++                return true;
++            }
++        }
++    }
++    false
++}
++
++/// Resolve the driver command string based on configured driver, env vars, and PATH discovery.
++pub fn resolve_review_driver(configured_driver: Option<&str>) -> Result<String, ReviewError> {
++    resolve_review_driver_with_env(
++        configured_driver,
++        |k| std::env::var(k).ok(),
++        is_binary_in_path,
++    )
++}
++
++/// Internal resolution helper allowing deterministic testing of environment and PATH lookup.
++pub fn resolve_review_driver_with_env<E, P>(
++    configured_driver: Option<&str>,
++    get_env: E,
++    check_path: P,
++) -> Result<String, ReviewError>
++where
++    E: Fn(&str) -> Option<String>,
++    P: Fn(&str) -> bool,
++{
++    if let Some(driver) = configured_driver {
++        let trimmed = driver.trim();
++        if !trimmed.is_empty() {
++            return Ok(expand_driver_command(trimmed));
++        }
++    }
++
++    if let Some(review_driver) = get_env("SUPERSTATE_REVIEW_DRIVER") {
++        let trimmed = review_driver.trim();
++        if !trimmed.is_empty() {
++            return Ok(expand_driver_command(trimmed));
++        }
++    }
++
++    if let Some(superstate_driver) = get_env("SUPERSTATE_DRIVER") {
++        let trimmed = superstate_driver.trim();
++        if !trimmed.is_empty() {
++            return Ok(expand_driver_command(trimmed));
++        }
++    }
++
++    if check_path("agy") {
++        return Ok(
++            "agy --model gemini-3.8-flash-low --print --dangerously-skip-permissions".to_string(),
++        );
++    }
++
++    if check_path("claude") {
++        return Ok("claude -p --dangerously-skip-permissions".to_string());
++    }
++
++    Err(ReviewError::DriverNotFound)
++}
++
++/// Clean markdown code fences (e.g. ```json ... ``` or ``` ... ```) and trim whitespace.
++pub fn clean_json_response(raw: &str) -> String {
++    let trimmed = raw.trim();
++    if let Some(start_idx) = trimmed.find("```") {
++        let after_fence = &trimmed[start_idx + 3..];
++        let content_start = if let Some(newline_idx) = after_fence.find('\n') {
++            start_idx + 3 + newline_idx + 1
++        } else {
++            let mut offset = start_idx + 3;
++            if after_fence.to_lowercase().starts_with("json") {
++                offset += 4;
++            }
++            offset
++        };
++        if let Some(end_idx) = trimmed[content_start..].rfind("```") {
++            return trimmed[content_start..content_start + end_idx]
++                .trim()
++                .to_string();
++        }
++    }
++    trimmed.to_string()
++}
++
++/// Parse raw LLM output into a structured ReviewReport.
++pub fn parse_review_report(raw: &str) -> Result<ReviewReport, ReviewError> {
++    let cleaned = clean_json_response(raw);
++    let value: serde_json::Value =
++        serde_json::from_str(&cleaned).map_err(|e| ReviewError::Json(e.to_string()))?;
++
++    match value {
++        serde_json::Value::Object(_) => {
++            let mut report: ReviewReport =
++                serde_json::from_value(value).map_err(|e| ReviewError::Json(e.to_string()))?;
++            if report.summary.trim().is_empty() {
++                report.summary = format!("Review generated {} findings", report.findings.len());
++            }
++            let has_high_or_crit = report
++                .findings
++                .iter()
++                .any(|f| matches!(f.severity, Severity::Critical | Severity::High));
++            if has_high_or_crit {
++                report.has_blocking_issues = true;
++            }
++            Ok(report)
++        }
++        serde_json::Value::Array(_) => {
++            let findings: Vec<ReviewFinding> =
++                serde_json::from_value(value).map_err(|e| ReviewError::Json(e.to_string()))?;
++            let count = findings.len();
++            let summary = format!("Review generated {} findings", count);
++            Ok(ReviewReport::new(summary, findings))
++        }
++        _ => Err(ReviewError::Json(
++            "Expected JSON object or array representing review report".to_string(),
++        )),
++    }
++}
++
++/// Execute an adversarial code review against the provided git diff.
++pub fn execute_review(
++    repo_root: &Path,
++    diff: &str,
++    task_instruction: Option<&str>,
++    config: &ReviewConfig,
++) -> Result<ReviewReport, ReviewError> {
++    if diff.trim().is_empty() {
++        return Ok(ReviewReport::clean("No changes detected in diff."));
++    }
++
++    let driver_cmd = resolve_review_driver(config.driver.as_deref())?;
++
++    let mut prompt = String::new();
++    prompt.push_str(build_review_system_prompt());
++    prompt.push_str("\n\n");
++    if let Some(instructions) = task_instruction {
++        if !instructions.trim().is_empty() {
++            prompt.push_str("Task Instructions:\n");
++            prompt.push_str(instructions.trim());
++            prompt.push_str("\n\n");
++        }
++    }
++    prompt.push_str("Git Diff:\n");
++    prompt.push_str(diff);
++
++    let mut child = Command::new("sh")
++        .arg("-c")
++        .arg(&driver_cmd)
++        .current_dir(repo_root)
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .env("SUPERSTATE_PROMPT", &prompt)
++        .spawn()?;
++
++    if let Some(mut stdin) = child.stdin.take() {
++        let prompt_bytes = prompt.as_bytes().to_vec();
++        std::thread::spawn(move || {
++            let _ = stdin.write_all(&prompt_bytes);
++        });
++    }
++
++    let output = child.wait_with_output()?;
++
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let stderr = String::from_utf8_lossy(&output.stderr);
++
++    if !output.status.success() {
++        // If driver produced valid JSON in stdout despite non-zero exit, parse it
++        if let Ok(report) = parse_review_report(&stdout) {
++            return Ok(report);
++        }
++        return Err(ReviewError::Driver(format!(
++            "Driver exited with status {}: {}{}",
++            output.status.code().unwrap_or(-1),
++            stderr.trim(),
++            if !stdout.trim().is_empty() {
++                format!(" (stdout: {})", stdout.trim())
++            } else {
++                String::new()
++            }
++        )));
++    }
++
++    parse_review_report(&stdout)
++}
+diff --git a/crates/superstate-review/src/schema.rs b/crates/superstate-review/src/schema.rs
+index 39631f7..0af7191 100644
+--- a/crates/superstate-review/src/schema.rs
++++ b/crates/superstate-review/src/schema.rs
+@@ -20,6 +20,7 @@ pub struct ReviewFinding {
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct ReviewReport {
++    #[serde(default)]
+     pub summary: String,
+     #[serde(default)]
+     pub findings: Vec<ReviewFinding>,
+@@ -47,3 +48,52 @@ impl ReviewReport {
+         }
+     }
+ }
++
++impl std::fmt::Display for Severity {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Severity::Critical => write!(f, "Critical"),
++            Severity::High => write!(f, "High"),
++            Severity::Medium => write!(f, "Medium"),
++            Severity::Low => write!(f, "Low"),
++        }
++    }
++}
++
++impl std::fmt::Display for ReviewFinding {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(
++            f,
++            "[{}] {}:{}-{}\n   Problem: {}\n   Suggested Fix: {}",
++            self.severity,
++            self.file.display(),
++            self.line_range.0,
++            self.line_range.1,
++            self.problem,
++            self.suggested_fix
++        )
++    }
++}
++
++impl std::fmt::Display for ReviewReport {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        writeln!(f, "Review Summary: {}", self.summary)?;
++        if self.has_blocking_issues {
++            writeln!(f, "Status: Blocking issues detected")?;
++        } else {
++            writeln!(f, "Status: Clean / Non-blocking")?;
++        }
++        if self.findings.is_empty() {
++            write!(f, "No findings reported.")?;
++        } else {
++            writeln!(f, "\nFindings ({}):", self.findings.len())?;
++            for (idx, finding) in self.findings.iter().enumerate() {
++                if idx > 0 {
++                    writeln!(f)?;
++                }
++                write!(f, "{}. {}", idx + 1, finding)?;
++            }
++        }
++        Ok(())
++    }
++}
+diff --git a/crates/superstate-review/tests/test_runner.rs b/crates/superstate-review/tests/test_runner.rs
+new file mode 100644
+index 0000000..9cd05d9
+--- /dev/null
++++ b/crates/superstate-review/tests/test_runner.rs
+@@ -0,0 +1,221 @@
++use std::path::{Path, PathBuf};
++use superstate_review::runner::{
++    clean_json_response, execute_review, parse_review_report, resolve_review_driver,
++    resolve_review_driver_with_env, ReviewConfig, ReviewError,
++};
++use superstate_review::schema::{ReviewFinding, ReviewReport, Severity};
++
++#[test]
++fn test_clean_json_response() {
++    assert_eq!(
++        clean_json_response("{\"summary\": \"ok\"}"),
++        "{\"summary\": \"ok\"}"
++    );
++    assert_eq!(
++        clean_json_response("```json\n{\"summary\": \"ok\"}\n```"),
++        "{\"summary\": \"ok\"}"
++    );
++    assert_eq!(
++        clean_json_response("```\n{\"summary\": \"ok\"}\n```"),
++        "{\"summary\": \"ok\"}"
++    );
++    assert_eq!(
++        clean_json_response("Preamble\n```json\n{\"summary\": \"ok\"}\n```\nPostamble"),
++        "{\"summary\": \"ok\"}"
++    );
++}
++
++#[test]
++fn test_parse_review_report_dict() {
++    let raw = r#"{
++        "summary": "Potential memory leak",
++        "findings": [
++            {
++                "severity": "High",
++                "file": "src/main.rs",
++                "line_range": [10, 20],
++                "problem": "Unbounded buffer",
++                "suggested_fix": "Add capacity limit"
++            }
++        ],
++        "has_blocking_issues": false
++    }"#;
++    let report = parse_review_report(raw).expect("Failed to parse report");
++    assert_eq!(report.summary, "Potential memory leak");
++    assert_eq!(report.findings.len(), 1);
++    assert!(
++        report.has_blocking_issues,
++        "High severity should promote has_blocking_issues"
++    );
++}
++
++#[test]
++fn test_parse_review_report_list() {
++    let raw = r#"[
++        {
++            "severity": "Critical",
++            "file": "src/lib.rs",
++            "line_range": [5, 6],
++            "problem": "Buffer overflow",
++            "suggested_fix": "Bounds check"
++        }
++    ]"#;
++    let report = parse_review_report(raw).expect("Failed to parse report list");
++    assert_eq!(report.findings.len(), 1);
++    assert_eq!(report.findings[0].severity, Severity::Critical);
++    assert!(report.has_blocking_issues);
++    assert_eq!(report.summary, "Review generated 1 findings");
++}
++
++#[test]
++fn test_parse_review_report_clean() {
++    let raw = r#"{
++        "summary": "All checks passed cleanly.",
++        "findings": [],
++        "has_blocking_issues": false
++    }"#;
++    let report = parse_review_report(raw).expect("Failed to parse clean report");
++    assert_eq!(report.summary, "All checks passed cleanly.");
++    assert!(report.findings.is_empty());
++    assert!(!report.has_blocking_issues);
++}
++
++#[test]
++fn test_parse_review_report_invalid_json() {
++    let raw = "not a valid json string";
++    let err = parse_review_report(raw).unwrap_err();
++    match err {
++        ReviewError::Json(_) => {}
++        other => panic!("Expected ReviewError::Json, got {:?}", other),
++    }
++}
++
++#[test]
++fn test_resolve_review_driver_configured() {
++    let claude = resolve_review_driver(Some("claude")).unwrap();
++    assert_eq!(claude, "claude -p --dangerously-skip-permissions");
++
++    let agy = resolve_review_driver(Some("agy")).unwrap();
++    assert_eq!(agy, "agy -p --dangerously-skip-permissions");
++
++    let custom = resolve_review_driver(Some("my-custom-reviewer --flag")).unwrap();
++    assert_eq!(custom, "my-custom-reviewer --flag");
++}
++
++#[test]
++fn test_resolve_review_driver_from_env() {
++    let driver = resolve_review_driver_with_env(
++        None,
++        |key| {
++            if key == "SUPERSTATE_REVIEW_DRIVER" {
++                Some("custom-review-tool".to_string())
++            } else {
++                None
++            }
++        },
++        |_| false,
++    )
++    .unwrap();
++    assert_eq!(driver, "custom-review-tool");
++
++    let driver2 = resolve_review_driver_with_env(
++        None,
++        |key| {
++            if key == "SUPERSTATE_DRIVER" {
++                Some("claude".to_string())
++            } else {
++                None
++            }
++        },
++        |_| false,
++    )
++    .unwrap();
++    assert_eq!(driver2, "claude -p --dangerously-skip-permissions");
++}
++
++#[test]
++fn test_resolve_review_driver_from_path() {
++    // agy found in PATH
++    let driver_agy = resolve_review_driver_with_env(None, |_| None, |bin| bin == "agy").unwrap();
++    assert_eq!(
++        driver_agy,
++        "agy --model gemini-3.8-flash-low --print --dangerously-skip-permissions"
++    );
++
++    // claude found in PATH when agy is not
++    let driver_claude =
++        resolve_review_driver_with_env(None, |_| None, |bin| bin == "claude").unwrap();
++    assert_eq!(driver_claude, "claude -p --dangerously-skip-permissions");
++
++    // neither found
++    let err = resolve_review_driver_with_env(None, |_| None, |_| false).unwrap_err();
++    match err {
++        ReviewError::DriverNotFound => {}
++        other => panic!("Expected DriverNotFound, got {:?}", other),
++    }
++}
++
++#[test]
++fn test_review_report_display() {
++    let report = ReviewReport {
++        summary: "Code review found 1 security issue".to_string(),
++        findings: vec![ReviewFinding {
++            severity: Severity::High,
++            file: PathBuf::from("src/auth.rs"),
++            line_range: (42, 50),
++            problem: "Missing authentication check".to_string(),
++            suggested_fix: "Validate session token".to_string(),
++        }],
++        has_blocking_issues: true,
++    };
++
++    let display_str = report.to_string();
++    assert!(display_str.contains("Code review found 1 security issue"));
++    assert!(display_str.contains("High"));
++    assert!(display_str.contains("src/auth.rs:42-50"));
++    assert!(display_str.contains("Missing authentication check"));
++    assert!(display_str.contains("Validate session token"));
++    assert!(display_str.contains("Blocking"));
++}
++
++#[test]
++fn test_execute_review_empty_diff() {
++    let config = ReviewConfig {
++        driver: Some("nonexistent-driver".to_string()),
++        timeout_secs: 10,
++    };
++    let report = execute_review(Path::new("."), "", None, &config).unwrap();
++    assert_eq!(report.summary, "No changes detected in diff.");
++    assert!(!report.has_blocking_issues);
++    assert!(report.findings.is_empty());
++
++    let report_whitespace = execute_review(Path::new("."), "   \n\t  ", None, &config).unwrap();
++    assert_eq!(report_whitespace.summary, "No changes detected in diff.");
++}
++
++#[test]
++fn test_execute_review_with_mock_driver() {
++    let mock_json = r#"{"summary":"All good","findings":[],"has_blocking_issues":false}"#;
++    let config = ReviewConfig {
++        driver: Some(format!("echo '{}'", mock_json)),
++        timeout_secs: 10,
++    };
++    let diff = "diff --git a/test.rs b/test.rs\n+new line\n";
++    let report = execute_review(Path::new("."), diff, Some("Check logic"), &config).unwrap();
++    assert_eq!(report.summary, "All good");
++    assert!(!report.has_blocking_issues);
++}
++
++#[test]
++fn test_execute_review_failing_driver() {
++    let config = ReviewConfig {
++        driver: Some("exit 1".to_string()),
++        timeout_secs: 10,
++    };
++    let diff = "diff --git a/test.rs b/test.rs\n+new line\n";
++    let err = execute_review(Path::new("."), diff, None, &config).unwrap_err();
++    match err {
++        ReviewError::Driver(_) => {}
++        other => panic!("Expected ReviewError::Driver, got {:?}", other),
++    }
++}

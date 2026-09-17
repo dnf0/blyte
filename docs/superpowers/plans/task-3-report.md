@@ -1,94 +1,83 @@
-# Task 3: Safety, Checkpoint, Rollback & Atomic Exec Handlers Report
+# Task 3 Report: Daemon Advisory Review Loop in `crates/superstate-core`
 
-**Status:** Completed  
-**Branch:** `wt/feat-mcp-cli-complete-parity-task-3`  
-**Commit:** `b9383a4065d45350da14249b14deb0ced692814c`  
-**Author:** Subagent (Task 3)  
-**Date:** 2026-09-12  
+## Summary
+Successfully implemented Task 3 of the advisory code review system. Wired automated adversarial code review into the daemon execution loop (`DaemonRunner::run_step` and `DaemonRunner::step`) in `crates/superstate-core/src/daemon.rs` and added the `--advisory-review` CLI flag in `crates/superstate-cli/src/state_cli.rs`, `commands/daemon.rs`, and `main.rs`.
 
----
+The loop enforces the critical architectural distinction between vacuous gates (e.g. `true`, `:`, `exit 0`, empty string) and non-vacuous verification gates:
+- **Vacuous verification gate**: If the advisory code review flags blocking issues on a vacuous gate, the daemon rejects the completion, records a `[review-advisory]` note to `state.notes`, and returns `DaemonStepOutcome::Failed { reason: "advisory-review: blocking issues detected on vacuous gate", ... }` so the implementer driver receives the critique on the subsequent turn.
+- **Non-vacuous verification gate**: If the verification gate is strict and passed, the daemon logs the `[review-advisory]` note into the ledger for diagnostic context but allows the milestone to advance, avoiding the 60.5% benchmark false-alarm trap.
 
-## 1. Overview & Objectives
+## Changes Made
+1. **`crates/superstate-core/Cargo.toml`**:
+   - Added dependency: `superstate-review = { path = "../superstate-review" }`.
 
-Task 3 brings full feature parity to the Superstate MCP server (`crates/superstate-mcp/src/server.rs`) for safety-critical state operations:
-1. `state_checkpoint`: creates deterministic git checkpoint tags guarding each step (`agent-checkpoint/step-N`).
-2. `state_rollback`: restores working tree to checkpoints with dirty/untracked debris removal while strictly preserving `.agent-state/state.json`. Also cleanly tears down any active task worktrees before restoring.
-3. `state_exec`: atomic command execution with gate verification, optional pre-execution checkpointing, worktree isolation merging, automated state advance on success, and automated rollback with failure reason recording in state errors on failure.
+2. **`crates/superstate-core/src/daemon.rs`**:
+   - Added `pub advisory_review: bool` (with `#[serde(default)]`) to `DaemonConfig`.
+   - Implemented `Default` for `DaemonConfig` (defaulting `advisory_review: false`, `advisory_gate: false`, `max_retries: 3`, `timeout_secs: 300`).
+   - Added `pub fn step(&mut self) -> Result<DaemonStepOutcome, DaemonError>` alias on `DaemonRunner` forwarding to `self.run_step()`.
+   - Wired advisory review into `run_step()` right after verification command passes:
+     - Checks `if gate_res.passed && self.config.advisory_review && working_dir.join(".git").exists()`.
+     - Extracts diff using `superstate_review::get_git_diff(&working_dir, None)`.
+     - Executes review with `superstate_review::execute_review(&working_dir, &diff, None, &ReviewConfig { driver: self.config.driver_cmd.clone(), timeout_secs: self.config.timeout_secs })`.
+     - When blocking issues exist (`report.has_blocking_issues`):
+       - Appends `[review-advisory] Task <id>: <summary>. Problem: <problem>` to `state.notes` via `LedgerEntry::new("superstate-daemon", ...)` and saves state atomically.
+       - If `is_vacuous_gate(verify_cmd)` and `driver_cmd.is_some()` and under attempt ceiling: returns `DaemonStepOutcome::Failed` with reason `"advisory-review: blocking issues detected on vacuous gate"`.
+       - If non-vacuous gate: continues to milestone completion.
 
----
+3. **`crates/superstate-cli/src/state_cli.rs`**:
+   - Added `#[arg(long)] pub advisory_review: bool` to `DaemonArgs`.
+   - Updated `StateCommands::Daemon` handler to pass `args.advisory_review` to `commands::daemon::cmd_daemon`.
 
-## 2. Implementation Summary
+4. **`crates/superstate-cli/src/commands/daemon.rs`**:
+   - Updated `cmd_daemon` signature to accept `advisory_review: bool`.
+   - Forwarded `--advisory-review` flag when spawning detached daemon process.
+   - Populated `advisory_review` in in-process `DaemonConfig`.
 
-### `state_checkpoint` (`crates/superstate-mcp/src/server.rs`)
-- Resolves effective repository root and branch-scoped state path via `resolve_mcp_state_path`.
-- Loads `ExecutionState` to determine `state.step`.
-- Invokes `superstate_core::checkpoint::create_checkpoint(&root, state.step)`.
-- Returns structured JSON response:
-  ```json
-  {
-    "checkpoint": "agent-checkpoint/step-N",
-    "step": N,
-    "content": [{ "type": "text", "text": "Checkpoint created: agent-checkpoint/step-N" }]
-  }
-  ```
+5. **`crates/superstate-cli/src/main.rs`**:
+   - Forwarded `args.advisory_review` in top-level `Commands::Daemon` match arm.
 
-### `state_rollback` (`crates/superstate-mcp/src/server.rs`)
-- Inspects `state.active_worktree`: if present on disk, constructs `IsolatedWorktree` and aborts it cleanly before git restoration.
-- Clears `active_worktree` and `active_branch`, persisting to state file atomically.
-- Computes preserved file list ensuring `.agent-state/` and state files survive git clean.
-- Invokes `superstate_core::checkpoint::rollback_to(&root, state.step, reference, &preserve_refs)`.
-- Returns confirmation response with target checkpoint tag and step.
+6. **Workspace Updates & Test Consistency**:
+   - Updated call sites of `cmd_daemon` in `crates/superstate-cli/src/commands/handoff.rs` and `crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs`.
+   - Updated all `DaemonConfig` initializations in `crates/superstate-core/tests/test_daemon_runner.rs`, `crates/superstate-core/tests/test_daemon_automerge.rs`, and `crates/superstate-core/tests/test_driver_presets.rs`.
 
-### `state_exec` (`crates/superstate-mcp/src/server.rs`)
-- Follows `crates/superstate-cli/src/commands/state.rs` (`cmd_exec`) behavior:
-  - Supports arguments: `verify_cmd` (required), `state`, `verify_git_clean` (default `false`), `checkpoint` (default `false`), `rollback_on_fail` (default `false`), `advance` (default `true`), `json` (default `false`).
-  - If `checkpoint == true`: calls `create_checkpoint(&root, step)`.
-  - Determines target execution directory (active worktree if present, else repository root).
-  - Executes verification command with 600s timeout (`run_verification_cmd`).
-  - If gate passes and `verify_git_clean == true`, ensures `.agent-state` is excluded via `ensure_git_exclude` and verifies clean working tree.
-  - If `passed && advance`:
-    - Merges and cleans up active worktree into base branch if present.
-    - Advances state machine step (`advance_step`).
-    - Provisions isolated worktree for next task if worktrees enabled.
-    - Persists state atomically (`save_state_atomic`).
-  - If `!passed`:
-    - Records detailed failure reason into `state.errors` and persists state atomically.
-    - If `rollback_on_fail == true`: aborts active worktree if present, and invokes `rollback_to` preserving `.agent-state`.
-  - Returns structured response with `passed`, `advanced`, `rolled_back`, `step`, `verify_cmd`, `output`, and formatted text content.
+7. **`crates/superstate-core/tests/test_daemon_advisory_review.rs`**:
+   - Added comprehensive integration tests:
+     - `test_daemon_config_default_advisory_review_false`: verifies default config value is `false`.
+     - `test_daemon_advisory_review_clean_diff_advances`: verifies clean diff with no changes advances cleanly.
+     - `test_daemon_advisory_review_blocking_issues_vacuous_gate_fails`: verifies mock driver returning blocking issues on a vacuous gate (`verify_cmd: "true"`) fails step with `"advisory-review: blocking issues detected on vacuous gate"` and records `[review-advisory]` to `state.notes`.
+     - `test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances`: verifies mock driver returning blocking issues on a non-vacuous gate (`verify_cmd: "test -f marker.txt"`) records `[review-advisory]` note to `state.notes` and advances milestone.
 
-### Helper Functions (`server.rs`)
-- `preserved(state_path: &Path) -> Vec<String>`: Ensures `.agent-state` directory and state file are excluded from rollback deletion.
-- `repo_root_for(state_path: &Path, fallback: &Path) -> PathBuf`: Resolves repository root owning the state file.
+## TDD Verification
 
----
+### RED Phase
+Executed `cargo test -p superstate-core --test test_daemon_advisory_review`:
+```text
+error[E0599]: no function or associated item named `default` found for struct `DaemonConfig`
+error[E0560]: struct `DaemonConfig` has no field named `advisory_review`
+error[E0599]: no method named `step` found for struct `DaemonRunner`
 
-## 3. Test-Driven Development (TDD) Lifecycle
+error: could not compile `superstate-core` (test "test_daemon_advisory_review") due to 5 previous errors
+```
+Tests failed as expected due to missing config field, missing default trait implementation, and missing step method.
 
-1. **RED Phase**:
-   - Authored 5 integration tests in `crates/superstate-mcp/tests/test_mcp_state_safety.rs`:
-     - `test_state_checkpoint_creates_git_tag`
-     - `test_state_rollback_restores_modified_file_and_preserves_state`
-     - `test_state_exec_passes_and_advances_step`
-     - `test_state_exec_fails_records_error_and_rolls_back`
-     - `test_state_exec_json_rpc_dispatch`
-   - Ran `cargo test -p superstate-mcp --test test_mcp_state_safety`. Verified expected failure (`Unknown tool: state_checkpoint`, `Unknown tool: state_exec`).
+### GREEN Phase
+Executed `cargo test -p superstate-core --test test_daemon_advisory_review`:
+```text
+running 4 tests
+test test_daemon_config_default_advisory_review_false ... ok
+test test_daemon_advisory_review_blocking_issues_vacuous_gate_fails ... ok
+test test_daemon_advisory_review_clean_diff_advances ... ok
+test test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances ... ok
 
-2. **GREEN Phase**:
-   - Implemented handlers and helper functions in `crates/superstate-mcp/src/server.rs`.
-   - Integrated `ensure_git_exclude` to guarantee `.agent-state/` does not dirty working tree checks.
-   - Re-ran tests: all 5 passed in 0.35s.
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+```
 
-3. **Regression & Quality Verification**:
-   - `cargo test -p superstate-mcp`: All 35 tests passed across 7 test suites (0 failures).
-   - `cargo fmt --check`: Clean (verified).
-   - `cargo clippy -p superstate-mcp --all-targets -- -D warnings`: Clean (0 warnings).
+### Full Workspace & Quality Checks
+- `cargo test --all`: All workspace test suites passed across all crates (`superstate-core`, `superstate-cli`, `superstate-mcp`, `superstate-review`, `superstate-rules`, `superstate-syntax`, `superstate-worktree`).
+- `cargo clippy --all`: Passed cleanly with zero warnings.
 
----
+## Commits Created
+- `0a0d763`: `feat(daemon): wire advisory review into milestone gate evaluation`
 
-## 4. Git Commit
-
-- **Commit**: `b9383a4065d45350da14249b14deb0ced692814c`
-- **Message**: `feat(mcp): implement state_checkpoint, state_rollback, and state_exec handlers`
-- **Files Modified/Added**:
-  - `crates/superstate-mcp/src/server.rs`
-  - `crates/superstate-mcp/tests/test_mcp_state_safety.rs`
+## Notes & Concerns
+- None. Vacuous vs. non-vacuous gate semantics are completely honored and covered by automated integration tests.

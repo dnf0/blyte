@@ -1,74 +1,91 @@
-# Task 2 Brief: State Inspection, Status & Briefing Handlers (`crates/superstate-mcp/src/server.rs`)
+# Task 2 Brief: CLI Command `superstate review` in `crates/superstate-cli`
 
-- **Working Directory:** `/Users/danielfisher/repos/superstate/.wt/feat-mcp-cli-complete-parity-task-2`
-- **Branch:** `wt/feat-mcp-cli-complete-parity-task-2`
+- **Repository Directory**: `/Users/danielfisher/repos/superstate`
+- **Current Branch**: `feat/advisory-code-review`
 - **Depends on:** Task 1
 
-## Files
-- Modify: `crates/superstate-mcp/src/server.rs`
-- Test: `crates/superstate-mcp/tests/test_mcp_state_inspection.rs`
+## Goal
+Implement the full CLI command `superstate review` in `crates/superstate-cli`, replacing the `ReviewReport::clean(...)` stub with real execution via `superstate_review::execute_review`. Support flags for commit ranges, driver overrides, JSON output, ledger recording, and exit-on-blocking.
 
-## Requirements
-Implement handlers in `handle_tool_call` for the 4 inspection tools:
-1. `state_status`:
-   - Parameters: `state?: string`, `json?: boolean`
-   - Resolve effective state path via branch-scoped routing (`find_branch_state_for_worktree` or `branch_scoped_state_path` or resolve path).
-   - Load state via `load_state`.
-   - Read ledger entries via `superstate_core::ledger::read_ledger`.
-   - If `json == true`: return JSON-serialized `state` (matching `superstate state status --json`).
-   - If `json == false` (or not specified): format human-readable text output:
-     ```text
-     State Status: {:?}
-     Step: {}
-     Active Task: {}
-     Completed Tasks: {}
-     Ledger Entries: {}
-       ✓ task...
-     Recent Notes (Epistemic Ledger):
-       • [author] note
-     ```
-2. `state_show`:
-   - Parameters: `state?: string`, `json?: boolean`
-   - If `json == true`: return JSON-serialized state.
-   - If `json == false`: return Markdown formatted summary matching `superstate state show`:
-     ```markdown
-     # Superstate Execution Status
-     - **Status:** {:?} (Step {})
-     - **Base Branch:** `{}` (if present)
-     - **Active Task:** {}: {} (or None)
-     - **Verification Command:** `{}` (if present)
-     - **Active Worktree:** `{}` (branch `{}`) (if present)
-     ```
-3. `state_resume`:
-   - Parameters: `state?: string`
-   - Resolve effective state path and repo root.
-   - Load state and ledger notes.
-   - Query last 5 git commits:
-     ```rust
-     let commits = std::process::Command::new("git")
-         .args(["log", "--oneline", "-5"])
-         .current_dir(&repo_root)
-         .output()
-         ...
-     ```
-   - Return `superstate_core::maintenance::resume_briefing(&state, &notes, &commits)`.
-4. `state_metrics`:
-   - Parameters: `state?: string`, `json?: boolean`
-   - Load state, read ledger.
-   - Compute `let m = superstate_core::maintenance::metrics(&state, notes.len());`
-   - If `json == true`: serialize `m` to JSON.
-   - If `json == false`: format telemetry text matching `superstate state metrics`.
+## Files to Touch
+- Modify: `crates/superstate-cli/src/main.rs`
+- Modify: `crates/superstate-cli/src/commands/review.rs`
+- Create: `crates/superstate-cli/tests/test_cli_review.rs`
 
-## Steps (TDD)
-1. Write failing integration tests in `crates/superstate-mcp/tests/test_mcp_state_inspection.rs`:
-   - Initialize a temporary repo with `.agent-state/state.json` containing active task, 1 completed task, and a ledger note.
-   - Test JSON-RPC calls to `state_status`, `state_show`, `state_resume`, and `state_metrics`.
-   - Verify each returns successful response with expected markdown/text and JSON formats.
-2. Run `cargo test -p superstate-mcp --test test_mcp_state_inspection` to verify failure.
-3. Implement the 4 handlers in `crates/superstate-mcp/src/server.rs`.
-4. Run `cargo test -p superstate-mcp --test test_mcp_state_inspection` to verify passing.
-5. Check `cargo clippy -p superstate-mcp` and `cargo fmt -p superstate-mcp --check`.
-6. Commit in the worktree directory:
-   `git add crates/superstate-mcp/src/server.rs crates/superstate-mcp/tests/test_mcp_state_inspection.rs`
-   `git commit -m "feat(mcp): implement state_status, state_show, state_resume, and state_metrics handlers"`
-7. Write report to `/Users/danielfisher/repos/superstate/docs/superpowers/plans/task-2-report.md`.
+## Detailed Requirements & Interfaces
+1. In `crates/superstate-cli/src/main.rs`:
+   Update `Commands::Review`:
+   ```rust
+   Review {
+       /// Git commit range (e.g. HEAD~1..HEAD). If omitted, inspects uncommitted diff in working tree
+       commit_range: Option<String>,
+       /// Repository root path
+       #[arg(short, long, default_value = ".")]
+       repo: PathBuf,
+       /// Reviewer driver command (e.g. "agy --model gemini-3.8-flash-low" or "claude")
+       #[arg(short, long)]
+       driver: Option<String>,
+       /// Path to .agent-state/state.json (auto-detected if omitted)
+       #[arg(long)]
+       state_path: Option<PathBuf>,
+       /// Record critical/high findings into the state epistemic ledger
+       #[arg(long)]
+       record: bool,
+       /// Output full ReviewReport JSON to stdout
+       #[arg(long)]
+       json: bool,
+       /// Exit with code 1 if blocking issues are present
+       #[arg(long)]
+       fail_on_blocking: bool,
+   }
+   ```
+2. In `crates/superstate-cli/src/commands/review.rs`:
+   Implement:
+   ```rust
+   pub struct ReviewArgs {
+       pub commit_range: Option<String>,
+       pub repo: PathBuf,
+       pub driver: Option<String>,
+       pub state_path: Option<PathBuf>,
+       pub record: bool,
+       pub json: bool,
+       pub fail_on_blocking: bool,
+   }
+
+   pub fn cmd_review(args: ReviewArgs) -> Result<(), String>;
+   ```
+   - Diff Extraction:
+     Call `superstate_review::get_git_diff(&args.repo, args.commit_range.as_deref())`.
+     Note: If `args.commit_range` is `None` and `get_git_diff` with `None` returns empty because changes are unstaged or staged vs HEAD, ensure `get_git_diff` captures both or `HEAD` comparison if a git repo has commits. Check how `get_git_diff` works: `git diff [range]`. If `range` is `None`, `git diff` shows unstaged changes. If unstaged is empty, `git diff HEAD` shows staged + unstaged if HEAD exists. Let's make sure it handles uncommitted changes cleanly.
+   - If diff is empty:
+     - If `--json`, print JSON `ReviewReport::clean("No changes detected in diff.")`.
+     - Else print "No changes detected in diff. Review clean."
+     - Return `Ok(())`.
+   - Execution:
+     Configure `ReviewConfig { driver: args.driver, timeout_secs: 120 }`.
+     Call `execute_review(&args.repo, &diff, None, &config)`.
+   - Recording to Ledger:
+     If `args.record` is true and `report.has_blocking_issues` is true (or if findings exist):
+     - Resolve state file path (from `args.state_path` or looking for `.agent-state/state.json` in `args.repo`).
+     - If state file exists, for each finding (or summarizing blocking findings):
+       Append to state ledger using `superstate_core::ledger::append_ledger_note` or `state.notes.push(LedgerEntry::new("reviewer", ...))` and save atomic.
+       Format: `[review-advisory] {finding.file}:{range.0}-{range.1}: {finding.problem} (Fix: {finding.suggested_fix})`.
+   - Output:
+     - If `args.json`: print `serde_json::to_string_pretty(&report)`.
+     - Else: print `report` using `Display` implementation.
+   - Exit Code:
+     - If `args.fail_on_blocking` && `report.has_blocking_issues`: return `Err("Review failed: blocking issues detected".to_string())`.
+     - Otherwise `Ok(())`.
+
+3. Tests (`crates/superstate-cli/tests/test_cli_review.rs`):
+   - Test empty diff output and `--json`.
+   - Test mock driver execution with `--json`.
+   - Test `--record` appending notes to `.agent-state/state.json`.
+   - Test `--fail-on-blocking` exiting with error when blocking issues exist.
+
+## TDD Instructions
+- Step 1: Write failing tests in `crates/superstate-cli/tests/test_cli_review.rs`.
+- Step 2: Run `cargo test -p superstate-cli --test test_cli_review` (verify FAIL).
+- Step 3: Implement `ReviewArgs` and `cmd_review` in `review.rs`, update `main.rs`.
+- Step 4: Run `cargo test -p superstate-cli` (verify PASS).
+- Step 5: Commit changes with message `feat(cli): wire superstate review with driver execution, --json and --record`.

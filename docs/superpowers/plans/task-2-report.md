@@ -1,104 +1,83 @@
-# Task 2 Report: State Inspection, Status & Briefing Handlers
+# Task 2 Report: CLI Command `superstate review` in `crates/superstate-cli`
 
-## Executive Summary
-Successfully implemented the 4 state inspection, status, and briefing MCP handlers (`state_status`, `state_show`, `state_resume`, and `state_metrics`) in `crates/superstate-mcp/src/server.rs` with full parity to their CLI counterparts in `crates/superstate-cli/src/commands/state.rs`. All handlers support both structured JSON payloads and human-readable text / markdown output, with branch-scoped state resolution and git context integration.
+## Summary
+Successfully implemented Task 2 of the advisory code review system. Replaced the stub `ReviewReport::clean(...)` in `crates/superstate-cli/src/commands/review.rs` and wired `Commands::Review` in `crates/superstate-cli/src/main.rs` with driver execution, working tree / commit-range diff detection, JSON output, epistemic ledger recording, and fail-on-blocking support.
 
-- **Status:** Completed
-- **Commit SHA:** `69b0e325f3b2a49f0adae889667e06496910a5b3` (short: `69b0e32`)
-- **Branch:** `wt/feat-mcp-cli-complete-parity-task-2`
-- **Worktree:** `/Users/danielfisher/repos/superstate/.wt/feat-mcp-cli-complete-parity-task-2`
+## Changes Made
+1. **`crates/superstate-cli/src/main.rs`**:
+   - Updated `Commands::Review` clap enum variant with all required flags:
+     - Positional `commit_range: Option<String>`
+     - `--repo <PathBuf>` (default: `"."`)
+     - `--driver <String>` (custom reviewer driver command)
+     - `--state-path <PathBuf>` (explicit path to `.agent-state/state.json`)
+     - `--record` (record advisory findings to epistemic ledger)
+     - `--json` (format output as JSON `ReviewReport`)
+     - `--fail-on-blocking` (exit with code 1 if blocking issues exist)
+   - Updated `main()` command match to construct `ReviewArgs` and dispatch to `commands::review::cmd_review`.
 
----
+2. **`crates/superstate-cli/src/commands/review.rs`**:
+   - Defined `pub struct ReviewArgs`.
+   - Implemented `pub fn cmd_review(args: ReviewArgs) -> Result<(), String>`.
+   - Git Diff extraction:
+     - When `commit_range` is provided, executes `get_git_diff(&args.repo, Some(range))`.
+     - When `commit_range` is omitted, checks `get_git_diff(&args.repo, Some("HEAD"))` to capture both staged and unstaged working tree diffs relative to HEAD, falling back to `get_git_diff(&args.repo, None)` if HEAD is not yet present.
+   - Handled empty diffs:
+     - If `--json`, outputs JSON serialized `ReviewReport::clean("No changes detected in diff.")`.
+     - Else outputs `"No changes detected in diff. Review clean."`.
+   - Configured and executed `execute_review(&args.repo, &diff, None, &config)` with 120s default timeout and driver override.
+   - Implemented `--record`:
+     - Resolves state file path using `resolve_state_path` against `args.state_path` or default `.agent-state/state.json`.
+     - Appends findings to epistemic ledger via `append_ledger_note` using author `"reviewer"` and format: `[review-advisory] {finding.file}:{range.0}-{range.1}: {finding.problem} (Fix: {finding.suggested_fix})`.
+   - Implemented output formatting:
+     - If `--json`: pretty-printed JSON.
+     - Else: human-readable report via `Display` implementation.
+   - Handled `--fail-on-blocking`: returns `Err("Review failed: blocking issues detected".to_string())` if `args.fail_on_blocking && report.has_blocking_issues`.
 
-## Implemented Handlers
+3. **`crates/superstate-cli/tests/test_cli_review.rs`**:
+   - Created comprehensive integration tests:
+     - `test_review_empty_diff_text_and_json`: tests text and `--json` outputs when diff is clean.
+     - `test_review_mock_driver_with_json`: tests mock driver returning structured review findings with `--json`.
+     - `test_review_record_to_ledger`: tests `--record` recording advisory notes to `.agent-state/state.json` via `read_ledger`.
+     - `test_review_fail_on_blocking`: tests `--fail-on-blocking` exiting non-zero when blocking issues exist, and succeeding without the flag.
+     - `test_review_explicit_commit_range`: tests commit range arguments (e.g. `HEAD~1..HEAD`).
+     - `test_review_explicit_state_path`: tests `--state-path` explicit override with `--record`.
 
-### 1. `state_status`
-- **Parameters:** `state?: string`, `json?: boolean`, `repo_root?: string`, `cwd?: string`
-- **Routing:** Resolves effective state path via `resolve_mcp_state_path` supporting branch-scoped routing.
-- **Data Loading:** Loads `ExecutionState` via `load_state` and reads epistemic notes via `superstate_core::ledger::read_ledger`.
-- **Output:**
-  - `json: true`: Returns JSON serialized execution state matching `superstate state status --json` with MCP `content` text representation.
-  - `json: false` (or omitted): Returns human-readable summary detailing `status`, `step`, `active_task`, `completed_tasks`, `ledger_entries`, completed task checkmarks, and the last 5 epistemic ledger notes.
+## TDD Verification
 
-### 2. `state_show`
-- **Parameters:** `state?: string`, `json?: boolean`, `repo_root?: string`, `cwd?: string`
-- **Routing:** Resolves effective state path via `resolve_mcp_state_path`.
-- **Output:**
-  - `json: true`: Returns JSON serialized state with MCP text content.
-  - `json: false` (or omitted): Returns Markdown formatted summary matching `superstate state show`:
-    - `# Superstate Execution Status`
-    - `- **Status:** <status> (Step <step>)`
-    - `- **Base Branch:** <base>` (if present)
-    - `- **Active Task:** <id>: <title>` (or None)
-    - `- **Verification Command:** <cmd>` (if task has verification command)
-    - `- **Active Worktree:** <path> (branch <branch>)` (if provisioned)
-
-### 3. `state_resume`
-- **Parameters:** `state?: string`, `repo_root?: string`, `cwd?: string`
-- **Routing & Git Context:** Resolves state path and git repository root, executing `git log --oneline -5` to capture recent commits.
-- **Briefing Generation:** Invokes `superstate_core::maintenance::resume_briefing(&state, &notes, &commits)` to produce complete resume briefing for restarted/compacted agent sessions, including recorded findings, git commits, and turnkey next actions.
-
-### 4. `state_metrics`
-- **Parameters:** `state?: string`, `json?: boolean`, `repo_root?: string`, `cwd?: string`
-- **Computation:** Computes progress and telemetry metrics via `superstate_core::maintenance::metrics(&state, notes.len())`.
-- **Output:**
-  - `json: true`: Returns serialized `Metrics` struct with `step`, `status`, `tasks_total`, `tasks_completed`, `tasks_remaining`, `completion_pct`, `notes_recorded`, `errors_recorded`, and `files_modified`.
-  - `json: false` (or omitted): Returns formatted metrics telemetry summary matching `superstate state metrics`.
-
----
-
-## Test Verification
-
-### TDD RED Phase
-- Created comprehensive test suite in `crates/superstate-mcp/tests/test_mcp_state_inspection.rs` covering all 4 handlers in both text and JSON modes, as well as JSON-RPC stdio dispatch.
-- Ran `cargo test -p superstate-mcp --test test_mcp_state_inspection`.
-- Verified failure with 8 failing tests returning `"Unknown tool: <tool_name>"`.
-
-### TDD GREEN Phase
-- Implemented handlers in `handle_tool_call` inside `crates/superstate-mcp/src/server.rs`.
-- Ran `cargo test -p superstate-mcp --test test_mcp_state_inspection`.
-- Output:
+### RED Phase
+Executed `cargo test -p superstate --test test_cli_review`:
 ```text
-running 8 tests
-test test_state_resume ... ok
-test test_state_status_json ... ok
-test test_state_metrics_json ... ok
-test test_state_metrics_text ... ok
-test test_state_status_text ... ok
-test test_state_show_json ... ok
-test test_state_show_markdown ... ok
-test test_state_inspection_json_rpc ... ok
+failures:
+    test_review_empty_diff_text_and_json
+    test_review_fail_on_blocking
+    test_review_mock_driver_with_json
+    test_review_record_to_ledger
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+```
+All tests failed as expected due to missing CLI flags and stub logic.
+
+### GREEN Phase
+Executed `cargo test -p superstate --test test_cli_review`:
+```text
+running 6 tests
+test test_review_empty_diff_text_and_json ... ok
+test test_review_mock_driver_with_json ... ok
+test test_review_explicit_commit_range ... ok
+test test_review_record_to_ledger ... ok
+test test_review_explicit_state_path ... ok
+test test_review_fail_on_blocking ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
 ```
 
-### Full Test Suite
-- Ran `cargo test -p superstate-mcp` across all test targets (branch scoped concurrency, handshakes, multi milestones, tool schemas, inspection, tools call):
-- Result: **All 30 unit and integration tests passed cleanly (0 failed)**.
+### Full Workspace & Quality Checks
+- `cargo test --workspace`: All workspace tests passing across `superstate-core`, `superstate-review`, `superstate-rules`, `superstate-syntax`, `superstate-worktree`, `superstate-mcp`, and `superstate` (0 failures).
+- `cargo clippy -p superstate`: Clean (0 warnings).
+- `cargo fmt --check`: Clean (0 formatting diffs).
 
-### Code Quality & Linter Verification
-- Ran `cargo fmt --check`: Clean (no diff).
-- Ran `cargo clippy -p superstate-mcp -- -D warnings`: Passed with 0 warnings.
-- Ran `git status --porcelain -uall`: Clean working tree.
+## Commits Created
+- `d9de3a3`: `feat(cli): wire superstate review with driver execution, --json and --record`
 
----
-
-## Files Changed
-
-| File | Status | Description |
-|---|---|---|
-| `crates/superstate-mcp/src/server.rs` | Modified | Added imports and implemented `state_status`, `state_show`, `state_resume`, and `state_metrics` handlers in `handle_tool_call`. |
-| `crates/superstate-mcp/tests/test_mcp_state_inspection.rs` | Created | Added 8 comprehensive integration tests for status, show, resume, and metrics tools under text, markdown, JSON, and JSON-RPC dispatch. |
-
----
-
-## Acceptance Criteria Checklist
-
-- [x] Failing integration tests written in `crates/superstate-mcp/tests/test_mcp_state_inspection.rs`.
-- [x] Verified failure: `cargo test -p superstate-mcp --test test_mcp_state_inspection` failed with "Unknown tool".
-- [x] Implemented handlers in `crates/superstate-mcp/src/server.rs` for `state_status`, `state_show`, `state_resume`, and `state_metrics`.
-- [x] Verified passing: all 8 inspection tests passed.
-- [x] Ran full package tests: all 30 tests in `superstate-mcp` passed.
-- [x] `cargo fmt --check` is clean.
-- [x] `cargo clippy -p superstate-mcp -- -D warnings` passed with 0 warnings.
-- [x] Committed cleanly in worktree with message `feat(mcp): implement state_status, state_show, state_resume, and state_metrics handlers`.
+## Next Steps
+Task 2 is complete. Proceed to subsequent tasks in the plan or integration with workflow drivers.
