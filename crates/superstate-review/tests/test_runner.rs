@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use superstate_review::runner::{
-    clean_json_response, execute_review, parse_review_report, resolve_review_driver,
-    resolve_review_driver_with_env, ReviewConfig, ReviewError,
+    build_review_prompt, cap_diff, clean_json_response, execute_review, parse_review_report,
+    resolve_review_driver, resolve_review_driver_with_env, ReviewConfig, ReviewError,
+    DIFF_TRUNCATION_NOTICE, MAX_DIFF_CHARS,
 };
 use superstate_review::schema::{ReviewFinding, ReviewReport, Severity};
 
@@ -217,5 +218,110 @@ fn test_execute_review_failing_driver() {
     match err {
         ReviewError::Driver(_) => {}
         other => panic!("Expected ReviewError::Driver, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_review_report_case_insensitive_severity() {
+    let raw = r#"[
+        {
+            "severity": "critical",
+            "file": "src/crit.rs",
+            "line_range": [1, 2],
+            "problem": "Critical flaw",
+            "suggested_fix": "Fix it"
+        },
+        {
+            "severity": "high",
+            "file": "src/high.rs",
+            "line_range": [3, 4],
+            "problem": "High risk",
+            "suggested_fix": "Fix high"
+        },
+        {
+            "severity": "MEDIUM",
+            "file": "src/med.rs",
+            "line_range": [5, 6],
+            "problem": "Medium issue",
+            "suggested_fix": "Fix med"
+        },
+        {
+            "severity": "low",
+            "file": "src/low.rs",
+            "line_range": [7, 8],
+            "problem": "Low issue",
+            "suggested_fix": "Fix low"
+        }
+    ]"#;
+    let report = parse_review_report(raw).expect("Failed to parse report with case variations");
+    assert_eq!(report.findings.len(), 4);
+    assert_eq!(report.findings[0].severity, Severity::Critical);
+    assert_eq!(report.findings[1].severity, Severity::High);
+    assert_eq!(report.findings[2].severity, Severity::Medium);
+    assert_eq!(report.findings[3].severity, Severity::Low);
+    assert!(report.has_blocking_issues);
+}
+
+#[test]
+fn test_diff_truncation_logic() {
+    let large_diff = "a".repeat(130_000);
+    let capped = cap_diff(&large_diff);
+    assert!(capped.contains("[Diff truncated: exceeded 120,000 character limit]"));
+    assert_eq!(
+        capped.chars().count(),
+        MAX_DIFF_CHARS + DIFF_TRUNCATION_NOTICE.chars().count()
+    );
+    assert_eq!(&capped[..MAX_DIFF_CHARS], &large_diff[..MAX_DIFF_CHARS]);
+
+    let prompt = build_review_prompt(&large_diff, None);
+    assert!(prompt.contains("```diff\n"));
+    assert!(prompt.contains("[Diff truncated: exceeded 120,000 character limit]\n```\n"));
+
+    let small_diff = "diff --git a/foo.rs b/foo.rs\n+bar\n";
+    let small_capped = cap_diff(small_diff);
+    assert_eq!(small_capped, small_diff);
+    let small_prompt = build_review_prompt(small_diff, None);
+    assert!(small_prompt.contains("```diff\ndiff --git a/foo.rs b/foo.rs\n+bar\n```\n"));
+}
+
+#[test]
+fn test_execute_review_diff_truncation() {
+    let large_diff = "a".repeat(130_000);
+    // Mock driver that asserts:
+    // 1. SUPERSTATE_PROMPT is NOT in env because prompt > 32_768 chars (ARG_MAX safety)
+    // 2. stdin contains the diff truncation notice
+    let mock_driver = r#"if [ -n "$SUPERSTATE_PROMPT" ]; then exit 1; fi; grep -q "exceeded 120,000 character limit" && echo '{"summary":"Truncated diff verified","findings":[],"has_blocking_issues":false}'"#;
+    let config = ReviewConfig {
+        driver: Some(mock_driver.to_string()),
+        timeout_secs: 10,
+    };
+    let report = execute_review(Path::new("."), &large_diff, None, &config).unwrap();
+    assert_eq!(report.summary, "Truncated diff verified");
+}
+
+#[test]
+fn test_execute_review_driver_timeout() {
+    let config = ReviewConfig {
+        driver: Some("sleep 5".to_string()),
+        timeout_secs: 1,
+    };
+    let diff = "diff --git a/test.rs b/test.rs\n+new line\n";
+    let start = std::time::Instant::now();
+    let err = execute_review(Path::new("."), diff, None, &config).unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "Expected timeout around 1s, but took {:?}",
+        elapsed
+    );
+    match err {
+        ReviewError::Driver(msg) => {
+            assert_eq!(msg, "Driver timed out after 1 seconds");
+        }
+        other => panic!(
+            "Expected ReviewError::Driver timeout error, got {:?}",
+            other
+        ),
     }
 }

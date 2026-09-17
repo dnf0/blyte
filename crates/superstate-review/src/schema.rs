@@ -2,10 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum Severity {
+    #[serde(alias = "critical", alias = "CRITICAL")]
     Critical,
+    #[serde(alias = "high", alias = "HIGH")]
     High,
+    #[serde(alias = "medium", alias = "MEDIUM")]
     Medium,
+    #[serde(alias = "low", alias = "LOW")]
     Low,
 }
 

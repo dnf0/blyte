@@ -1,6 +1,7 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::diff::DiffError;
@@ -221,6 +222,43 @@ pub fn parse_review_report(raw: &str) -> Result<ReviewReport, ReviewError> {
     }
 }
 
+pub const MAX_DIFF_CHARS: usize = 120_000;
+pub const DIFF_TRUNCATION_NOTICE: &str = "\n\n[Diff truncated: exceeded 120,000 character limit]";
+pub const MAX_ENV_PROMPT_LEN: usize = 32_768;
+
+/// Caps the git diff at 120,000 characters, appending a truncation notice if exceeded.
+pub fn cap_diff(diff: &str) -> String {
+    if diff.chars().count() > MAX_DIFF_CHARS {
+        let mut truncated: String = diff.chars().take(MAX_DIFF_CHARS).collect();
+        truncated.push_str(DIFF_TRUNCATION_NOTICE);
+        truncated
+    } else {
+        diff.to_string()
+    }
+}
+
+/// Builds the full prompt for the review driver, enclosing the capped diff in markdown code blocks.
+pub fn build_review_prompt(diff: &str, task_instruction: Option<&str>) -> String {
+    let capped = cap_diff(diff);
+    let mut prompt = String::new();
+    prompt.push_str(build_review_system_prompt());
+    prompt.push_str("\n\n");
+    if let Some(instructions) = task_instruction {
+        if !instructions.trim().is_empty() {
+            prompt.push_str("Task Instructions:\n");
+            prompt.push_str(instructions.trim());
+            prompt.push_str("\n\n");
+        }
+    }
+    prompt.push_str("Git Diff:\n```diff\n");
+    prompt.push_str(&capped);
+    if !capped.ends_with('\n') {
+        prompt.push('\n');
+    }
+    prompt.push_str("```\n");
+    prompt
+}
+
 /// Execute an adversarial code review against the provided git diff.
 pub fn execute_review(
     repo_root: &Path,
@@ -233,29 +271,23 @@ pub fn execute_review(
     }
 
     let driver_cmd = resolve_review_driver(config.driver.as_deref())?;
+    let prompt = build_review_prompt(diff, task_instruction);
 
-    let mut prompt = String::new();
-    prompt.push_str(build_review_system_prompt());
-    prompt.push_str("\n\n");
-    if let Some(instructions) = task_instruction {
-        if !instructions.trim().is_empty() {
-            prompt.push_str("Task Instructions:\n");
-            prompt.push_str(instructions.trim());
-            prompt.push_str("\n\n");
-        }
-    }
-    prompt.push_str("Git Diff:\n");
-    prompt.push_str(diff);
-
-    let mut child = Command::new("sh")
-        .arg("-c")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(&driver_cmd)
         .current_dir(repo_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("SUPERSTATE_PROMPT", &prompt)
-        .spawn()?;
+        .stderr(Stdio::piped());
+
+    // Do NOT pass SUPERSTATE_PROMPT in child.env if prompt.len() > 32_768
+    // to avoid ARG_MAX errors.
+    if prompt.len() <= MAX_ENV_PROMPT_LEN {
+        cmd.env("SUPERSTATE_PROMPT", &prompt);
+    }
+
+    let mut child = cmd.spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let prompt_bytes = prompt.as_bytes().to_vec();
@@ -264,19 +296,60 @@ pub fn execute_review(
         });
     }
 
-    let output = child.wait_with_output()?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut r) = stdout_pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    });
 
-    if !output.status.success() {
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut r) = stderr_pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(config.timeout_secs);
+    let poll_interval = Duration::from_millis(50);
+
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ReviewError::Driver(format!(
+                        "Driver timed out after {} seconds",
+                        config.timeout_secs
+                    )));
+                }
+                std::thread::sleep(poll_interval);
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_handle.join().unwrap_or_default();
+    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    if !status.success() {
         // If driver produced valid JSON in stdout despite non-zero exit, parse it
         if let Ok(report) = parse_review_report(&stdout) {
             return Ok(report);
         }
         return Err(ReviewError::Driver(format!(
             "Driver exited with status {}: {}{}",
-            output.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             stderr.trim(),
             if !stdout.trim().is_empty() {
                 format!(" (stdout: {})", stdout.trim())
