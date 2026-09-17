@@ -11,6 +11,63 @@ every number recorded so far, and only one of them is in the evaluation.
 
 ---
 
+## 0. How it got here
+
+162 commits over nine days. The drift is not gradual erosion; it is two decisions, each
+reasonable on its own terms.
+
+**09-09 — the whole system, in one day.** Deterministic state machine, plan parser, multi-gate
+verifier, tree-sitter AST symbol extractor, adversarial review engine, MCP server, CLI. The
+conceptual product existed on day one.
+
+**09-10 — isolation.** Worktrees with reflink cache sharing, and the append-only ledger: the
+machinery for offloading a chunk of work somewhere it can be checked and discarded.
+
+**09-11 — first pivot, the plan-free engine.** `state init --goal --verify-cmd`, skipping
+`plan.md` entirely. Its own design spec gives the reason:
+
+> **Latency & Token Tax**: In benchmarks and single-objective tasks, running an upfront LLM turn
+> to write `plan.md` adds 30-45 seconds of latency and thousands of tokens before code execution
+> begins.
+
+with a stated goal of *"cutting Phase 1 planning latency to 0ms on atomic tasks"*. It is equally
+explicit about scope:
+
+> We are **NOT** discarding multi-milestone planning; `superstate state init --plan <path>`
+> remains supported for complex multi-module features.
+
+**That boundary was never enforced.** The fast path became the evaluation's default the next day
+and was applied to every task, atomic or not — including datacurve repository tasks. On
+2026-09-17 the planner, given one of those, produced two milestones with a dependency between
+them and seven files to modify. They were never atomic.
+
+**09-13 — the daemon.** `DaemonRunner`, detached handoff, autonomous milestone execution:
+autonomy layered on top of an already-degenerate one-milestone path.
+
+**09-14 — second pivot, "streamline tool catalog to strict detached handoff gateway".** ADR 0002.
+Net **-6,284 lines**, chiefly the worktree lifecycle and MCP tool parity tests. The surface
+narrowed to handoff.
+
+**09-15 onward — gate tuning.** Advisory gate mode, refusing an unconditional gate pass, four ADR
+addenda arguing about benchmark results. Every product change in the final three days tunes the
+gate on the single-milestone path.
+
+### The mechanism
+
+A benchmark latency optimisation became the default, then the only configuration measured, then
+the thing the product was tuned around. Each step follows from the last:
+
+1. planning costs 30-45s per run, so add a fast path **for atomic tasks**
+2. the evaluation adopts the fast path **for all tasks**, because it is faster
+3. every benchmark number therefore describes the fast path
+4. product work optimises what the benchmark measures — the gate
+5. the gate becomes *the* mechanism, because on a one-node graph it is the only one left
+
+Nothing was deleted. The plan path, the DAG, the worktrees, the review engine and the impact
+analysis are all still in the tree. They stopped being measured, and so stopped being developed.
+
+---
+
 ## 1. What superstate is designed to be
 
 The README is unambiguous:
@@ -105,8 +162,10 @@ on 2026-09-11 as a speed "fast-path", became the default the next day, and was t
 Condition B — the configuration behind every headline number. With one node there is no graph,
 no task selection, no staged verification and nothing for `ready_tasks` to order.
 
-`files_modify` is written as `[]` on every milestone, so `state decompose` would be a no-op and
-`impact.rs` would have nothing to slice, even if either were called.
+On the direct-handoff path `files_modify` is written as `[]`, so `state decompose` would be a
+no-op and `impact.rs` would have nothing to slice. (On the `plan.md` path the Rust parser does
+populate both `files_modify` and `depends_on` — `plan_parser.rs:113` and `:77` — so that path
+carries real graph edges. It is simply the path that has almost never run.)
 
 **So every measurement describes `init` + `prompt` + one shell gate.** The +3pp effect, the 17%
 versus 92% gate precision, the daemon-equals-mcp finding — all of it characterises that subset.
