@@ -110,6 +110,7 @@ pub fn cmd_daemon(
     detach: bool,
     max_retries: usize,
     timeout_secs: u64,
+    advisory_review: bool,
 ) -> Result<(), String> {
     let paths = daemon_paths_for_state(state_path);
 
@@ -160,6 +161,9 @@ pub fn cmd_daemon(
         }
         cmd.arg("--max-retries").arg(max_retries.to_string());
         cmd.arg("--timeout").arg(timeout_secs.to_string());
+        if advisory_review {
+            cmd.arg("--advisory-review");
+        }
         cmd.stdout(std::process::Stdio::from(log_out));
         cmd.stderr(std::process::Stdio::from(log_err));
         cmd.stdin(std::process::Stdio::null());
@@ -235,6 +239,7 @@ pub fn cmd_daemon(
             advisory_gate: std::env::var("SUPERSTATE_GATE_MODE")
                 .map(|v| v.trim().eq_ignore_ascii_case("advisory"))
                 .unwrap_or(false),
+            advisory_review,
         };
 
         let mut runner = DaemonRunner::new(config)

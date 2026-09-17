@@ -142,6 +142,7 @@ fn main() {
                 args.detach,
                 args.max_retries,
                 args.timeout,
+                args.advisory_review,
             ),
         },
         Commands::Cancel(args) => {

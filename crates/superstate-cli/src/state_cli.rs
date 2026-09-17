@@ -304,6 +304,9 @@ pub struct DaemonArgs {
     /// Timeout in seconds per verification attempt
     #[arg(long, default_value_t = 300)]
     pub timeout: u64,
+    /// Run advisory adversarial code review on milestone completion
+    #[arg(long)]
+    pub advisory_review: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -522,6 +525,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 args.detach,
                 args.max_retries,
                 args.timeout,
+                args.advisory_review,
             ),
         },
         StateCommands::Cancel(args) => {

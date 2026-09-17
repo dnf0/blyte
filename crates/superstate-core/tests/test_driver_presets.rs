@@ -176,6 +176,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
         max_retries: 3,
         timeout_secs: 10,
         advisory_gate: false,
+        advisory_review: false,
     };
 
     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();

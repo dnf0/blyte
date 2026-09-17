@@ -145,6 +145,22 @@ pub struct DaemonConfig {
     /// `superstate_mcp` does. Default false -- completion should mean verified.
     #[serde(default)]
     pub advisory_gate: bool,
+    /// Run advisory adversarial code review on milestone completion
+    #[serde(default)]
+    pub advisory_review: bool,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            state_path: PathBuf::from(".agent-state/state.json"),
+            driver_cmd: None,
+            max_retries: 3,
+            timeout_secs: 120,
+            advisory_gate: false,
+            advisory_review: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -425,6 +441,12 @@ impl DaemonRunner {
     ///
     /// # Errors
     /// Returns `DaemonError` if state loading, driver spawning, or advancer execution fails.
+    /// Executes a single autonomous daemon step for the currently active task.
+    /// Alias for `run_step`.
+    pub fn step(&mut self) -> Result<DaemonStepOutcome, DaemonError> {
+        self.run_step()
+    }
+
     pub fn run_step(&mut self) -> Result<DaemonStepOutcome, DaemonError> {
         let mut state = load_state(&self.config.state_path)?;
 
@@ -572,6 +594,55 @@ impl DaemonRunner {
             .copied()
             .unwrap_or(0);
         let attempt_ceiling = self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+
+        if gate_res.passed && self.config.advisory_review && working_dir.join(".git").exists() {
+            let diff = match superstate_review::get_git_diff(&working_dir, Some("HEAD")) {
+                Ok(d) if !d.trim().is_empty() => d,
+                _ => superstate_review::get_git_diff(&working_dir, None).unwrap_or_default(),
+            };
+            let review_cfg = superstate_review::ReviewConfig {
+                driver: self.config.driver_cmd.clone(),
+                timeout_secs: self.config.timeout_secs,
+            };
+            if let Ok(report) =
+                superstate_review::execute_review(&working_dir, &diff, None, &review_cfg)
+            {
+                if report.has_blocking_issues {
+                    let first_finding = report
+                        .findings
+                        .first()
+                        .map(|f| format!("{}: {}", f.file.display(), f.problem))
+                        .unwrap_or_else(|| report.summary.clone());
+                    let note = format!(
+                        "[review-advisory] Task {}: {}. Problem: {}",
+                        active_task.id, report.summary, first_finding
+                    );
+                    state.notes.push(LedgerEntry::new("superstate-daemon", note));
+                    save_state_atomic(&self.config.state_path, &state)?;
+
+                    if is_vacuous_gate(verify_cmd)
+                        && self.config.driver_cmd.is_some()
+                        && attempts_so_far < attempt_ceiling
+                    {
+                        *self
+                            .total_attempts
+                            .entry(active_task.id.clone())
+                            .or_insert(0) += 1;
+                        return Ok(DaemonStepOutcome::Failed {
+                            task_id: active_task.id,
+                            reason:
+                                "advisory-review: blocking issues detected on vacuous gate"
+                                    .to_string(),
+                            retries_remaining: self
+                                .config
+                                .max_retries
+                                .saturating_sub(attempts_so_far),
+                        });
+                    }
+                }
+            }
+        }
+
         if gate_res.passed
             && is_vacuous_gate(verify_cmd)
             && self.config.driver_cmd.is_some()
