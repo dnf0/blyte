@@ -351,3 +351,29 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
         .note
         .contains("Issues: 1) sub.txt: Missing header (fix: Add header)"));
 }
+
+#[test]
+fn test_is_inside_git_repo_paths() {
+    use superstate_core::daemon::is_inside_git_repo;
+    use std::path::Path;
+
+    // A fresh non-git temporary directory
+    let non_git_dir = tempfile::tempdir().unwrap();
+    assert!(!is_inside_git_repo(non_git_dir.path()));
+
+    // A git repository
+    let git_dir = setup_test_git_repo();
+    assert!(is_inside_git_repo(git_dir.path()));
+
+    // A subdirectory inside git repository
+    let sub = git_dir.path().join("sub/dir");
+    fs::create_dir_all(&sub).unwrap();
+    assert!(is_inside_git_repo(&sub));
+
+    // Non-existent path in non-git directory
+    assert!(!is_inside_git_repo(&non_git_dir.path().join("nonexistent")));
+
+    // Empty path: does not panic or falsely assert
+    let _ = is_inside_git_repo(Path::new(""));
+}
+
