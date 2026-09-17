@@ -720,30 +720,57 @@ impl DaemonRunner {
                     let should_block = report.has_blocking_issues
                         && (self.config.review_blocking || is_vacuous_gate(verify_cmd));
 
-                    if should_block
-                        && self.config.driver_cmd.is_some()
-                        && attempts_so_far < attempt_ceiling
-                    {
-                        *self
-                            .total_attempts
-                            .entry(active_task.id.clone())
-                            .or_insert(0) += 1;
-                        let reason = if self.config.review_blocking {
-                            format!(
-                                "code-review: {} blocking issue(s) detected",
-                                report.findings.len()
-                            )
+                    if should_block {
+                        let blocking_count = report
+                            .findings
+                            .iter()
+                            .filter(|f| {
+                                matches!(
+                                    f.severity,
+                                    superstate_review::schema::Severity::Critical
+                                        | superstate_review::schema::Severity::High
+                                )
+                            })
+                            .count();
+                        let count = if blocking_count > 0 {
+                            blocking_count
                         } else {
-                            "advisory-review: blocking issues detected on vacuous gate".to_string()
+                            report.findings.len()
                         };
-                        return Ok(DaemonStepOutcome::Failed {
-                            task_id: active_task.id,
-                            reason,
-                            retries_remaining: self
-                                .config
-                                .max_retries
-                                .saturating_sub(attempts_so_far),
-                        });
+
+                        if self.config.driver_cmd.is_some() && attempts_so_far < attempt_ceiling {
+                            *self
+                                .total_attempts
+                                .entry(active_task.id.clone())
+                                .or_insert(0) += 1;
+                            let reason = if self.config.review_blocking {
+                                format!(
+                                    "code-review: {} blocking issue(s) detected",
+                                    count
+                                )
+                            } else {
+                                "advisory-review: blocking issues detected on vacuous gate".to_string()
+                            };
+                            return Ok(DaemonStepOutcome::Failed {
+                                task_id: active_task.id,
+                                reason,
+                                retries_remaining: self
+                                    .config
+                                    .max_retries
+                                    .saturating_sub(attempts_so_far),
+                            });
+                        } else if self.config.review_blocking && !self.config.advisory_gate {
+                            state.status = ExecutionStatus::Blocked;
+                            state.errors.push(format!(
+                                "Task '{}' blocked: code review detected blocking issues and max retries ({}) exhausted",
+                                active_task.id, self.config.max_retries
+                            ));
+                            save_state_atomic(&self.config.state_path, &state)?;
+                            return Ok(DaemonStepOutcome::Blocked {
+                                task_id: active_task.id,
+                                reason: "code review detected blocking issues and max retries exhausted".to_string(),
+                            });
+                        }
                     }
                 }
             }
