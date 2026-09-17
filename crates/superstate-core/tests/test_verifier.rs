@@ -51,7 +51,6 @@ fn test_execute_all_gates() {
         title: "Test Task".to_string(),
         depends_on: vec![],
         files_modify: vec![],
-        interfaces_produces: vec![],
         verification_cmd: Some("echo 'gate ok'".to_string()),
     };
 

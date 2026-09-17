@@ -84,7 +84,6 @@ fn test_generate_handoff_markdown_claude_to_agy() {
                 PathBuf::from("crates/superstate-core/src/handoff.rs"),
                 PathBuf::from("crates/superstate-core/src/maintenance.rs"),
             ],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo test -p superstate-core".to_string()),
         }),
         active_worktree: Some(PathBuf::from(".wt/feat-handoff")),
@@ -145,7 +144,6 @@ fn test_generate_handoff_markdown_agy_to_claude() {
             files_modify: vec![PathBuf::from(
                 "crates/superstate-cli/src/commands/handoff.rs",
             )],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo test -p superstate".to_string()),
         }),
         ..Default::default()
@@ -184,7 +182,6 @@ fn test_write_handoff_package_writes_both_files() {
             title: "Initialize package".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo check".to_string()),
         }),
         ..Default::default()
@@ -224,7 +221,6 @@ fn test_resume_briefing_surfaces_active_handoff_when_present() {
             title: "Test task".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo check".to_string()),
         }),
         ..Default::default()
@@ -258,7 +254,6 @@ fn test_write_handoff_package_sanitizes_slug_with_slashes() {
             title: "Task with slash branch".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo check".to_string()),
         }),
         active_branch: Some("feat/cross-agent-handoff".to_string()),
@@ -301,7 +296,6 @@ fn test_resume_briefing_outputs_correct_state_json_path_with_plan() {
             title: "Resumption briefing test".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: Some("cargo test".to_string()),
         }),
         ..Default::default()
@@ -347,7 +341,6 @@ fn test_resume_briefing_outputs_correct_state_json_path_with_plan() {
             title: "Default branch test".to_string(),
             depends_on: vec![],
             files_modify: vec![],
-            interfaces_produces: vec![],
             verification_cmd: None,
         }),
         ..Default::default()

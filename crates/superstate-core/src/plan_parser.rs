@@ -59,7 +59,6 @@ pub fn parse_plan_markdown(content: &str) -> Result<Vec<TaskSpec>, ParseError> {
                 title,
                 depends_on: Vec::new(),
                 files_modify: Vec::new(),
-                interfaces_produces: Vec::new(),
                 verification_cmd: None,
             });
             continue;
