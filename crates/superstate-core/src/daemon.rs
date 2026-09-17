@@ -50,7 +50,10 @@ pub fn is_vacuous_gate(verify_cmd: &str) -> bool {
 /// Supports subdirectories, standard repositories, and worktrees where `.git` may be
 /// an ancestor directory or a gitlink file.
 pub fn is_inside_git_repo(path: &Path) -> bool {
-    let check_ancestors = |p: &Path| p.ancestors().any(|ancestor| ancestor.join(".git").exists());
+    let check_ancestors = |p: &Path| {
+        p.ancestors()
+            .any(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.join(".git").exists())
+    };
 
     if check_ancestors(path) {
         return true;
