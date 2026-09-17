@@ -325,3 +325,18 @@ fn test_execute_review_driver_timeout() {
         ),
     }
 }
+
+#[test]
+fn test_parse_review_report_driver_cli_envelope() {
+    let raw = r#"{
+        "conversation_id": "test-uuid",
+        "status": "SUCCESS",
+        "response": "```json\n{\n  \"summary\": \"Unchecked array index\",\n  \"findings\": [\n    {\n      \"severity\": \"Critical\",\n      \"file\": \"src/parse.rs\",\n      \"line_range\": [12, 15],\n      \"problem\": \"Out of bounds access\",\n      \"suggested_fix\": \"Add bounds check\"\n    }\n  ],\n  \"has_blocking_issues\": true\n}\n```\n",
+        "duration_seconds": 2.5
+    }"#;
+    let report = parse_review_report(raw).expect("Failed to parse driver envelope");
+    assert_eq!(report.summary, "Unchecked array index");
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].severity, Severity::Critical);
+    assert!(report.has_blocking_issues);
+}

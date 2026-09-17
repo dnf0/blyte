@@ -194,7 +194,14 @@ pub fn parse_review_report(raw: &str) -> Result<ReviewReport, ReviewError> {
         serde_json::from_str(&cleaned).map_err(|e| ReviewError::Json(e.to_string()))?;
 
     match value {
-        serde_json::Value::Object(_) => {
+        serde_json::Value::Object(ref map) => {
+            // If this is a driver CLI JSON envelope (e.g. agy {"status": "SUCCESS", "response": "..."},
+            // or claude {"result": "..."}) and does not directly contain findings:
+            if !map.contains_key("findings") {
+                if let Some(inner) = map.get("response").or_else(|| map.get("result")).and_then(|v| v.as_str()) {
+                    return parse_review_report(inner);
+                }
+            }
             let mut report: ReviewReport =
                 serde_json::from_value(value).map_err(|e| ReviewError::Json(e.to_string()))?;
             if report.summary.trim().is_empty() {
