@@ -604,14 +604,32 @@ impl DaemonRunner {
                 driver: self.config.driver_cmd.clone(),
                 timeout_secs: self.config.timeout_secs,
             };
-            if let Ok(report) =
-                superstate_review::execute_review(&working_dir, &diff, None, &review_cfg)
-            {
+            if let Ok(report) = superstate_review::execute_review(
+                &working_dir,
+                &diff,
+                Some(&active_task.title),
+                &review_cfg,
+            ) {
                 if report.has_blocking_issues {
                     let first_finding = report
                         .findings
-                        .first()
-                        .map(|f| format!("{}: {}", f.file.display(), f.problem))
+                        .iter()
+                        .find(|f| {
+                            matches!(
+                                f.severity,
+                                superstate_review::schema::Severity::Critical
+                                    | superstate_review::schema::Severity::High
+                            )
+                        })
+                        .or_else(|| report.findings.first())
+                        .map(|f| {
+                            format!(
+                                "{}: {} (fix: {})",
+                                f.file.display(),
+                                f.problem,
+                                f.suggested_fix
+                            )
+                        })
                         .unwrap_or_else(|| report.summary.clone());
                     let note = format!(
                         "[review-advisory] Task {}: {}. Problem: {}",

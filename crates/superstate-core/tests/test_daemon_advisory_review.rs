@@ -136,7 +136,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
     let updated_state = load_state(&state_path).unwrap();
     let has_advisory_note = updated_state.notes.iter().any(|n| {
         n.note.contains("[review-advisory]")
-            && n.note.contains("Dangerous flaw")
+            && n.note.contains("Dangerous flaw (fix: Sanitize input)")
             && n.note.contains("Task task-1")
     });
     assert!(
@@ -191,7 +191,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
     let updated_state = load_state(&state_path).unwrap();
     let has_advisory_note = updated_state.notes.iter().any(|n| {
         n.note.contains("[review-advisory]")
-            && n.note.contains("Potential bug")
+            && n.note.contains("Potential bug (fix: Fix logic)")
             && n.note.contains("Task task-1")
     });
     assert!(
@@ -203,3 +203,58 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
     // Milestone completed and advanced
     assert_eq!(updated_state.completed_tasks.len(), 1);
 }
+
+#[test]
+fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix() {
+    let dir = setup_test_git_repo();
+    let repo = dir.path();
+    let state_path = repo.join(".agent-state/state.json");
+
+    let milestones = vec![MilestoneSpec {
+        title: "Secure Auth Handler".to_string(),
+        verify_cmd: "echo gate_ok".to_string(),
+        files: vec![],
+    }];
+    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    fs::write(repo.join("README.md"), "# Updated auth logic\n").unwrap();
+
+    let mock_report_json = r#"{"summary":"Security and formatting issues detected","findings":[{"severity":"Low","file":"README.md","line_range":[1,1],"problem":"Trailing whitespace","suggested_fix":"Trim line"},{"severity":"Critical","file":"README.md","line_range":[2,5],"problem":"Unsanitized input used in SQL query","suggested_fix":"Use parameterized statements"}],"has_blocking_issues":true}"#;
+    let mock_driver = format!("echo '{}'", mock_report_json);
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some(mock_driver),
+        max_retries: 3,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: true,
+    };
+
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let outcome = runner.step().unwrap();
+
+    assert!(matches!(outcome, DaemonStepOutcome::Advanced { .. }));
+
+    let updated_state = load_state(&state_path).unwrap();
+    let advisory_note = updated_state
+        .notes
+        .iter()
+        .find(|n| n.note.contains("[review-advisory]"))
+        .expect("Expected [review-advisory] note in ledger");
+
+    assert!(
+        advisory_note
+            .note
+            .contains("Unsanitized input used in SQL query (fix: Use parameterized statements)"),
+        "Expected critical finding with suggested fix to be selected, got: {}",
+        advisory_note.note
+    );
+    assert!(
+        !advisory_note.note.contains("Trailing whitespace"),
+        "Low severity finding should not be selected when Critical finding exists, got: {}",
+        advisory_note.note
+    );
+}
+
