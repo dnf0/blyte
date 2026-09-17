@@ -98,22 +98,20 @@ pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Resul
     if let Some(start) = normalized_start {
         if start != head_hash {
             let range = format!("{}..HEAD", start);
-            if let Ok(committed_diff) = get_git_diff(repo_root, Some(&range)) {
-                if !committed_diff.trim().is_empty() {
-                    combined_diff.push_str(&committed_diff);
-                }
+            let committed_diff = get_git_diff(repo_root, Some(&range))?;
+            if !committed_diff.trim().is_empty() {
+                combined_diff.push_str(&committed_diff);
             }
         }
     }
 
     // Step 3: Check for working tree modifications or untracked files and append to diff.
-    if let Ok(working_diff) = get_git_diff(repo_root, Some("HEAD")) {
-        if !working_diff.trim().is_empty() {
-            if !combined_diff.is_empty() && !combined_diff.ends_with('\n') {
-                combined_diff.push('\n');
-            }
-            combined_diff.push_str(&working_diff);
+    let working_diff = get_git_diff(repo_root, Some("HEAD"))?;
+    if !working_diff.trim().is_empty() {
+        if !combined_diff.is_empty() && !combined_diff.ends_with('\n') {
+            combined_diff.push('\n');
         }
+        combined_diff.push_str(&working_diff);
     }
 
     // Step 4: If no milestone start commit was provided and the diff is still empty, fallback to HEAD~1..HEAD.
@@ -124,9 +122,8 @@ pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Resul
             .output()
         {
             if out.status.success() {
-                if let Ok(last_commit_diff) = get_git_diff(repo_root, Some("HEAD~1..HEAD")) {
-                    return Ok(last_commit_diff);
-                }
+                let last_commit_diff = get_git_diff(repo_root, Some("HEAD~1..HEAD"))?;
+                return Ok(last_commit_diff);
             }
         }
     }
