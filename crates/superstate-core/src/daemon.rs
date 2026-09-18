@@ -177,6 +177,9 @@ pub struct DaemonConfig {
     /// Treat code review findings as blocking quality gates that fail milestone completion
     #[serde(default)]
     pub review_blocking: bool,
+    /// Automatically roll back working tree to milestone baseline on verification failure
+    #[serde(default)]
+    pub auto_rollback: bool,
 }
 
 impl Default for DaemonConfig {
@@ -189,6 +192,7 @@ impl Default for DaemonConfig {
             advisory_gate: false,
             advisory_review: false,
             review_blocking: false,
+            auto_rollback: false,
         }
     }
 }
@@ -458,6 +462,41 @@ impl DaemonRunner {
     /// Returns a reference to the recorded start commits for milestones.
     pub fn milestone_start_commits(&self) -> &HashMap<String, String> {
         &self.milestone_start_commits
+    }
+
+    /// Rolls back the working tree to the milestone start commit upon verification failure.
+    fn perform_rollback(
+        &mut self,
+        task_id: &str,
+        attempt: usize,
+        working_dir: &Path,
+        state: &mut ExecutionState,
+    ) -> Result<(), DaemonError> {
+        if !self.config.auto_rollback || !is_inside_git_repo(working_dir) {
+            return Ok(());
+        }
+
+        if let Some(start_commit) = self.milestone_start_commits.get(task_id).cloned() {
+            let _ = Command::new("git")
+                .args(["reset", "--hard", &start_commit])
+                .current_dir(working_dir)
+                .output();
+            let _ = Command::new("git")
+                .args(["clean", "-fd"])
+                .current_dir(working_dir)
+                .output();
+            state.notes.push(LedgerEntry::new(
+                "superstate-daemon",
+                format!(
+                    "[rollback] Task {}: attempt {} failed verification; rolled back working tree to baseline commit {}. Avoid repeating previous failed approach.",
+                    task_id, attempt, start_commit
+                ),
+            ));
+            save_state_atomic(&self.config.state_path, state)?;
+            self.last_fingerprint
+                .insert(task_id.to_string(), workspace_fingerprint(working_dir));
+        }
+        Ok(())
     }
 
     /// Executes a single autonomous daemon step for the currently active task.
@@ -743,6 +782,15 @@ impl DaemonRunner {
                                 .total_attempts
                                 .entry(active_task.id.clone())
                                 .or_insert(0) += 1;
+                            let current_attempt = attempts_so_far + 1;
+                            if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
+                                self.perform_rollback(
+                                    &active_task.id,
+                                    current_attempt,
+                                    &working_dir,
+                                    &mut state,
+                                )?;
+                            }
                             let reason = if self.config.review_blocking {
                                 format!(
                                     "code-review: {} blocking issue(s) detected",
@@ -884,19 +932,22 @@ impl DaemonRunner {
             *attempts += 1;
             let attempts_spent = *attempts;
 
-            let retries = self.retry_counts.entry(active_task.id.clone()).or_insert(0);
-            if made_progress {
-                *retries = 0;
-                state.notes.push(LedgerEntry::new(
-                    "superstate-daemon",
-                    format!(
-                        "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
-                        active_task.id, attempts_spent
-                    ),
-                ));
-            } else {
-                *retries += 1;
-            }
+            let current_retries = {
+                let retries = self.retry_counts.entry(active_task.id.clone()).or_insert(0);
+                if made_progress {
+                    *retries = 0;
+                    state.notes.push(LedgerEntry::new(
+                        "superstate-daemon",
+                        format!(
+                            "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
+                            active_task.id, attempts_spent
+                        ),
+                    ));
+                } else {
+                    *retries += 1;
+                }
+                *retries
+            };
 
             let fail_reason = gate_res
                 .failure_reason
@@ -920,7 +971,19 @@ impl DaemonRunner {
                 ),
             ));
 
-            let stalled = *retries >= self.config.max_retries;
+            if self.config.auto_rollback
+                && is_inside_git_repo(&working_dir)
+                && attempts_so_far < attempt_ceiling
+            {
+                self.perform_rollback(
+                    &active_task.id,
+                    attempts_spent,
+                    &working_dir,
+                    &mut state,
+                )?;
+            }
+
+            let stalled = current_retries >= self.config.max_retries;
             let exhausted = attempts_spent >= self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
             if (stalled || exhausted) && self.config.advisory_gate {
                 // Advisory: the verification command failed and the budget is spent, but the
@@ -983,7 +1046,7 @@ impl DaemonRunner {
                 Ok(DaemonStepOutcome::Failed {
                     task_id: active_task.id,
                     reason: fail_reason,
-                    retries_remaining: self.config.max_retries - *retries,
+                    retries_remaining: self.config.max_retries - current_retries,
                 })
             }
         }

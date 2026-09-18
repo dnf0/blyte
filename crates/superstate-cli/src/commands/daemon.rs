@@ -245,6 +245,7 @@ pub fn cmd_daemon(
                 .unwrap_or(false),
             advisory_review,
             review_blocking,
+            auto_rollback: false,
         };
 
         let mut runner = DaemonRunner::new(config)

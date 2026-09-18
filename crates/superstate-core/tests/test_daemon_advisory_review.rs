@@ -68,6 +68,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
         advisory_gate: false,
         advisory_review: true,
         review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -118,6 +119,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
         advisory_gate: false,
         advisory_review: true,
         review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -182,6 +184,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
         advisory_gate: false,
         advisory_review: true,
         review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -236,6 +239,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix() 
         advisory_gate: false,
         advisory_review: true,
         review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -291,6 +295,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
         advisory_gate: false,
         advisory_review: true,
         review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -339,6 +344,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
         advisory_gate: false,
         advisory_review: true,
         review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();

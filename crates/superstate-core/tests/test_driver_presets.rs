@@ -178,6 +178,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
         advisory_gate: false,
         advisory_review: false,
         review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();
