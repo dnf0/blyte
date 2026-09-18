@@ -319,6 +319,28 @@ pub struct DaemonArgs {
         help = "Automatically roll back working tree to milestone baseline on verification failure"
     )]
     pub auto_rollback: bool,
+    /// Disable automatic git rollback on verification failure
+    #[arg(
+        long,
+        help = "Disable automatic git rollback on verification failure"
+    )]
+    pub no_auto_rollback: bool,
+}
+
+impl DaemonArgs {
+    pub fn use_auto_rollback(&self) -> bool {
+        if self.no_auto_rollback {
+            false
+        } else if let Ok(val) = std::env::var("SUPERSTATE_DAEMON_AUTO_ROLLBACK") {
+            let s = val.trim();
+            s != "0" && !s.eq_ignore_ascii_case("false")
+        } else if let Ok(val) = std::env::var("SUPERSTATE_AUTO_ROLLBACK") {
+            let s = val.trim();
+            s != "0" && !s.eq_ignore_ascii_case("false")
+        } else {
+            true
+        }
+    }
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -531,16 +553,19 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 });
                 commands::daemon::cmd_daemon_list(&repo_root, json)
             }
-            None => commands::daemon::cmd_daemon(
-                &resolve(args.state),
-                args.driver.as_deref(),
-                args.detach,
-                args.max_retries,
-                args.timeout,
-                args.advisory_review,
-                args.review_blocking,
-                args.auto_rollback,
-            ),
+            None => {
+                let auto_rollback = args.use_auto_rollback();
+                commands::daemon::cmd_daemon(
+                    &resolve(args.state),
+                    args.driver.as_deref(),
+                    args.detach,
+                    args.max_retries,
+                    args.timeout,
+                    args.advisory_review,
+                    args.review_blocking,
+                    auto_rollback,
+                )
+            }
         },
         StateCommands::Cancel(args) => {
             let state_path = args.state.map(resolve);
