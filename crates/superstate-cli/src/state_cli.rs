@@ -310,6 +310,12 @@ pub struct DaemonArgs {
     /// Treat Critical and High severity review findings as blocking failures requiring retry
     #[arg(long, help = "Treat Critical and High severity review findings as blocking failures requiring retry")]
     pub review_blocking: bool,
+    /// Automatically roll back working tree to milestone baseline on verification failure
+    #[arg(
+        long,
+        help = "Automatically roll back working tree to milestone baseline on verification failure"
+    )]
+    pub auto_rollback: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -530,6 +536,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 args.timeout,
                 args.advisory_review,
                 args.review_blocking,
+                args.auto_rollback,
             ),
         },
         StateCommands::Cancel(args) => {
