@@ -476,26 +476,49 @@ impl DaemonRunner {
             return Ok(());
         }
 
-        if let Some(start_commit) = self.milestone_start_commits.get(task_id).cloned() {
-            let _ = Command::new("git")
-                .args(["reset", "--hard", &start_commit])
-                .current_dir(working_dir)
-                .output();
-            let _ = Command::new("git")
-                .args(["clean", "-fd"])
-                .current_dir(working_dir)
-                .output();
-            state.notes.push(LedgerEntry::new(
-                "superstate-daemon",
-                format!(
-                    "[rollback] Task {}: attempt {} failed verification; rolled back working tree to baseline commit {}. Avoid repeating previous failed approach.",
-                    task_id, attempt, start_commit
-                ),
-            ));
-            save_state_atomic(&self.config.state_path, state)?;
-            self.last_fingerprint
-                .insert(task_id.to_string(), workspace_fingerprint(working_dir));
-        }
+        let target_commit = match self.milestone_start_commits.get(task_id).cloned() {
+            Some(c) => c,
+            None => {
+                // Resolve HEAD as fallback baseline if milestone_start_commits did not capture it
+                if let Ok(out) = Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(working_dir)
+                    .output()
+                {
+                    if out.status.success() {
+                        let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if !h.is_empty() {
+                            h
+                        } else {
+                            "HEAD".to_string()
+                        }
+                    } else {
+                        "HEAD".to_string()
+                    }
+                } else {
+                    "HEAD".to_string()
+                }
+            }
+        };
+
+        let _ = Command::new("git")
+            .args(["reset", "--hard", &target_commit])
+            .current_dir(working_dir)
+            .output();
+        let _ = Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(working_dir)
+            .output();
+        state.notes.push(LedgerEntry::new(
+            "superstate-daemon",
+            format!(
+                "[rollback] Task {}: attempt {} failed verification; rolled back working tree to baseline commit {}. Avoid repeating previous failed approach.",
+                task_id, attempt, target_commit
+            ),
+        ));
+        save_state_atomic(&self.config.state_path, state)?;
+        self.last_fingerprint
+            .insert(task_id.to_string(), workspace_fingerprint(working_dir));
         Ok(())
     }
 

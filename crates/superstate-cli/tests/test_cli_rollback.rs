@@ -16,35 +16,64 @@ struct StateWrapper {
 }
 
 fn init_git_repo(path: &Path) {
-    Command::new("git")
+    let init_res = Command::new("git")
         .args(["init", "-b", "main"])
         .current_dir(path)
-        .output()
-        .expect("git init");
+        .output();
+    if let Ok(out) = init_res {
+        if !out.status.success() {
+            let _ = Command::new("git").arg("init").current_dir(path).output();
+            let _ = Command::new("git")
+                .args(["checkout", "-b", "main"])
+                .current_dir(path)
+                .output();
+        }
+    }
 
-    Command::new("git")
+    let _ = Command::new("git")
         .args(["config", "user.name", "Tester"])
         .current_dir(path)
-        .output()
-        .expect("git config user.name");
+        .output();
 
-    Command::new("git")
+    let _ = Command::new("git")
         .args(["config", "user.email", "test@example.com"])
         .current_dir(path)
-        .output()
-        .expect("git config user.email");
+        .output();
+
+    let _ = Command::new("git")
+        .args(["config", "commit.gpgsign", "false"])
+        .current_dir(path)
+        .output();
 
     fs::write(path.join("tracked.txt"), "initial baseline\n").expect("write tracked.txt");
-    Command::new("git")
+    let add_out = Command::new("git")
         .args(["add", "."])
         .current_dir(path)
         .output()
         .expect("git add");
-    Command::new("git")
+    assert!(
+        add_out.status.success(),
+        "git add must succeed: {:?}",
+        add_out
+    );
+
+    let commit_out = Command::new("git")
         .args(["commit", "-m", "chore: initial baseline", "--no-gpg-sign"])
         .current_dir(path)
         .output()
         .expect("git commit");
+    assert!(
+        commit_out.status.success(),
+        "git commit must succeed: {:?}",
+        commit_out
+    );
+
+    let head_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(head_out.status.success(), "HEAD must exist: {:?}", head_out);
 }
 
 #[test]
