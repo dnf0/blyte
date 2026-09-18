@@ -160,6 +160,10 @@ pub enum DaemonError {
     MaxRetriesExceeded(usize, String),
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     pub state_path: PathBuf,
@@ -178,7 +182,7 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub review_blocking: bool,
     /// Automatically roll back working tree to milestone baseline on verification failure
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_rollback: bool,
 }
 
@@ -192,7 +196,7 @@ impl Default for DaemonConfig {
             advisory_gate: false,
             advisory_review: false,
             review_blocking: false,
-            auto_rollback: false,
+            auto_rollback: true,
         }
     }
 }

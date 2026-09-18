@@ -215,3 +215,22 @@ fn test_daemon_no_rollback_when_disabled() {
         "state.notes should NOT contain a [rollback] note when auto_rollback is false"
     );
 }
+
+#[test]
+fn test_daemon_config_default_has_auto_rollback_enabled() {
+    let config = DaemonConfig::default();
+    assert!(
+        config.auto_rollback,
+        "DaemonConfig::default().auto_rollback must be true"
+    );
+}
+
+#[test]
+fn test_daemon_deserialization_defaults_auto_rollback_to_true() {
+    let json_str = r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
+    let config: DaemonConfig = serde_json::from_str(json_str).expect("deserialize config");
+    assert!(
+        config.auto_rollback,
+        "deserialized DaemonConfig without auto_rollback field must default to true"
+    );
+}
