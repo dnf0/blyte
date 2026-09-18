@@ -115,13 +115,17 @@ pub fn cmd_daemon(
     review_blocking: bool,
     auto_rollback: bool,
 ) -> Result<(), String> {
-    let auto_rollback = auto_rollback
-        || std::env::var("SUPERSTATE_AUTO_ROLLBACK")
-            .map(|v| {
-                let s = v.trim();
-                s == "1" || s.eq_ignore_ascii_case("true")
-            })
-            .unwrap_or(false);
+    let auto_rollback = if !auto_rollback {
+        false
+    } else if let Ok(val) = std::env::var("SUPERSTATE_DAEMON_AUTO_ROLLBACK") {
+        let s = val.trim();
+        s != "0" && !s.eq_ignore_ascii_case("false")
+    } else if let Ok(val) = std::env::var("SUPERSTATE_AUTO_ROLLBACK") {
+        let s = val.trim();
+        s != "0" && !s.eq_ignore_ascii_case("false")
+    } else {
+        true
+    };
 
     let paths = daemon_paths_for_state(state_path);
 
@@ -178,8 +182,8 @@ pub fn cmd_daemon(
         if review_blocking {
             cmd.arg("--review-blocking");
         }
-        if auto_rollback {
-            cmd.arg("--auto-rollback");
+        if !auto_rollback {
+            cmd.arg("--no-auto-rollback");
         }
         cmd.stdout(std::process::Stdio::from(log_out));
         cmd.stderr(std::process::Stdio::from(log_err));

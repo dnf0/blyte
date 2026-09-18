@@ -144,7 +144,7 @@ fn main() {
                 args.timeout,
                 args.advisory_review,
                 args.review_blocking,
-                args.auto_rollback,
+                args.use_auto_rollback(),
             ),
         },
         Commands::Cancel(args) => {

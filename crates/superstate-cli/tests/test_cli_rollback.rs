@@ -86,19 +86,42 @@ fn test_cli_state_daemon_parses_auto_rollback_flag() {
                 args.auto_rollback,
                 "args.auto_rollback must be true when --auto-rollback is supplied"
             );
+            assert!(
+                args.use_auto_rollback(),
+                "args.use_auto_rollback() must be true when --auto-rollback is supplied"
+            );
         }
         _ => panic!("Expected StateCommands::Daemon"),
     }
 }
 
 #[test]
-fn test_cli_state_daemon_auto_rollback_default_false() {
+fn test_cli_state_daemon_auto_rollback_default_true() {
     let parsed = StateWrapper::try_parse_from(["state", "daemon"]).expect("parse state daemon");
     match parsed.cmd {
         StateCommands::Daemon(args) => {
             assert!(
-                !args.auto_rollback,
-                "args.auto_rollback must be false by default"
+                args.use_auto_rollback(),
+                "args.use_auto_rollback() must be true by default"
+            );
+        }
+        _ => panic!("Expected StateCommands::Daemon"),
+    }
+}
+
+#[test]
+fn test_cli_state_daemon_parses_no_auto_rollback_flag() {
+    let parsed = StateWrapper::try_parse_from(["state", "daemon", "--no-auto-rollback"])
+        .expect("parse state daemon --no-auto-rollback");
+    match parsed.cmd {
+        StateCommands::Daemon(args) => {
+            assert!(
+                args.no_auto_rollback,
+                "args.no_auto_rollback must be true when --no-auto-rollback is supplied"
+            );
+            assert!(
+                !args.use_auto_rollback(),
+                "args.use_auto_rollback() must be false when --no-auto-rollback is supplied"
             );
         }
         _ => panic!("Expected StateCommands::Daemon"),
@@ -120,10 +143,8 @@ fn test_cli_daemon_help_has_auto_rollback() {
         stdout
     );
     assert!(
-        stdout.contains(
-            "Automatically roll back working tree to milestone baseline on verification failure"
-        ),
-        "`superstate daemon --help` should describe --auto-rollback, got:\n{}",
+        stdout.contains("--no-auto-rollback"),
+        "`superstate daemon --help` should mention --no-auto-rollback, got:\n{}",
         stdout
     );
 
@@ -140,10 +161,8 @@ fn test_cli_daemon_help_has_auto_rollback() {
         stdout_state
     );
     assert!(
-        stdout_state.contains(
-            "Automatically roll back working tree to milestone baseline on verification failure"
-        ),
-        "`superstate state daemon --help` should describe --auto-rollback, got:\n{}",
+        stdout_state.contains("--no-auto-rollback"),
+        "`superstate state daemon --help` should mention --no-auto-rollback, got:\n{}",
         stdout_state
     );
 }
@@ -220,7 +239,7 @@ fn test_cli_daemon_auto_rollback_execution() {
 }
 
 #[test]
-fn test_cli_daemon_auto_rollback_disabled_by_default() {
+fn test_cli_daemon_auto_rollback_enabled_by_default() {
     let tmp = tempdir().unwrap();
     let repo = tmp.path();
     init_git_repo(repo);
@@ -257,95 +276,25 @@ fn test_cli_daemon_auto_rollback_disabled_by_default() {
             "1",
         ])
         .current_dir(repo)
+        .env_remove("SUPERSTATE_DAEMON_AUTO_ROLLBACK")
         .env_remove("SUPERSTATE_AUTO_ROLLBACK")
         .output()
-        .expect("run state daemon without --auto-rollback");
+        .expect("run state daemon with default auto-rollback");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     println!("stdout:\n{}\nstderr:\n{}", stdout, stderr);
 
-    // Without auto_rollback, corrupted changes remain
-    let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
-    assert_eq!(
-        tracked_content.trim(),
-        "corrupted",
-        "tracked file should NOT be rolled back when auto_rollback is false"
-    );
-
-    assert!(
-        repo.join("untracked.txt").exists(),
-        "untracked.txt should NOT be removed when auto_rollback is false"
-    );
-
-    let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
-    let has_rollback_note = updated_state
-        .notes
-        .iter()
-        .any(|n| n.note.contains("[rollback]"));
-    assert!(
-        !has_rollback_note,
-        "state.notes should NOT contain a [rollback] note when auto_rollback is false"
-    );
-}
-
-#[test]
-fn test_cli_daemon_auto_rollback_via_env_var() {
-    let tmp = tempdir().unwrap();
-    let repo = tmp.path();
-    init_git_repo(repo);
-
-    let state_dir = repo.join(".agent-state");
-    fs::create_dir_all(&state_dir).unwrap();
-    let state_path = state_dir.join("state.json");
-
-    let milestones = vec![superstate_core::models::MilestoneSpec {
-        title: "Test Task".to_string(),
-        verify_cmd: "test -f must_exist.txt".to_string(),
-        files: vec![PathBuf::from("tracked.txt")],
-    }];
-    let state = superstate_core::state_machine::init_state_milestones(
-        Some("Test Goal"),
-        milestones,
-        None,
-        true,
-    )
-    .unwrap();
-    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
-
-    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
-
-    // Run without --auto-rollback flag, but with SUPERSTATE_AUTO_ROLLBACK=1
-    let output = Command::new(bin())
-        .args([
-            "state",
-            "daemon",
-            "--state",
-            state_path.to_str().unwrap(),
-            "--driver",
-            mock_driver,
-            "--max-retries",
-            "1",
-        ])
-        .current_dir(repo)
-        .env("SUPERSTATE_AUTO_ROLLBACK", "1")
-        .output()
-        .expect("run state daemon with SUPERSTATE_AUTO_ROLLBACK=1");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    println!("stdout:\n{}\nstderr:\n{}", stdout, stderr);
-
-    // Tracked file must be restored
+    // By default, auto_rollback is enabled: tracked file restored, untracked removed
     let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
     assert_eq!(
         tracked_content, "initial baseline\n",
-        "tracked file should be rolled back via SUPERSTATE_AUTO_ROLLBACK=1"
+        "tracked file should be rolled back by default"
     );
 
     assert!(
         !repo.join("untracked.txt").exists(),
-        "untracked.txt should be removed via SUPERSTATE_AUTO_ROLLBACK=1"
+        "untracked.txt should be removed by default auto-rollback"
     );
 
     let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
@@ -355,7 +304,149 @@ fn test_cli_daemon_auto_rollback_via_env_var() {
         .any(|n| n.note.contains("[rollback]"));
     assert!(
         has_rollback_note,
-        "state.notes should contain a [rollback] note"
+        "state.notes should contain a [rollback] note by default"
+    );
+}
+
+#[test]
+fn test_cli_daemon_auto_rollback_disabled_with_flag() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_git_repo(repo);
+
+    let state_dir = repo.join(".agent-state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
+
+    let milestones = vec![superstate_core::models::MilestoneSpec {
+        title: "Test Task".to_string(),
+        verify_cmd: "test -f must_exist.txt".to_string(),
+        files: vec![PathBuf::from("tracked.txt")],
+    }];
+    let state = superstate_core::state_machine::init_state_milestones(
+        Some("Test Goal"),
+        milestones,
+        None,
+        true,
+    )
+    .unwrap();
+    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
+
+    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
+
+    let output = Command::new(bin())
+        .args([
+            "state",
+            "daemon",
+            "--state",
+            state_path.to_str().unwrap(),
+            "--driver",
+            mock_driver,
+            "--max-retries",
+            "1",
+            "--no-auto-rollback",
+        ])
+        .current_dir(repo)
+        .env_remove("SUPERSTATE_DAEMON_AUTO_ROLLBACK")
+        .env_remove("SUPERSTATE_AUTO_ROLLBACK")
+        .output()
+        .expect("run state daemon with --no-auto-rollback");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("stdout:\n{}\nstderr:\n{}", stdout, stderr);
+
+    // With --no-auto-rollback, corrupted changes remain
+    let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
+    assert_eq!(
+        tracked_content.trim(),
+        "corrupted",
+        "tracked file should NOT be rolled back when --no-auto-rollback is passed"
+    );
+
+    assert!(
+        repo.join("untracked.txt").exists(),
+        "untracked.txt should NOT be removed when --no-auto-rollback is passed"
+    );
+
+    let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
+    let has_rollback_note = updated_state
+        .notes
+        .iter()
+        .any(|n| n.note.contains("[rollback]"));
+    assert!(
+        !has_rollback_note,
+        "state.notes should NOT contain a [rollback] note when --no-auto-rollback is passed"
+    );
+}
+
+#[test]
+fn test_cli_daemon_auto_rollback_disabled_via_env_var() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_git_repo(repo);
+
+    let state_dir = repo.join(".agent-state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
+
+    let milestones = vec![superstate_core::models::MilestoneSpec {
+        title: "Test Task".to_string(),
+        verify_cmd: "test -f must_exist.txt".to_string(),
+        files: vec![PathBuf::from("tracked.txt")],
+    }];
+    let state = superstate_core::state_machine::init_state_milestones(
+        Some("Test Goal"),
+        milestones,
+        None,
+        true,
+    )
+    .unwrap();
+    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
+
+    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
+
+    let output = Command::new(bin())
+        .args([
+            "state",
+            "daemon",
+            "--state",
+            state_path.to_str().unwrap(),
+            "--driver",
+            mock_driver,
+            "--max-retries",
+            "1",
+        ])
+        .current_dir(repo)
+        .env("SUPERSTATE_DAEMON_AUTO_ROLLBACK", "0")
+        .output()
+        .expect("run state daemon with SUPERSTATE_DAEMON_AUTO_ROLLBACK=0");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("stdout:\n{}\nstderr:\n{}", stdout, stderr);
+
+    // Tracked file should remain corrupted
+    let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
+    assert_eq!(
+        tracked_content.trim(),
+        "corrupted",
+        "tracked file should NOT be rolled back when SUPERSTATE_DAEMON_AUTO_ROLLBACK=0"
+    );
+
+    assert!(
+        repo.join("untracked.txt").exists(),
+        "untracked.txt should NOT be removed when SUPERSTATE_DAEMON_AUTO_ROLLBACK=0"
+    );
+
+    let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
+    let has_rollback_note = updated_state
+        .notes
+        .iter()
+        .any(|n| n.note.contains("[rollback]"));
+    assert!(
+        !has_rollback_note,
+        "state.notes should NOT contain a [rollback] note when disabled via env var"
     );
 }
 
