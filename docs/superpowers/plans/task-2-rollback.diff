@@ -1,0 +1,660 @@
+diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
+index 011d8c4..8ee1d58 100644
+--- a/crates/superstate-cli/src/commands/daemon.rs
++++ b/crates/superstate-cli/src/commands/daemon.rs
+@@ -245,6 +245,7 @@ pub fn cmd_daemon(
+                 .unwrap_or(false),
+             advisory_review,
+             review_blocking,
++            auto_rollback: false,
+         };
+ 
+         let mut runner = DaemonRunner::new(config)
+diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
+index 1927193..cd4e236 100644
+--- a/crates/superstate-core/src/daemon.rs
++++ b/crates/superstate-core/src/daemon.rs
+@@ -177,6 +177,9 @@ pub struct DaemonConfig {
+     /// Treat code review findings as blocking quality gates that fail milestone completion
+     #[serde(default)]
+     pub review_blocking: bool,
++    /// Automatically roll back working tree to milestone baseline on verification failure
++    #[serde(default)]
++    pub auto_rollback: bool,
+ }
+ 
+ impl Default for DaemonConfig {
+@@ -189,6 +192,7 @@ impl Default for DaemonConfig {
+             advisory_gate: false,
+             advisory_review: false,
+             review_blocking: false,
++            auto_rollback: false,
+         }
+     }
+ }
+@@ -460,6 +464,41 @@ impl DaemonRunner {
+         &self.milestone_start_commits
+     }
+ 
++    /// Rolls back the working tree to the milestone start commit upon verification failure.
++    fn perform_rollback(
++        &mut self,
++        task_id: &str,
++        attempt: usize,
++        working_dir: &Path,
++        state: &mut ExecutionState,
++    ) -> Result<(), DaemonError> {
++        if !self.config.auto_rollback || !is_inside_git_repo(working_dir) {
++            return Ok(());
++        }
++
++        if let Some(start_commit) = self.milestone_start_commits.get(task_id).cloned() {
++            let _ = Command::new("git")
++                .args(["reset", "--hard", &start_commit])
++                .current_dir(working_dir)
++                .output();
++            let _ = Command::new("git")
++                .args(["clean", "-fd"])
++                .current_dir(working_dir)
++                .output();
++            state.notes.push(LedgerEntry::new(
++                "superstate-daemon",
++                format!(
++                    "[rollback] Task {}: attempt {} failed verification; rolled back working tree to baseline commit {}. Avoid repeating previous failed approach.",
++                    task_id, attempt, start_commit
++                ),
++            ));
++            save_state_atomic(&self.config.state_path, state)?;
++            self.last_fingerprint
++                .insert(task_id.to_string(), workspace_fingerprint(working_dir));
++        }
++        Ok(())
++    }
++
+     /// Executes a single autonomous daemon step for the currently active task.
+     ///
+     /// # Process Lifecycle
+@@ -743,6 +782,15 @@ impl DaemonRunner {
+                                 .total_attempts
+                                 .entry(active_task.id.clone())
+                                 .or_insert(0) += 1;
++                            let current_attempt = attempts_so_far + 1;
++                            if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
++                                self.perform_rollback(
++                                    &active_task.id,
++                                    current_attempt,
++                                    &working_dir,
++                                    &mut state,
++                                )?;
++                            }
+                             let reason = if self.config.review_blocking {
+                                 format!(
+                                     "code-review: {} blocking issue(s) detected",
+@@ -884,19 +932,22 @@ impl DaemonRunner {
+             *attempts += 1;
+             let attempts_spent = *attempts;
+ 
+-            let retries = self.retry_counts.entry(active_task.id.clone()).or_insert(0);
+-            if made_progress {
+-                *retries = 0;
+-                state.notes.push(LedgerEntry::new(
+-                    "superstate-daemon",
+-                    format!(
+-                        "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
+-                        active_task.id, attempts_spent
+-                    ),
+-                ));
+-            } else {
+-                *retries += 1;
+-            }
++            let current_retries = {
++                let retries = self.retry_counts.entry(active_task.id.clone()).or_insert(0);
++                if made_progress {
++                    *retries = 0;
++                    state.notes.push(LedgerEntry::new(
++                        "superstate-daemon",
++                        format!(
++                            "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
++                            active_task.id, attempts_spent
++                        ),
++                    ));
++                } else {
++                    *retries += 1;
++                }
++                *retries
++            };
+ 
+             let fail_reason = gate_res
+                 .failure_reason
+@@ -920,7 +971,19 @@ impl DaemonRunner {
+                 ),
+             ));
+ 
+-            let stalled = *retries >= self.config.max_retries;
++            if self.config.auto_rollback
++                && is_inside_git_repo(&working_dir)
++                && attempts_so_far < attempt_ceiling
++            {
++                self.perform_rollback(
++                    &active_task.id,
++                    attempts_spent,
++                    &working_dir,
++                    &mut state,
++                )?;
++            }
++
++            let stalled = current_retries >= self.config.max_retries;
+             let exhausted = attempts_spent >= self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+             if (stalled || exhausted) && self.config.advisory_gate {
+                 // Advisory: the verification command failed and the budget is spent, but the
+@@ -983,7 +1046,7 @@ impl DaemonRunner {
+                 Ok(DaemonStepOutcome::Failed {
+                     task_id: active_task.id,
+                     reason: fail_reason,
+-                    retries_remaining: self.config.max_retries - *retries,
++                    retries_remaining: self.config.max_retries - current_retries,
+                 })
+             }
+         }
+diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+index 5bfb17f..0ee8c14 100644
+--- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
++++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+@@ -68,6 +68,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -118,6 +119,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -182,6 +184,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -236,6 +239,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -291,6 +295,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -339,6 +344,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
+index d34bc3d..4bccced 100644
+--- a/crates/superstate-core/tests/test_daemon_automerge.rs
++++ b/crates/superstate-core/tests/test_daemon_automerge.rs
+@@ -121,6 +121,7 @@ fn test_daemon_automerge_on_completion() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -215,6 +216,7 @@ fn test_daemon_completion_in_place_mode() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -275,6 +277,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -295,6 +298,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     })
+     .expect("create second runner");
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+index e498955..a8efc63 100644
+--- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
++++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+@@ -85,6 +85,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: true,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -156,6 +157,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: true,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -199,6 +201,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -270,6 +273,7 @@ EOF
+         advisory_gate: false,
+         advisory_review: true,
+         review_blocking: true,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+diff --git a/crates/superstate-core/tests/test_daemon_rollback.rs b/crates/superstate-core/tests/test_daemon_rollback.rs
+new file mode 100644
+index 0000000..5a52edb
+--- /dev/null
++++ b/crates/superstate-core/tests/test_daemon_rollback.rs
+@@ -0,0 +1,212 @@
++use std::fs;
++use std::process::Command;
++use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
++use superstate_core::models::{ExecutionState, ExecutionStatus, TaskSpec};
++use superstate_core::state_machine::{load_state, save_state_atomic};
++
++/// Helper to configure a temporary git repository rooted on the main branch.
++fn setup_temp_git_repo(path: &std::path::Path) -> String {
++    let init_res = Command::new("git")
++        .args(["init", "-b", "main"])
++        .current_dir(path)
++        .output();
++    if let Ok(out) = init_res {
++        if !out.status.success() {
++            let _ = Command::new("git").arg("init").current_dir(path).output();
++            let _ = Command::new("git")
++                .args(["checkout", "-b", "main"])
++                .current_dir(path)
++                .output();
++        }
++    }
++
++    let _ = Command::new("git")
++        .args(["config", "user.name", "Superstate Test"])
++        .current_dir(path)
++        .output();
++    let _ = Command::new("git")
++        .args(["config", "user.email", "test@superstate.local"])
++        .current_dir(path)
++        .output();
++
++    // Create an initial tracked file and commit
++    fs::write(path.join("tracked.txt"), "initial content\n").expect("write tracked.txt");
++    let _ = Command::new("git")
++        .args(["add", "tracked.txt"])
++        .current_dir(path)
++        .output();
++    let _ = Command::new("git")
++        .args(["commit", "-m", "initial commit"])
++        .current_dir(path)
++        .output();
++
++    let head_out = Command::new("git")
++        .args(["rev-parse", "HEAD"])
++        .current_dir(path)
++        .output()
++        .expect("git rev-parse HEAD");
++    String::from_utf8_lossy(&head_out.stdout).trim().to_string()
++}
++
++#[test]
++fn test_daemon_rollback_on_verification_failure() {
++    let temp_dir = tempfile::tempdir().expect("create temp dir");
++    let repo_root = temp_dir.path();
++    let initial_commit = setup_temp_git_repo(repo_root);
++    assert!(!initial_commit.is_empty(), "initial commit must not be empty");
++
++    // Initialize execution state targeting in-place repository
++    let state_dir = repo_root.join(".agent-state");
++    fs::create_dir_all(&state_dir).expect("create state dir");
++    let state_path = state_dir.join("state.json");
++
++    let state = ExecutionState {
++        status: ExecutionStatus::InProgress,
++        step: 1,
++        active_task: Some(TaskSpec {
++            id: "task-rollback-1".to_string(),
++            title: "Task with failing verification requiring rollback".to_string(),
++            // Verification command fails
++            verification_cmd: Some("test -f milestone_done.txt".to_string()),
++            ..Default::default()
++        }),
++        pending_tasks: Vec::new(),
++        active_worktree: None,
++        active_branch: Some("main".to_string()),
++        base_branch: Some("main".to_string()),
++        no_worktree: true,
++        goal: Some("Test rollback behavior on verification failure".to_string()),
++        ..Default::default()
++    };
++    save_state_atomic(&state_path, &state).expect("save state");
++
++    // Driver command: modifies tracked.txt, creates untracked.txt and untracked_dir/nested.txt
++    let driver_script = "echo 'corrupted driver content' > tracked.txt && \
++                         echo 'untracked artifact' > untracked.txt && \
++                         mkdir -p untracked_dir && \
++                         echo 'nested' > untracked_dir/nested.txt";
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(driver_script.to_string()),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: true,
++    };
++
++    let mut runner = DaemonRunner::new(config).expect("create runner");
++    let outcome = runner.run_step().expect("run_step");
++
++    // 1. Outcome must be Failed (retries remaining)
++    assert!(
++        matches!(outcome, DaemonStepOutcome::Failed { .. }),
++        "expected Failed outcome, got {:?}",
++        outcome
++    );
++
++    // 2. Tracked file must be restored to initial commit content
++    let tracked_content = fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
++    assert_eq!(
++        tracked_content, "initial content\n",
++        "tracked file should be rolled back to initial commit content"
++    );
++
++    // 3. Untracked file and directory must be cleaned (-fd)
++    assert!(
++        !repo_root.join("untracked.txt").exists(),
++        "untracked.txt should be removed by git clean -fd"
++    );
++    assert!(
++        !repo_root.join("untracked_dir").exists(),
++        "untracked_dir should be removed by git clean -fd"
++    );
++
++    // 4. Epistemic note must be recorded
++    let updated_state = load_state(&state_path).expect("load updated state");
++    let rollback_note = updated_state
++        .notes
++        .iter()
++        .find(|n| n.note.contains("[rollback]"));
++    assert!(
++        rollback_note.is_some(),
++        "state.notes must contain a [rollback] note"
++    );
++    let note_content = &rollback_note.unwrap().note;
++    assert!(
++        note_content.contains("Task task-rollback-1: attempt 1 failed verification"),
++        "note should reference task id and attempt number: {}",
++        note_content
++    );
++    assert!(
++        note_content.contains(&format!("baseline commit {}", initial_commit)),
++        "note should reference baseline commit SHA: {}",
++        note_content
++    );
++}
++
++#[test]
++fn test_daemon_no_rollback_when_disabled() {
++    let temp_dir = tempfile::tempdir().expect("create temp dir");
++    let repo_root = temp_dir.path();
++    let _ = setup_temp_git_repo(repo_root);
++
++    let state_dir = repo_root.join(".agent-state");
++    fs::create_dir_all(&state_dir).expect("create state dir");
++    let state_path = state_dir.join("state.json");
++
++    let state = ExecutionState {
++        status: ExecutionStatus::InProgress,
++        step: 1,
++        active_task: Some(TaskSpec {
++            id: "task-no-rollback".to_string(),
++            title: "Task without rollback".to_string(),
++            verification_cmd: Some("test -f milestone_done.txt".to_string()),
++            ..Default::default()
++        }),
++        pending_tasks: Vec::new(),
++        active_worktree: None,
++        active_branch: Some("main".to_string()),
++        base_branch: Some("main".to_string()),
++        no_worktree: true,
++        goal: Some("Test non-rollback behavior".to_string()),
++        ..Default::default()
++    };
++    save_state_atomic(&state_path, &state).expect("save state");
++
++    let driver_script = "echo 'corrupted driver content' > tracked.txt && \
++                         echo 'untracked artifact' > untracked.txt";
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(driver_script.to_string()),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).expect("create runner");
++    let outcome = runner.run_step().expect("run_step");
++
++    assert!(matches!(outcome, DaemonStepOutcome::Failed { .. }));
++
++    // When disabled, dirty tree is preserved
++    let tracked_content = fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
++    assert_eq!(tracked_content.trim(), "corrupted driver content");
++    assert!(repo_root.join("untracked.txt").exists());
++
++    let updated_state = load_state(&state_path).expect("load updated state");
++    let rollback_note = updated_state
++        .notes
++        .iter()
++        .find(|n| n.note.contains("[rollback]"));
++    assert!(
++        rollback_note.is_none(),
++        "state.notes should NOT contain a [rollback] note when auto_rollback is false"
++    );
++}
+diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
+index d68120d..44e9af1 100644
+--- a/crates/superstate-core/tests/test_daemon_runner.rs
++++ b/crates/superstate-core/tests/test_daemon_runner.rs
+@@ -34,6 +34,7 @@ fn test_daemon_run_step_success() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -70,6 +71,7 @@ fn test_daemon_run_step_verification_failure() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -113,6 +115,7 @@ fn test_daemon_run_to_completion() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -152,6 +155,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -202,6 +206,7 @@ fn test_daemon_step_advancer_invoked() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     use std::sync::{Arc, Mutex};
+@@ -248,6 +253,7 @@ fn test_daemon_step_advancer_error_propagation() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     // Configure a StepAdvancer that simulates downstream failure during advancement
+@@ -298,6 +304,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -358,6 +365,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -406,6 +414,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -495,6 +504,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -551,6 +561,7 @@ fn test_progress_renews_the_retry_budget() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -593,6 +604,7 @@ fn test_stalled_worker_still_blocks() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -647,6 +659,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -691,6 +704,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -742,6 +756,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -791,6 +806,7 @@ fn test_real_gate_completes_immediately() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+     assert!(
+@@ -827,6 +843,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+     assert!(
+@@ -879,6 +896,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
+             advisory_gate: advisory,
+             advisory_review: false,
+             review_blocking: false,
++            auto_rollback: false,
+         })
+         .unwrap();
+         for _ in 0..4 {
+diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
+index e05964b..d99c14c 100644
+--- a/crates/superstate-core/tests/test_driver_presets.rs
++++ b/crates/superstate-core/tests/test_driver_presets.rs
+@@ -178,6 +178,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
+         advisory_gate: false,
+         advisory_review: false,
+         review_blocking: false,
++        auto_rollback: false,
+     };
+ 
+     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();

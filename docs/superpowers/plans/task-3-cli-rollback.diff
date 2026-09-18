@@ -1,0 +1,536 @@
+diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
+index 8ee1d58..d894522 100644
+--- a/crates/superstate-cli/src/commands/daemon.rs
++++ b/crates/superstate-cli/src/commands/daemon.rs
+@@ -104,6 +104,7 @@ pub fn resolve_state_dir(repo_or_state: Option<&Path>) -> PathBuf {
+ }
+ 
+ /// Spawns or executes an autonomous daemon runner for a given state machine.
++#[allow(clippy::too_many_arguments)]
+ pub fn cmd_daemon(
+     state_path: &Path,
+     driver: Option<&str>,
+@@ -112,7 +113,16 @@ pub fn cmd_daemon(
+     timeout_secs: u64,
+     advisory_review: bool,
+     review_blocking: bool,
++    auto_rollback: bool,
+ ) -> Result<(), String> {
++    let auto_rollback = auto_rollback
++        || std::env::var("SUPERSTATE_AUTO_ROLLBACK")
++            .map(|v| {
++                let s = v.trim();
++                s == "1" || s.eq_ignore_ascii_case("true")
++            })
++            .unwrap_or(false);
++
+     let paths = daemon_paths_for_state(state_path);
+ 
+     // Enforce per-job PID lock
+@@ -168,6 +178,9 @@ pub fn cmd_daemon(
+         if review_blocking {
+             cmd.arg("--review-blocking");
+         }
++        if auto_rollback {
++            cmd.arg("--auto-rollback");
++        }
+         cmd.stdout(std::process::Stdio::from(log_out));
+         cmd.stderr(std::process::Stdio::from(log_err));
+         cmd.stdin(std::process::Stdio::null());
+@@ -245,7 +258,7 @@ pub fn cmd_daemon(
+                 .unwrap_or(false),
+             advisory_review,
+             review_blocking,
+-            auto_rollback: false,
++            auto_rollback,
+         };
+ 
+         let mut runner = DaemonRunner::new(config)
+diff --git a/crates/superstate-cli/src/commands/handoff.rs b/crates/superstate-cli/src/commands/handoff.rs
+index 577a220..fac776e 100644
+--- a/crates/superstate-cli/src/commands/handoff.rs
++++ b/crates/superstate-cli/src/commands/handoff.rs
+@@ -170,7 +170,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
+     // Route execution based on invocation mode: detached daemon, JSON output, or interactive text
+     if args.detach {
+         let driver_str = resolved_driver.as_deref().or(args.driver.as_deref());
+-        cmd_daemon(&state_path, driver_str, true, 3, 300, false, false)
++        cmd_daemon(&state_path, driver_str, true, 3, 300, false, false, false)
+     } else if args.json {
+         let active_task_str = state
+             .active_task
+diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
+index e265664..9c31e15 100644
+--- a/crates/superstate-cli/src/main.rs
++++ b/crates/superstate-cli/src/main.rs
+@@ -144,6 +144,7 @@ fn main() {
+                 args.timeout,
+                 args.advisory_review,
+                 args.review_blocking,
++                args.auto_rollback,
+             ),
+         },
+         Commands::Cancel(args) => {
+diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
+index 53bd325..1b55e92 100644
+--- a/crates/superstate-cli/src/state_cli.rs
++++ b/crates/superstate-cli/src/state_cli.rs
+@@ -310,6 +310,12 @@ pub struct DaemonArgs {
+     /// Treat Critical and High severity review findings as blocking failures requiring retry
+     #[arg(long, help = "Treat Critical and High severity review findings as blocking failures requiring retry")]
+     pub review_blocking: bool,
++    /// Automatically roll back working tree to milestone baseline on verification failure
++    #[arg(
++        long,
++        help = "Automatically roll back working tree to milestone baseline on verification failure"
++    )]
++    pub auto_rollback: bool,
+ }
+ 
+ #[derive(clap::Args, Debug, Clone)]
+@@ -530,6 +536,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
+                 args.timeout,
+                 args.advisory_review,
+                 args.review_blocking,
++                args.auto_rollback,
+             ),
+         },
+         StateCommands::Cancel(args) => {
+diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+index 42afef5..7018df0 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
++++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+@@ -40,6 +40,7 @@ fn test_cli_daemon_lifecycle() {
+         10,
+         false,
+         false,
++        false,
+     )
+     .unwrap();
+ 
+@@ -98,7 +99,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
+     fs::write(&legacy_pid, "99999").unwrap();
+ 
+     // Run daemon to completion synchronously
+-    cmd_daemon(&state_path, None, false, 1, 5, false, false).unwrap();
++    cmd_daemon(&state_path, None, false, 1, 5, false, false, false).unwrap();
+ 
+     assert!(
+         !legacy_pid.exists(),
+diff --git a/crates/superstate-cli/tests/test_cli_rollback.rs b/crates/superstate-cli/tests/test_cli_rollback.rs
+new file mode 100644
+index 0000000..53dc201
+--- /dev/null
++++ b/crates/superstate-cli/tests/test_cli_rollback.rs
+@@ -0,0 +1,411 @@
++use clap::Parser;
++use std::fs;
++use std::path::{Path, PathBuf};
++use std::process::Command;
++use superstate_cli::state_cli::StateCommands;
++use tempfile::tempdir;
++
++fn bin() -> &'static str {
++    env!("CARGO_BIN_EXE_superstate")
++}
++
++#[derive(Parser)]
++struct StateWrapper {
++    #[command(subcommand)]
++    cmd: StateCommands,
++}
++
++fn init_git_repo(path: &Path) {
++    Command::new("git")
++        .args(["init", "-b", "main"])
++        .current_dir(path)
++        .output()
++        .expect("git init");
++
++    Command::new("git")
++        .args(["config", "user.name", "Tester"])
++        .current_dir(path)
++        .output()
++        .expect("git config user.name");
++
++    Command::new("git")
++        .args(["config", "user.email", "test@example.com"])
++        .current_dir(path)
++        .output()
++        .expect("git config user.email");
++
++    fs::write(path.join("tracked.txt"), "initial baseline\n").expect("write tracked.txt");
++    Command::new("git")
++        .args(["add", "."])
++        .current_dir(path)
++        .output()
++        .expect("git add");
++    Command::new("git")
++        .args(["commit", "-m", "chore: initial baseline", "--no-gpg-sign"])
++        .current_dir(path)
++        .output()
++        .expect("git commit");
++}
++
++#[test]
++fn test_cli_state_daemon_parses_auto_rollback_flag() {
++    let parsed = StateWrapper::try_parse_from(["state", "daemon", "--auto-rollback"])
++        .expect("parse state daemon --auto-rollback");
++    match parsed.cmd {
++        StateCommands::Daemon(args) => {
++            assert!(
++                args.auto_rollback,
++                "args.auto_rollback must be true when --auto-rollback is supplied"
++            );
++        }
++        _ => panic!("Expected StateCommands::Daemon"),
++    }
++}
++
++#[test]
++fn test_cli_state_daemon_auto_rollback_default_false() {
++    let parsed = StateWrapper::try_parse_from(["state", "daemon"]).expect("parse state daemon");
++    match parsed.cmd {
++        StateCommands::Daemon(args) => {
++            assert!(
++                !args.auto_rollback,
++                "args.auto_rollback must be false by default"
++            );
++        }
++        _ => panic!("Expected StateCommands::Daemon"),
++    }
++}
++
++#[test]
++fn test_cli_daemon_help_has_auto_rollback() {
++    // Check `superstate daemon --help`
++    let output = Command::new(bin())
++        .args(["daemon", "--help"])
++        .output()
++        .expect("run superstate daemon --help");
++    assert!(output.status.success());
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    assert!(
++        stdout.contains("--auto-rollback"),
++        "`superstate daemon --help` should mention --auto-rollback, got:\n{}",
++        stdout
++    );
++    assert!(
++        stdout.contains("Automatically roll back working tree to milestone baseline on verification failure"),
++        "`superstate daemon --help` should describe --auto-rollback, got:\n{}",
++        stdout
++    );
++
++    // Also check `superstate state daemon --help`
++    let output_state = Command::new(bin())
++        .args(["state", "daemon", "--help"])
++        .output()
++        .expect("run superstate state daemon --help");
++    assert!(output_state.status.success());
++    let stdout_state = String::from_utf8_lossy(&output_state.stdout);
++    assert!(
++        stdout_state.contains("--auto-rollback"),
++        "`superstate state daemon --help` should mention --auto-rollback, got:\n{}",
++        stdout_state
++    );
++    assert!(
++        stdout_state.contains("Automatically roll back working tree to milestone baseline on verification failure"),
++        "`superstate state daemon --help` should describe --auto-rollback, got:\n{}",
++        stdout_state
++    );
++}
++
++#[test]
++fn test_cli_daemon_auto_rollback_execution() {
++    let tmp = tempdir().unwrap();
++    let repo = tmp.path();
++    init_git_repo(repo);
++
++    let state_dir = repo.join(".agent-state");
++    fs::create_dir_all(&state_dir).unwrap();
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![superstate_core::models::MilestoneSpec {
++        title: "Test Task".to_string(),
++        verify_cmd: "test -f must_exist.txt".to_string(),
++        files: vec![PathBuf::from("tracked.txt")],
++    }];
++    let state = superstate_core::state_machine::init_state_milestones(
++        Some("Test Goal"),
++        milestones,
++        None,
++        true,
++    )
++    .unwrap();
++    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
++
++    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
++
++    let output = Command::new(bin())
++        .args([
++            "state",
++            "daemon",
++            "--state",
++            state_path.to_str().unwrap(),
++            "--driver",
++            mock_driver,
++            "--max-retries",
++            "1",
++            "--auto-rollback",
++        ])
++        .current_dir(repo)
++        .output()
++        .expect("run state daemon with --auto-rollback");
++
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let stderr = String::from_utf8_lossy(&output.stderr);
++    println!("stdout:\n{}\nstderr:\n{}", stdout, stderr);
++
++    // Tracked file must be restored
++    let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
++    assert_eq!(
++        tracked_content, "initial baseline\n",
++        "tracked file should be rolled back to initial commit baseline"
++    );
++
++    // Untracked file must be removed by clean -fd
++    assert!(
++        !repo.join("untracked.txt").exists(),
++        "untracked.txt should be removed by auto_rollback"
++    );
++
++    // Notes must contain [rollback]
++    let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
++    let has_rollback_note = updated_state
++        .notes
++        .iter()
++        .any(|n| n.note.contains("[rollback]"));
++    assert!(
++        has_rollback_note,
++        "state.notes should contain a [rollback] note"
++    );
++}
++
++#[test]
++fn test_cli_daemon_auto_rollback_disabled_by_default() {
++    let tmp = tempdir().unwrap();
++    let repo = tmp.path();
++    init_git_repo(repo);
++
++    let state_dir = repo.join(".agent-state");
++    fs::create_dir_all(&state_dir).unwrap();
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![superstate_core::models::MilestoneSpec {
++        title: "Test Task".to_string(),
++        verify_cmd: "test -f must_exist.txt".to_string(),
++        files: vec![PathBuf::from("tracked.txt")],
++    }];
++    let state = superstate_core::state_machine::init_state_milestones(
++        Some("Test Goal"),
++        milestones,
++        None,
++        true,
++    )
++    .unwrap();
++    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
++
++    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
++
++    let output = Command::new(bin())
++        .args([
++            "state",
++            "daemon",
++            "--state",
++            state_path.to_str().unwrap(),
++            "--driver",
++            mock_driver,
++            "--max-retries",
++            "1",
++        ])
++        .current_dir(repo)
++        .env_remove("SUPERSTATE_AUTO_ROLLBACK")
++        .output()
++        .expect("run state daemon without --auto-rollback");
++
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let stderr = String::from_utf8_lossy(&output.stderr);
++    println!("stdout:\n{}\nstderr:\n{}", stdout, stderr);
++
++    // Without auto_rollback, corrupted changes remain
++    let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
++    assert_eq!(
++        tracked_content.trim(),
++        "corrupted",
++        "tracked file should NOT be rolled back when auto_rollback is false"
++    );
++
++    assert!(
++        repo.join("untracked.txt").exists(),
++        "untracked.txt should NOT be removed when auto_rollback is false"
++    );
++
++    let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
++    let has_rollback_note = updated_state
++        .notes
++        .iter()
++        .any(|n| n.note.contains("[rollback]"));
++    assert!(
++        !has_rollback_note,
++        "state.notes should NOT contain a [rollback] note when auto_rollback is false"
++    );
++}
++
++#[test]
++fn test_cli_daemon_auto_rollback_via_env_var() {
++    let tmp = tempdir().unwrap();
++    let repo = tmp.path();
++    init_git_repo(repo);
++
++    let state_dir = repo.join(".agent-state");
++    fs::create_dir_all(&state_dir).unwrap();
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![superstate_core::models::MilestoneSpec {
++        title: "Test Task".to_string(),
++        verify_cmd: "test -f must_exist.txt".to_string(),
++        files: vec![PathBuf::from("tracked.txt")],
++    }];
++    let state = superstate_core::state_machine::init_state_milestones(
++        Some("Test Goal"),
++        milestones,
++        None,
++        true,
++    )
++    .unwrap();
++    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
++
++    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
++
++    // Run without --auto-rollback flag, but with SUPERSTATE_AUTO_ROLLBACK=1
++    let output = Command::new(bin())
++        .args([
++            "state",
++            "daemon",
++            "--state",
++            state_path.to_str().unwrap(),
++            "--driver",
++            mock_driver,
++            "--max-retries",
++            "1",
++        ])
++        .current_dir(repo)
++        .env("SUPERSTATE_AUTO_ROLLBACK", "1")
++        .output()
++        .expect("run state daemon with SUPERSTATE_AUTO_ROLLBACK=1");
++
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let stderr = String::from_utf8_lossy(&output.stderr);
++    println!("stdout:\n{}\nstderr:\n{}", stdout, stderr);
++
++    // Tracked file must be restored
++    let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
++    assert_eq!(
++        tracked_content, "initial baseline\n",
++        "tracked file should be rolled back via SUPERSTATE_AUTO_ROLLBACK=1"
++    );
++
++    assert!(
++        !repo.join("untracked.txt").exists(),
++        "untracked.txt should be removed via SUPERSTATE_AUTO_ROLLBACK=1"
++    );
++
++    let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
++    let has_rollback_note = updated_state
++        .notes
++        .iter()
++        .any(|n| n.note.contains("[rollback]"));
++    assert!(
++        has_rollback_note,
++        "state.notes should contain a [rollback] note"
++    );
++}
++
++#[test]
++fn test_cli_daemon_detached_forwarding() {
++    let tmp = tempdir().unwrap();
++    let repo = tmp.path();
++    init_git_repo(repo);
++
++    let state_dir = repo.join(".agent-state");
++    fs::create_dir_all(&state_dir).unwrap();
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![superstate_core::models::MilestoneSpec {
++        title: "Test Task".to_string(),
++        verify_cmd: "test -f must_exist.txt".to_string(),
++        files: vec![PathBuf::from("tracked.txt")],
++    }];
++    let state = superstate_core::state_machine::init_state_milestones(
++        Some("Test Goal"),
++        milestones,
++        None,
++        true,
++    )
++    .unwrap();
++    superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
++
++    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
++
++    // Spawn detached daemon with --auto-rollback
++    let output = Command::new(bin())
++        .args([
++            "state",
++            "daemon",
++            "--state",
++            state_path.to_str().unwrap(),
++            "--driver",
++            mock_driver,
++            "--max-retries",
++            "1",
++            "--auto-rollback",
++            "--detach",
++        ])
++        .current_dir(repo)
++        .env_remove("SUPERSTATE_AUTO_ROLLBACK")
++        .output()
++        .expect("run state daemon detached with --auto-rollback");
++
++    assert!(output.status.success());
++
++    // Read the PID written by the detached command and wait for background execution to complete
++    let paths = superstate_core::daemon::daemon_paths_for_state(&state_path);
++    assert!(paths.pid_file.exists(), "pid_file should exist after detach");
++    let pid: i32 = fs::read_to_string(&paths.pid_file)
++        .expect("read pid file")
++        .trim()
++        .parse()
++        .expect("parse pid");
++
++    for _ in 0..100 {
++        if !superstate_core::daemon::is_pid_alive(pid) {
++            break;
++        }
++        std::thread::sleep(std::time::Duration::from_millis(50));
++    }
++    assert!(
++        !superstate_core::daemon::is_pid_alive(pid),
++        "background daemon should have finished within 5s"
++    );
++
++    let log_content = fs::read_to_string(&paths.log_file).unwrap_or_default();
++    println!("Detached daemon log:\n{}", log_content);
++    let updated_state = superstate_core::state_machine::load_state(&state_path).unwrap();
++    println!("Detached state:\n{:?}", updated_state);
++
++    // Verify that background daemon rolled back the corrupted changes
++    let tracked_content = fs::read_to_string(repo.join("tracked.txt")).unwrap();
++    assert_eq!(
++        tracked_content, "initial baseline\n",
++        "detached daemon should have received --auto-rollback and rolled back working tree"
++    );
++    assert!(
++        !repo.join("untracked.txt").exists(),
++        "detached daemon should have removed untracked.txt via --auto-rollback"
++    );
++}
