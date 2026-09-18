@@ -38,6 +38,9 @@ pub fn execute_shunt(cmd_args: &[String], threshold_lines: usize) -> Result<i32,
     // Determine current working directory to anchor log file relative resolution
     let current_dir = env::current_dir().map_err(|e| e.to_string())?;
 
+    // Record start time to track total execution duration
+    let start_time = std::time::Instant::now();
+
     // Spawn child process with inherited standard input and piped output streams
     let mut child = Command::new(program)
         .args(args)
@@ -70,12 +73,23 @@ pub fn execute_shunt(cmd_args: &[String], threshold_lines: usize) -> Result<i32,
         .wait()
         .map_err(|e| format!("Failed to wait for child command: {}", e))?;
 
+    // Measure total duration elapsed since child process launch
+    let duration = start_time.elapsed();
+
     // Join reader threads to retrieve captured stdout and stderr byte vectors
     let stdout_bytes = stdout_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
-    // Preserve the exact integer exit status code (defaulting to 1 if terminated by signal)
-    let exit_code = status.code().unwrap_or(1);
+    // Resolve exit code, preserving POSIX 128+SIG termination semantics on Unix
+    let exit_code = status.code().unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map(|s| 128 + s).unwrap_or(1)
+        }
+        #[cfg(not(unix))]
+        1
+    });
 
     // Build shunting configuration using configured threshold lines and 4 KB byte ceiling
     let config = ShuntConfig {
@@ -91,6 +105,7 @@ pub fn execute_shunt(cmd_args: &[String], threshold_lines: usize) -> Result<i32,
         &stdout_bytes,
         &stderr_bytes,
         exit_code,
+        duration,
         &config,
     )
     .map_err(|e| format!("Shunt distillation error: {}", e))?;

@@ -43,3 +43,14 @@ fn test_cli_shunt_large_output_truncates_and_saves_log() {
     assert!(stdout.contains("[superstate-shunt] Command succeeded (exit 0)"));
     assert!(stdout.contains("Full log:"));
 }
+
+#[cfg(unix)]
+#[test]
+fn test_cli_shunt_signal_exit_code() {
+    let output = Command::new(env!("CARGO_BIN_EXE_superstate"))
+        .args(["shunt", "--", "sh", "-c", "kill -9 $$"])
+        .output()
+        .expect("failed to run superstate shunt");
+
+    assert_eq!(output.status.code(), Some(137));
+}

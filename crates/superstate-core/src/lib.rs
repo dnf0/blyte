@@ -26,7 +26,7 @@ pub use prompt::{
     compact_ledger_note, format_retry_failure_section, render_turnkey_prompt, resolve_project_root,
     select_task,
 };
-pub use shunt::{evaluate_and_distill, DistilledOutput, ShuntConfig};
+pub use shunt::{evaluate_and_distill, prune_old_logs, DistilledOutput, ShuntConfig};
 pub use state_machine::{
     advance_step, branch_scoped_state_path, find_branch_state_for_worktree, init_state_direct,
     init_state_milestones, load_state, sanitize_branch_slug, save_state_atomic, StateError,
