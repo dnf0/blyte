@@ -98,6 +98,7 @@ fn test_daemon_rollback_on_verification_failure() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: true,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create runner");
@@ -192,6 +193,7 @@ fn test_daemon_no_rollback_when_disabled() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create runner");

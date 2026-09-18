@@ -114,6 +114,7 @@ pub fn cmd_daemon(
     advisory_review: bool,
     review_blocking: bool,
     auto_rollback: bool,
+    shunt_driver_output: bool,
 ) -> Result<(), String> {
     let auto_rollback = if !auto_rollback {
         false
@@ -184,6 +185,9 @@ pub fn cmd_daemon(
         }
         if !auto_rollback {
             cmd.arg("--no-auto-rollback");
+        }
+        if !shunt_driver_output {
+            cmd.arg("--no-shunt");
         }
         cmd.stdout(std::process::Stdio::from(log_out));
         cmd.stderr(std::process::Stdio::from(log_err));
@@ -263,6 +267,7 @@ pub fn cmd_daemon(
             advisory_review,
             review_blocking,
             auto_rollback,
+            shunt_driver_output,
         };
 
         let mut runner = DaemonRunner::new(config)

@@ -154,6 +154,7 @@ fn main() {
                 args.advisory_review,
                 args.review_blocking,
                 args.use_auto_rollback(),
+                args.use_shunt(),
             ),
         },
         Commands::Cancel(args) => {

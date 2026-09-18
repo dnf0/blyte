@@ -184,6 +184,9 @@ pub struct DaemonConfig {
     /// Automatically roll back working tree to milestone baseline on verification failure
     #[serde(default = "default_true")]
     pub auto_rollback: bool,
+    /// Automatically enable tool output shunting during driver worker execution
+    #[serde(default = "default_true")]
+    pub shunt_driver_output: bool,
 }
 
 impl Default for DaemonConfig {
@@ -197,6 +200,7 @@ impl Default for DaemonConfig {
             advisory_review: false,
             review_blocking: false,
             auto_rollback: true,
+            shunt_driver_output: true,
         }
     }
 }
@@ -216,6 +220,20 @@ pub enum DaemonStepOutcome {
         task_id: String,
         reason: String,
     },
+}
+
+impl DaemonStepOutcome {
+    pub fn is_advanced(&self) -> bool {
+        matches!(self, DaemonStepOutcome::Advanced { .. })
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self, DaemonStepOutcome::Failed { .. })
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, DaemonStepOutcome::Blocked { .. })
+    }
 }
 
 /// Structured completion artifact persisted upon task graph completion.
@@ -649,8 +667,8 @@ impl DaemonRunner {
         if let Some(ref driver) = self.config.driver_cmd {
             *self.driver_turns.entry(active_task.id.clone()).or_insert(0) += 1;
             let resolved_driver = resolve_driver_command(driver);
-            let mut child = Command::new("sh")
-                .arg("-c")
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
                 .arg(&resolved_driver)
                 .current_dir(&working_dir)
                 .stdin(Stdio::piped())
@@ -662,8 +680,28 @@ impl DaemonRunner {
                 .env(
                     "SUPERSTATE_WORKTREE_PATH",
                     working_dir.to_string_lossy().as_ref(),
-                )
-                .spawn()?;
+                );
+
+            if self.config.shunt_driver_output {
+                cmd.env("SUPERSTATE_SHUNT_ENABLED", "1");
+                let bin_dir = working_dir.join(".agent-state").join("bin");
+                fs::create_dir_all(&bin_dir)?;
+                let shunt_wrapper = bin_dir.join("shunt");
+                fs::write(&shunt_wrapper, "#!/bin/sh\nexec superstate shunt -- \"$@\"\n")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&shunt_wrapper, fs::Permissions::from_mode(0o755));
+                }
+                let current_paths = std::env::var_os("PATH").unwrap_or_default();
+                let mut paths = vec![bin_dir];
+                paths.extend(std::env::split_paths(&current_paths));
+                if let Ok(new_path) = std::env::join_paths(paths) {
+                    cmd.env("PATH", new_path);
+                }
+            }
+
+            let mut child = cmd.spawn()?;
 
             // Pipe prompt into driver stdin on a background thread to avoid pipe buffer deadlock
             // while the parent thread drains stdout/stderr in wait_with_output.

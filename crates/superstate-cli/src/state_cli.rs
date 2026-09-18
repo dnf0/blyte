@@ -325,6 +325,9 @@ pub struct DaemonArgs {
         help = "Disable automatic git rollback on verification failure"
     )]
     pub no_auto_rollback: bool,
+    /// Disable automatic tool output shunting during driver execution
+    #[arg(long, help = "Disable automatic tool output shunting during driver execution")]
+    pub no_shunt: bool,
 }
 
 impl DaemonArgs {
@@ -340,6 +343,10 @@ impl DaemonArgs {
         } else {
             true
         }
+    }
+
+    pub fn use_shunt(&self) -> bool {
+        !self.no_shunt
     }
 }
 
@@ -555,6 +562,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             }
             None => {
                 let auto_rollback = args.use_auto_rollback();
+                let shunt_driver_output = args.use_shunt();
                 commands::daemon::cmd_daemon(
                     &resolve(args.state),
                     args.driver.as_deref(),
@@ -564,6 +572,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     args.advisory_review,
                     args.review_blocking,
                     auto_rollback,
+                    shunt_driver_output,
                 )
             }
         },

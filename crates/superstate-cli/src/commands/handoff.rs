@@ -170,7 +170,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
     // Route execution based on invocation mode: detached daemon, JSON output, or interactive text
     if args.detach {
         let driver_str = resolved_driver.as_deref().or(args.driver.as_deref());
-        cmd_daemon(&state_path, driver_str, true, 3, 300, false, false, false)
+        cmd_daemon(&state_path, driver_str, true, 3, 300, false, false, false, true)
     } else if args.json {
         let active_task_str = state
             .active_task

@@ -106,5 +106,8 @@ pub fn execute_shunt(cmd_args: &[String], threshold_lines: usize) -> Result<i32,
         }
     }
 
+    let _ = io::stdout().flush();
+    let _ = io::stderr().flush();
+
     Ok(exit_code)
 }
