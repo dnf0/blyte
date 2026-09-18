@@ -74,6 +74,15 @@ enum Commands {
     Logs(superstate_cli::state_cli::LogsArgs),
     /// Prepare standardized cross-agent handoff package
     Handoff(superstate_cli::state_cli::HandoffArgs),
+    /// Execute a shell command through the output shunting distillation layer
+    Shunt {
+        /// Line count threshold before shunting triggers
+        #[arg(long, default_value = "50")]
+        threshold_lines: usize,
+        /// Command and arguments to execute
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
+    },
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -155,6 +164,16 @@ fn main() {
                 .map(|_| ())
         }
         Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
+        Commands::Shunt {
+            threshold_lines,
+            cmd,
+        } => match commands::shunt::execute_shunt(&cmd, threshold_lines) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        },
     };
 
     if let Err(e) = result {

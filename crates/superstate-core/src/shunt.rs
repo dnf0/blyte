@@ -104,7 +104,7 @@ pub fn evaluate_and_distill(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let hash = format!("{:016x}", md5_hash(cmd_str.as_bytes()));
+    let hash = format!("{:016x}", fnv1a_hash(cmd_str.as_bytes()));
     let log_filename = format!("cmd_{}_{}.log", stamp, &hash[..8]);
     let log_path = logs_dir.join(log_filename);
 
@@ -160,7 +160,7 @@ pub fn evaluate_and_distill(
 ///
 /// # Returns
 /// - 64-bit integer hash value.
-pub fn md5_hash(bytes: &[u8]) -> u64 {
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
     // Standard 64-bit FNV-1a offset basis and prime constants
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;

@@ -3,5 +3,6 @@ pub mod doctor;
 pub mod handoff;
 pub mod init;
 pub mod review;
+pub mod shunt;
 pub mod state;
 pub mod worktree;
