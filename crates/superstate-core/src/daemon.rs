@@ -45,6 +45,32 @@ pub fn is_vacuous_gate(verify_cmd: &str) -> bool {
     )
 }
 
+/// Check whether a path resides inside a git repository or worktree.
+///
+/// Supports subdirectories, standard repositories, and worktrees where `.git` may be
+/// an ancestor directory or a gitlink file.
+pub fn is_inside_git_repo(path: &Path) -> bool {
+    let check_ancestors = |p: &Path| {
+        p.ancestors()
+            .any(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.join(".git").exists())
+    };
+
+    if check_ancestors(path) {
+        return true;
+    }
+    if let Ok(canonical) = path.canonicalize() {
+        if check_ancestors(&canonical) {
+            return true;
+        }
+    }
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output()
+        .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
 /// Driver turns required before an UNGATED task may be reported complete.
 ///
 /// Mirrors superstate_mcp's `max_turns_per_milestone`, whose iteration is turn-driven
@@ -145,6 +171,30 @@ pub struct DaemonConfig {
     /// `superstate_mcp` does. Default false -- completion should mean verified.
     #[serde(default)]
     pub advisory_gate: bool,
+    /// Run advisory adversarial code review on milestone completion
+    #[serde(default)]
+    pub advisory_review: bool,
+    /// Treat code review findings as blocking quality gates that fail milestone completion
+    #[serde(default)]
+    pub review_blocking: bool,
+    /// Automatically roll back working tree to milestone baseline on verification failure
+    #[serde(default)]
+    pub auto_rollback: bool,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            state_path: PathBuf::from(".agent-state/state.json"),
+            driver_cmd: None,
+            max_retries: 3,
+            timeout_secs: 120,
+            advisory_gate: false,
+            advisory_review: false,
+            review_blocking: false,
+            auto_rollback: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -365,6 +415,8 @@ pub struct DaemonRunner {
     driver_turns: HashMap<String, usize>,
     /// Working-tree fingerprint at the end of the previous attempt.
     last_fingerprint: HashMap<String, String>,
+    /// Git HEAD commit hash when each milestone was first entered.
+    pub milestone_start_commits: HashMap<String, String>,
     step_advancer: Option<StepAdvancer>,
     last_failure_output: HashMap<String, String>,
 }
@@ -384,6 +436,7 @@ impl DaemonRunner {
             total_attempts: HashMap::new(),
             driver_turns: HashMap::new(),
             last_fingerprint: HashMap::new(),
+            milestone_start_commits: HashMap::new(),
             step_advancer: None,
             last_failure_output: HashMap::new(),
         })
@@ -406,6 +459,69 @@ impl DaemonRunner {
         &self.last_failure_output
     }
 
+    /// Returns a reference to the recorded start commits for milestones.
+    pub fn milestone_start_commits(&self) -> &HashMap<String, String> {
+        &self.milestone_start_commits
+    }
+
+    /// Rolls back the working tree to the milestone start commit upon verification failure.
+    fn perform_rollback(
+        &mut self,
+        task_id: &str,
+        attempt: usize,
+        working_dir: &Path,
+        state: &mut ExecutionState,
+    ) -> Result<(), DaemonError> {
+        if !self.config.auto_rollback || !is_inside_git_repo(working_dir) {
+            return Ok(());
+        }
+
+        let target_commit = match self.milestone_start_commits.get(task_id).cloned() {
+            Some(c) => c,
+            None => {
+                // Resolve HEAD as fallback baseline if milestone_start_commits did not capture it
+                if let Ok(out) = Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(working_dir)
+                    .output()
+                {
+                    if out.status.success() {
+                        let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if !h.is_empty() {
+                            h
+                        } else {
+                            "HEAD".to_string()
+                        }
+                    } else {
+                        "HEAD".to_string()
+                    }
+                } else {
+                    "HEAD".to_string()
+                }
+            }
+        };
+
+        let _ = Command::new("git")
+            .args(["reset", "--hard", &target_commit])
+            .current_dir(working_dir)
+            .output();
+        let _ = Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(working_dir)
+            .output();
+        state.notes.push(LedgerEntry::new(
+            "superstate-daemon",
+            format!(
+                "[rollback] Task {}: attempt {} failed verification; rolled back working tree to baseline commit {}. Avoid repeating previous failed approach.",
+                task_id, attempt, target_commit
+            ),
+        ));
+        save_state_atomic(&self.config.state_path, state)?;
+        self.last_fingerprint
+            .insert(task_id.to_string(), workspace_fingerprint(working_dir));
+        Ok(())
+    }
+
     /// Executes a single autonomous daemon step for the currently active task.
     ///
     /// # Process Lifecycle
@@ -425,6 +541,12 @@ impl DaemonRunner {
     ///
     /// # Errors
     /// Returns `DaemonError` if state loading, driver spawning, or advancer execution fails.
+    /// Executes a single autonomous daemon step for the currently active task.
+    /// Alias for `run_step`.
+    pub fn step(&mut self) -> Result<DaemonStepOutcome, DaemonError> {
+        self.run_step()
+    }
+
     pub fn run_step(&mut self) -> Result<DaemonStepOutcome, DaemonError> {
         let mut state = load_state(&self.config.state_path)?;
 
@@ -500,6 +622,25 @@ impl DaemonRunner {
             .entry(active_task.id.clone())
             .or_insert_with(|| workspace_fingerprint(&working_dir));
 
+        // Record starting HEAD commit when entering milestone so milestone diff captures all changes
+        if !self.milestone_start_commits.contains_key(&active_task.id)
+            && is_inside_git_repo(&working_dir)
+        {
+            if let Ok(out) = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&working_dir)
+                .output()
+            {
+                if out.status.success() {
+                    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !head.is_empty() {
+                        self.milestone_start_commits
+                            .insert(active_task.id.clone(), head);
+                    }
+                }
+            }
+        }
+
         // Execute headless driver worker if provided
         if let Some(ref driver) = self.config.driver_cmd {
             *self.driver_turns.entry(active_task.id.clone()).or_insert(0) += 1;
@@ -572,6 +713,144 @@ impl DaemonRunner {
             .copied()
             .unwrap_or(0);
         let attempt_ceiling = self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+
+        if gate_res.passed
+            && (self.config.advisory_review || self.config.review_blocking)
+            && is_inside_git_repo(&working_dir)
+        {
+            let start_commit = self
+                .milestone_start_commits
+                .get(&active_task.id)
+                .map(|s| s.as_str());
+            let diff = match superstate_review::diff::get_milestone_diff(&working_dir, start_commit)
+            {
+                Ok(d) if !d.trim().is_empty() => d,
+                _ => superstate_review::get_git_diff(&working_dir, None).unwrap_or_default(),
+            };
+            let review_cfg = superstate_review::ReviewConfig {
+                driver: self.config.driver_cmd.clone(),
+                timeout_secs: self.config.timeout_secs,
+            };
+            if let Ok(report) = superstate_review::execute_review(
+                &working_dir,
+                &diff,
+                Some(&active_task.title),
+                &review_cfg,
+            ) {
+                if report.has_blocking_issues {
+                    let mut blocking_findings: Vec<_> = report
+                        .findings
+                        .iter()
+                        .filter(|f| {
+                            matches!(
+                                f.severity,
+                                superstate_review::schema::Severity::Critical
+                                    | superstate_review::schema::Severity::High
+                            )
+                        })
+                        .take(3)
+                        .collect();
+
+                    if blocking_findings.is_empty() && !report.findings.is_empty() {
+                        blocking_findings = report.findings.iter().take(3).collect();
+                    }
+
+                    let summary = report.summary.trim_end_matches('.');
+                    let note = if blocking_findings.is_empty() {
+                        format!("[review-advisory] Task {}: {}", active_task.id, summary)
+                    } else {
+                        let issues = blocking_findings
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| {
+                                format!(
+                                    "{}) {}: {} (fix: {})",
+                                    i + 1,
+                                    f.file.display(),
+                                    f.problem,
+                                    f.suggested_fix
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        format!(
+                            "[review-advisory] Task {}: {}. Issues: {}",
+                            active_task.id, summary, issues
+                        )
+                    };
+                    state
+                        .notes
+                        .push(LedgerEntry::new("superstate-daemon", note));
+                    save_state_atomic(&self.config.state_path, &state)?;
+
+                    let should_block = report.has_blocking_issues
+                        && (self.config.review_blocking || is_vacuous_gate(verify_cmd));
+
+                    if should_block {
+                        let blocking_count = report
+                            .findings
+                            .iter()
+                            .filter(|f| {
+                                matches!(
+                                    f.severity,
+                                    superstate_review::schema::Severity::Critical
+                                        | superstate_review::schema::Severity::High
+                                )
+                            })
+                            .count();
+                        let count = if blocking_count > 0 {
+                            blocking_count
+                        } else {
+                            report.findings.len()
+                        };
+
+                        if self.config.driver_cmd.is_some() && attempts_so_far < attempt_ceiling {
+                            *self
+                                .total_attempts
+                                .entry(active_task.id.clone())
+                                .or_insert(0) += 1;
+                            let current_attempt = attempts_so_far + 1;
+                            if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
+                                self.perform_rollback(
+                                    &active_task.id,
+                                    current_attempt,
+                                    &working_dir,
+                                    &mut state,
+                                )?;
+                            }
+                            let reason = if self.config.review_blocking {
+                                format!("code-review: {} blocking issue(s) detected", count)
+                            } else {
+                                "advisory-review: blocking issues detected on vacuous gate"
+                                    .to_string()
+                            };
+                            return Ok(DaemonStepOutcome::Failed {
+                                task_id: active_task.id,
+                                reason,
+                                retries_remaining: self
+                                    .config
+                                    .max_retries
+                                    .saturating_sub(attempts_so_far),
+                            });
+                        } else if self.config.review_blocking && !self.config.advisory_gate {
+                            state.status = ExecutionStatus::Blocked;
+                            state.errors.push(format!(
+                                "Task '{}' blocked: code review detected blocking issues and max retries ({}) exhausted",
+                                active_task.id, self.config.max_retries
+                            ));
+                            save_state_atomic(&self.config.state_path, &state)?;
+                            return Ok(DaemonStepOutcome::Blocked {
+                                task_id: active_task.id,
+                                reason:
+                                    "code review detected blocking issues and max retries exhausted"
+                                        .to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         if gate_res.passed
             && is_vacuous_gate(verify_cmd)
             && self.config.driver_cmd.is_some()
@@ -606,9 +885,10 @@ impl DaemonRunner {
         if gate_res.passed {
             self.retry_counts.remove(&active_task.id);
             self.last_failure_output.remove(&active_task.id);
+            self.milestone_start_commits.remove(&active_task.id);
 
             // Milestone git checkpoint in in-place mode when git repository exists
-            if state.no_worktree && working_dir.join(".git").exists() {
+            if state.no_worktree && is_inside_git_repo(&working_dir) {
                 let status_res = Command::new("git")
                     .args(["status", "--porcelain"])
                     .current_dir(&working_dir)
@@ -679,19 +959,22 @@ impl DaemonRunner {
             *attempts += 1;
             let attempts_spent = *attempts;
 
-            let retries = self.retry_counts.entry(active_task.id.clone()).or_insert(0);
-            if made_progress {
-                *retries = 0;
-                state.notes.push(LedgerEntry::new(
-                    "superstate-daemon",
-                    format!(
-                        "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
-                        active_task.id, attempts_spent
-                    ),
-                ));
-            } else {
-                *retries += 1;
-            }
+            let current_retries = {
+                let retries = self.retry_counts.entry(active_task.id.clone()).or_insert(0);
+                if made_progress {
+                    *retries = 0;
+                    state.notes.push(LedgerEntry::new(
+                        "superstate-daemon",
+                        format!(
+                            "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
+                            active_task.id, attempts_spent
+                        ),
+                    ));
+                } else {
+                    *retries += 1;
+                }
+                *retries
+            };
 
             let fail_reason = gate_res
                 .failure_reason
@@ -715,7 +998,14 @@ impl DaemonRunner {
                 ),
             ));
 
-            let stalled = *retries >= self.config.max_retries;
+            if self.config.auto_rollback
+                && is_inside_git_repo(&working_dir)
+                && attempts_so_far < attempt_ceiling
+            {
+                self.perform_rollback(&active_task.id, attempts_spent, &working_dir, &mut state)?;
+            }
+
+            let stalled = current_retries >= self.config.max_retries;
             let exhausted = attempts_spent >= self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
             if (stalled || exhausted) && self.config.advisory_gate {
                 // Advisory: the verification command failed and the budget is spent, but the
@@ -731,6 +1021,7 @@ impl DaemonRunner {
                 ));
                 self.retry_counts.remove(&active_task.id);
                 self.last_failure_output.remove(&active_task.id);
+                self.milestone_start_commits.remove(&active_task.id);
 
                 if let Some(ref mut advancer) = self.step_advancer {
                     save_state_atomic(&self.config.state_path, &state)?;
@@ -777,7 +1068,7 @@ impl DaemonRunner {
                 Ok(DaemonStepOutcome::Failed {
                     task_id: active_task.id,
                     reason: fail_reason,
-                    retries_remaining: self.config.max_retries - *retries,
+                    retries_remaining: self.config.max_retries - current_retries,
                 })
             }
         }
@@ -935,7 +1226,7 @@ pub fn finalize_completed_execution(
                     .clone()
                     .unwrap_or_else(|| "main".to_string());
 
-                if repo_root.join(".git").exists() {
+                if is_inside_git_repo(&repo_root) {
                     // Ensure repository root is on base_branch before merging
                     let head_out = Command::new("git")
                         .args(["rev-parse", "--abbrev-ref", "HEAD"])

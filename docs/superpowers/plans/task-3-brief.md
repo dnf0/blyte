@@ -1,77 +1,47 @@
-# Task 3 Brief: Safety, Checkpoint, Rollback & Atomic Exec Handlers (`crates/superstate-mcp/src/server.rs`)
+# Task 3 Brief: CLI Flag `--review-blocking` in `crates/superstate-cli`
 
-- **Working Directory:** `/Users/danielfisher/repos/superstate/.wt/feat-mcp-cli-complete-parity-task-3`
-- **Branch:** `wt/feat-mcp-cli-complete-parity-task-3`
-- **Depends on:** Task 2
+## Context
+Working directory: `/Users/danielfisher/repos/superstate`
+Branch: `feat/blocking-code-review`
+Plan: `docs/superpowers/plans/2026-09-17-advisory-review-diff-and-blocking.md`
 
-## Files
-- Modify: `crates/superstate-mcp/src/server.rs`
-- Test: `crates/superstate-mcp/tests/test_mcp_state_safety.rs`
+## What to Implement
 
-## Requirements
-Implement handlers in `handle_tool_call` for safety and atomic execution tools:
+1. **CLI Flag `--review-blocking` for Daemon**:
+   In `crates/superstate-cli/src/main.rs`:
+   Add `--review-blocking` argument to `StateCommands::Daemon`:
+   ```rust
+   #[arg(long, help = "Treat Critical and High severity review findings as blocking failures requiring retry")]
+   review_blocking: bool,
+   ```
+   Pass `review_blocking` to `cmd_daemon` in `crates/superstate-cli/src/commands/daemon.rs`.
+   In `cmd_daemon`, assign `review_blocking: args.review_blocking` into `DaemonConfig`.
 
-1. `state_checkpoint`:
-   - Parameters: `state?: string`
-   - Resolve effective state path and repository root.
-   - Load state to retrieve `state.step`.
-   - Call `superstate_core::checkpoint::create_checkpoint(&repo_root, state.step)`.
-   - Return confirmation:
-     ```json
-     {
-       "checkpoint": tag,
-       "step": state.step,
-       "content": [{ "type": "text", "text": format!("Checkpoint created: {}", tag) }]
-     }
-     ```
+2. **Update `cmd_review` in `crates/superstate-cli/src/commands/review.rs`**:
+   Replace the old diff extraction logic with `superstate_review::diff::get_milestone_diff`:
+   ```rust
+   let diff = match args.commit_range.as_deref() {
+       Some(range) => get_git_diff(&args.repo, Some(range))
+           .map_err(|e| format!("Failed to get git diff: {}", e))?,
+       None => {
+           get_milestone_diff(&args.repo, None)
+               .map_err(|e| format!("Failed to get git diff: {}", e))?
+       }
+   };
+   ```
+   This ensures `superstate review` without arguments automatically reviews the last commit (`HEAD~1..HEAD`) if working tree is clean, or working tree + untracked files if dirty!
 
-2. `state_rollback`:
-   - Parameters: `state?: string`, `reference?: string`
-   - Resolve effective state path and repository root.
-   - Load state.
-   - If `state.active_worktree` exists:
-     - Check if worktree directory exists on disk. If so, abort it cleanly via `IsolatedWorktree { branch, path, base_branch, repo_root }.abort()`.
-     - Clear `state.active_worktree = None; state.active_branch = None;` and save state atomically.
-   - Call `superstate_core::checkpoint::rollback_to(&repo_root, state.step, reference, &[".agent-state"])`.
-   - Return confirmation:
-     ```json
-     {
-       "target": target,
-       "step": state.step,
-       "content": [{ "type": "text", "text": format!("Working tree cleanly rolled back to {}", target) }]
-     }
-     ```
+3. **Install and Verify**:
+   - Write integration tests in `crates/superstate-cli/tests/test_cli_blocking_review.rs` verifying `--review-blocking` flag is parsed and passed into daemon runner.
+   - Run `cargo test -p superstate-cli`.
+   - Install binary: `cargo install --path crates/superstate-cli --locked --force`.
+   - Verify `superstate state daemon --help` outputs `--review-blocking`.
 
-3. `state_exec`:
-   - Parameters:
-     - `verify_cmd: string` (required)
-     - `state?: string`
-     - `verify_git_clean?: boolean` (default false)
-     - `checkpoint?: boolean` (default false)
-     - `rollback_on_fail?: boolean` (default false)
-     - `advance?: boolean` (default true)
-     - `json?: boolean` (default false)
-   - Follow the exact logic of `cmd_exec` in `crates/superstate-cli/src/commands/state.rs`:
-     - If `checkpoint == true`: call `create_checkpoint(&repo_root, state.step)`.
-     - Determine target directory: `state.active_worktree` if existing, else `repo_root`.
-     - Run verification command: `superstate_core::verifier::run_verification_cmd(&verify_cmd, &target_dir, 600)`.
-     - If `verify_git_clean == true` and gate passed, run `verify_git_clean(&target_dir)`.
-     - Calculate `passed = gate.passed && git_clean_passed`.
-     - If `passed && advance`: advance state machine (using `advance_step` or delegating to the `state_next` flow) and save state.
-     - If `!passed`: record failure message into `state.errors` and save state. If `rollback_on_fail == true`: abort active worktree if present, and run `rollback_to(&repo_root, state.step, None, &[".agent-state"])`.
-     - Return JSON-RPC response with `passed`, `advanced`, `rolled_back`, `output`, `step`, and text content.
-
-## Steps (TDD)
-1. Write failing integration tests in `crates/superstate-mcp/tests/test_mcp_state_safety.rs`:
-   - Test `state_checkpoint` creates git tag `agent-checkpoint/step-N`.
-   - Test `state_rollback` restores modified file to checkpoint and preserves `.agent-state/state.json`.
-   - Test `state_exec` passes with clean tree and advances step when `advance: true`.
-   - Test `state_exec` fails when command fails, records error in state, and rolls back modified file when `rollback_on_fail: true`.
-2. Run `cargo test -p superstate-mcp --test test_mcp_state_safety` to verify failure.
-3. Implement the 3 handlers in `crates/superstate-mcp/src/server.rs`.
-4. Run `cargo test -p superstate-mcp --test test_mcp_state_safety` to verify passing.
-5. Check `cargo clippy -p superstate-mcp` and `cargo fmt -p superstate-mcp --check`.
-6. Commit in the worktree:
-   `git add crates/superstate-mcp/src/server.rs crates/superstate-mcp/tests/test_mcp_state_safety.rs`
-   `git commit -m "feat(mcp): implement state_checkpoint, state_rollback, and state_exec handlers"`
-7. Write report to `/Users/danielfisher/repos/superstate/docs/superpowers/plans/task-3-report.md`.
+## TDD Instructions
+1. Write failing integration tests in `crates/superstate-cli/tests/test_cli_blocking_review.rs`.
+2. Run `cargo test -p superstate-cli --test test_cli_blocking_review` and verify RED failure.
+3. Implement in `crates/superstate-cli/src/main.rs`, `crates/superstate-cli/src/commands/daemon.rs`, and `crates/superstate-cli/src/commands/review.rs`.
+4. Run `cargo test -p superstate-cli` and verify all tests pass GREEN.
+5. Reinstall CLI binary (`cargo install --path crates/superstate-cli --locked --force`).
+6. Commit with conventional commit message `feat(cli): wire --review-blocking CLI flag and milestone diff in review` (skip GPG with `--no-gpg-sign`).
+7. Write full report to `docs/superpowers/plans/task-3-report.md`.

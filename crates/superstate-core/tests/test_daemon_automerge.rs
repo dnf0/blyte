@@ -119,6 +119,9 @@ fn test_daemon_automerge_on_completion() {
         max_retries: 2,
         timeout_secs: 10,
         advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
@@ -211,6 +214,9 @@ fn test_daemon_completion_in_place_mode() {
         max_retries: 2,
         timeout_secs: 10,
         advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
@@ -269,6 +275,9 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         max_retries: 2,
         timeout_secs: 10,
         advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
@@ -287,6 +296,9 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         max_retries: 2,
         timeout_secs: 10,
         advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
     })
     .expect("create second runner");
 

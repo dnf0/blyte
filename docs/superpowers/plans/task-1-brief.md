@@ -1,68 +1,34 @@
-# Task 1: MCP Tool Declarations & Schemas (`crates/superstate-mcp/src/tools.rs`)
+# Task 1 Brief: Milestone Diff Extraction in `crates/superstate-review`
 
-- **Depends on:** none
+## Context
+Working directory: `/Users/danielfisher/repos/superstate`
+Branch: `feat/blocking-code-review`
+Plan: `docs/superpowers/plans/2026-09-17-advisory-review-diff-and-blocking.md`
 
-**Files:**
-- Modify: `crates/superstate-mcp/src/tools.rs`
-- Test: `crates/superstate-mcp/tests/test_mcp_tool_schemas.rs`
+## What to Implement
+Implement `get_milestone_diff` in `crates/superstate-review/src/diff.rs` and export it in `crates/superstate-review/src/lib.rs`.
 
-**Interfaces:**
-- Consumes: `McpTool`, `McpToolInputSchema` from `superstate_mcp::tools`
-- Produces: Complete list of MCP tool definitions in `list_all_mcp_tools()`:
-  - `state_status`, `state_show`, `state_resume`, `state_metrics`
-  - `state_checkpoint`, `state_rollback`, `state_exec`
-  - `state_ready`, `state_sync`, `state_doctor`, `state_validate`, `state_apply`, `state_list`
-  - `worktree_list`, `worktree_remove`, `worktree_clean`
-  - Parameter additions to `state_next` (`ignore_untracked_glob`) and `state_prompt` (`with_graph`, `task`).
+Function signature:
+```rust
+pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Result<String, DiffError>
+```
 
-## Steps (TDD)
+Behavior:
+1. Determine `head_hash` via `git rev-parse HEAD`. If that fails (e.g. freshly initialized empty repo), fall back to `get_git_diff(repo_root, None)`.
+2. If `start_commit` is provided:
+   - Trim whitespace. If non-empty and `start != head_hash`, execute `git diff <start>..HEAD` to capture all commits made on the branch.
+3. Next, check if there are any working tree changes (uncommitted or untracked) by running `get_git_diff(repo_root, Some("HEAD"))`. If non-empty, append to the diff string.
+4. If `start_commit` is `None` and the combined diff is still empty, check if `HEAD~1` exists (`git rev-parse --verify HEAD~1`). If it exists, return `get_git_diff(repo_root, Some("HEAD~1..HEAD"))`.
+5. Return `Ok(combined_diff)`.
 
-1. Write failing test in `crates/superstate-mcp/tests/test_mcp_tool_schemas.rs`:
-   Verify `list_all_mcp_tools()` contains all 25 tools:
-   - `state_init`
-   - `state_show`
-   - `state_status`
-   - `state_next`
-   - `state_ready`
-   - `state_checkpoint`
-   - `state_rollback`
-   - `state_prompt`
-   - `state_sync`
-   - `state_exec`
-   - `state_doctor`
-   - `state_validate`
-   - `state_apply`
-   - `state_resume`
-   - `state_metrics`
-   - `state_list`
-   - `state_note`
-   - `worktree_create`
-   - `worktree_merge`
-   - `worktree_list`
-   - `worktree_remove`
-   - `worktree_clean`
-   - `superstate_review`
-   - `superstate_preflight`
-   - `superstate_handoff`
-   Also test that:
-   - `state_next` schema has `ignore_untracked_glob` property (type string)
-   - `state_prompt` schema has `with_graph` (type boolean) and `task` (type string)
-   - `state_exec` schema has `verify_cmd` (type string, required: ["verify_cmd"]), `state`, `verify_git_clean`, `checkpoint`, `rollback_on_fail`, `advance`
-   - `worktree_remove` schema has `branch` (type string, required: ["branch"]), `force`, `repo`
-   - `state_sync` schema has `plan` (type string, required: ["plan"]), `state`, `out`
-
-2. Run test to verify it fails:
-   `cargo test -p superstate-mcp --test test_mcp_tool_schemas`
-
-3. Implement tool definitions in `crates/superstate-mcp/src/tools.rs`:
-   Add the missing tools and update `state_next` and `state_prompt` schemas.
-
-4. Run test to verify it passes:
-   `cargo test -p superstate-mcp --test test_mcp_tool_schemas`
-
-5. Verify formatting and linting:
-   `cargo clippy -p superstate-mcp && cargo fmt -p superstate-mcp --check`
-
-6. Commit:
-   `git add crates/superstate-mcp/src/tools.rs crates/superstate-mcp/tests/test_mcp_tool_schemas.rs`
-   `git commit -m "feat(mcp): declare schemas for all CLI parity tools and parameters"`
+## TDD Instructions
+1. Write failing tests in `crates/superstate-review/tests/test_milestone_diff.rs` covering:
+   - Committed changes only (working tree clean) with `Some(initial_hash)` -> returns committed diff.
+   - Uncommitted changes only with `Some(initial_hash)` -> returns uncommitted diff.
+   - Committed changes AND untracked new files with `Some(initial_hash)` -> returns both!
+   - Clean working tree with `None` when `HEAD~1` exists -> returns `HEAD~1..HEAD` diff.
+2. Run `cargo test -p superstate-review --test test_milestone_diff` and verify RED failure.
+3. Implement `get_milestone_diff` in `crates/superstate-review/src/diff.rs` and export in `src/lib.rs`.
+4. Run `cargo test -p superstate-review` and verify all tests pass GREEN.
+5. Commit with `git commit --no-gpg-sign -m "feat(review): implement get_milestone_diff with committed and uncommitted change tracking"`.
+6. Write full report to `docs/superpowers/plans/task-1-report.md`.

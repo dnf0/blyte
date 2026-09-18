@@ -192,12 +192,14 @@ fn test_cli_multi_daemon_fleet() {
         .join("logs")
         .join("feat-beta.log");
 
-    for _ in 0..40 {
-        if alpha_pid_file.exists()
-            && beta_pid_file.exists()
-            && alpha_log_file.exists()
-            && beta_log_file.exists()
-        {
+    for _ in 0..60 {
+        let alpha_ready = fs::read_to_string(&alpha_pid_file)
+            .map(|s| s.trim().parse::<i32>().is_ok())
+            .unwrap_or(false);
+        let beta_ready = fs::read_to_string(&beta_pid_file)
+            .map(|s| s.trim().parse::<i32>().is_ok())
+            .unwrap_or(false);
+        if alpha_ready && beta_ready && alpha_log_file.exists() && beta_log_file.exists() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

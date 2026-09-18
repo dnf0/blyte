@@ -23,11 +23,26 @@ enum Commands {
     Mcp,
     /// Adversarial code review over git diff
     Review {
-        /// Git commit range (e.g. HEAD~1..HEAD)
+        /// Git commit range (e.g. HEAD~1..HEAD). If omitted, inspects uncommitted diff in working tree
         commit_range: Option<String>,
         /// Repository root path
         #[arg(short, long, default_value = ".")]
         repo: PathBuf,
+        /// Reviewer driver command (e.g. "agy --model gemini-3.8-flash-low" or "claude")
+        #[arg(short, long)]
+        driver: Option<String>,
+        /// Path to .agent-state/state.json (auto-detected if omitted)
+        #[arg(long)]
+        state_path: Option<PathBuf>,
+        /// Record critical/high findings into the state epistemic ledger
+        #[arg(long)]
+        record: bool,
+        /// Output full ReviewReport JSON to stdout
+        #[arg(long)]
+        json: bool,
+        /// Exit with code 1 if blocking issues are present
+        #[arg(long)]
+        fail_on_blocking: bool,
     },
     /// Initialize agent guidance (AGENTS.md, Cursor rules)
     Init {
@@ -82,9 +97,23 @@ fn main() {
     let result = match cli.command {
         Commands::Doctor => commands::doctor::run_doctor(),
         Commands::Mcp => superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string()),
-        Commands::Review { commit_range, repo } => {
-            commands::review::cmd_review(&repo, commit_range)
-        }
+        Commands::Review {
+            commit_range,
+            repo,
+            driver,
+            state_path,
+            record,
+            json,
+            fail_on_blocking,
+        } => commands::review::cmd_review(commands::review::ReviewArgs {
+            commit_range,
+            repo,
+            driver,
+            state_path,
+            record,
+            json,
+            fail_on_blocking,
+        }),
         Commands::Init {
             dest,
             language,
@@ -113,6 +142,9 @@ fn main() {
                 args.detach,
                 args.max_retries,
                 args.timeout,
+                args.advisory_review,
+                args.review_blocking,
+                args.auto_rollback,
             ),
         },
         Commands::Cancel(args) => {

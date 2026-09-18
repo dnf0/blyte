@@ -1,0 +1,697 @@
+diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
+index 419f2e0..425a93b 100644
+--- a/crates/superstate-cli/src/commands/daemon.rs
++++ b/crates/superstate-cli/src/commands/daemon.rs
+@@ -240,6 +240,7 @@ pub fn cmd_daemon(
+                 .map(|v| v.trim().eq_ignore_ascii_case("advisory"))
+                 .unwrap_or(false),
+             advisory_review,
++            review_blocking: false,
+         };
+ 
+         let mut runner = DaemonRunner::new(config)
+diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
+index 3a98788..bf2b69c 100644
+--- a/crates/superstate-core/src/daemon.rs
++++ b/crates/superstate-core/src/daemon.rs
+@@ -174,6 +174,9 @@ pub struct DaemonConfig {
+     /// Run advisory adversarial code review on milestone completion
+     #[serde(default)]
+     pub advisory_review: bool,
++    /// Treat code review findings as blocking quality gates that fail milestone completion
++    #[serde(default)]
++    pub review_blocking: bool,
+ }
+ 
+ impl Default for DaemonConfig {
+@@ -185,6 +188,7 @@ impl Default for DaemonConfig {
+             timeout_secs: 120,
+             advisory_gate: false,
+             advisory_review: false,
++            review_blocking: false,
+         }
+     }
+ }
+@@ -407,6 +411,8 @@ pub struct DaemonRunner {
+     driver_turns: HashMap<String, usize>,
+     /// Working-tree fingerprint at the end of the previous attempt.
+     last_fingerprint: HashMap<String, String>,
++    /// Git HEAD commit hash when each milestone was first entered.
++    pub milestone_start_commits: HashMap<String, String>,
+     step_advancer: Option<StepAdvancer>,
+     last_failure_output: HashMap<String, String>,
+ }
+@@ -426,6 +432,7 @@ impl DaemonRunner {
+             total_attempts: HashMap::new(),
+             driver_turns: HashMap::new(),
+             last_fingerprint: HashMap::new(),
++            milestone_start_commits: HashMap::new(),
+             step_advancer: None,
+             last_failure_output: HashMap::new(),
+         })
+@@ -448,6 +455,11 @@ impl DaemonRunner {
+         &self.last_failure_output
+     }
+ 
++    /// Returns a reference to the recorded start commits for milestones.
++    pub fn milestone_start_commits(&self) -> &HashMap<String, String> {
++        &self.milestone_start_commits
++    }
++
+     /// Executes a single autonomous daemon step for the currently active task.
+     ///
+     /// # Process Lifecycle
+@@ -548,6 +560,22 @@ impl DaemonRunner {
+             .entry(active_task.id.clone())
+             .or_insert_with(|| workspace_fingerprint(&working_dir));
+ 
++        // Record starting HEAD commit when entering milestone so milestone diff captures all changes
++        if !self.milestone_start_commits.contains_key(&active_task.id) && is_inside_git_repo(&working_dir) {
++            if let Ok(out) = Command::new("git")
++                .args(["rev-parse", "HEAD"])
++                .current_dir(&working_dir)
++                .output()
++            {
++                if out.status.success() {
++                    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
++                    if !head.is_empty() {
++                        self.milestone_start_commits.insert(active_task.id.clone(), head);
++                    }
++                }
++            }
++        }
++
+         // Execute headless driver worker if provided
+         if let Some(ref driver) = self.config.driver_cmd {
+             *self.driver_turns.entry(active_task.id.clone()).or_insert(0) += 1;
+@@ -621,8 +649,15 @@ impl DaemonRunner {
+             .unwrap_or(0);
+         let attempt_ceiling = self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+ 
+-        if gate_res.passed && self.config.advisory_review && is_inside_git_repo(&working_dir) {
+-            let diff = match superstate_review::get_git_diff(&working_dir, Some("HEAD")) {
++        if gate_res.passed
++            && (self.config.advisory_review || self.config.review_blocking)
++            && is_inside_git_repo(&working_dir)
++        {
++            let start_commit = self
++                .milestone_start_commits
++                .get(&active_task.id)
++                .map(|s| s.as_str());
++            let diff = match superstate_review::diff::get_milestone_diff(&working_dir, start_commit) {
+                 Ok(d) if !d.trim().is_empty() => d,
+                 _ => superstate_review::get_git_diff(&working_dir, None).unwrap_or_default(),
+             };
+@@ -682,7 +717,10 @@ impl DaemonRunner {
+                         .push(LedgerEntry::new("superstate-daemon", note));
+                     save_state_atomic(&self.config.state_path, &state)?;
+ 
+-                    if is_vacuous_gate(verify_cmd)
++                    let should_block = report.has_blocking_issues
++                        && (self.config.review_blocking || is_vacuous_gate(verify_cmd));
++
++                    if should_block
+                         && self.config.driver_cmd.is_some()
+                         && attempts_so_far < attempt_ceiling
+                     {
+@@ -690,10 +728,17 @@ impl DaemonRunner {
+                             .total_attempts
+                             .entry(active_task.id.clone())
+                             .or_insert(0) += 1;
++                        let reason = if self.config.review_blocking {
++                            format!(
++                                "code-review: {} blocking issue(s) detected",
++                                report.findings.len()
++                            )
++                        } else {
++                            "advisory-review: blocking issues detected on vacuous gate".to_string()
++                        };
+                         return Ok(DaemonStepOutcome::Failed {
+                             task_id: active_task.id,
+-                            reason: "advisory-review: blocking issues detected on vacuous gate"
+-                                .to_string(),
++                            reason,
+                             retries_remaining: self
+                                 .config
+                                 .max_retries
+@@ -738,6 +783,7 @@ impl DaemonRunner {
+         if gate_res.passed {
+             self.retry_counts.remove(&active_task.id);
+             self.last_failure_output.remove(&active_task.id);
++            self.milestone_start_commits.remove(&active_task.id);
+ 
+             // Milestone git checkpoint in in-place mode when git repository exists
+             if state.no_worktree && is_inside_git_repo(&working_dir) {
+@@ -863,6 +909,7 @@ impl DaemonRunner {
+                 ));
+                 self.retry_counts.remove(&active_task.id);
+                 self.last_failure_output.remove(&active_task.id);
++                self.milestone_start_commits.remove(&active_task.id);
+ 
+                 if let Some(ref mut advancer) = self.step_advancer {
+                     save_state_atomic(&self.config.state_path, &state)?;
+diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+index 4e69c99..5bfb17f 100644
+--- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
++++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+@@ -67,6 +67,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: true,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -116,6 +117,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: true,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -179,6 +181,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: true,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -232,6 +235,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: true,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -286,6 +290,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: true,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -333,6 +338,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: true,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
+index 4120b5c..d34bc3d 100644
+--- a/crates/superstate-core/tests/test_daemon_automerge.rs
++++ b/crates/superstate-core/tests/test_daemon_automerge.rs
+@@ -120,6 +120,7 @@ fn test_daemon_automerge_on_completion() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -213,6 +214,7 @@ fn test_daemon_completion_in_place_mode() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -272,6 +274,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -291,6 +294,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     })
+     .expect("create second runner");
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+new file mode 100644
+index 0000000..e498955
+--- /dev/null
++++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+@@ -0,0 +1,291 @@
++use std::fs;
++use std::process::Command;
++use tempfile::{tempdir, TempDir};
++
++use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
++use superstate_core::models::MilestoneSpec;
++use superstate_core::state_machine::{init_state_milestones, load_state, save_state_atomic};
++
++fn setup_test_git_repo() -> TempDir {
++    let dir = tempdir().unwrap();
++    let repo = dir.path();
++    Command::new("git")
++        .args(["init", "-q"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["config", "user.name", "Test User"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["config", "user.email", "test@example.com"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++
++    fs::write(repo.join("README.md"), "# Initial content\n").unwrap();
++    Command::new("git")
++        .args(["add", "README.md"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "initial commit", "--no-gpg-sign"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++
++    dir
++}
++
++#[test]
++fn test_daemon_config_default_review_blocking_false() {
++    let config = DaemonConfig::default();
++    assert!(!config.review_blocking);
++}
++
++#[test]
++fn test_daemon_blocking_review_fails_on_blocking_issues() {
++    let dir = setup_test_git_repo();
++    let repo = dir.path();
++    let state_path = repo.join(".agent-state/state.json");
++
++    let milestones = vec![MilestoneSpec {
++        title: "Strict Gate Milestone".to_string(),
++        verify_cmd: "test -f README.md".to_string(),
++        files: vec![],
++    }];
++    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
++    save_state_atomic(&state_path, &state).unwrap();
++
++    // Modify a tracked file and commit it, simulating driver committing changes
++    fs::write(repo.join("README.md"), "# Broken code with security flaw\n").unwrap();
++    Command::new("git")
++        .args(["add", "README.md"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "feat: implement flawed feature", "--no-gpg-sign"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++
++    // Mock driver that outputs a ReviewReport JSON with a Critical blocking finding
++    let mock_report_json = r#"{"summary":"Critical SQL injection detected","findings":[{"severity":"Critical","file":"README.md","line_range":[1,1],"problem":"Dangerous flaw","suggested_fix":"Sanitize input"}],"has_blocking_issues":true}"#;
++    let mock_driver = format!("echo '{}'", mock_report_json);
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(mock_driver),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: true,
++        review_blocking: true,
++    };
++
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++
++    match outcome {
++        DaemonStepOutcome::Failed { task_id, reason, .. } => {
++            assert_eq!(task_id, "task-1");
++            assert!(
++                reason.contains("code-review"),
++                "Reason should cite code-review, got: {}",
++                reason
++            );
++        }
++        other => panic!(
++            "Expected DaemonStepOutcome::Failed with review_blocking=true, got: {:?}",
++            other
++        ),
++    }
++
++    let updated_state = load_state(&state_path).unwrap();
++    // Milestone must not have advanced
++    assert_eq!(updated_state.step, 1);
++    assert_eq!(updated_state.completed_tasks.len(), 0);
++    assert!(
++        updated_state
++            .notes
++            .iter()
++            .any(|n| n.note.contains("Dangerous flaw")),
++        "Expected review findings recorded in notes"
++    );
++}
++
++#[test]
++fn test_daemon_blocking_review_clean_report_advances() {
++    let dir = setup_test_git_repo();
++    let repo = dir.path();
++    let state_path = repo.join(".agent-state/state.json");
++
++    let milestones = vec![MilestoneSpec {
++        title: "Clean Milestone".to_string(),
++        verify_cmd: "test -f README.md".to_string(),
++        files: vec![],
++    }];
++    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
++    save_state_atomic(&state_path, &state).unwrap();
++
++    fs::write(repo.join("README.md"), "# Clean valid code\n").unwrap();
++    Command::new("git")
++        .args(["add", "README.md"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "feat: clean implementation", "--no-gpg-sign"])
++        .current_dir(repo)
++        .output()
++        .unwrap();
++
++    // Mock driver returns clean report
++    let mock_report_json = r#"{"summary":"Code is clean and correct","findings":[],"has_blocking_issues":false}"#;
++    let mock_driver = format!("echo '{}'", mock_report_json);
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(mock_driver),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: true,
++        review_blocking: true,
++    };
++
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++
++    assert!(
++        matches!(outcome, DaemonStepOutcome::Advanced { .. }),
++        "Clean review with review_blocking must advance milestone, got: {:?}",
++        outcome
++    );
++
++    let updated_state = load_state(&state_path).unwrap();
++    assert_eq!(updated_state.completed_tasks.len(), 1);
++}
++
++#[test]
++fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
++    let dir = setup_test_git_repo();
++    let repo = dir.path();
++    let state_path = repo.join(".agent-state/state.json");
++
++    let milestones = vec![MilestoneSpec {
++        title: "Non Vacuous Gate Milestone".to_string(),
++        verify_cmd: "test -f README.md".to_string(),
++        files: vec![],
++    }];
++    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
++    save_state_atomic(&state_path, &state).unwrap();
++
++    fs::write(repo.join("README.md"), "# Flawed code\n").unwrap();
++
++    // Mock driver returns blocking issues
++    let mock_report_json = r#"{"summary":"Flaws found","findings":[{"severity":"High","file":"README.md","line_range":[1,1],"problem":"Advisory issue","suggested_fix":"Fix later"}],"has_blocking_issues":true}"#;
++    let mock_driver = format!("echo '{}'", mock_report_json);
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(mock_driver),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: true,
++        review_blocking: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++
++    assert!(
++        matches!(outcome, DaemonStepOutcome::Advanced { .. }),
++        "When review_blocking is false, non-vacuous gate milestone must advance, got: {:?}",
++        outcome
++    );
++
++    let updated_state = load_state(&state_path).unwrap();
++    assert_eq!(updated_state.completed_tasks.len(), 1);
++    assert!(
++        updated_state
++            .notes
++            .iter()
++            .any(|n| n.note.contains("Advisory issue")),
++        "Advisory notes must be recorded"
++    );
++}
++
++#[test]
++fn test_daemon_tracks_milestone_start_commit_across_retries() {
++    let dir = setup_test_git_repo();
++    let repo = dir.path();
++    let state_path = repo.join(".agent-state/state.json");
++
++    let initial_head = String::from_utf8(
++        Command::new("git")
++            .args(["rev-parse", "HEAD"])
++            .current_dir(repo)
++            .output()
++            .unwrap()
++            .stdout,
++    )
++    .unwrap()
++    .trim()
++    .to_string();
++
++    let milestones = vec![MilestoneSpec {
++        title: "Milestone With Commits".to_string(),
++        verify_cmd: "test -f README.md".to_string(),
++        files: vec![],
++    }];
++    let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
++    save_state_atomic(&state_path, &state).unwrap();
++
++    let script = repo.join("driver.sh");
++    fs::write(
++        &script,
++        r#"#!/bin/sh
++echo "committed change" >> README.md
++git add README.md >/dev/null 2>&1
++git commit -m "commit in milestone" --no-gpg-sign >/dev/null 2>&1 || true
++cat << 'EOF'
++{"summary":"Commit flaw","findings":[{"severity":"High","file":"README.md","line_range":[1,1],"problem":"Bad commit","suggested_fix":"Undo"}],"has_blocking_issues":true}
++EOF
++"#,
++    )
++    .unwrap();
++    Command::new("chmod").args(["+x", script.to_str().unwrap()]).output().unwrap();
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(script.to_str().unwrap().to_string()),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: true,
++        review_blocking: true,
++    };
++
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++
++    match outcome {
++        DaemonStepOutcome::Failed { task_id, reason, .. } => {
++            assert_eq!(task_id, "task-1");
++            assert!(reason.contains("code-review"));
++        }
++        other => panic!("Expected Failed, got {:?}", other),
++    }
++
++    assert_eq!(
++        runner.milestone_start_commits().get("task-1"),
++        Some(&initial_head),
++        "milestone_start_commits should preserve the commit from before driver executed"
++    );
++}
+diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
+index a66f071..d68120d 100644
+--- a/crates/superstate-core/tests/test_daemon_runner.rs
++++ b/crates/superstate-core/tests/test_daemon_runner.rs
+@@ -33,6 +33,7 @@ fn test_daemon_run_step_success() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -68,6 +69,7 @@ fn test_daemon_run_step_verification_failure() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -110,6 +112,7 @@ fn test_daemon_run_to_completion() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -148,6 +151,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -197,6 +201,7 @@ fn test_daemon_step_advancer_invoked() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     use std::sync::{Arc, Mutex};
+@@ -242,6 +247,7 @@ fn test_daemon_step_advancer_error_propagation() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     // Configure a StepAdvancer that simulates downstream failure during advancement
+@@ -291,6 +297,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -350,6 +357,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -397,6 +405,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -485,6 +494,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -540,6 +550,7 @@ fn test_progress_renews_the_retry_budget() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -581,6 +592,7 @@ fn test_stalled_worker_still_blocks() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -634,6 +646,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -677,6 +690,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -727,6 +741,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -775,6 +790,7 @@ fn test_real_gate_completes_immediately() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+     assert!(
+@@ -810,6 +826,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
+         timeout_secs: 5,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+     assert!(
+@@ -861,6 +878,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
+             timeout_secs: 5,
+             advisory_gate: advisory,
+             advisory_review: false,
++            review_blocking: false,
+         })
+         .unwrap();
+         for _ in 0..4 {
+diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
+index b0108b2..e05964b 100644
+--- a/crates/superstate-core/tests/test_driver_presets.rs
++++ b/crates/superstate-core/tests/test_driver_presets.rs
+@@ -177,6 +177,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
+         timeout_secs: 10,
+         advisory_gate: false,
+         advisory_review: false,
++        review_blocking: false,
+     };
+ 
+     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();

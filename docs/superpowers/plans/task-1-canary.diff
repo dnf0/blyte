@@ -1,0 +1,263 @@
+diff --git a/lab/benchmarks/task_sets.py b/lab/benchmarks/task_sets.py
+index d10c451..bb762fb 100644
+--- a/lab/benchmarks/task_sets.py
++++ b/lab/benchmarks/task_sets.py
+@@ -117,3 +117,19 @@ def is_discriminating(task_name: str) -> bool:
+ def excluded_reason(task_name: str) -> str | None:
+     """Why a gradeable task is kept out of the core set, or None if it is in."""
+     return EXCLUDED_TASKS.get(task_name)
++
++
++# Fast 3-task Canary slice (~12-15 min total) for rapid iteration on state management.
++# Balanced across 2 terminal-bench tasks and 1 tier-1 repo task; all 3 are discriminating
++# and gradeable.
++CANARY_TASKS: tuple[str, ...] = (
++    "build-cython-ext",
++    "chess-best-move",
++    "httpx-multipart-response-parsing",
++)
++
++
++def is_canary(task_name: str) -> bool:
++    """Whether a task belongs to the fast 3-task Canary slice."""
++    return task_name in CANARY_TASKS
++
+diff --git a/scripts/eval_routing_split.py b/scripts/eval_routing_split.py
+index 870a210..f9096f8 100644
+--- a/scripts/eval_routing_split.py
++++ b/scripts/eval_routing_split.py
+@@ -13,7 +13,6 @@ This script tests whether that lift holds out-of-sample or collapses to noise/co
+ 
+ from __future__ import annotations
+ 
+-import glob
+ import json
+ import random
+ from collections import Counter, defaultdict
+@@ -98,9 +97,9 @@ def evaluate() -> None:
+         print(f"  {cnt:3d} runs: {src}")
+ 
+     for name, task_set in [("DATACURVE (9 tasks)", DATACURVE_TASKS), ("TERMINAL-BENCH (13 gradeable tasks)", GRADEABLE_TB)]:
+-        print(f"\n==========================================")
++        print("\n==========================================")
+         print(f"  {name}")
+-        print(f"==========================================")
++        print("==========================================")
+ 
+         # In-sample summary per task
+         print(f"{'Task':<45} | {'Single':<10} | {'Multi':<10} | {'In-Sample Oracle'}")
+@@ -126,7 +125,7 @@ def evaluate() -> None:
+         in_sample_lift = macro_oracle - best_fixed
+ 
+         print("-" * 80)
+-        print(f"Macro In-Sample Average:")
++        print("Macro In-Sample Average:")
+         print(f"  Single:          {macro_single*100:5.1f}%")
+         print(f"  Multi:           {macro_multi*100:5.1f}%")
+         print(f"  In-Sample Oracle:{macro_oracle*100:5.1f}% (+{in_sample_lift*100:.1f}pp over better fixed policy)")
+@@ -190,15 +189,15 @@ def evaluate() -> None:
+             test_routed_scores.append(mean_routed)
+ 
+         oos_lift = sum(out_of_sample_lifts) / len(out_of_sample_lifts)
+-        print(f"\nHeld-Out Split-Half Cross-Validation (1000 trials):")
++        print("\nHeld-Out Split-Half Cross-Validation (1000 trials):")
+         print(f"  Test Set Single:  {sum(test_single_scores)/len(test_single_scores)*100:5.1f}%")
+         print(f"  Test Set Multi:   {sum(test_multi_scores)/len(test_multi_scores)*100:5.1f}%")
+         print(f"  Test Set Routed:  {sum(test_routed_scores)/len(test_routed_scores)*100:5.1f}%")
+         print(f"  Held-Out Lift:    {oos_lift*100:+5.1f}pp")
+         if oos_lift <= 0:
+-            print(f"  --> VERDICT: Routing advantage collapses to ZERO or NEGATIVE out-of-sample. Claim falsified.")
++            print("  --> VERDICT: Routing advantage collapses to ZERO or NEGATIVE out-of-sample. Claim falsified.")
+         else:
+-            print(f"  --> VERDICT: Modest held-out lift observed, but note that Multi consists entirely of pre-09-15 confounded arms.")
++            print("  --> VERDICT: Modest held-out lift observed, but note that Multi consists entirely of pre-09-15 confounded arms.")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/scripts/gate_precision.py b/scripts/gate_precision.py
+index 1ce6170..528c96b 100755
+--- a/scripts/gate_precision.py
++++ b/scripts/gate_precision.py
+@@ -59,7 +59,7 @@ def main() -> int:
+         fn, tn = cell[(False, True)], cell[(False, False)]
+         total = tp + fp + fn + tn
+         print(f"\n{arm}  ({total} runs with a recorded gate verdict)")
+-        print(f"                    grader PASS   grader FAIL")
++        print("                    grader PASS   grader FAIL")
+         print(f"  gate says PASS {tp:12d} {fp:13d}")
+         print(f"  gate says FAIL {fn:12d} {tn:13d}")
+         if tp + fp:
+diff --git a/scripts/harvest_run_diffs.py b/scripts/harvest_run_diffs.py
+index 7aa6c4b..b8a6ffb 100644
+--- a/scripts/harvest_run_diffs.py
++++ b/scripts/harvest_run_diffs.py
+@@ -8,7 +8,6 @@ directory is wiped between benchmark runs.
+ from __future__ import annotations
+ 
+ import json
+-import os
+ import subprocess
+ from pathlib import Path
+ from typing import Any
+diff --git a/scripts/paired_run.py b/scripts/paired_run.py
+index 2220980..db73dd5 100644
+--- a/scripts/paired_run.py
++++ b/scripts/paired_run.py
+@@ -20,7 +20,7 @@ from typing import Any
+ 
+ from lab.benchmarks.gate_fixtures import is_unmeasurable
+ from lab.benchmarks.task_loader import load_benchmark_tasks, load_task_from_dir
+-from lab.benchmarks.task_sets import is_discriminating
++from lab.benchmarks.task_sets import is_canary, is_discriminating
+ from lab.engine.drivers.agy_cli import AgyCliDriver
+ from lab.engine.drivers.claude_cli import ClaudeCliDriver
+ from lab.engine.governor import ConcurrencyGovernor
+@@ -38,7 +38,7 @@ logger = logging.getLogger("superstate_eval.paired")
+ DEFAULT_TASKS = Path.home() / ".cache/agent-rules/frontier-eval/tasks"
+ 
+ 
+-def main() -> int:
++def build_parser() -> argparse.ArgumentParser:
+     ap = argparse.ArgumentParser(description="Paired control-plane evaluation")
+     ap.add_argument("--task", type=Path, help="Single task directory")
+     ap.add_argument("--tasks-root", type=Path, default=DEFAULT_TASKS)
+@@ -59,7 +59,14 @@ def main() -> int:
+     ap.add_argument("--core", action="store_true",
+                     help="Run only tasks that can contribute signal: gradeable, and not at a "
+                          "ceiling or floor. 14 of the 30-task corpus. See lab/benchmarks/task_sets.py")
++    ap.add_argument("--canary", action="store_true",
++                    help="Run the fast 3-task Canary slice (~15 min total)")
+     ap.add_argument("--out", type=Path, help="Write results JSON here")
++    return ap
++
++
++def main() -> int:
++    ap = build_parser()
+     args = ap.parse_args()
+ 
+     tier1_names = {
+@@ -105,6 +112,13 @@ def main() -> int:
+             "ceiling or floor, so they cannot move an arm-vs-arm result.",
+             len(tasks), before,
+         )
++    if args.canary:
++        before = len(tasks)
++        tasks = [t for t in tasks if is_canary(t.name)]
++        logger.info(
++            "Canary slice: %d of %d tasks (%s).",
++            len(tasks), before, ", ".join(t.name for t in tasks),
++        )
+     if args.only_with_verifier:
+         tasks = [t for t in tasks if t.tests_dir]
+     ungradeable = [(t.name, is_unmeasurable(t.name)) for t in tasks if is_unmeasurable(t.name)]
+diff --git a/scripts/run_canary.sh b/scripts/run_canary.sh
+new file mode 100755
+index 0000000..76cbe1c
+--- /dev/null
++++ b/scripts/run_canary.sh
+@@ -0,0 +1,33 @@
++#!/bin/bash
++set -euo pipefail
++
++cd "$(dirname "$0")/.."
++
++# Default arms if not provided via arguments
++if [ $# -eq 0 ]; then
++  ARMS=(superstate_daemon_review superstate_mcp)
++elif [ $# -eq 1 ]; then
++  # Allow passing space-separated arms in a single quoted argument or single arm
++  # shellcheck disable=SC2206
++  ARMS=($1)
++else
++  ARMS=("$@")
++fi
++
++STAMP=$(date +"%Y%m%d_%H%M%S")
++OUT_FILE="results/canary_${STAMP}.json"
++
++echo "Starting Canary evaluation on 3 tasks (build-cython-ext, chess-best-move, httpx-multipart-response-parsing)"
++echo "Arms: ${ARMS[*]}"
++echo "Governor concurrency limit: 2"
++echo "Model: gemini-3.8-flash-high"
++echo "Driver: agy"
++echo "Output: ${OUT_FILE}"
++
++.venv/bin/python scripts/paired_run.py \
++  --arms "${ARMS[@]}" \
++  --canary \
++  --driver agy \
++  --model gemini-3.8-flash-high \
++  --concurrency 2 \
++  --out "${OUT_FILE}"
+diff --git a/tests/test_canary_task_set.py b/tests/test_canary_task_set.py
+new file mode 100644
+index 0000000..ef55fb9
+--- /dev/null
++++ b/tests/test_canary_task_set.py
+@@ -0,0 +1,66 @@
++"""Unit tests for the Canary 3 task set and runner configuration."""
++
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++from lab.benchmarks.gate_fixtures import is_unmeasurable
++from lab.benchmarks.task_sets import (
++    CANARY_TASKS,
++    DISCRIMINATING_TASKS,
++    is_canary,
++    is_discriminating,
++)
++
++
++def test_canary_tasks_definition() -> None:
++    """Canary set must contain exactly the 3 designated fast discriminating tasks."""
++    expected = (
++        "build-cython-ext",
++        "chess-best-move",
++        "httpx-multipart-response-parsing",
++    )
++    assert CANARY_TASKS == expected
++    assert len(CANARY_TASKS) == 3
++
++
++def test_is_canary() -> None:
++    """is_canary must identify canary tasks and reject others."""
++    for task_name in CANARY_TASKS:
++        assert is_canary(task_name) is True
++
++    assert is_canary("scc-bounded-memory-spilling") is False
++    assert is_canary("openssl-selfsigned-cert") is False
++    assert is_canary("nonexistent-task") is False
++
++
++def test_canary_tasks_are_discriminating() -> None:
++    """Every canary task must belong to DISCRIMINATING_TASKS to provide valid signal."""
++    for task_name in CANARY_TASKS:
++        assert task_name in DISCRIMINATING_TASKS, f"{task_name} is not in DISCRIMINATING_TASKS"
++        assert is_discriminating(task_name) is True
++
++
++def test_canary_tasks_are_measurable() -> None:
++    """Canary tasks must have held-out verifiers and not be unmeasurable."""
++    for task_name in CANARY_TASKS:
++        assert not is_unmeasurable(task_name), f"{task_name} is marked unmeasurable"
++
++
++def test_run_canary_script_exists_and_executable() -> None:
++    """The turnkey scripts/run_canary.sh script must exist and have execute permissions."""
++    repo_root = Path(__file__).resolve().parents[1]
++    script_path = repo_root / "scripts" / "run_canary.sh"
++    assert script_path.is_file(), f"Expected {script_path} to exist"
++    assert os.access(script_path, os.X_OK), f"Expected {script_path} to be executable"
++
++
++def test_paired_run_canary_flag() -> None:
++    """paired_run.py must accept the --canary flag."""
++    from scripts.paired_run import build_parser
++
++    parser = build_parser()
++    args = parser.parse_args(["--canary"])
++    assert args.canary is True
++

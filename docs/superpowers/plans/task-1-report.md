@@ -1,92 +1,91 @@
-# Task 1 Implementation Report: MCP Tool Declarations & Schemas
+# Task 1 Report: Milestone Diff Extraction in `crates/superstate-review`
 
 **Status:** Completed  
-**Commit SHA:** `921fe508b19ea19f191b792fcb7000309575190a`  
-**Branch:** `feat/mcp-cli-complete-parity`  
+**Commit SHA:** `0f67b1d`  
+**Branch:** `feat/blocking-code-review`  
 **Repository:** `/Users/danielfisher/repos/superstate`  
+**Date:** 2026-09-17  
 
 ---
 
 ## Executive Summary
 
-Task 1 established complete MCP tool catalog parity with the Superstate CLI by declaring all missing tools and properties in `crates/superstate-mcp/src/tools.rs`. The MCP server now declares 25 distinct tools with exact schema parity matching the CLI subcommand interface.
+Task 1 implemented `get_milestone_diff` in `crates/superstate-review/src/diff.rs` and exported it in `crates/superstate-review/src/lib.rs` as specified in `docs/superpowers/plans/task-1-brief.md`.
 
-Strict Test-Driven Development (TDD) was followed:
-1. **Red Phase:** Added comprehensive tests in `crates/superstate-mcp/tests/test_mcp_tool_schemas.rs` validating the presence of all 25 tools, schema structures, required properties, and JSON-RPC `tools/list` dispatch. Verified tests failed as expected (3 test failures due to missing tools and schema properties).
-2. **Green Phase:** Updated `crates/superstate-mcp/src/tools.rs` to expose all 25 tools with complete schema properties and descriptions. Verified all tests passed (3/3 schema tests, 22/22 total crate tests).
-3. **Refactor & Formatting:** Cleaned code formatting with `cargo fmt -p superstate-mcp` and verified clean linting with `cargo clippy -p superstate-mcp -- -D warnings`.
-4. **Commit:** Committed with message `feat(mcp): declare schemas for all CLI parity tools and parameters`.
-
----
-
-## Declared Tools Catalog (25 Tools)
-
-### State Inspection & Status
-- `state_init`: Initialize DFA state machine from plan markdown, milestones, or direct goal.
-- `state_show`: Inspect state formatted as markdown or structured JSON (`state`, `json`).
-- `state_status`: Status overview and epistemic ledger summary (`state`, `json`).
-- `state_resume`: Context-loss recovery briefing with recent git history (`state`).
-- `state_metrics`: Execution telemetry, step counters, and efficiency metrics (`state`, `json`).
-- `state_list`: Discover active and completed branch-scoped states (`state`, `json`).
-
-### Execution & Safety
-- `state_next`: Advance active task with verification gates (`verify_cmd`, `verify_git_clean`, `ignore_untracked_glob`, `state`).
-- `state_ready`: Query tasks whose dependencies are satisfied and eligible for execution (`state`, `json`).
-- `state_checkpoint`: Create git checkpoint snapshot guarding active step (`state`).
-- `state_rollback`: Restore working directory to checkpoint snapshot (`state`, `reference`).
-- `state_exec`: Atomically execute verification command with rollback and step advance (`verify_cmd` [required], `state`, `verify_git_clean`, `checkpoint`, `rollback_on_fail`, `advance`, `json`).
-- `state_prompt`: Generate bounded turnkey subagent prompt for active task (`state`, `task`, `with_graph`, `json`, `no_worktree`).
-- `state_note`: Append note to epistemic ledger (`note` [required], `state`, `author`).
-
-### Maintenance & Reconciliation
-- `state_sync`: Reconcile state machine against modified plan (`plan` [required], `state`, `out`).
-- `state_doctor`: Diagnose and repair state/plan drift (`state`, `plan`, `repair`, `json`).
-- `state_validate`: Validate state JSON against execution schema (`state`).
-- `state_apply`: Apply JSON patch and/or append note (`state`, `patch`, `note`, `out`).
-
-### Worktree Management
-- `worktree_create`: Create isolated git worktree for parallel task execution (`branch` [required], `base`, `path`, `caches`, `no_cache`, `repo`).
-- `worktree_merge`: Merge isolated worktree branch into base branch (`branch` [required], `base`, `message`, `repo`).
-- `worktree_list`: List active git worktrees (`repo`).
-- `worktree_remove`: Remove worktree and clean branch (`branch` [required], `force`, `repo`).
-- `worktree_clean`: Clean orphaned worktree directories and prune tracking (`repo`).
-
-### Advisory & Direct Handoff
-- `superstate_review`: Adversarial git diff reviewer (`commit_range`).
-- `superstate_preflight`: Command execution dry-run sandbox on OS (`verify_cmd`, `verify_cmds`).
-- `superstate_handoff`: Plan-free direct initialization and prompt provisioning (`goal`, `verify_cmd`, `milestones`, `files`, `worktree`, `no_worktree`).
+The implementation addresses a critical gap in diff extraction for code review: milestone work often spans both committed changes on a branch and uncommitted/untracked changes in the working tree. `get_milestone_diff` provides a unified diff combining:
+1. `head_hash` determination via `git rev-parse HEAD`, falling back gracefully to `get_git_diff(repo_root, None)` on empty repositories without initial commits.
+2. Committed changes across milestone commits using `git diff <start>..HEAD` when `start_commit` is provided and differs from `HEAD`.
+3. Uncommitted working tree changes and untracked files using `get_git_diff(repo_root, Some("HEAD"))` (which leverages read-only `--no-index` diffs for untracked files without index pollution).
+4. Fallback to `HEAD~1..HEAD` diff when `start_commit` is `None` and the working tree is clean.
 
 ---
 
-## Verification Evidence
+## TDD Execution
 
-### Test Execution
-```
-cargo test -p superstate-mcp
-```
-Result:
-- `test_mcp_tool_schemas.rs`: 3 passed, 0 failed
-  - `test_all_cli_parity_tools_declared`: ok
-  - `test_tool_parameter_schemas_and_requirements`: ok
-  - `test_tools_list_rpc_schema_parity`: ok
-- Total crate tests: 22 passed, 0 failed, 0 warnings
+### 1. Red Phase
+Created `crates/superstate-review/tests/test_milestone_diff.rs` with 5 targeted test cases:
+- `test_get_milestone_diff_committed_only`: Committed changes on branch since `initial_hash`, working tree clean.
+- `test_get_milestone_diff_uncommitted_only`: Working tree modified without commits since `initial_hash`.
+- `test_get_milestone_diff_committed_and_uncommitted`: Both committed changes on branch and untracked new files.
+- `test_get_milestone_diff_none_fallback_to_head_minus_1`: Clean working tree with `start_commit = None`, falling back to `HEAD~1..HEAD`.
+- `test_get_milestone_diff_empty_repo`: Freshly initialized git repository without commits.
 
-### Linting & Formatting
+Ran test suite to verify RED failure:
+```text
+$ cargo test -p superstate-review --test test_milestone_diff
+   Compiling superstate-review v0.1.0 (/Users/danielfisher/repos/superstate/crates/superstate-review)
+error[E0432]: unresolved import `superstate_review::diff::get_milestone_diff`
+ --> crates/superstate-review/tests/test_milestone_diff.rs:4:5
+  |
+4 | use superstate_review::diff::get_milestone_diff;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `get_milestone_diff` in `diff`
+
+error: could not compile `superstate-review` (test "test_milestone_diff") due to 1 previous error
 ```
-cargo clippy -p superstate-mcp -- -D warnings
-cargo fmt -p superstate-mcp --check
+
+### 2. Green Phase
+Implemented `get_milestone_diff` in `crates/superstate-review/src/diff.rs` and re-exported it in `crates/superstate-review/src/lib.rs`.
+
+Ran `cargo test -p superstate-review --test test_milestone_diff`:
+```text
+running 5 tests
+test test_get_milestone_diff_empty_repo ... ok
+test test_get_milestone_diff_uncommitted_only ... ok
+test test_get_milestone_diff_committed_only ... ok
+test test_get_milestone_diff_committed_and_uncommitted ... ok
+test test_get_milestone_diff_none_fallback_to_head_minus_1 ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
 ```
-Result: Clean exit (0 errors, 0 warnings).
+
+Ran full crate test suite `cargo test -p superstate-review`:
+```text
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+```
+
+### 3. Quality Checks
+- `cargo clippy -p superstate-review --all-targets -- -D warnings`: Passed cleanly (0 warnings).
+- `cargo check --all`: Workspace compilation succeeded across all crates.
 
 ---
 
-## Self-Review Checklist
-- [x] All 25 tools declared with explicit descriptions and schemas
-- [x] `state_next` includes `ignore_untracked_glob` property
-- [x] `state_prompt` includes `with_graph` and `task` properties
-- [x] `state_exec` requires `verify_cmd` and declares `advance`, `checkpoint`, `rollback_on_fail`, `verify_git_clean`, `state`
-- [x] `worktree_remove` requires `branch` and declares `force`, `repo`
-- [x] `state_sync` requires `plan` and declares `state`, `out`
-- [x] Tests verify both tool list completeness and detailed schema definitions
-- [x] Formatting and clippy checks pass cleanly
-- [x] Git commit created on branch `feat/mcp-cli-complete-parity`
+## File Changes Summary
+
+| File | Status | Description |
+|---|---|---|
+| `crates/superstate-review/src/diff.rs` | Modified | Implemented `get_milestone_diff` combining committed range diffs and uncommitted/untracked changes |
+| `crates/superstate-review/src/lib.rs` | Modified | Re-exported `get_milestone_diff` at crate root |
+| `crates/superstate-review/tests/test_milestone_diff.rs` | Created | Added 5 integration tests covering committed, uncommitted, combined, fallback, and empty repo scenarios |
+
+---
+
+## Commit Details
+
+- **Commit:** `0f67b1d`
+- **Message:** `feat(review): implement get_milestone_diff with committed and uncommitted change tracking`
+
+---
+
+## Readiness & Next Steps
+
+Task 1 is complete and verified. The codebase is prepared for **Task 2: Milestone Base Commit Tracking & `--review-blocking` in `crates/superstate-core`**, which will track `milestone_start_commits` in `DaemonRunner`, supply the milestone diff to the review engine, and block milestone advancement upon detecting Critical/High severity review findings.

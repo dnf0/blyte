@@ -304,6 +304,21 @@ pub struct DaemonArgs {
     /// Timeout in seconds per verification attempt
     #[arg(long, default_value_t = 300)]
     pub timeout: u64,
+    /// Run advisory adversarial code review on milestone completion
+    #[arg(long)]
+    pub advisory_review: bool,
+    /// Treat Critical and High severity review findings as blocking failures requiring retry
+    #[arg(
+        long,
+        help = "Treat Critical and High severity review findings as blocking failures requiring retry"
+    )]
+    pub review_blocking: bool,
+    /// Automatically roll back working tree to milestone baseline on verification failure
+    #[arg(
+        long,
+        help = "Automatically roll back working tree to milestone baseline on verification failure"
+    )]
+    pub auto_rollback: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -522,6 +537,9 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 args.detach,
                 args.max_retries,
                 args.timeout,
+                args.advisory_review,
+                args.review_blocking,
+                args.auto_rollback,
             ),
         },
         StateCommands::Cancel(args) => {

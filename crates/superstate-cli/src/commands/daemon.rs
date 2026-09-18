@@ -104,13 +104,25 @@ pub fn resolve_state_dir(repo_or_state: Option<&Path>) -> PathBuf {
 }
 
 /// Spawns or executes an autonomous daemon runner for a given state machine.
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_daemon(
     state_path: &Path,
     driver: Option<&str>,
     detach: bool,
     max_retries: usize,
     timeout_secs: u64,
+    advisory_review: bool,
+    review_blocking: bool,
+    auto_rollback: bool,
 ) -> Result<(), String> {
+    let auto_rollback = auto_rollback
+        || std::env::var("SUPERSTATE_AUTO_ROLLBACK")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
+
     let paths = daemon_paths_for_state(state_path);
 
     // Enforce per-job PID lock
@@ -160,6 +172,15 @@ pub fn cmd_daemon(
         }
         cmd.arg("--max-retries").arg(max_retries.to_string());
         cmd.arg("--timeout").arg(timeout_secs.to_string());
+        if advisory_review {
+            cmd.arg("--advisory-review");
+        }
+        if review_blocking {
+            cmd.arg("--review-blocking");
+        }
+        if auto_rollback {
+            cmd.arg("--auto-rollback");
+        }
         cmd.stdout(std::process::Stdio::from(log_out));
         cmd.stderr(std::process::Stdio::from(log_err));
         cmd.stdin(std::process::Stdio::null());
@@ -235,6 +256,9 @@ pub fn cmd_daemon(
             advisory_gate: std::env::var("SUPERSTATE_GATE_MODE")
                 .map(|v| v.trim().eq_ignore_ascii_case("advisory"))
                 .unwrap_or(false),
+            advisory_review,
+            review_blocking,
+            auto_rollback,
         };
 
         let mut runner = DaemonRunner::new(config)

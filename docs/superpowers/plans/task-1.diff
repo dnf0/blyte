@@ -1,0 +1,254 @@
+diff --git a/crates/superstate-review/src/diff.rs b/crates/superstate-review/src/diff.rs
+index addd95f..ba67bf6 100644
+--- a/crates/superstate-review/src/diff.rs
++++ b/crates/superstate-review/src/diff.rs
+@@ -62,3 +62,75 @@ pub fn get_git_diff(repo_root: &Path, commit_range: Option<&str>) -> Result<Stri
+ 
+     Ok(diff)
+ }
++
++/// Extracts the cumulative diff for a milestone, capturing both committed commits since
++/// `start_commit` and any uncommitted or untracked changes in the working tree.
++///
++/// # Parameters
++/// - `repo_root`: The absolute or relative root path of the git repository.
++/// - `start_commit`: Optional commit hash recorded at the start of the milestone.
++///
++/// # Returns
++/// - `Ok(String)`: The combined unified diff string.
++/// - `Err(DiffError)`: If git command execution encounters an I/O failure.
++pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Result<String, DiffError> {
++    // Determine the current repository HEAD revision hash.
++    // If rev-parse fails (e.g. freshly initialized repo without commits), fallback to working tree diff.
++    let head_output = match Command::new("git")
++        .args(["rev-parse", "HEAD"])
++        .current_dir(repo_root)
++        .output()
++    {
++        Ok(out) => out,
++        Err(e) => return Err(DiffError::Io(e)),
++    };
++
++    let head_hash = if head_output.status.success() {
++        String::from_utf8_lossy(&head_output.stdout).trim().to_string()
++    } else {
++        return get_git_diff(repo_root, None);
++    };
++
++    let mut combined_diff = String::new();
++    let normalized_start = start_commit.map(|s| s.trim()).filter(|s| !s.is_empty());
++
++    // Step 2: If a starting commit was provided and differs from HEAD, capture all commits on the branch.
++    if let Some(start) = normalized_start {
++        if start != head_hash {
++            let range = format!("{}..HEAD", start);
++            if let Ok(committed_diff) = get_git_diff(repo_root, Some(&range)) {
++                if !committed_diff.trim().is_empty() {
++                    combined_diff.push_str(&committed_diff);
++                }
++            }
++        }
++    }
++
++    // Step 3: Check for working tree modifications or untracked files and append to diff.
++    if let Ok(working_diff) = get_git_diff(repo_root, Some("HEAD")) {
++        if !working_diff.trim().is_empty() {
++            if !combined_diff.is_empty() && !combined_diff.ends_with('\n') {
++                combined_diff.push('\n');
++            }
++            combined_diff.push_str(&working_diff);
++        }
++    }
++
++    // Step 4: If no milestone start commit was provided and the diff is still empty, fallback to HEAD~1..HEAD.
++    if combined_diff.trim().is_empty() && normalized_start.is_none() {
++        if let Ok(out) = Command::new("git")
++            .args(["rev-parse", "--verify", "HEAD~1"])
++            .current_dir(repo_root)
++            .output()
++        {
++            if out.status.success() {
++                if let Ok(last_commit_diff) = get_git_diff(repo_root, Some("HEAD~1..HEAD")) {
++                    return Ok(last_commit_diff);
++                }
++            }
++        }
++    }
++
++    Ok(combined_diff)
++}
++
+diff --git a/crates/superstate-review/src/lib.rs b/crates/superstate-review/src/lib.rs
+index 96bf093..698bae1 100644
+--- a/crates/superstate-review/src/lib.rs
++++ b/crates/superstate-review/src/lib.rs
+@@ -3,7 +3,7 @@ pub mod prompt;
+ pub mod runner;
+ pub mod schema;
+ 
+-pub use diff::{get_git_diff, DiffError};
++pub use diff::{get_git_diff, get_milestone_diff, DiffError};
+ pub use prompt::build_review_system_prompt;
+ pub use runner::{
+     build_review_prompt, cap_diff, clean_json_response, execute_review, parse_review_report,
+diff --git a/crates/superstate-review/tests/test_milestone_diff.rs b/crates/superstate-review/tests/test_milestone_diff.rs
+new file mode 100644
+index 0000000..cd64c4d
+--- /dev/null
++++ b/crates/superstate-review/tests/test_milestone_diff.rs
+@@ -0,0 +1,155 @@
++use std::fs;
++use std::process::Command;
++use tempfile::TempDir;
++use superstate_review::diff::get_milestone_diff;
++
++fn setup_repo() -> (TempDir, String) {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    Command::new("git")
++        .args(["init", "-b", "main"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["config", "user.name", "Tester"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["config", "user.email", "tester@example.com"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++
++    fs::write(root.join("base.txt"), "base content\n").unwrap();
++    Command::new("git")
++        .args(["add", "base.txt"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "initial commit", "--no-gpg-sign"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++
++    let head = Command::new("git")
++        .args(["rev-parse", "HEAD"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++    let initial_hash = String::from_utf8(head.stdout).unwrap().trim().to_string();
++    (temp, initial_hash)
++}
++
++#[test]
++fn test_get_milestone_diff_committed_only() {
++    let (temp, initial_hash) = setup_repo();
++    let root = temp.path();
++
++    fs::write(root.join("base.txt"), "base content\ncommitted change\n").unwrap();
++    Command::new("git")
++        .args(["add", "base.txt"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "update base", "--no-gpg-sign"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++
++    let diff = get_milestone_diff(root, Some(&initial_hash)).unwrap();
++    assert!(
++        diff.contains("+committed change"),
++        "Diff should contain committed changes, got:\n{}",
++        diff
++    );
++}
++
++#[test]
++fn test_get_milestone_diff_uncommitted_only() {
++    let (temp, initial_hash) = setup_repo();
++    let root = temp.path();
++
++    fs::write(root.join("base.txt"), "base content\nuncommitted change\n").unwrap();
++
++    let diff = get_milestone_diff(root, Some(&initial_hash)).unwrap();
++    assert!(
++        diff.contains("+uncommitted change"),
++        "Diff should contain uncommitted changes, got:\n{}",
++        diff
++    );
++}
++
++#[test]
++fn test_get_milestone_diff_committed_and_uncommitted() {
++    let (temp, initial_hash) = setup_repo();
++    let root = temp.path();
++
++    fs::write(root.join("base.txt"), "base content\ncommitted change\n").unwrap();
++    Command::new("git")
++        .args(["add", "base.txt"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "update base", "--no-gpg-sign"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++
++    fs::write(root.join("uncommitted.txt"), "uncommitted file\n").unwrap();
++
++    let diff = get_milestone_diff(root, Some(&initial_hash)).unwrap();
++    assert!(
++        diff.contains("+committed change"),
++        "Diff should contain committed changes, got:\n{}",
++        diff
++    );
++    assert!(
++        diff.contains("+uncommitted file"),
++        "Diff should contain untracked uncommitted file, got:\n{}",
++        diff
++    );
++}
++
++#[test]
++fn test_get_milestone_diff_none_fallback_to_head_minus_1() {
++    let (temp, _initial_hash) = setup_repo();
++    let root = temp.path();
++
++    fs::write(root.join("base.txt"), "base content\nsecond commit\n").unwrap();
++    Command::new("git")
++        .args(["add", "base.txt"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "second commit", "--no-gpg-sign"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++
++    let diff = get_milestone_diff(root, None).unwrap();
++    assert!(
++        diff.contains("+second commit"),
++        "Clean working tree with None should fall back to HEAD~1..HEAD diff, got:\n{}",
++        diff
++    );
++}
++
++#[test]
++fn test_get_milestone_diff_empty_repo() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    Command::new("git")
++        .args(["init", "-b", "main"])
++        .current_dir(root)
++        .output()
++        .unwrap();
++
++    let diff = get_milestone_diff(root, None).unwrap();
++    assert!(diff.is_empty(), "Empty repo should yield empty diff");
++}
