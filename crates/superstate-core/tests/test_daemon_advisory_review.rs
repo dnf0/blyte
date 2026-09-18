@@ -366,8 +366,8 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
 
 #[test]
 fn test_is_inside_git_repo_paths() {
-    use superstate_core::daemon::is_inside_git_repo;
     use std::path::Path;
+    use superstate_core::daemon::is_inside_git_repo;
 
     // A fresh non-git temporary directory
     let non_git_dir = tempfile::tempdir().unwrap();
@@ -388,4 +388,3 @@ fn test_is_inside_git_repo_paths() {
     // Empty path: does not panic or falsely assert
     let _ = is_inside_git_repo(Path::new(""));
 }
-

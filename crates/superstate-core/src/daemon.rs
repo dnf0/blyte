@@ -600,7 +600,9 @@ impl DaemonRunner {
             .or_insert_with(|| workspace_fingerprint(&working_dir));
 
         // Record starting HEAD commit when entering milestone so milestone diff captures all changes
-        if !self.milestone_start_commits.contains_key(&active_task.id) && is_inside_git_repo(&working_dir) {
+        if !self.milestone_start_commits.contains_key(&active_task.id)
+            && is_inside_git_repo(&working_dir)
+        {
             if let Ok(out) = Command::new("git")
                 .args(["rev-parse", "HEAD"])
                 .current_dir(&working_dir)
@@ -609,7 +611,8 @@ impl DaemonRunner {
                 if out.status.success() {
                     let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if !head.is_empty() {
-                        self.milestone_start_commits.insert(active_task.id.clone(), head);
+                        self.milestone_start_commits
+                            .insert(active_task.id.clone(), head);
                     }
                 }
             }
@@ -696,7 +699,8 @@ impl DaemonRunner {
                 .milestone_start_commits
                 .get(&active_task.id)
                 .map(|s| s.as_str());
-            let diff = match superstate_review::diff::get_milestone_diff(&working_dir, start_commit) {
+            let diff = match superstate_review::diff::get_milestone_diff(&working_dir, start_commit)
+            {
                 Ok(d) if !d.trim().is_empty() => d,
                 _ => superstate_review::get_git_diff(&working_dir, None).unwrap_or_default(),
             };
@@ -792,12 +796,10 @@ impl DaemonRunner {
                                 )?;
                             }
                             let reason = if self.config.review_blocking {
-                                format!(
-                                    "code-review: {} blocking issue(s) detected",
-                                    count
-                                )
+                                format!("code-review: {} blocking issue(s) detected", count)
                             } else {
-                                "advisory-review: blocking issues detected on vacuous gate".to_string()
+                                "advisory-review: blocking issues detected on vacuous gate"
+                                    .to_string()
                             };
                             return Ok(DaemonStepOutcome::Failed {
                                 task_id: active_task.id,
@@ -816,7 +818,9 @@ impl DaemonRunner {
                             save_state_atomic(&self.config.state_path, &state)?;
                             return Ok(DaemonStepOutcome::Blocked {
                                 task_id: active_task.id,
-                                reason: "code review detected blocking issues and max retries exhausted".to_string(),
+                                reason:
+                                    "code review detected blocking issues and max retries exhausted"
+                                        .to_string(),
                             });
                         }
                     }
@@ -975,12 +979,7 @@ impl DaemonRunner {
                 && is_inside_git_repo(&working_dir)
                 && attempts_so_far < attempt_ceiling
             {
-                self.perform_rollback(
-                    &active_task.id,
-                    attempts_spent,
-                    &working_dir,
-                    &mut state,
-                )?;
+                self.perform_rollback(&active_task.id, attempts_spent, &working_dir, &mut state)?;
             }
 
             let stalled = current_retries >= self.config.max_retries;

@@ -54,7 +54,9 @@ fn test_cli_daemon_help_has_review_blocking() {
         stdout
     );
     assert!(
-        stdout.contains("Treat Critical and High severity review findings as blocking failures requiring retry"),
+        stdout.contains(
+            "Treat Critical and High severity review findings as blocking failures requiring retry"
+        ),
         "`superstate state daemon --help` should describe --review-blocking, got:\n{}",
         stdout
     );
@@ -97,7 +99,8 @@ fn test_cli_daemon_accepts_review_blocking_flag() {
     .unwrap();
     superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
 
-    let mock_driver = "echo '{\"summary\":\"Clean\",\"findings\":[],\"has_blocking_issues\":false}'";
+    let mock_driver =
+        "echo '{\"summary\":\"Clean\",\"findings\":[],\"has_blocking_issues\":false}'";
 
     // Call with --review-blocking
     let output = Command::new(bin())

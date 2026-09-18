@@ -73,7 +73,10 @@ pub fn get_git_diff(repo_root: &Path, commit_range: Option<&str>) -> Result<Stri
 /// # Returns
 /// - `Ok(String)`: The combined unified diff string.
 /// - `Err(DiffError)`: If git command execution encounters an I/O failure.
-pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Result<String, DiffError> {
+pub fn get_milestone_diff(
+    repo_root: &Path,
+    start_commit: Option<&str>,
+) -> Result<String, DiffError> {
     // Determine the current repository HEAD revision hash.
     // If rev-parse fails (e.g. freshly initialized repo without commits), fallback to working tree diff.
     let head_output = match Command::new("git")
@@ -86,7 +89,9 @@ pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Resul
     };
 
     let head_hash = if head_output.status.success() {
-        String::from_utf8_lossy(&head_output.stdout).trim().to_string()
+        String::from_utf8_lossy(&head_output.stdout)
+            .trim()
+            .to_string()
     } else {
         return get_git_diff(repo_root, None);
     };
@@ -130,4 +135,3 @@ pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Resul
 
     Ok(combined_diff)
 }
-

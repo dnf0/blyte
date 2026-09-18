@@ -68,7 +68,12 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["commit", "-m", "feat: implement flawed feature", "--no-gpg-sign"])
+        .args([
+            "commit",
+            "-m",
+            "feat: implement flawed feature",
+            "--no-gpg-sign",
+        ])
         .current_dir(repo)
         .output()
         .unwrap();
@@ -92,7 +97,9 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
     let outcome = runner.step().unwrap();
 
     match outcome {
-        DaemonStepOutcome::Failed { task_id, reason, .. } => {
+        DaemonStepOutcome::Failed {
+            task_id, reason, ..
+        } => {
             assert_eq!(task_id, "task-1");
             assert!(
                 reason.contains("code-review"),
@@ -140,13 +147,19 @@ fn test_daemon_blocking_review_clean_report_advances() {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["commit", "-m", "feat: clean implementation", "--no-gpg-sign"])
+        .args([
+            "commit",
+            "-m",
+            "feat: clean implementation",
+            "--no-gpg-sign",
+        ])
         .current_dir(repo)
         .output()
         .unwrap();
 
     // Mock driver returns clean report
-    let mock_report_json = r#"{"summary":"Code is clean and correct","findings":[],"has_blocking_issues":false}"#;
+    let mock_report_json =
+        r#"{"summary":"Code is clean and correct","findings":[],"has_blocking_issues":false}"#;
     let mock_driver = format!("echo '{}'", mock_report_json);
 
     let config = DaemonConfig {
@@ -263,7 +276,10 @@ EOF
 "#,
     )
     .unwrap();
-    Command::new("chmod").args(["+x", script.to_str().unwrap()]).output().unwrap();
+    Command::new("chmod")
+        .args(["+x", script.to_str().unwrap()])
+        .output()
+        .unwrap();
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
@@ -280,7 +296,9 @@ EOF
     let outcome = runner.step().unwrap();
 
     match outcome {
-        DaemonStepOutcome::Failed { task_id, reason, .. } => {
+        DaemonStepOutcome::Failed {
+            task_id, reason, ..
+        } => {
             assert_eq!(task_id, "task-1");
             assert!(reason.contains("code-review"));
         }

@@ -91,7 +91,9 @@ fn test_cli_daemon_help_has_auto_rollback() {
         stdout
     );
     assert!(
-        stdout.contains("Automatically roll back working tree to milestone baseline on verification failure"),
+        stdout.contains(
+            "Automatically roll back working tree to milestone baseline on verification failure"
+        ),
         "`superstate daemon --help` should describe --auto-rollback, got:\n{}",
         stdout
     );
@@ -109,7 +111,9 @@ fn test_cli_daemon_help_has_auto_rollback() {
         stdout_state
     );
     assert!(
-        stdout_state.contains("Automatically roll back working tree to milestone baseline on verification failure"),
+        stdout_state.contains(
+            "Automatically roll back working tree to milestone baseline on verification failure"
+        ),
         "`superstate state daemon --help` should describe --auto-rollback, got:\n{}",
         stdout_state
     );
@@ -375,7 +379,10 @@ fn test_cli_daemon_detached_forwarding() {
 
     // Read the PID written by the detached command and wait for background execution to complete
     let paths = superstate_core::daemon::daemon_paths_for_state(&state_path);
-    assert!(paths.pid_file.exists(), "pid_file should exist after detach");
+    assert!(
+        paths.pid_file.exists(),
+        "pid_file should exist after detach"
+    );
     let pid: i32 = fs::read_to_string(&paths.pid_file)
         .expect("read pid file")
         .trim()

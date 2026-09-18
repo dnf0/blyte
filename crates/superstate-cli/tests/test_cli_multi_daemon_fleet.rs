@@ -199,11 +199,7 @@ fn test_cli_multi_daemon_fleet() {
         let beta_ready = fs::read_to_string(&beta_pid_file)
             .map(|s| s.trim().parse::<i32>().is_ok())
             .unwrap_or(false);
-        if alpha_ready
-            && beta_ready
-            && alpha_log_file.exists()
-            && beta_log_file.exists()
-        {
+        if alpha_ready && beta_ready && alpha_log_file.exists() && beta_log_file.exists() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

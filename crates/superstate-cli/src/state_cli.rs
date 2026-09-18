@@ -308,7 +308,10 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub advisory_review: bool,
     /// Treat Critical and High severity review findings as blocking failures requiring retry
-    #[arg(long, help = "Treat Critical and High severity review findings as blocking failures requiring retry")]
+    #[arg(
+        long,
+        help = "Treat Critical and High severity review findings as blocking failures requiring retry"
+    )]
     pub review_blocking: bool,
     /// Automatically roll back working tree to milestone baseline on verification failure
     #[arg(

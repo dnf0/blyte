@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
-use tempfile::TempDir;
 use superstate_review::diff::get_milestone_diff;
+use tempfile::TempDir;
 
 fn setup_repo() -> (TempDir, String) {
     let temp = TempDir::new().unwrap();

@@ -118,8 +118,8 @@ fn test_get_git_diff_captures_untracked_files() {
         .unwrap();
 
     // Explicit commit range must NOT include untracked working copy files
-    let diff_range = get_git_diff(repo_path, Some("HEAD~1..HEAD"))
-        .expect("Failed to get git diff for range");
+    let diff_range =
+        get_git_diff(repo_path, Some("HEAD~1..HEAD")).expect("Failed to get git diff for range");
     assert!(
         !diff_range.contains("brand_new.txt"),
         "Explicit range must not include untracked working copy file"

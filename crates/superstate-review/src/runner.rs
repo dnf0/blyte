@@ -198,7 +198,11 @@ pub fn parse_review_report(raw: &str) -> Result<ReviewReport, ReviewError> {
             // If this is a driver CLI JSON envelope (e.g. agy {"status": "SUCCESS", "response": "..."},
             // or claude {"result": "..."}) and does not directly contain findings:
             if !map.contains_key("findings") {
-                if let Some(inner) = map.get("response").or_else(|| map.get("result")).and_then(|v| v.as_str()) {
+                if let Some(inner) = map
+                    .get("response")
+                    .or_else(|| map.get("result"))
+                    .and_then(|v| v.as_str())
+                {
                     return parse_review_report(inner);
                 }
             }

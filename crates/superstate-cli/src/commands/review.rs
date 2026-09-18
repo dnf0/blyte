@@ -20,10 +20,8 @@ pub fn cmd_review(args: ReviewArgs) -> Result<(), String> {
     let diff = match args.commit_range.as_deref() {
         Some(range) => get_git_diff(&args.repo, Some(range))
             .map_err(|e| format!("Failed to get git diff: {}", e))?,
-        None => {
-            get_milestone_diff(&args.repo, None)
-                .map_err(|e| format!("Failed to get git diff: {}", e))?
-        }
+        None => get_milestone_diff(&args.repo, None)
+            .map_err(|e| format!("Failed to get git diff: {}", e))?,
     };
 
     if diff.trim().is_empty() {

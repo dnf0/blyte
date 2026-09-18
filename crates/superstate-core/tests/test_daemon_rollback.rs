@@ -53,7 +53,10 @@ fn test_daemon_rollback_on_verification_failure() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let repo_root = temp_dir.path();
     let initial_commit = setup_temp_git_repo(repo_root);
-    assert!(!initial_commit.is_empty(), "initial commit must not be empty");
+    assert!(
+        !initial_commit.is_empty(),
+        "initial commit must not be empty"
+    );
 
     // Initialize execution state targeting in-place repository
     let state_dir = repo_root.join(".agent-state");
@@ -108,7 +111,8 @@ fn test_daemon_rollback_on_verification_failure() {
     );
 
     // 2. Tracked file must be restored to initial commit content
-    let tracked_content = fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
+    let tracked_content =
+        fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
     assert_eq!(
         tracked_content, "initial content\n",
         "tracked file should be rolled back to initial commit content"
@@ -196,7 +200,8 @@ fn test_daemon_no_rollback_when_disabled() {
     assert!(matches!(outcome, DaemonStepOutcome::Failed { .. }));
 
     // When disabled, dirty tree is preserved
-    let tracked_content = fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
+    let tracked_content =
+        fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
     assert_eq!(tracked_content.trim(), "corrupted driver content");
     assert!(repo_root.join("untracked.txt").exists());
 
