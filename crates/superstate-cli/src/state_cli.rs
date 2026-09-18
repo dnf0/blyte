@@ -320,13 +320,13 @@ pub struct DaemonArgs {
     )]
     pub auto_rollback: bool,
     /// Disable automatic git rollback on verification failure
-    #[arg(
-        long,
-        help = "Disable automatic git rollback on verification failure"
-    )]
+    #[arg(long, help = "Disable automatic git rollback on verification failure")]
     pub no_auto_rollback: bool,
     /// Disable automatic tool output shunting during driver execution
-    #[arg(long, help = "Disable automatic tool output shunting during driver execution")]
+    #[arg(
+        long,
+        help = "Disable automatic tool output shunting during driver execution"
+    )]
     pub no_shunt: bool,
 }
 

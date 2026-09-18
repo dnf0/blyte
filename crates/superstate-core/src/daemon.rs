@@ -687,7 +687,10 @@ impl DaemonRunner {
                 let bin_dir = working_dir.join(".agent-state").join("bin");
                 fs::create_dir_all(&bin_dir)?;
                 let shunt_wrapper = bin_dir.join("shunt");
-                fs::write(&shunt_wrapper, "#!/bin/sh\nexec superstate shunt -- \"$@\"\n")?;
+                fs::write(
+                    &shunt_wrapper,
+                    "#!/bin/sh\nexec superstate shunt -- \"$@\"\n",
+                )?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;

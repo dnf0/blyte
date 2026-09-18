@@ -71,7 +71,10 @@ fn test_daemon_runner_injects_shunt_wrapper() {
 
     // Verify .agent-state/bin/shunt was created and is executable
     let shunt_script = dir.path().join(".agent-state/bin/shunt");
-    assert!(shunt_script.exists(), "shunt wrapper script must exist in .agent-state/bin");
+    assert!(
+        shunt_script.exists(),
+        "shunt wrapper script must exist in .agent-state/bin"
+    );
     let content = fs::read_to_string(&shunt_script).unwrap();
     assert!(
         content.contains("#!/bin/sh") && content.contains("exec superstate shunt -- \"$@\""),
@@ -110,7 +113,8 @@ fn test_daemon_runner_no_shunt_disables_injection() {
     save_state_atomic(&state_file, &state).unwrap();
 
     // Driver command verifies SUPERSTATE_SHUNT_ENABLED is empty/unset
-    let driver_cmd = "test -z \"$SUPERSTATE_SHUNT_ENABLED\" && echo 'no_shunt_ok' > no_shunt_evidence.txt";
+    let driver_cmd =
+        "test -z \"$SUPERSTATE_SHUNT_ENABLED\" && echo 'no_shunt_ok' > no_shunt_evidence.txt";
 
     let config = DaemonConfig {
         state_path: state_file,
@@ -129,5 +133,8 @@ fn test_daemon_runner_no_shunt_disables_injection() {
     assert!(outcome.is_advanced());
 
     let shunt_script = dir.path().join(".agent-state/bin/shunt");
-    assert!(!shunt_script.exists(), "shunt script must not be created when shunt_driver_output is false");
+    assert!(
+        !shunt_script.exists(),
+        "shunt script must not be created when shunt_driver_output is false"
+    );
 }
