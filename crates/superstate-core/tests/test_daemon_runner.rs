@@ -15,11 +15,13 @@ fn test_daemon_run_step_success() {
             title: "Milestone 1".to_string(),
             verify_cmd: "test -f worker-ran.txt".to_string(),
             files: vec![PathBuf::from("file1.txt")],
+            ..Default::default()
         },
         MilestoneSpec {
             title: "Milestone 2".to_string(),
             verify_cmd: "test -f worker-ran.txt".to_string(),
             files: vec![PathBuf::from("file2.txt")],
+            ..Default::default()
         },
     ];
 
@@ -59,6 +61,7 @@ fn test_daemon_run_step_verification_failure() {
         title: "Failing Milestone".to_string(),
         verify_cmd: "false".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
@@ -98,11 +101,13 @@ fn test_daemon_run_to_completion() {
             title: "Task A".to_string(),
             verify_cmd: "true".to_string(),
             files: vec![],
+            ..Default::default()
         },
         MilestoneSpec {
             title: "Task B".to_string(),
             verify_cmd: "true".to_string(),
             files: vec![],
+            ..Default::default()
         },
     ];
 
@@ -145,6 +150,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
         title: "Task Branch Alpha".to_string(),
         verify_cmd: "true".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = init_state_milestones(Some("Branch Goal"), milestones, None, true).unwrap();
@@ -197,6 +203,7 @@ fn test_daemon_step_advancer_invoked() {
         title: "Advancer Milestone".to_string(),
         verify_cmd: "test -f worker-ran.txt".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
@@ -244,6 +251,7 @@ fn test_daemon_step_advancer_error_propagation() {
         title: "Advancer Failure Milestone".to_string(),
         verify_cmd: "test -f worker-ran.txt".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     // Initialize state with in-place execution mode
@@ -291,6 +299,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
         title: "Rescue Milestone Bounded Stderr".to_string(),
         verify_cmd: format!("test -f {}", target_str),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = init_state_milestones(Some("Rescue Goal"), milestones, None, true).unwrap();
@@ -356,6 +365,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
         title: "Rescue Milestone".to_string(),
         verify_cmd: format!("test -f {}", target_str),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = init_state_milestones(Some("Rescue Goal"), milestones, None, true).unwrap();
@@ -404,6 +414,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
         title: "Failing Milestone".to_string(),
         verify_cmd: "sh -c 'echo \"syntax error in main.rs line 42\" >&2 && exit 1'".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = init_state_milestones(Some("Retry Goal"), milestones, None, true).unwrap();
@@ -499,6 +510,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
         title: "Create Feature".to_string(),
         verify_cmd: "test -f feature.txt".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     // Note: 4th arg is `no_worktree: true` -> in-place mode
@@ -558,6 +570,7 @@ fn test_progress_renews_the_retry_budget() {
         title: "Never satisfied".to_string(),
         verify_cmd: "false".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -602,6 +615,7 @@ fn test_stalled_worker_still_blocks() {
         title: "Never satisfied".to_string(),
         verify_cmd: "false".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -657,6 +671,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
         title: "Never satisfied".to_string(),
         verify_cmd: "false".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -704,6 +719,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
         title: "Never satisfied".to_string(),
         verify_cmd: "false".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -758,6 +774,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
         title: "Ungated".to_string(),
         verify_cmd: "true".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -809,6 +826,7 @@ fn test_real_gate_completes_immediately() {
         title: "Gated".to_string(),
         verify_cmd: "test -f produced.txt".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -847,6 +865,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
         title: "Ungated, no driver".to_string(),
         verify_cmd: "true".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -899,6 +918,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
                 title: "Never satisfiable".to_string(),
                 verify_cmd: "false".to_string(),
                 files: vec![],
+                ..Default::default()
             }],
             None,
             true,

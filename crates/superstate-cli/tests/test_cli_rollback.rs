@@ -181,6 +181,7 @@ fn test_cli_daemon_auto_rollback_execution() {
         title: "Test Task".to_string(),
         verify_cmd: "test -f must_exist.txt".to_string(),
         files: vec![PathBuf::from("tracked.txt")],
+        ..Default::default()
     }];
     let state = superstate_core::state_machine::init_state_milestones(
         Some("Test Goal"),
@@ -252,6 +253,7 @@ fn test_cli_daemon_auto_rollback_enabled_by_default() {
         title: "Test Task".to_string(),
         verify_cmd: "test -f must_exist.txt".to_string(),
         files: vec![PathBuf::from("tracked.txt")],
+        ..Default::default()
     }];
     let state = superstate_core::state_machine::init_state_milestones(
         Some("Test Goal"),
@@ -322,6 +324,7 @@ fn test_cli_daemon_auto_rollback_disabled_with_flag() {
         title: "Test Task".to_string(),
         verify_cmd: "test -f must_exist.txt".to_string(),
         files: vec![PathBuf::from("tracked.txt")],
+        ..Default::default()
     }];
     let state = superstate_core::state_machine::init_state_milestones(
         Some("Test Goal"),
@@ -394,6 +397,7 @@ fn test_cli_daemon_auto_rollback_disabled_via_env_var() {
         title: "Test Task".to_string(),
         verify_cmd: "test -f must_exist.txt".to_string(),
         files: vec![PathBuf::from("tracked.txt")],
+        ..Default::default()
     }];
     let state = superstate_core::state_machine::init_state_milestones(
         Some("Test Goal"),
@@ -464,6 +468,7 @@ fn test_cli_daemon_detached_forwarding() {
         title: "Test Task".to_string(),
         verify_cmd: "test -f must_exist.txt".to_string(),
         files: vec![PathBuf::from("tracked.txt")],
+        ..Default::default()
     }];
     let state = superstate_core::state_machine::init_state_milestones(
         Some("Test Goal"),

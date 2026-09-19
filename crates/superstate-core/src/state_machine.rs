@@ -150,42 +150,52 @@ pub fn init_state_milestones(
         }
     }
 
-    // Deconstruct milestones into the initial active task (task-1) and pending sequential tasks (task-2..N)
-    let mut iter = milestones.into_iter();
-    // Guard against empty iterator; safely return an error rather than panicking if empty
-    let Some(first) = iter.next() else {
-        return Err(StateError::InvalidTransition(
-            "milestones cannot be empty".to_string(),
-        ));
-    };
+    // Build tasks supporting custom id and explicit or sequential DAG dependencies
+    let mut all_tasks = Vec::with_capacity(milestones.len());
+    let mut prev_id = String::new();
 
-    let task_1 = TaskSpec {
-        id: "task-1".to_string(),
-        title: first.title,
-        depends_on: Vec::new(),
-        files_modify: first.files,
-        verification_cmd: Some(first.verify_cmd),
-    };
+    for (idx, m) in milestones.into_iter().enumerate() {
+        let task_id = m.id.unwrap_or_else(|| format!("task-{}", idx + 1));
+        let depends_on = match m.depends_on {
+            Some(deps) => deps,
+            None => {
+                if idx == 0 {
+                    Vec::new()
+                } else {
+                    vec![prev_id.clone()]
+                }
+            }
+        };
+        prev_id = task_id.clone();
 
-    // Build subsequent tasks in the DAG, each chained to depend on the previous task ID
-    let mut pending_tasks = Vec::new();
-    for (i, milestone) in iter.enumerate() {
-        let current_task_num = i + 2;
-        let prev_task_num = i + 1;
-        pending_tasks.push(TaskSpec {
-            id: format!("task-{}", current_task_num),
-            title: milestone.title,
-            depends_on: vec![format!("task-{}", prev_task_num)],
-            files_modify: milestone.files,
-            verification_cmd: Some(milestone.verify_cmd),
+        all_tasks.push(TaskSpec {
+            id: task_id,
+            title: m.title,
+            depends_on,
+            files_modify: m.files,
+            verification_cmd: Some(m.verify_cmd),
         });
     }
+
+    // Select the first task whose dependencies are satisfied (or first task if independent)
+    let completed: Vec<&str> = Vec::new();
+    let active_idx = all_tasks
+        .iter()
+        .position(|task| {
+            task.depends_on
+                .iter()
+                .all(|dep| is_dependency_satisfied(dep, &completed))
+        })
+        .unwrap_or(0);
+
+    let active_task = Some(all_tasks.remove(active_idx));
+    let pending_tasks = all_tasks;
 
     // Assemble initial ExecutionState at step 1 in progress with configured base branch
     Ok(ExecutionState {
         status: ExecutionStatus::InProgress,
         step: 1,
-        active_task: Some(task_1),
+        active_task,
         pending_tasks,
         completed_tasks: Vec::new(),
         modified_files: Vec::new(),
@@ -236,16 +246,26 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
                 task.depends_on
                     .iter()
                     .all(|dep| is_dependency_satisfied(dep, &completed))
-            })
-            .unwrap_or(0);
+            });
 
-        // Reset active worktree and branch tracking for intermediate tasks to ensure
-        // subsequent sequential milestones provision their own clean workspaces
-        state.active_worktree = None;
-        state.active_branch = None;
-        state.active_task = Some(state.pending_tasks.remove(next_idx));
-        state.step += 1;
-        state.status = ExecutionStatus::InProgress;
+        match next_idx {
+            Some(idx) => {
+                // Reset active worktree and branch tracking for intermediate tasks to ensure
+                // subsequent sequential milestones provision their own clean workspaces
+                state.active_worktree = None;
+                state.active_branch = None;
+                state.active_task = Some(state.pending_tasks.remove(idx));
+                state.step += 1;
+                state.status = ExecutionStatus::InProgress;
+            }
+            None => {
+                state.active_task = None;
+                state.status = ExecutionStatus::Blocked;
+                return Err(StateError::InvalidTransition(
+                    "Cannot advance: pending tasks exist but none have satisfied dependencies".to_string(),
+                ));
+            }
+        }
     } else {
         // Milestone DAG completed: preserve active_worktree and active_branch intact
         // so that the daemon completion lifecycle can execute auto-merge and workspace cleanup
