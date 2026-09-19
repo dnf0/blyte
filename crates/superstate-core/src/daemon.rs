@@ -1,3 +1,4 @@
+use crate::impact::{build_sliced_test_cmd, infer_impacted_tests};
 use crate::models::{ExecutionState, ExecutionStatus, LedgerEntry};
 use crate::prompt::{format_retry_failure_section, render_turnkey_prompt, resolve_project_root};
 use crate::state_machine::{
@@ -12,6 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 use thiserror::Error;
 
 /// Closure callback hook for pluggable step advancement across workspace and worktree lifecycles.
@@ -750,6 +752,84 @@ impl DaemonRunner {
                     ),
                 ));
                 save_state_atomic(&self.config.state_path, &state)?;
+            }
+        }
+
+        // Stage 1: Milestone-Scoped Test Impact Slicing (Fast-Fail Pre-Filter)
+        // Check impacted test suite before running full verification gate to ensure fast feedback.
+        if self.config.impact_slicing && is_inside_git_repo(&working_dir) {
+            let start_commit = self.milestone_start_commits.get(&active_task.id);
+            let impacted = infer_impacted_tests(&working_dir, start_commit.map(|s| s.as_str()));
+            if !impacted.is_empty() {
+                if let Some(sliced_cmd) = build_sliced_test_cmd(verify_cmd, &impacted, &working_dir) {
+                    let slice_start = Instant::now();
+                    let slice_res = run_verification_cmd(&sliced_cmd, &working_dir, self.config.timeout_secs)?;
+                    let slice_elapsed = slice_start.elapsed().as_secs();
+
+                    if !slice_res.passed {
+                        // Extract diagnostic failure excerpt from slice output
+                        let failure_output = if !slice_res.output.trim().is_empty() {
+                            slice_res.output.trim()
+                        } else if let Some(ref reason) = slice_res.failure_reason {
+                            reason.trim()
+                        } else {
+                            "Unknown slice test failure"
+                        };
+                        let bounded_diag = failure_output.chars().take(1000).collect::<String>();
+
+                        // Record fast-fail diagnostics into state notes
+                        state.notes.push(LedgerEntry::new(
+                            "superstate-daemon",
+                            format!(
+                                "[impact-fail] Task {}: Fast test slice failed in {}s: {}",
+                                active_task.id, slice_elapsed, bounded_diag
+                            ),
+                        ));
+                        save_state_atomic(&self.config.state_path, &state)?;
+
+                        // Update attempt counter and failure diagnostics for subsequent retry
+                        let attempts = self
+                            .total_attempts
+                            .entry(active_task.id.clone())
+                            .or_insert(0);
+                        *attempts += 1;
+                        let attempts_spent = *attempts;
+
+                        // Perform rollback to milestone baseline when auto_rollback is enabled
+                        if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
+                            self.perform_rollback(
+                                &active_task.id,
+                                attempts_spent,
+                                &working_dir,
+                                &mut state,
+                            )?;
+                        }
+
+                        self.last_failure_output
+                            .insert(active_task.id.clone(), bounded_diag.clone());
+
+                        let retries_remaining = self
+                            .config
+                            .max_retries
+                            .saturating_sub(attempts_spent);
+
+                        return Ok(DaemonStepOutcome::Failed {
+                            task_id: active_task.id,
+                            reason: format!("Fast test slice failed: {}", bounded_diag),
+                            retries_remaining,
+                        });
+                    } else {
+                        // Record passing slice progress before executing full gate
+                        state.notes.push(LedgerEntry::new(
+                            "superstate-daemon",
+                            format!(
+                                "[impact-pass] Task {}: Fast slice passed ({} test files) in {}s, advancing to full gate",
+                                active_task.id, impacted.len(), slice_elapsed
+                            ),
+                        ));
+                        save_state_atomic(&self.config.state_path, &state)?;
+                    }
+                }
             }
         }
 
