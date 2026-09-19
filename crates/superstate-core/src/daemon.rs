@@ -969,17 +969,41 @@ impl DaemonRunner {
                     next_task_id,
                 })
             } else {
-                advance_step(&mut state)?;
-                save_state_atomic(&self.config.state_path, &state)?;
+                // In-process advancement evaluates dependency satisfaction across pending milestones.
+                // If remaining tasks have unresolved or cyclical dependencies, transition to Blocked
+                // rather than failing unrecoverably, recording a ledger entry for epistemic tracking.
+                match advance_step(&mut state) {
+                    Ok(()) => {
+                        save_state_atomic(&self.config.state_path, &state)?;
 
-                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
-                if state.status == ExecutionStatus::Completed {
-                    finalize_completed_execution(&self.config.state_path, &state)?;
+                        let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                        if state.status == ExecutionStatus::Completed {
+                            finalize_completed_execution(&self.config.state_path, &state)?;
+                        }
+                        Ok(DaemonStepOutcome::Advanced {
+                            completed_task_id: active_task.id,
+                            next_task_id,
+                        })
+                    }
+                    Err(StateError::InvalidTransition(msg)) => {
+                        // Guard against DAG deadlock: milestone completed successfully, but remaining
+                        // pending tasks cannot advance due to missing or cyclical dependencies.
+                        state.status = ExecutionStatus::Blocked;
+                        state.notes.push(LedgerEntry::new(
+                            "superstate-daemon",
+                            format!(
+                                "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
+                                active_task.id, msg
+                            ),
+                        ));
+                        save_state_atomic(&self.config.state_path, &state)?;
+                        Ok(DaemonStepOutcome::Blocked {
+                            task_id: active_task.id,
+                            reason: msg,
+                        })
+                    }
+                    Err(e) => Err(DaemonError::State(e)),
                 }
-                Ok(DaemonStepOutcome::Advanced {
-                    completed_task_id: active_task.id,
-                    next_task_id,
-                })
             }
         } else {
             // Verification gate failed: record failure diagnostics and update retry budget.
