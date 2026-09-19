@@ -454,6 +454,11 @@ impl DaemonRunner {
     /// # Returns
     /// An initialized `DaemonRunner` with empty retry tracking and no custom step advancer.
     pub fn new(config: DaemonConfig) -> Result<Self, DaemonError> {
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+
         Ok(Self {
             config,
             retry_counts: HashMap::new(),
@@ -1079,10 +1084,7 @@ impl DaemonRunner {
                 ),
             ));
 
-            if self.config.auto_rollback
-                && is_inside_git_repo(&working_dir)
-                && attempts_so_far < attempt_ceiling
-            {
+            if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
                 self.perform_rollback(&active_task.id, attempts_spent, &working_dir, &mut state)?;
             }
 

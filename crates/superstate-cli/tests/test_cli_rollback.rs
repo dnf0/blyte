@@ -207,6 +207,8 @@ fn test_cli_daemon_auto_rollback_execution() {
             "--auto-rollback",
         ])
         .current_dir(repo)
+        .env_remove("SUPERSTATE_DAEMON_AUTO_ROLLBACK")
+        .env_remove("SUPERSTATE_AUTO_ROLLBACK")
         .output()
         .expect("run state daemon with --auto-rollback");
 
@@ -496,6 +498,7 @@ fn test_cli_daemon_detached_forwarding() {
             "--detach",
         ])
         .current_dir(repo)
+        .env_remove("SUPERSTATE_DAEMON_AUTO_ROLLBACK")
         .env_remove("SUPERSTATE_AUTO_ROLLBACK")
         .output()
         .expect("run state daemon detached with --auto-rollback");
