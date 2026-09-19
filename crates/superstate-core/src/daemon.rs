@@ -949,7 +949,7 @@ impl DaemonRunner {
                             active_task.id, active_task.title
                         );
                         let _ = Command::new("git")
-                            .args(["commit", "-m", &commit_msg])
+                            .args(["commit", "--no-gpg-sign", "-m", &commit_msg])
                             .current_dir(&working_dir)
                             .output();
                     }
