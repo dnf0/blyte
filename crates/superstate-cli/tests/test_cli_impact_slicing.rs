@@ -7,7 +7,10 @@ fn test_cli_impact_slicing_flag_parsing() {
         .expect("Failed to parse --impact-slicing flag");
     match args.command {
         Subcommands::Daemon(daemon_args) => {
-            assert!(daemon_args.impact_slicing, "Expected impact_slicing to be true");
+            assert!(
+                daemon_args.impact_slicing,
+                "Expected impact_slicing to be true"
+            );
         }
         _ => panic!("Expected Subcommands::Daemon"),
     }
@@ -15,11 +18,13 @@ fn test_cli_impact_slicing_flag_parsing() {
 
 #[test]
 fn test_cli_impact_slicing_flag_default_false() {
-    let args = StateArgs::try_parse_from(["state", "daemon"])
-        .expect("Failed to parse daemon args");
+    let args = StateArgs::try_parse_from(["state", "daemon"]).expect("Failed to parse daemon args");
     match args.command {
         Commands::Daemon(daemon_args) => {
-            assert!(!daemon_args.impact_slicing, "Expected impact_slicing to default to false");
+            assert!(
+                !daemon_args.impact_slicing,
+                "Expected impact_slicing to default to false"
+            );
         }
         _ => panic!("Expected Commands::Daemon"),
     }

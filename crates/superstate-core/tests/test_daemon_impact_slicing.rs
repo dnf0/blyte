@@ -467,8 +467,14 @@ fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
 
     // Both [impact-fail] and [rollback] notes should be in state notes
     let updated_state = load_state(&state_path).expect("load state");
-    assert!(updated_state.notes.iter().any(|n| n.note.contains("[impact-fail]")));
-    assert!(updated_state.notes.iter().any(|n| n.note.contains("[rollback]")));
+    assert!(updated_state
+        .notes
+        .iter()
+        .any(|n| n.note.contains("[impact-fail]")));
+    assert!(updated_state
+        .notes
+        .iter()
+        .any(|n| n.note.contains("[rollback]")));
 }
 
 #[test]
@@ -642,6 +648,3 @@ fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
         updated_state.notes
     );
 }
-
-
-

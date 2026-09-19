@@ -761,9 +761,11 @@ impl DaemonRunner {
             let start_commit = self.milestone_start_commits.get(&active_task.id);
             let impacted = infer_impacted_tests(&working_dir, start_commit.map(|s| s.as_str()));
             if !impacted.is_empty() {
-                if let Some(sliced_cmd) = build_sliced_test_cmd(verify_cmd, &impacted, &working_dir) {
+                if let Some(sliced_cmd) = build_sliced_test_cmd(verify_cmd, &impacted, &working_dir)
+                {
                     let slice_start = Instant::now();
-                    let slice_res = run_verification_cmd(&sliced_cmd, &working_dir, self.config.timeout_secs)?;
+                    let slice_res =
+                        run_verification_cmd(&sliced_cmd, &working_dir, self.config.timeout_secs)?;
                     let slice_elapsed = slice_start.elapsed().as_secs();
 
                     if !slice_res.passed {
@@ -808,10 +810,8 @@ impl DaemonRunner {
                         self.last_failure_output
                             .insert(active_task.id.clone(), bounded_diag.clone());
 
-                        let retries_remaining = self
-                            .config
-                            .max_retries
-                            .saturating_sub(attempts_spent);
+                        let retries_remaining =
+                            self.config.max_retries.saturating_sub(attempts_spent);
 
                         if retries_remaining == 0 {
                             if self.config.advisory_gate {
@@ -828,11 +828,16 @@ impl DaemonRunner {
 
                                 if let Some(ref mut advancer) = self.step_advancer {
                                     save_state_atomic(&self.config.state_path, &state)?;
-                                    advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
+                                    advancer(&self.config.state_path)
+                                        .map_err(DaemonError::StepAdvancer)?;
                                     let updated_state = load_state(&self.config.state_path)?;
-                                    let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
+                                    let next_task_id =
+                                        updated_state.active_task.as_ref().map(|t| t.id.clone());
                                     if updated_state.status == ExecutionStatus::Completed {
-                                        finalize_completed_execution(&self.config.state_path, &updated_state)?;
+                                        finalize_completed_execution(
+                                            &self.config.state_path,
+                                            &updated_state,
+                                        )?;
                                     }
                                     return Ok(DaemonStepOutcome::Advanced {
                                         completed_task_id: active_task.id,
@@ -842,9 +847,13 @@ impl DaemonRunner {
                                 match advance_step(&mut state) {
                                     Ok(()) => {
                                         save_state_atomic(&self.config.state_path, &state)?;
-                                        let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                                        let next_task_id =
+                                            state.active_task.as_ref().map(|t| t.id.clone());
                                         if state.status == ExecutionStatus::Completed {
-                                            finalize_completed_execution(&self.config.state_path, &state)?;
+                                            finalize_completed_execution(
+                                                &self.config.state_path,
+                                                &state,
+                                            )?;
                                         }
                                         return Ok(DaemonStepOutcome::Advanced {
                                             completed_task_id: active_task.id,
