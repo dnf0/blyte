@@ -1,34 +1,75 @@
-# Task 1 Brief: Milestone Diff Extraction in `crates/superstate-review`
+# Task 1 Brief: Model Enhancements & State Machine DAG Advancement
 
-## Context
-Working directory: `/Users/danielfisher/repos/superstate`
-Branch: `feat/blocking-code-review`
-Plan: `docs/superpowers/plans/2026-09-17-advisory-review-diff-and-blocking.md`
+## Working Directory
+`/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-dag-execution`
+Branch: `feat/daemon-dag-execution`
 
-## What to Implement
-Implement `get_milestone_diff` in `crates/superstate-review/src/diff.rs` and export it in `crates/superstate-review/src/lib.rs`.
+## Goal
+Extend `MilestoneSpec` in `crates/superstate-core/src/models.rs` to support optional explicit `id` and `depends_on`.
+Upgrade `advance_step` and `init_state_milestones` in `crates/superstate-core/src/state_machine.rs` to resolve arbitrary DAGs, eliminate the blind `.unwrap_or(0)` fallback, and fail-closed with `ExecutionStatus::Blocked` when remaining pending tasks are deadlocked.
 
-Function signature:
+## Global Constraints
+- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
+- No new external crate dependencies.
+- Zero network I/O or direct API keys in Rust binary.
+- Use `--no-gpg-sign` for git commits.
+- Follow strict Test-Driven Development (TDD).
+
+## Requirements
+
+### 1. `crates/superstate-core/src/models.rs`
+Update `MilestoneSpec`:
 ```rust
-pub fn get_milestone_diff(repo_root: &Path, start_commit: Option<&str>) -> Result<String, DiffError>
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MilestoneSpec {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub title: String,
+    pub verify_cmd: String,
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    #[serde(default)]
+    pub files: Vec<PathBuf>,
+}
 ```
 
-Behavior:
-1. Determine `head_hash` via `git rev-parse HEAD`. If that fails (e.g. freshly initialized empty repo), fall back to `get_git_diff(repo_root, None)`.
-2. If `start_commit` is provided:
-   - Trim whitespace. If non-empty and `start != head_hash`, execute `git diff <start>..HEAD` to capture all commits made on the branch.
-3. Next, check if there are any working tree changes (uncommitted or untracked) by running `get_git_diff(repo_root, Some("HEAD"))`. If non-empty, append to the diff string.
-4. If `start_commit` is `None` and the combined diff is still empty, check if `HEAD~1` exists (`git rev-parse --verify HEAD~1`). If it exists, return `get_git_diff(repo_root, Some("HEAD~1..HEAD"))`.
-5. Return `Ok(combined_diff)`.
+### 2. `crates/superstate-core/src/state_machine.rs`
+#### `init_state_milestones`
+- Support custom `id`: `m.id.clone().unwrap_or_else(|| format!("task-{}", idx + 1))`.
+- Support custom `depends_on`:
+  - If `Some(deps)`, use `deps`.
+  - If `None`, if `idx == 0`, `vec![]`; if `idx > 0`, `vec![prev_id]`.
+- Build the task list. The first task whose `depends_on` are satisfied (or first task if independent) becomes `active_task`. The rest go into `pending_tasks`.
 
-## TDD Instructions
-1. Write failing tests in `crates/superstate-review/tests/test_milestone_diff.rs` covering:
-   - Committed changes only (working tree clean) with `Some(initial_hash)` -> returns committed diff.
-   - Uncommitted changes only with `Some(initial_hash)` -> returns uncommitted diff.
-   - Committed changes AND untracked new files with `Some(initial_hash)` -> returns both!
-   - Clean working tree with `None` when `HEAD~1` exists -> returns `HEAD~1..HEAD` diff.
-2. Run `cargo test -p superstate-review --test test_milestone_diff` and verify RED failure.
-3. Implement `get_milestone_diff` in `crates/superstate-review/src/diff.rs` and export in `src/lib.rs`.
-4. Run `cargo test -p superstate-review` and verify all tests pass GREEN.
-5. Commit with `git commit --no-gpg-sign -m "feat(review): implement get_milestone_diff with committed and uncommitted change tracking"`.
-6. Write full report to `docs/superpowers/plans/task-1-report.md`.
+#### `advance_step`
+- When `state.active_task` is taken, push to `state.completed_tasks`.
+- If `!state.pending_tasks.is_empty()`:
+  - Search `pending_tasks.iter().position(|t| t.depends_on.iter().all(|dep| is_dependency_satisfied(dep, &completed)))`.
+  - If `Some(idx)`:
+    - `state.active_worktree = None;`
+    - `state.active_branch = None;`
+    - `state.active_task = Some(state.pending_tasks.remove(idx));`
+    - `state.step += 1;`
+    - `state.status = ExecutionStatus::InProgress;`
+  - If `None`:
+    - `state.active_task = None;`
+    - `state.status = ExecutionStatus::Blocked;`
+    - Return `Err(StateError::InvalidTransition("Cannot advance: pending tasks exist but none have satisfied dependencies".to_string()))`.
+- If `state.pending_tasks.is_empty()`:
+  - `state.active_task = None;`
+  - `state.status = ExecutionStatus::Completed;`
+
+### 3. Integration Tests
+Write tests in `crates/superstate-core/tests/test_state_machine_dag.rs`:
+- `test_init_state_milestones_with_custom_dag_dependencies`
+- `test_advance_step_resolves_diamond_dag_topologically`
+- `test_advance_step_deadlock_halts_with_blocked_status`
+
+## Verification
+- `cargo test -p superstate-core --test test_state_machine_dag`
+- `cargo test -p superstate-core`
+- `cargo check --all`
+
+## Completion
+- Commit with: `git commit --no-gpg-sign -m "feat(core): implement DAG milestone resolution and deadlock detection in advance_step"`
+- Write detailed report to `docs/superpowers/plans/task-1-report.md`.
