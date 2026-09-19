@@ -180,6 +180,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
             false,
             false,
             true,
+            false,
         )
     } else if args.json {
         let active_task_str = state

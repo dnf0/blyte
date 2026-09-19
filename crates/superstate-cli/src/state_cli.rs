@@ -111,7 +111,7 @@ impl Default for ShowArgs {
     }
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum StateCommands {
     /// Initialize state from plan markdown or direct goal
     Init(InitArgs),
@@ -272,6 +272,22 @@ pub enum StateCommands {
     Handoff(HandoffArgs),
 }
 
+/// Type alias for `StateCommands` providing naming symmetry with standard CLI subcommand enums.
+pub type Subcommands = StateCommands;
+/// Type alias for `StateCommands` providing naming symmetry with standard CLI commands enums.
+pub type Commands = StateCommands;
+
+/// Arguments parser for `state` CLI invocations.
+#[derive(clap::Parser, Debug, Clone)]
+#[command(
+    name = "state",
+    about = "Deterministic state machine operations for agent execution"
+)]
+pub struct StateArgs {
+    #[command(subcommand)]
+    pub command: StateCommands,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum DaemonSubcommands {
     /// List active and managed daemon processes
@@ -328,6 +344,12 @@ pub struct DaemonArgs {
         help = "Disable automatic tool output shunting during driver execution"
     )]
     pub no_shunt: bool,
+    /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
+    #[arg(
+        long,
+        help = "Enable milestone-scoped test impact slicing for fast fail-fast feedback"
+    )]
+    pub impact_slicing: bool,
 }
 
 impl DaemonArgs {
@@ -575,6 +597,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     args.review_blocking,
                     auto_rollback,
                     shunt_driver_output,
+                    args.impact_slicing,
                 )
             }
         },

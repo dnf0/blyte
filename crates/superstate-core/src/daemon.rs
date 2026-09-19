@@ -189,6 +189,9 @@ pub struct DaemonConfig {
     /// Automatically enable tool output shunting during driver worker execution
     #[serde(default = "default_true")]
     pub shunt_driver_output: bool,
+    /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
+    #[serde(default)]
+    pub impact_slicing: bool,
 }
 
 impl Default for DaemonConfig {
@@ -203,6 +206,7 @@ impl Default for DaemonConfig {
             review_blocking: false,
             auto_rollback: true,
             shunt_driver_output: true,
+            impact_slicing: false,
         }
     }
 }
