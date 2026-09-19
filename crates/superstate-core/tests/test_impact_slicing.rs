@@ -89,3 +89,61 @@ fn test_build_sliced_test_cmd_go_package() {
     let res = build_sliced_test_cmd("go test ./...", &files, repo);
     assert_eq!(res, Some("go test ./pkg/server".to_string()));
 }
+
+#[test]
+fn test_build_sliced_test_cmd_preserves_flags() {
+    let repo = Path::new("/workspace");
+
+    // Pytest preserves -v -s -k "test_foo" while dropping directory tests/
+    let py_files = vec![PathBuf::from("/workspace/tests/test_auth.py")];
+    let res_py = build_sliced_test_cmd("pytest -v -s -k test_foo tests/", &py_files, repo);
+    assert_eq!(
+        res_py,
+        Some("pytest -v -s -k test_foo tests/test_auth.py".to_string())
+    );
+
+    // Cargo preserves --features all --release while replacing with --test
+    let rs_files = vec![PathBuf::from("/workspace/tests/test_lexer.rs")];
+    let res_cargo = build_sliced_test_cmd("cargo test --features all --release", &rs_files, repo);
+    assert_eq!(
+        res_cargo,
+        Some("cargo test --features all --release --test test_lexer".to_string())
+    );
+
+    // Go preserves -v -race while replacing ./... with package dir
+    let go_files = vec![PathBuf::from("/workspace/pkg/server/server_test.go")];
+    let res_go = build_sliced_test_cmd("go test -v -race ./...", &go_files, repo);
+    assert_eq!(res_go, Some("go test -v -race ./pkg/server".to_string()));
+
+    // Vitest preserves --run -t "suite"
+    let ts_files = vec![PathBuf::from("/workspace/tests/auth.test.ts")];
+    let res_vitest = build_sliced_test_cmd("npx vitest run --coverage tests/", &ts_files, repo);
+    assert_eq!(
+        res_vitest,
+        Some("npx vitest run --coverage tests/auth.test.ts".to_string())
+    );
+}
+
+#[test]
+fn test_build_sliced_test_cmd_stops_at_shell_chaining_operators() {
+    let repo = Path::new("/workspace");
+
+    let py_files = vec![PathBuf::from("/workspace/tests/test_auth.py")];
+    let res = build_sliced_test_cmd(
+        "pytest -v tests/ && touch full_gate_ran.txt && exit 0",
+        &py_files,
+        repo,
+    );
+    assert_eq!(res, Some("pytest -v tests/test_auth.py".to_string()));
+
+    let rs_files = vec![PathBuf::from("/workspace/tests/test_lexer.rs")];
+    let res_cargo = build_sliced_test_cmd(
+        "cargo test --features all tests/ ; echo done",
+        &rs_files,
+        repo,
+    );
+    assert_eq!(
+        res_cargo,
+        Some("cargo test --features all --test test_lexer".to_string())
+    );
+}

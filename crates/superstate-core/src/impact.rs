@@ -295,9 +295,9 @@ fn collect_candidates_for_source(repo_root: &Path, rel_path: &Path, tests: &mut 
 pub fn infer_impacted_tests(repo_root: &Path, base_branch: Option<&str>) -> Vec<PathBuf> {
     let base = base_branch.unwrap_or("main");
 
-    // Execute git diff to retrieve modified file names
+    // Execute git diff to retrieve modified file names without octal-escaping non-ASCII paths
     let output = match Command::new("git")
-        .args(["diff", "--name-only", base])
+        .args(["-c", "core.quotepath=off", "diff", "--name-only", base])
         .current_dir(repo_root)
         .output()
     {
@@ -362,21 +362,61 @@ fn is_word_boundary_match(s: &str, idx: usize, word_len: usize) -> bool {
         || bytes[after_idx] == b'\n';
     before_ok && after_ok
 }
+/// Splits a shell command string into discrete argument tokens respecting single and double quotes.
+fn split_cmd_tokens(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
 
-/// Specialize a base verification command to execute only the impacted test files.
+    for c in s.chars() {
+        if escape {
+            current.push(c);
+            escape = false;
+        } else if c == '\\' {
+            escape = true;
+        } else if c == '\'' && !in_double {
+            in_single = !in_single;
+        } else if c == '"' && !in_single {
+            in_double = !in_double;
+        } else if c.is_whitespace() && !in_single && !in_double {
+            if !current.is_empty() {
+                tokens.push(current);
+                current = String::new();
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Formats and deduplicates relative file paths from repository root.
+fn format_rel_paths(files: &[PathBuf], repo_root: &Path) -> Vec<String> {
+    let mut rel_paths: Vec<String> = files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(repo_root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    rel_paths.sort();
+    rel_paths.dedup();
+    rel_paths
+}
+
+/// Constructs a specialized, targeted test execution command for the detected test runner,
+/// focusing execution solely on the provided impacted test files while preserving flags.
 ///
-/// Inspects the base command to recognize common test runners:
-/// - Pytest: `pytest`, `python -m pytest`, or prefixed commands like `./run-in-container pytest`
-/// - Cargo: `cargo test`
-/// - Go: `go test`
-/// - Node/Vitest/Jest: `npm test`, `npx vitest`, `yarn test`, `pnpm test`, `jest`
-///
-/// When a recognized runner is identified, the command is specialized by targeting
-/// the impacted test files directly, replacing generic test directory arguments.
-///
-/// # Parameters
-/// - `base_cmd`: The raw base verification command string (e.g. `pytest tests/`).
-/// - `impacted_files`: Slice of test file paths discovered by impact analysis.
+/// # Arguments
+/// - `base_cmd`: The full milestone verification command string (e.g. `pytest`, `cargo test`).
+/// - `impacted_files`: Slice of absolute paths to test files impacted by changes.
 /// - `repo_root`: The base repository directory against which relative paths are formed.
 ///
 /// # Returns
@@ -398,21 +438,35 @@ pub fn build_sliced_test_cmd(
     if let Some(prefix_idx) = trimmed.find("pytest") {
         if is_word_boundary_match(trimmed, prefix_idx, "pytest".len()) {
             let prefix = trimmed[..prefix_idx + "pytest".len()].trim();
-            // Format relative paths from repo_root for clean test invocations
-            let mut rel_paths: Vec<String> = impacted_files
-                .iter()
-                .map(|p| {
-                    p.strip_prefix(repo_root)
-                        .unwrap_or(p)
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect();
-            rel_paths.sort();
-            rel_paths.dedup();
+            let suffix = trimmed[prefix_idx + "pytest".len()..].trim();
+            let tokens = split_cmd_tokens(suffix);
 
+            // Filter out directory targets or specific test file paths from the original command
+            let mut kept_flags = Vec::new();
+            for t in tokens {
+                if t == "&&" || t == "||" || t == ";" || t == "|" || t == "&" {
+                    break;
+                }
+                let is_path_target = t.ends_with(".py")
+                    || t == "tests"
+                    || t == "tests/"
+                    || t.starts_with("tests/")
+                    || t == "test"
+                    || t == "test/"
+                    || t.starts_with("test/");
+                if !is_path_target {
+                    kept_flags.push(t);
+                }
+            }
+
+            let rel_paths = format_rel_paths(impacted_files, repo_root);
             if !rel_paths.is_empty() {
-                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
+                let mut parts = vec![prefix.to_string()];
+                if !kept_flags.is_empty() {
+                    parts.push(kept_flags.join(" "));
+                }
+                parts.push(rel_paths.join(" "));
+                return Some(parts.join(" "));
             }
         }
     }
@@ -421,8 +475,41 @@ pub fn build_sliced_test_cmd(
     if let Some(idx) = trimmed.find("cargo test") {
         if is_word_boundary_match(trimmed, idx, "cargo test".len()) {
             let prefix = trimmed[..idx + "cargo test".len()].trim();
+            let suffix = trimmed[idx + "cargo test".len()..].trim();
+            let tokens = split_cmd_tokens(suffix);
+
+            let mut kept_flags = Vec::new();
+            let mut skip_next = false;
+            let mut prev_token_takes_value = false;
+            for t in tokens {
+                if t == "&&" || t == "||" || t == ";" || t == "|" || t == "&" {
+                    break;
+                }
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if t == "--test" || t == "--bench" {
+                    skip_next = true;
+                    continue;
+                }
+                if t.starts_with("--test=") || t.starts_with("--bench=") {
+                    continue;
+                }
+                if !t.starts_with('-') && !prev_token_takes_value {
+                    // Positional target or filter stem: drop it
+                    continue;
+                }
+                prev_token_takes_value = t == "--features"
+                    || t == "-p"
+                    || t == "--package"
+                    || t == "--bin"
+                    || t == "--example"
+                    || t == "--target";
+                kept_flags.push(t);
+            }
+
             let mut test_args = Vec::new();
-            // Inspect each file to build appropriate --test flags or test filters
             for file in impacted_files {
                 let rel = file.strip_prefix(repo_root).unwrap_or(file);
                 if let Some(parent) = rel.parent() {
@@ -441,7 +528,12 @@ pub fn build_sliced_test_cmd(
             test_args.dedup();
 
             if !test_args.is_empty() {
-                return Some(format!("{} {}", prefix, test_args.join(" ")));
+                let mut parts = vec![prefix.to_string()];
+                if !kept_flags.is_empty() {
+                    parts.push(kept_flags.join(" "));
+                }
+                parts.push(test_args.join(" "));
+                return Some(parts.join(" "));
             }
         }
     }
@@ -450,8 +542,26 @@ pub fn build_sliced_test_cmd(
     if let Some(idx) = trimmed.find("go test") {
         if is_word_boundary_match(trimmed, idx, "go test".len()) {
             let prefix = trimmed[..idx + "go test".len()].trim();
+            let suffix = trimmed[idx + "go test".len()..].trim();
+            let tokens = split_cmd_tokens(suffix);
+
+            let mut kept_flags = Vec::new();
+            for t in tokens {
+                if t == "&&" || t == "||" || t == ";" || t == "|" || t == "&" {
+                    break;
+                }
+                let is_pkg_target = t == "./..."
+                    || t == "..."
+                    || t == "."
+                    || t == "./"
+                    || t.ends_with("/...")
+                    || (t.starts_with("./") && !t.starts_with("-"));
+                if !is_pkg_target {
+                    kept_flags.push(t);
+                }
+            }
+
             let mut pkgs = Vec::new();
-            // Translate impacted files to their enclosing Go package directories
             for file in impacted_files {
                 let rel = file.strip_prefix(repo_root).unwrap_or(file);
                 let parent = rel.parent().unwrap_or(Path::new(""));
@@ -468,59 +578,70 @@ pub fn build_sliced_test_cmd(
             pkgs.dedup();
 
             if !pkgs.is_empty() {
-                return Some(format!("{} {}", prefix, pkgs.join(" ")));
+                let mut parts = vec![prefix.to_string()];
+                if !kept_flags.is_empty() {
+                    parts.push(kept_flags.join(" "));
+                }
+                parts.push(pkgs.join(" "));
+                return Some(parts.join(" "));
             }
         }
     }
 
     // 4. Node / Vitest / Jest detection
-    let mut rel_paths: Vec<String> = impacted_files
-        .iter()
-        .map(|p| {
-            p.strip_prefix(repo_root)
-                .unwrap_or(p)
-                .to_string_lossy()
-                .to_string()
-        })
-        .collect();
-    rel_paths.sort();
-    rel_paths.dedup();
-
+    let rel_paths = format_rel_paths(impacted_files, repo_root);
     if !rel_paths.is_empty() {
-        if let Some(idx) = trimmed.find("npm test") {
-            if is_word_boundary_match(trimmed, idx, "npm test".len()) {
-                let prefix = trimmed[..idx + "npm test".len()].trim();
-                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
-            }
-        }
-        if let Some(idx) = trimmed.find("pnpm test") {
-            if is_word_boundary_match(trimmed, idx, "pnpm test".len()) {
-                let prefix = trimmed[..idx + "pnpm test".len()].trim();
-                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
-            }
-        }
-        if let Some(idx) = trimmed.find("yarn test") {
-            if is_word_boundary_match(trimmed, idx, "yarn test".len()) {
-                let prefix = trimmed[..idx + "yarn test".len()].trim();
-                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-            }
-        }
-        if let Some(idx) = trimmed.find("vitest run") {
-            if is_word_boundary_match(trimmed, idx, "vitest run".len()) {
-                let prefix = trimmed[..idx + "vitest run".len()].trim();
-                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-            }
-        }
-        if let Some(idx) = trimmed.find("vitest") {
-            if is_word_boundary_match(trimmed, idx, "vitest".len()) {
-                let prefix = trimmed[..idx + "vitest".len()].trim();
-                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-            }
-        }
-        if let Some(idx) = trimmed.find("jest") {
-            if is_word_boundary_match(trimmed, idx, "jest".len()) {
-                let prefix = trimmed[..idx + "jest".len()].trim();
-                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
+        for (pattern, use_double_dash) in [
+            ("npm test", true),
+            ("pnpm test", true),
+            ("yarn test", false),
+            ("vitest run", false),
+            ("vitest", false),
+            ("jest", false),
+        ] {
+            if let Some(idx) = trimmed.find(pattern) {
+                if is_word_boundary_match(trimmed, idx, pattern.len()) {
+                    let prefix = trimmed[..idx + pattern.len()].trim();
+                    let suffix = trimmed[idx + pattern.len()..].trim();
+                    let tokens = split_cmd_tokens(suffix);
+
+                    let mut kept_flags = Vec::new();
+                    for t in tokens {
+                        if t == "&&" || t == "||" || t == ";" || t == "|" || t == "&" {
+                            break;
+                        }
+                        if t == "--" {
+                            continue;
+                        }
+                        let is_target = t.ends_with(".js")
+                            || t.ends_with(".ts")
+                            || t.ends_with(".jsx")
+                            || t.ends_with(".tsx")
+                            || t == "tests"
+                            || t == "tests/"
+                            || t.starts_with("tests/")
+                            || t == "test"
+                            || t == "test/"
+                            || t.starts_with("test/");
+                        if !is_target {
+                            kept_flags.push(t);
+                        }
+                    }
+
+                    let mut parts = vec![prefix.to_string()];
+                    if use_double_dash {
+                        if !kept_flags.is_empty() {
+                            parts.push(kept_flags.join(" "));
+                        }
+                        parts.push(format!("-- {}", rel_paths.join(" ")));
+                    } else {
+                        if !kept_flags.is_empty() {
+                            parts.push(kept_flags.join(" "));
+                        }
+                        parts.push(rel_paths.join(" "));
+                    }
+                    return Some(parts.join(" "));
+                }
             }
         }
     }

@@ -29,9 +29,10 @@ const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
 /// Directories never counted as progress.
 ///
 /// `.agent-state` is written by the daemon itself on every attempt (prompts, logs, driver
-/// turns), so including it would make every attempt look like progress and the retry
-/// budget would never expire.
-const FINGERPRINT_SKIP_DIRS: [&str; 2] = [".git", ".agent-state"];
+/// turns), and test runners create `.pytest_cache` and `__pycache__` when executing gates,
+/// so including them would make every attempt look like progress and the retry budget would
+/// never expire.
+const FINGERPRINT_SKIP_DIRS: [&str; 4] = [".git", ".agent-state", ".pytest_cache", "__pycache__"];
 
 /// A verification command that cannot fail, so it certifies nothing.
 ///
@@ -557,6 +558,64 @@ impl DaemonRunner {
         Ok(())
     }
 
+    /// Advances state under advisory_gate configuration when retries or attempts are exhausted.
+    fn execute_advisory_advancement(
+        &mut self,
+        state: &mut ExecutionState,
+        active_task_id: &str,
+        note: &str,
+    ) -> Result<DaemonStepOutcome, DaemonError> {
+        state
+            .notes
+            .push(LedgerEntry::new("superstate-daemon", note));
+        self.retry_counts.remove(active_task_id);
+        self.last_failure_output.remove(active_task_id);
+        self.milestone_start_commits.remove(active_task_id);
+
+        if let Some(ref mut advancer) = self.step_advancer {
+            save_state_atomic(&self.config.state_path, state)?;
+            advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
+            let updated_state = load_state(&self.config.state_path)?;
+            let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
+            if updated_state.status == ExecutionStatus::Completed {
+                finalize_completed_execution(&self.config.state_path, &updated_state)?;
+            }
+            return Ok(DaemonStepOutcome::Advanced {
+                completed_task_id: active_task_id.to_string(),
+                next_task_id,
+            });
+        }
+        match advance_step(state) {
+            Ok(()) => {
+                save_state_atomic(&self.config.state_path, state)?;
+                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                if state.status == ExecutionStatus::Completed {
+                    finalize_completed_execution(&self.config.state_path, state)?;
+                }
+                Ok(DaemonStepOutcome::Advanced {
+                    completed_task_id: active_task_id.to_string(),
+                    next_task_id,
+                })
+            }
+            Err(StateError::InvalidTransition(msg)) => {
+                state.status = ExecutionStatus::Blocked;
+                state.notes.push(LedgerEntry::new(
+                    "superstate-daemon",
+                    format!(
+                        "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
+                        active_task_id, msg
+                    ),
+                ));
+                save_state_atomic(&self.config.state_path, state)?;
+                Ok(DaemonStepOutcome::Blocked {
+                    task_id: active_task_id.to_string(),
+                    reason: msg,
+                })
+            }
+            Err(e) => Err(DaemonError::State(e)),
+        }
+    }
+
     /// Executes a single autonomous daemon step for the currently active task.
     ///
     /// # Process Lifecycle
@@ -789,6 +848,14 @@ impl DaemonRunner {
                         ));
                         save_state_atomic(&self.config.state_path, &state)?;
 
+                        let fingerprint = workspace_fingerprint(&working_dir);
+                        let made_progress = self
+                            .last_fingerprint
+                            .get(&active_task.id)
+                            .is_some_and(|prev| prev != &fingerprint);
+                        self.last_fingerprint
+                            .insert(active_task.id.clone(), fingerprint);
+
                         // Update attempt counter and failure diagnostics for subsequent retry
                         let attempts = self
                             .total_attempts
@@ -796,6 +863,24 @@ impl DaemonRunner {
                             .or_insert(0);
                         *attempts += 1;
                         let attempts_spent = *attempts;
+
+                        let current_retries = {
+                            let retries =
+                                self.retry_counts.entry(active_task.id.clone()).or_insert(0);
+                            if made_progress {
+                                *retries = 0;
+                                state.notes.push(LedgerEntry::new(
+                                    "superstate-daemon",
+                                    format!(
+                                        "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
+                                        active_task.id, attempts_spent
+                                    ),
+                                ));
+                            } else {
+                                *retries += 1;
+                            }
+                            *retries
+                        };
 
                         // Perform rollback to milestone baseline when auto_rollback is enabled
                         if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
@@ -810,90 +895,46 @@ impl DaemonRunner {
                         self.last_failure_output
                             .insert(active_task.id.clone(), bounded_diag.clone());
 
-                        let retries_remaining =
-                            self.config.max_retries.saturating_sub(attempts_spent);
+                        let stalled = current_retries >= self.config.max_retries;
+                        let exhausted =
+                            attempts_spent >= self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
 
-                        if retries_remaining == 0 {
-                            if self.config.advisory_gate {
-                                state.notes.push(LedgerEntry::new(
-                                    "superstate-daemon",
-                                    format!(
-                                        "[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion",
-                                        active_task.id
-                                    ),
-                                ));
-                                self.retry_counts.remove(&active_task.id);
-                                self.last_failure_output.remove(&active_task.id);
-                                self.milestone_start_commits.remove(&active_task.id);
-
-                                if let Some(ref mut advancer) = self.step_advancer {
-                                    save_state_atomic(&self.config.state_path, &state)?;
-                                    advancer(&self.config.state_path)
-                                        .map_err(DaemonError::StepAdvancer)?;
-                                    let updated_state = load_state(&self.config.state_path)?;
-                                    let next_task_id =
-                                        updated_state.active_task.as_ref().map(|t| t.id.clone());
-                                    if updated_state.status == ExecutionStatus::Completed {
-                                        finalize_completed_execution(
-                                            &self.config.state_path,
-                                            &updated_state,
-                                        )?;
-                                    }
-                                    return Ok(DaemonStepOutcome::Advanced {
-                                        completed_task_id: active_task.id,
-                                        next_task_id,
-                                    });
-                                }
-                                match advance_step(&mut state) {
-                                    Ok(()) => {
-                                        save_state_atomic(&self.config.state_path, &state)?;
-                                        let next_task_id =
-                                            state.active_task.as_ref().map(|t| t.id.clone());
-                                        if state.status == ExecutionStatus::Completed {
-                                            finalize_completed_execution(
-                                                &self.config.state_path,
-                                                &state,
-                                            )?;
-                                        }
-                                        return Ok(DaemonStepOutcome::Advanced {
-                                            completed_task_id: active_task.id,
-                                            next_task_id,
-                                        });
-                                    }
-                                    Err(StateError::InvalidTransition(msg)) => {
-                                        state.status = ExecutionStatus::Blocked;
-                                        state.notes.push(LedgerEntry::new(
-                                            "superstate-daemon",
-                                            format!(
-                                                "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
-                                                active_task.id, msg
-                                            ),
-                                        ));
-                                        save_state_atomic(&self.config.state_path, &state)?;
-                                        return Ok(DaemonStepOutcome::Blocked {
-                                            task_id: active_task.id,
-                                            reason: msg,
-                                        });
-                                    }
-                                    Err(e) => return Err(DaemonError::State(e)),
-                                }
-                            } else {
-                                state.status = ExecutionStatus::Blocked;
-                                state.errors.push(format!(
-                                    "Task '{}' blocked: fast test slice failed and max retries ({}) exhausted: {}",
-                                    active_task.id, self.config.max_retries, bounded_diag
-                                ));
-                                save_state_atomic(&self.config.state_path, &state)?;
-                                return Ok(DaemonStepOutcome::Blocked {
-                                    task_id: active_task.id.clone(),
-                                    reason: format!(
-                                        "Fast test slice failed and max retries ({}) exhausted: {}",
-                                        self.config.max_retries, bounded_diag
-                                    ),
-                                });
-                            }
+                        if (stalled || exhausted) && self.config.advisory_gate {
+                            let note = format!(
+                                "[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion",
+                                active_task.id
+                            );
+                            return self.execute_advisory_advancement(
+                                &mut state,
+                                &active_task.id,
+                                &note,
+                            );
                         }
 
+                        if stalled || exhausted {
+                            state.status = ExecutionStatus::Blocked;
+                            let reason = if stalled {
+                                format!(
+                                    "Task '{}' blocked: fast test slice failed: exceeded maximum retries ({}) without changing the working tree: {}",
+                                    active_task.id, self.config.max_retries, bounded_diag
+                                )
+                            } else {
+                                format!(
+                                    "Task '{}' blocked: fast test slice failed: exceeded maximum attempts ({}): {}",
+                                    active_task.id, attempts_spent, bounded_diag
+                                )
+                            };
+                            state.errors.push(reason.clone());
+                            save_state_atomic(&self.config.state_path, &state)?;
+                            return Ok(DaemonStepOutcome::Blocked {
+                                task_id: active_task.id.clone(),
+                                reason,
+                            });
+                        }
+
+                        save_state_atomic(&self.config.state_path, &state)?;
+                        let retries_remaining =
+                            self.config.max_retries.saturating_sub(current_retries);
                         return Ok(DaemonStepOutcome::Failed {
                             task_id: active_task.id,
                             reason: format!("Fast test slice failed: {}", bounded_diag),
@@ -1259,41 +1300,12 @@ impl DaemonRunner {
                 // Advisory: the verification command failed and the budget is spent, but the
                 // work is submitted anyway, as superstate_mcp does. The sealed grader, not
                 // the daemon, decides whether it was good enough.
-                state.notes.push(LedgerEntry::new(
-                    "superstate-daemon",
-                    format!(
-                        "[advisory-gate] Task {} advancing with its verification command still \
-                         failing after {} attempts; completion here does NOT mean verified",
-                        active_task.id, attempts_spent
-                    ),
-                ));
-                self.retry_counts.remove(&active_task.id);
-                self.last_failure_output.remove(&active_task.id);
-                self.milestone_start_commits.remove(&active_task.id);
-
-                if let Some(ref mut advancer) = self.step_advancer {
-                    save_state_atomic(&self.config.state_path, &state)?;
-                    advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
-                    let updated_state = load_state(&self.config.state_path)?;
-                    let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
-                    if updated_state.status == ExecutionStatus::Completed {
-                        finalize_completed_execution(&self.config.state_path, &updated_state)?;
-                    }
-                    return Ok(DaemonStepOutcome::Advanced {
-                        completed_task_id: active_task.id,
-                        next_task_id,
-                    });
-                }
-                advance_step(&mut state)?;
-                save_state_atomic(&self.config.state_path, &state)?;
-                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
-                if state.status == ExecutionStatus::Completed {
-                    finalize_completed_execution(&self.config.state_path, &state)?;
-                }
-                return Ok(DaemonStepOutcome::Advanced {
-                    completed_task_id: active_task.id,
-                    next_task_id,
-                });
+                let note = format!(
+                    "[advisory-gate] Task {} advancing with its verification command still \
+                     failing after {} attempts; completion here does NOT mean verified",
+                    active_task.id, attempts_spent
+                );
+                return self.execute_advisory_advancement(&mut state, &active_task.id, &note);
             }
 
             if stalled || exhausted {
