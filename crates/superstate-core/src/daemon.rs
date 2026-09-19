@@ -783,10 +783,11 @@ impl DaemonRunner {
                 driver: self.config.driver_cmd.clone(),
                 timeout_secs: self.config.timeout_secs,
             };
+            let review_instruction = state.goal.as_deref().unwrap_or(&active_task.title);
             if let Ok(report) = superstate_review::execute_review(
                 &working_dir,
                 &diff,
-                Some(&active_task.title),
+                Some(review_instruction),
                 &review_cfg,
             ) {
                 if report.has_blocking_issues {

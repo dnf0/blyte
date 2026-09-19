@@ -319,3 +319,120 @@ EOF
         "milestone_start_commits should preserve the commit from before driver executed"
     );
 }
+
+#[test]
+fn test_daemon_review_uses_full_state_goal_when_available() {
+    let dir = setup_test_git_repo();
+    let repo = dir.path();
+    let state_path = repo.join(".agent-state/state.json");
+
+    let milestones = vec![MilestoneSpec {
+        title: "Short Task Title".to_string(),
+        verify_cmd: "test -f README.md".to_string(),
+        files: vec![],
+        ..Default::default()
+    }];
+    let long_goal =
+        "Comprehensive Task Objective: Fix cython extension compatibility with Numpy 2.3";
+    let state = init_state_milestones(Some(long_goal), milestones, None, true).unwrap();
+    save_state_atomic(&state_path, &state).unwrap();
+
+    fs::write(
+        repo.join(".gitignore"),
+        ".agent-state/\nreview_prompt.txt\ndriver.sh\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "chore: add gitignore", "--no-gpg-sign"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let script = repo.join("driver.sh");
+    fs::write(
+        &script,
+        r##"#!/bin/sh
+INPUT=$(cat)
+if echo "$INPUT" | grep -q "You are an adversarial zero-noise code reviewer"; then
+    echo "$INPUT" > review_prompt.txt
+    if echo "$INPUT" | grep -q "Comprehensive Task Objective"; then
+        cat << 'EOF'
+{"summary":"Blocking issue found based on full goal","findings":[{"severity":"Critical","file":"README.md","line_range":[1,1],"problem":"Dangerous flaw violating objective","suggested_fix":"Fix according to comprehensive objective"}],"has_blocking_issues":true}
+EOF
+    else
+        cat << 'EOF'
+{"summary":"Full goal not found in instructions","findings":[],"has_blocking_issues":false}
+EOF
+    fi
+else
+    echo "# Broken code with security flaw" >> README.md
+    git add README.md >/dev/null 2>&1
+    git commit -m "feat: implement flawed feature" --no-gpg-sign >/dev/null 2>&1 || true
+fi
+"##,
+    )
+    .unwrap();
+    Command::new("chmod")
+        .args(["+x", script.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some(script.to_str().unwrap().to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: true,
+        review_blocking: true,
+        auto_rollback: false,
+        shunt_driver_output: false,
+    };
+
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let outcome = runner.step().unwrap();
+
+    let prompt_content = fs::read_to_string(repo.join("review_prompt.txt")).unwrap_or_default();
+    assert!(
+        prompt_content.contains(
+            "Task Instructions:\nComprehensive Task Objective: Fix cython extension compatibility with Numpy 2.3"
+        ),
+        "Prompt passed to review driver must contain full state goal in Task Instructions, got prompt:\n{}",
+        prompt_content
+    );
+
+    match outcome {
+        DaemonStepOutcome::Failed {
+            task_id, reason, ..
+        } => {
+            assert_eq!(task_id, "task-1");
+            assert!(
+                reason.contains("code-review"),
+                "Reason should cite code-review, got: {}",
+                reason
+            );
+        }
+        other => panic!(
+            "Expected DaemonStepOutcome::Failed with review_blocking=true, got: {:?}",
+            other
+        ),
+    }
+
+    let updated_state = load_state(&state_path).unwrap();
+    assert_eq!(updated_state.step, 1);
+    assert_eq!(updated_state.completed_tasks.len(), 0);
+    assert!(
+        updated_state
+            .notes
+            .iter()
+            .any(|n| n.note.contains("Dangerous flaw violating objective")),
+        "Expected review findings recorded in notes"
+    );
+}
+
+
