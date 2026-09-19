@@ -186,7 +186,11 @@ pub fn init_state_milestones(
                 .iter()
                 .all(|dep| is_dependency_satisfied(dep, &completed))
         })
-        .unwrap_or(0);
+        .ok_or_else(|| {
+            StateError::InvalidTransition(
+                "Cannot initialize state: milestones contain no starting task with satisfied dependencies".to_string(),
+            )
+        })?;
 
     let active_task = Some(all_tasks.remove(active_idx));
     let pending_tasks = all_tasks;
@@ -215,9 +219,14 @@ fn is_dependency_satisfied(dep: &str, completed: &[&str]) -> bool {
     if dep.is_empty() || dep.eq_ignore_ascii_case("none") {
         return true;
     }
-    completed
-        .iter()
-        .any(|done| done.eq_ignore_ascii_case(dep) || dep.starts_with(*done))
+    completed.iter().any(|done| {
+        done.eq_ignore_ascii_case(dep)
+            || (dep.starts_with(*done)
+                && dep
+                    .as_bytes()
+                    .get(done.len())
+                    .is_some_and(|&b| b == b' ' || b == b':' || b == b'-'))
+    })
 }
 
 /// Advances execution state to the next task, completing the current active task.
@@ -227,6 +236,10 @@ fn is_dependency_satisfied(dep: &str, completed: &[&str]) -> bool {
 /// When the entire milestone graph reaches completion, worktree references are preserved
 /// so that the completion lifecycle can cleanly auto-merge and remove them.
 pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
+    if state.status == ExecutionStatus::Completed {
+        return Ok(());
+    }
+
     if let Some(completed) = state.active_task.take() {
         state.completed_tasks.push(completed);
     }

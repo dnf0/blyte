@@ -210,3 +210,32 @@ fn test_advance_step_deadlock_halts_with_blocked_status() {
     assert_eq!(state.completed_tasks[0].id, "task-1");
     assert_eq!(state.pending_tasks.len(), 2);
 }
+
+#[test]
+fn test_init_state_milestones_initial_deadlock_fails_closed() {
+    let milestones = vec![
+        MilestoneSpec {
+            id: Some("task-a".to_string()),
+            title: "Task A".to_string(),
+            verify_cmd: "test -f a".to_string(),
+            depends_on: Some(vec!["task-b".to_string()]),
+            ..Default::default()
+        },
+        MilestoneSpec {
+            id: Some("task-b".to_string()),
+            title: "Task B".to_string(),
+            verify_cmd: "test -f b".to_string(),
+            depends_on: Some(vec!["task-a".to_string()]),
+            ..Default::default()
+        },
+    ];
+
+    let result = init_state_milestones(Some("Deadlocked init"), milestones, None, true);
+    assert!(result.is_err());
+    match result {
+        Err(StateError::InvalidTransition(msg)) => {
+            assert!(msg.contains("milestones contain no starting task with satisfied dependencies"));
+        }
+        _ => panic!("Expected StateError::InvalidTransition, got {:?}", result),
+    }
+}
