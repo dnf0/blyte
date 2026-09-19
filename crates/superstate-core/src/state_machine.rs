@@ -259,14 +259,11 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
             .collect();
 
         // Advance to the first task whose dependencies are satisfied in DAG order
-        let next_idx = state
-            .pending_tasks
-            .iter()
-            .position(|task| {
-                task.depends_on
-                    .iter()
-                    .all(|dep| is_dependency_satisfied(dep, &completed))
-            });
+        let next_idx = state.pending_tasks.iter().position(|task| {
+            task.depends_on
+                .iter()
+                .all(|dep| is_dependency_satisfied(dep, &completed))
+        });
 
         match next_idx {
             Some(idx) => {
@@ -282,7 +279,8 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
                 state.active_task = None;
                 state.status = ExecutionStatus::Blocked;
                 return Err(StateError::InvalidTransition(
-                    "Cannot advance: pending tasks exist but none have satisfied dependencies".to_string(),
+                    "Cannot advance: pending tasks exist but none have satisfied dependencies"
+                        .to_string(),
                 ));
             }
         }

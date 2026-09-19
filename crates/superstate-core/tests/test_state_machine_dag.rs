@@ -48,10 +48,7 @@ fn test_init_state_milestones_with_custom_dag_dependencies() {
     assert_eq!(state.base_branch, Some("feat/custom-dag".to_string()));
     assert_eq!(state.goal, Some("Run custom DAG".to_string()));
 
-    let active = state
-        .active_task
-        .as_ref()
-        .expect("Active task must be set");
+    let active = state.active_task.as_ref().expect("Active task must be set");
     assert_eq!(active.id, "prep");
     assert_eq!(active.title, "Preparation");
     assert!(active.depends_on.is_empty());
@@ -196,7 +193,9 @@ fn test_advance_step_deadlock_halts_with_blocked_status() {
     match result {
         Err(StateError::InvalidTransition(msg)) => {
             assert!(
-                msg.contains("Cannot advance: pending tasks exist but none have satisfied dependencies"),
+                msg.contains(
+                    "Cannot advance: pending tasks exist but none have satisfied dependencies"
+                ),
                 "Unexpected error message: {}",
                 msg
             );

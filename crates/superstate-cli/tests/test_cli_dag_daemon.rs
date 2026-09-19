@@ -61,7 +61,13 @@ fn test_cli_diamond_dag_daemon_execution() {
     ]"#;
 
     let init_output = Command::new(bin())
-        .args(["state", "init", "--milestones", diamond_json, "--no-worktree"])
+        .args([
+            "state",
+            "init",
+            "--milestones",
+            diamond_json,
+            "--no-worktree",
+        ])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state init");
@@ -175,7 +181,13 @@ fn test_cli_deadlocked_dag_daemon_halts_blocked() {
     ]"#;
 
     let init_output = Command::new(bin())
-        .args(["state", "init", "--milestones", deadlocked_json, "--no-worktree"])
+        .args([
+            "state",
+            "init",
+            "--milestones",
+            deadlocked_json,
+            "--no-worktree",
+        ])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state init");
@@ -191,14 +203,7 @@ fn test_cli_deadlocked_dag_daemon_halts_blocked() {
 
     // Run daemon: task-1 passes, but advancement cannot satisfy task-2's dependency
     let daemon_output = Command::new(bin())
-        .args([
-            "state",
-            "daemon",
-            "--max-retries",
-            "1",
-            "--timeout",
-            "5",
-        ])
+        .args(["state", "daemon", "--max-retries", "1", "--timeout", "5"])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state daemon");
@@ -252,7 +257,13 @@ fn test_cli_init_initial_deadlock_error_reporting() {
     ]"#;
 
     let init_output = Command::new(bin())
-        .args(["state", "init", "--milestones", cyclic_json, "--no-worktree"])
+        .args([
+            "state",
+            "init",
+            "--milestones",
+            cyclic_json,
+            "--no-worktree",
+        ])
         .current_dir(&repo_root)
         .output()
         .expect("Failed to run superstate state init");

@@ -801,7 +801,8 @@ pub fn cmd_next(
 
     match advance_step(&mut state) {
         Ok(()) => {
-            save_state_atomic(state_path, &state).map_err(|e| format!("Failed to save state: {}", e))?;
+            save_state_atomic(state_path, &state)
+                .map_err(|e| format!("Failed to save state: {}", e))?;
 
             // Provision worktree for newly active task in sequential progression
             if !state.no_worktree && repo_root.join(".git").exists() {

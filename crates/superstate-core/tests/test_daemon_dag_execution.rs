@@ -235,7 +235,10 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
     // Final state verification
     assert!(repo_root.join("a.txt").exists(), "a.txt exists at end");
     assert!(repo_root.join("b.txt").exists(), "b.txt exists at end");
-    assert!(!repo_root.join("bad.txt").exists(), "bad.txt does not exist at end");
+    assert!(
+        !repo_root.join("bad.txt").exists(),
+        "bad.txt does not exist at end"
+    );
 
     let final_state = load_state(&state_path).expect("load final state");
     assert_eq!(final_state.status, ExecutionStatus::Completed);
@@ -266,8 +269,8 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
         },
     ];
 
-    let state = init_state_milestones(Some("Deadlock test"), milestones, None, true)
-        .expect("init state");
+    let state =
+        init_state_milestones(Some("Deadlock test"), milestones, None, true).expect("init state");
     save_state_atomic(&state_path, &state).expect("save state");
 
     let config = DaemonConfig {
@@ -285,7 +288,9 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
     let mut runner = DaemonRunner::new(config).expect("create runner");
 
     // Run step on task-1: verification passes, but advance_step detects deadlock with task-2
-    let outcome = runner.run_step().expect("run_step should return Ok(Blocked)");
+    let outcome = runner
+        .run_step()
+        .expect("run_step should return Ok(Blocked)");
 
     // Must return DaemonStepOutcome::Blocked
     match outcome {
