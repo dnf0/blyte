@@ -98,6 +98,7 @@ fn test_daemon_rollback_on_verification_failure() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: true,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create runner");
@@ -192,6 +193,7 @@ fn test_daemon_no_rollback_when_disabled() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create runner");
@@ -227,7 +229,8 @@ fn test_daemon_config_default_has_auto_rollback_enabled() {
 
 #[test]
 fn test_daemon_deserialization_defaults_auto_rollback_to_true() {
-    let json_str = r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
+    let json_str =
+        r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
     let config: DaemonConfig = serde_json::from_str(json_str).expect("deserialize config");
     assert!(
         config.auto_rollback,

@@ -91,6 +91,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
         advisory_review: true,
         review_blocking: true,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -171,6 +172,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
         advisory_review: true,
         review_blocking: true,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -215,6 +217,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
         advisory_review: true,
         review_blocking: false,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -290,6 +293,7 @@ EOF
         advisory_review: true,
         review_blocking: true,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();

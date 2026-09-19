@@ -122,6 +122,7 @@ fn test_daemon_automerge_on_completion() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
@@ -217,6 +218,7 @@ fn test_daemon_completion_in_place_mode() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
@@ -278,6 +280,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        shunt_driver_output: false,
     };
 
     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
@@ -299,6 +302,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        shunt_driver_output: false,
     })
     .expect("create second runner");
 
