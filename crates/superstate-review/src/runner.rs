@@ -281,6 +281,11 @@ pub fn execute_review(
         return Ok(ReviewReport::clean("No changes detected in diff."));
     }
 
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     let driver_cmd = resolve_review_driver(config.driver.as_deref())?;
     let prompt = build_review_prompt(diff, task_instruction);
 

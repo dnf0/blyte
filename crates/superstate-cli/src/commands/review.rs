@@ -17,6 +17,11 @@ pub struct ReviewArgs {
 }
 
 pub fn cmd_review(args: ReviewArgs) -> Result<(), String> {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     let diff = match args.commit_range.as_deref() {
         Some(range) => get_git_diff(&args.repo, Some(range))
             .map_err(|e| format!("Failed to get git diff: {}", e))?,

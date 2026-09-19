@@ -314,7 +314,14 @@ fn test_review_explicit_commit_range() {
         .output()
         .expect("run superstate review with commit range");
 
-    assert!(output.status.success());
+    if !output.status.success() {
+        panic!(
+            "superstate review failed:\nstatus: {:?}\nstdout: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let report: ReviewReport =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
     assert_eq!(report.summary, "Commit range review passed");
