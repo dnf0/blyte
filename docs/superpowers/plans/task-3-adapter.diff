@@ -1,0 +1,90 @@
+diff --git a/lab/engine/runner.py b/lab/engine/runner.py
+index 7ff42de..846cbfb 100644
+--- a/lab/engine/runner.py
++++ b/lab/engine/runner.py
+@@ -151,7 +151,7 @@ class AblationRunner:
+             return SuperstateDaemonAdapter()
+         elif arm in ("superstate_daemon_review", "superstate-daemon-review", "daemon_review"):
+             return SuperstateDaemonAdapter(
+-                advisory_review=True, auto_rollback=False, name="superstate_daemon_review"
++                advisory_review=True, review_blocking=True, auto_rollback=False, name="superstate_daemon_review"
+             )
+         elif arm in (
+             "superstate_daemon_rollback",
+diff --git a/tests/test_arm_input_parity.py b/tests/test_arm_input_parity.py
+index f652569..55d02a5 100644
+--- a/tests/test_arm_input_parity.py
++++ b/tests/test_arm_input_parity.py
+@@ -12,6 +12,8 @@ from __future__ import annotations
+ 
+ import pathlib
+ 
++import pytest
++
+ ADAPTERS = pathlib.Path("lab/engine/adapters")
+ 
+ # Arms whose results are compared against each other in reports.
+@@ -122,3 +124,22 @@ def test_every_arm_name_resolves_to_a_distinct_adapter_name() -> None:
+         else:
+             suffix = "planned"
+         assert suffix in b.name, f"{planned!r} must be identifiable in results, got {b.name!r}"
++
++
++def test_daemon_review_arm_wires_review_blocking_and_no_rollback(monkeypatch: pytest.MonkeyPatch) -> None:
++    """superstate_daemon_review must run with review blocking and without auto-rollback.
++
++    Advisory review with auto_rollback=True rolls back on review failure, destroying
++    the worker's edits. Full review blocking must be wired explicitly so the arm behaves
++    deterministically regardless of environment variable fallbacks.
++    """
++    from lab.engine.adapters.superstate_daemon import REVIEW_BLOCKING_ENV_FLAG
++    from lab.engine.runner import AblationRunner
++
++    monkeypatch.setenv(REVIEW_BLOCKING_ENV_FLAG, "0")
++    runner = AblationRunner.__new__(AblationRunner)
++    adapter = runner._get_adapter("superstate_daemon_review")  # noqa: SLF001
++    assert getattr(adapter, "advisory_review", None) is True
++    assert getattr(adapter, "review_blocking", None) is True
++    assert getattr(adapter, "auto_rollback", None) is False
++
+diff --git a/tests/test_superstate_daemon_adapter.py b/tests/test_superstate_daemon_adapter.py
+index 96ae3d3..a149273 100644
+--- a/tests/test_superstate_daemon_adapter.py
++++ b/tests/test_superstate_daemon_adapter.py
+@@ -628,4 +628,36 @@ def test_daemon_adapter_init_daemon_state_passes_milestones(tmp_path: Path) -> N
+         assert call_kwargs["milestones"][1]["id"] == "fix-implementation"
+ 
+ 
++def test_daemon_spawn_cmd_review_blocking_flags(monkeypatch: pytest.MonkeyPatch) -> None:
++    """When review_blocking is True and auto_rollback is False, verify daemon flags.
++
++    Asserts that --advisory-review, --review-blocking, and --no-auto-rollback are
++    properly appended to the daemon spawn command, and that the runner explicitly
++    configures superstate_daemon_review with review_blocking=True and auto_rollback=False.
++    """
++    adapter = SuperstateDaemonAdapter(
++        advisory_review=True,
++        review_blocking=True,
++        auto_rollback=False,
++        name="superstate_daemon_review",
++    )
++    cmd = adapter._build_daemon_spawn_cmd(Path("/fake/workspace"))  # noqa: SLF001
++    assert "--advisory-review" in cmd
++    assert "--review-blocking" in cmd
++    assert "--no-auto-rollback" in cmd
++    assert adapter.review_blocking is True
++    assert adapter.auto_rollback is False
++
++    from lab.engine.adapters.superstate_daemon import REVIEW_BLOCKING_ENV_FLAG
++    from lab.engine.runner import AblationRunner
++
++    # Ensure runner explicitly wires review_blocking=True regardless of environment flag
++    monkeypatch.setenv(REVIEW_BLOCKING_ENV_FLAG, "0")
++    runner = AblationRunner.__new__(AblationRunner)
++    resolved = runner._get_adapter("superstate_daemon_review")  # noqa: SLF001
++    assert resolved.review_blocking is True
++    assert resolved.auto_rollback is False
++
++
++
+ 
