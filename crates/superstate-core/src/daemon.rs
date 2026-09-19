@@ -963,6 +963,11 @@ impl DaemonRunner {
                 let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
                 if updated_state.status == ExecutionStatus::Completed {
                     finalize_completed_execution(&self.config.state_path, &updated_state)?;
+                } else if updated_state.status == ExecutionStatus::Blocked {
+                    return Ok(DaemonStepOutcome::Blocked {
+                        task_id: active_task.id,
+                        reason: "remaining tasks cannot advance".to_string(),
+                    });
                 }
                 Ok(DaemonStepOutcome::Advanced {
                     completed_task_id: active_task.id,
