@@ -813,6 +813,78 @@ impl DaemonRunner {
                             .max_retries
                             .saturating_sub(attempts_spent);
 
+                        if retries_remaining == 0 {
+                            if self.config.advisory_gate {
+                                state.notes.push(LedgerEntry::new(
+                                    "superstate-daemon",
+                                    format!(
+                                        "[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion",
+                                        active_task.id
+                                    ),
+                                ));
+                                self.retry_counts.remove(&active_task.id);
+                                self.last_failure_output.remove(&active_task.id);
+                                self.milestone_start_commits.remove(&active_task.id);
+
+                                if let Some(ref mut advancer) = self.step_advancer {
+                                    save_state_atomic(&self.config.state_path, &state)?;
+                                    advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
+                                    let updated_state = load_state(&self.config.state_path)?;
+                                    let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
+                                    if updated_state.status == ExecutionStatus::Completed {
+                                        finalize_completed_execution(&self.config.state_path, &updated_state)?;
+                                    }
+                                    return Ok(DaemonStepOutcome::Advanced {
+                                        completed_task_id: active_task.id,
+                                        next_task_id,
+                                    });
+                                }
+                                match advance_step(&mut state) {
+                                    Ok(()) => {
+                                        save_state_atomic(&self.config.state_path, &state)?;
+                                        let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                                        if state.status == ExecutionStatus::Completed {
+                                            finalize_completed_execution(&self.config.state_path, &state)?;
+                                        }
+                                        return Ok(DaemonStepOutcome::Advanced {
+                                            completed_task_id: active_task.id,
+                                            next_task_id,
+                                        });
+                                    }
+                                    Err(StateError::InvalidTransition(msg)) => {
+                                        state.status = ExecutionStatus::Blocked;
+                                        state.notes.push(LedgerEntry::new(
+                                            "superstate-daemon",
+                                            format!(
+                                                "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
+                                                active_task.id, msg
+                                            ),
+                                        ));
+                                        save_state_atomic(&self.config.state_path, &state)?;
+                                        return Ok(DaemonStepOutcome::Blocked {
+                                            task_id: active_task.id,
+                                            reason: msg,
+                                        });
+                                    }
+                                    Err(e) => return Err(DaemonError::State(e)),
+                                }
+                            } else {
+                                state.status = ExecutionStatus::Blocked;
+                                state.errors.push(format!(
+                                    "Task '{}' blocked: fast test slice failed and max retries ({}) exhausted: {}",
+                                    active_task.id, self.config.max_retries, bounded_diag
+                                ));
+                                save_state_atomic(&self.config.state_path, &state)?;
+                                return Ok(DaemonStepOutcome::Blocked {
+                                    task_id: active_task.id.clone(),
+                                    reason: format!(
+                                        "Fast test slice failed and max retries ({}) exhausted: {}",
+                                        self.config.max_retries, bounded_diag
+                                    ),
+                                });
+                            }
+                        }
+
                         return Ok(DaemonStepOutcome::Failed {
                             task_id: active_task.id,
                             reason: format!("Fast test slice failed: {}", bounded_diag),

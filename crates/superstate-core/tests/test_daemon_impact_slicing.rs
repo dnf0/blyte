@@ -471,3 +471,177 @@ fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
     assert!(updated_state.notes.iter().any(|n| n.note.contains("[rollback]")));
 }
 
+#[test]
+fn test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let repo_root = temp_dir.path();
+    let initial_commit = setup_temp_git_repo(repo_root);
+    assert!(!initial_commit.is_empty());
+
+    // Create source and failing test files
+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
+    fs::write(
+        repo_root.join("src/lib.py"),
+        "def compute(a, b): return a + b\n",
+    )
+    .expect("write src/lib.py");
+    fs::write(
+        repo_root.join("tests/test_lib.py"),
+        "def test_failing_slice(): assert False\n",
+    )
+    .expect("write tests/test_lib.py");
+
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_root)
+        .output();
+
+    let state_dir = repo_root.join(".agent-state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let state_path = state_dir.join("state.json");
+
+    let state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(TaskSpec {
+            id: "task-impact-exhaust-1".to_string(),
+            title: "Task with failing slice exhausting retries".to_string(),
+            verification_cmd: Some(
+                "pytest tests/ && touch full_gate_ran.txt && exit 0".to_string(),
+            ),
+            ..Default::default()
+        }),
+        pending_tasks: Vec::new(),
+        active_worktree: None,
+        active_branch: Some("main".to_string()),
+        base_branch: Some("main".to_string()),
+        no_worktree: true,
+        goal: Some("Test retry exhaustion and blocking on fast slice failure".to_string()),
+        ..Default::default()
+    };
+    save_state_atomic(&state_path, &state).expect("save state");
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: None,
+        max_retries: 1,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
+        shunt_driver_output: false,
+        impact_slicing: true,
+    };
+
+    let mut runner = DaemonRunner::new(config).expect("create runner");
+    let outcome = runner.step().expect("runner step");
+
+    // Must return Blocked outcome
+    assert!(
+        matches!(outcome, DaemonStepOutcome::Blocked { .. }),
+        "expected Blocked outcome when retries are exhausted, got {:?}",
+        outcome
+    );
+
+    // State file must reflect Blocked status and contain error message
+    let updated_state = load_state(&state_path).expect("load state");
+    assert_eq!(
+        updated_state.status,
+        ExecutionStatus::Blocked,
+        "state status should be Blocked"
+    );
+    assert!(
+        updated_state.errors.iter().any(|e| e.contains("blocked")),
+        "state errors should contain blocked diagnostic, got: {:?}",
+        updated_state.errors
+    );
+}
+
+#[test]
+fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let repo_root = temp_dir.path();
+    let initial_commit = setup_temp_git_repo(repo_root);
+    assert!(!initial_commit.is_empty());
+
+    // Create source and failing test files
+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
+    fs::write(
+        repo_root.join("src/lib.py"),
+        "def compute(a, b): return a + b\n",
+    )
+    .expect("write src/lib.py");
+    fs::write(
+        repo_root.join("tests/test_lib.py"),
+        "def test_failing_slice(): assert False\n",
+    )
+    .expect("write tests/test_lib.py");
+
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_root)
+        .output();
+
+    let state_dir = repo_root.join(".agent-state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let state_path = state_dir.join("state.json");
+
+    let state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(TaskSpec {
+            id: "task-impact-advisory-1".to_string(),
+            title: "Task with failing slice and advisory gate".to_string(),
+            verification_cmd: Some(
+                "pytest tests/ && touch full_gate_ran.txt && exit 0".to_string(),
+            ),
+            ..Default::default()
+        }),
+        pending_tasks: Vec::new(),
+        active_worktree: None,
+        active_branch: Some("main".to_string()),
+        base_branch: Some("main".to_string()),
+        no_worktree: true,
+        goal: Some("Test advisory advancement on fast slice failure exhaustion".to_string()),
+        ..Default::default()
+    };
+    save_state_atomic(&state_path, &state).expect("save state");
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: None,
+        max_retries: 1,
+        timeout_secs: 10,
+        advisory_gate: true,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
+        shunt_driver_output: false,
+        impact_slicing: true,
+    };
+
+    let mut runner = DaemonRunner::new(config).expect("create runner");
+    let outcome = runner.step().expect("runner step");
+
+    assert!(
+        matches!(outcome, DaemonStepOutcome::Advanced { .. }),
+        "expected Advanced outcome when advisory gate is enabled, got {:?}",
+        outcome
+    );
+
+    let updated_state = load_state(&state_path).expect("load state");
+    assert!(
+        updated_state
+            .notes
+            .iter()
+            .any(|n| n.note.contains("[impact-advisory]")),
+        "state notes should contain [impact-advisory], got: {:?}",
+        updated_state.notes
+    );
+}
+
+
+
