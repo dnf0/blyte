@@ -152,10 +152,17 @@ pub fn init_state_milestones(
 
     // Build tasks supporting custom id and explicit or sequential DAG dependencies
     let mut all_tasks = Vec::with_capacity(milestones.len());
+    let mut seen_ids = std::collections::HashSet::new();
     let mut prev_id = String::new();
 
     for (idx, m) in milestones.into_iter().enumerate() {
         let task_id = m.id.unwrap_or_else(|| format!("task-{}", idx + 1));
+        if !seen_ids.insert(task_id.clone()) {
+            return Err(StateError::InvalidTransition(format!(
+                "duplicate milestone id: {}",
+                task_id
+            )));
+        }
         let depends_on = match m.depends_on {
             Some(deps) => deps,
             None => {
@@ -225,7 +232,7 @@ fn is_dependency_satisfied(dep: &str, completed: &[&str]) -> bool {
                 && dep
                     .as_bytes()
                     .get(done.len())
-                    .is_some_and(|&b| b == b' ' || b == b':' || b == b'-'))
+                    .is_some_and(|&b| b == b' ' || b == b':'))
     })
 }
 

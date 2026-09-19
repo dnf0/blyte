@@ -158,6 +158,8 @@ pub enum DaemonError {
     NoActiveTask,
     #[error("Maximum retries ({0}) exceeded for task {1}")]
     MaxRetriesExceeded(usize, String),
+    #[error("Execution blocked for task {task_id}: {reason}")]
+    Blocked { task_id: String, reason: String },
 }
 
 fn default_true() -> bool {
@@ -964,9 +966,14 @@ impl DaemonRunner {
                 if updated_state.status == ExecutionStatus::Completed {
                     finalize_completed_execution(&self.config.state_path, &updated_state)?;
                 } else if updated_state.status == ExecutionStatus::Blocked {
+                    let reason = updated_state
+                        .notes
+                        .last()
+                        .map(|n| n.note.clone())
+                        .unwrap_or_else(|| "remaining tasks cannot advance".to_string());
                     return Ok(DaemonStepOutcome::Blocked {
                         task_id: active_task.id,
-                        reason: "remaining tasks cannot advance".to_string(),
+                        reason,
                     });
                 }
                 Ok(DaemonStepOutcome::Advanced {
@@ -1169,10 +1176,7 @@ impl DaemonRunner {
                     continue;
                 }
                 DaemonStepOutcome::Blocked { task_id, reason } => {
-                    return Err(DaemonError::MaxRetriesExceeded(
-                        self.config.max_retries,
-                        format!("{}: {}", task_id, reason),
-                    ));
+                    return Err(DaemonError::Blocked { task_id, reason });
                 }
             }
         }
