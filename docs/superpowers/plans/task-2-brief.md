@@ -1,65 +1,59 @@
-# Task 2 Brief: Daemon Runner Topological Advancement & Scoped Rollback
-
-## Working Directory
-`/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-dag-execution`
-Branch: `feat/daemon-dag-execution`
-
-## Goal
-Wire `DaemonRunner` in `crates/superstate-core/src/daemon.rs` to support multi-milestone DAG execution:
-1. Handle `advance_step()` deadlock errors gracefully by transitioning state to `ExecutionStatus::Blocked`, appending a `[dag-blocked]` ledger entry, and returning `DaemonStepOutcome::Blocked`.
-2. Ensure milestone checkpoint commits and baseline commit tracking cleanly isolate `--auto-rollback` resets to the active milestone, so rolling back Milestone 2 never loses or mutates Milestone 1's completed work.
-3. Verify sequential, multi-attempt rollback, and deadlock handling in end-to-end integration tests.
+# Task 2 Brief: Configuration & CLI Flag (`--impact-slicing`)
 
 ## Global Constraints
 - Compile cleanly with `cargo check --all` and pass `cargo test --all`.
-- No new external crate dependencies.
-- Zero network I/O or direct API keys in Rust binary.
-- Use `--no-gpg-sign` for git commits.
-- Follow strict Test-Driven Development (TDD).
+- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
+- Skip GPG verification on all commits (`--no-gpg-sign`).
+- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
 
-## Requirements
+## Task Details
+- **Task:** Task 2: Configuration & CLI Flag (`--impact-slicing`)
+- **Depends on:** Task 1
+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
 
-### 1. `crates/superstate-core/src/daemon.rs`
-In `run_step()`:
-- When verification passes and `self.step_advancer` is `None`:
-  Call `advance_step(&mut state)`.
-  - On `Ok(())`:
-    - Save updated state.
-    - If `state.status == ExecutionStatus::Completed`, finalize execution (`finalize_completed_execution`).
-    - Emit `DaemonStepOutcome::Advanced { completed_task_id: active_task.id, next_task_id: state.active_task.as_ref().map(|t| t.id.clone()) }`.
-  - On `Err(StateError::InvalidTransition(msg))`:
-    - Transition `state.status = ExecutionStatus::Blocked`.
-    - Record note `LedgerEntry::new("superstate-daemon", format!("[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}", active_task.id, msg))`.
-    - `save_state_atomic(&self.config.state_path, &state)?;`
-    - Emit `DaemonStepOutcome::Blocked { task_id: active_task.id, reason: msg }`.
-  - On other `Err(e)`:
-    - Return `Err(DaemonError::State(e))`.
+**Files:**
+- Modify: `crates/superstate-core/src/daemon.rs`
+- Modify: `crates/superstate-cli/src/state_cli.rs`
+- Modify: `crates/superstate-cli/src/commands/daemon.rs`
+- Create: `crates/superstate-cli/tests/test_cli_impact_slicing.rs`
 
-### 2. Integration Tests: `crates/superstate-core/tests/test_daemon_dag_execution.rs`
-Write 3 tests:
-1. `test_daemon_executes_sequential_milestones_with_checkpoints`:
-   - 2-milestone DAG (task-1 -> task-2).
-   - Mock driver creates `a.txt` for task-1 and `b.txt` for task-2.
-   - Run `runner.run_to_completion()`.
-   - Verify report status is `"completed"`. Both `a.txt` and `b.txt` exist.
-   - Verify git log contains checkpoint commits for both `task-1` and `task-2`.
-2. `test_daemon_rollback_isolation_preserves_earlier_milestone_commits`:
-   - 2-milestone DAG (task-1 -> task-2).
-   - Mock driver creates `a.txt` for task-1 (passes).
-   - On task-2 attempt 1: writes `bad.txt` (fails verification). Daemon triggers rollback.
-   - Verify `a.txt` is STILL present in repo, while `bad.txt` is removed.
-   - On task-2 attempt 2: writes `b.txt` (passes).
-   - Final state is completed with both `a.txt` and `b.txt`, and no `bad.txt`.
-3. `test_daemon_deadlock_halts_with_blocked_outcome`:
-   - Task 1 passes, but pending Task 2 depends on non-existent `task-99`.
-   - Daemon advances Task 1, detects deadlock in remaining tasks, records `[dag-blocked]` note, and transitions state to `Blocked`.
-   - `run_step()` returns `DaemonStepOutcome::Blocked`.
+**Interfaces:**
+- Consumes: `DaemonConfig`
+- Produces: `DaemonConfig.impact_slicing: bool`, CLI `--impact-slicing` flag
 
-## Verification
-- `cargo test -p superstate-core --test test_daemon_dag_execution`
-- `cargo test -p superstate-core`
-- `cargo check --all`
+## Implementation Steps
+Follow TDD strictly:
+1. Write CLI parsing test in `crates/superstate-cli/tests/test_cli_impact_slicing.rs`:
+   ```rust
+   use clap::Parser;
+   use superstate_cli::state_cli::{Commands, StateArgs, Subcommands};
 
-## Completion
-- Commit with: `git commit --no-gpg-sign -m "feat(daemon): wire DAG milestone transitions, checkpoint commits, and scoped rollback"`
-- Write detailed report to `docs/superpowers/plans/task-2-report.md`.
+   #[test]
+   fn test_cli_impact_slicing_flag_parsing() {
+       let args = StateArgs::try_parse_from(["state", "daemon", "--impact-slicing"])
+           .expect("Failed to parse --impact-slicing flag");
+       match args.command {
+           Subcommands::Daemon(daemon_args) => {
+               assert!(daemon_args.impact_slicing, "Expected impact_slicing to be true");
+           }
+           _ => panic!("Expected Subcommands::Daemon"),
+       }
+   }
+   ```
+2. Run `cargo test -p superstate-cli --test test_cli_impact_slicing` to confirm failure (unrecognized argument `--impact-slicing`).
+3. Add `impact_slicing` to `DaemonConfig` and CLI args:
+   - In `crates/superstate-core/src/daemon.rs`:
+     - Add `pub impact_slicing: bool` to `DaemonConfig` (defaulting to `false` in `Default::default()`).
+   - In `crates/superstate-cli/src/state_cli.rs`:
+     - Add `#[arg(long, help = "Enable milestone-scoped test impact slicing for fast fail-fast feedback")] pub impact_slicing: bool` to `DaemonArgs`.
+   - In `crates/superstate-cli/src/commands/daemon.rs`:
+     - Wire `impact_slicing: args.impact_slicing` when constructing `DaemonConfig`.
+4. Run `cargo test -p superstate-cli --test test_cli_impact_slicing` and verify PASS.
+5. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
+6. Commit changes:
+   ```bash
+   git add crates/superstate-core/src/daemon.rs crates/superstate-cli/src/state_cli.rs crates/superstate-cli/src/commands/daemon.rs crates/superstate-cli/tests/test_cli_impact_slicing.rs
+   git commit --no-gpg-sign -m "feat(cli): wire --impact-slicing flag into daemon configuration"
+   ```
+7. Write implementer report to `docs/superpowers/plans/task-2-report.md`.
+8. Report status: DONE / DONE_WITH_CONCERNS / BLOCKED.
