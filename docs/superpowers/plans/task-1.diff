@@ -1,760 +1,288 @@
-diff --git a/crates/superstate-cli/tests/test_cli_blocking_review.rs b/crates/superstate-cli/tests/test_cli_blocking_review.rs
-index 073585a..dbaeb54 100644
---- a/crates/superstate-cli/tests/test_cli_blocking_review.rs
-+++ b/crates/superstate-cli/tests/test_cli_blocking_review.rs
-@@ -89,6 +89,7 @@ fn test_cli_daemon_accepts_review_blocking_flag() {
-         title: "Test Task".to_string(),
-         verify_cmd: "true".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = superstate_core::state_machine::init_state_milestones(
-         Some("Test Goal"),
-diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-index 0c6f70f..11fd383 100644
---- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-+++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-@@ -18,11 +18,13 @@ fn test_cli_daemon_lifecycle() {
-             title: "Task 1".to_string(),
-             verify_cmd: "sleep 0.2 && true".to_string(),
-             files: vec![],
-+            ..Default::default()
-         },
-         MilestoneSpec {
-             title: "Task 2".to_string(),
-             verify_cmd: "sleep 0.2 && true".to_string(),
-             files: vec![],
-+            ..Default::default()
-         },
-     ];
- 
-@@ -91,6 +93,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
-         title: "Fast Task".to_string(),
-         verify_cmd: "true".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-diff --git a/crates/superstate-cli/tests/test_cli_rollback.rs b/crates/superstate-cli/tests/test_cli_rollback.rs
-index 88916a1..d1ebe5c 100644
---- a/crates/superstate-cli/tests/test_cli_rollback.rs
-+++ b/crates/superstate-cli/tests/test_cli_rollback.rs
-@@ -181,6 +181,7 @@ fn test_cli_daemon_auto_rollback_execution() {
-         title: "Test Task".to_string(),
-         verify_cmd: "test -f must_exist.txt".to_string(),
-         files: vec![PathBuf::from("tracked.txt")],
-+        ..Default::default()
-     }];
-     let state = superstate_core::state_machine::init_state_milestones(
-         Some("Test Goal"),
-@@ -252,6 +253,7 @@ fn test_cli_daemon_auto_rollback_enabled_by_default() {
-         title: "Test Task".to_string(),
-         verify_cmd: "test -f must_exist.txt".to_string(),
-         files: vec![PathBuf::from("tracked.txt")],
-+        ..Default::default()
-     }];
-     let state = superstate_core::state_machine::init_state_milestones(
-         Some("Test Goal"),
-@@ -322,6 +324,7 @@ fn test_cli_daemon_auto_rollback_disabled_with_flag() {
-         title: "Test Task".to_string(),
-         verify_cmd: "test -f must_exist.txt".to_string(),
-         files: vec![PathBuf::from("tracked.txt")],
-+        ..Default::default()
-     }];
-     let state = superstate_core::state_machine::init_state_milestones(
-         Some("Test Goal"),
-@@ -394,6 +397,7 @@ fn test_cli_daemon_auto_rollback_disabled_via_env_var() {
-         title: "Test Task".to_string(),
-         verify_cmd: "test -f must_exist.txt".to_string(),
-         files: vec![PathBuf::from("tracked.txt")],
-+        ..Default::default()
-     }];
-     let state = superstate_core::state_machine::init_state_milestones(
-         Some("Test Goal"),
-@@ -464,6 +468,7 @@ fn test_cli_daemon_detached_forwarding() {
-         title: "Test Task".to_string(),
-         verify_cmd: "test -f must_exist.txt".to_string(),
-         files: vec![PathBuf::from("tracked.txt")],
-+        ..Default::default()
-     }];
-     let state = superstate_core::state_machine::init_state_milestones(
-         Some("Test Goal"),
-diff --git a/crates/superstate-core/src/models.rs b/crates/superstate-core/src/models.rs
-index a608a33..a87797b 100644
---- a/crates/superstate-core/src/models.rs
-+++ b/crates/superstate-core/src/models.rs
-@@ -119,11 +119,15 @@ impl LedgerEntry {
-     }
+diff --git a/crates/superstate-core/src/impact.rs b/crates/superstate-core/src/impact.rs
+index 39bd8bb..c739f98 100644
+--- a/crates/superstate-core/src/impact.rs
++++ b/crates/superstate-core/src/impact.rs
+@@ -344,3 +344,186 @@ pub fn infer_impacted_tests(repo_root: &Path, base_branch: Option<&str>) -> Vec<
+     tests.dedup();
+     tests
  }
- 
--#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
- pub struct MilestoneSpec {
-+    #[serde(default)]
-+    pub id: Option<String>,
-     pub title: String,
-     pub verify_cmd: String,
-     #[serde(default)]
-+    pub depends_on: Option<Vec<String>>,
-+    #[serde(default)]
-     pub files: Vec<PathBuf>,
- }
- 
-diff --git a/crates/superstate-core/src/state_machine.rs b/crates/superstate-core/src/state_machine.rs
-index 243761e..7cb548a 100644
---- a/crates/superstate-core/src/state_machine.rs
-+++ b/crates/superstate-core/src/state_machine.rs
-@@ -150,42 +150,52 @@ pub fn init_state_milestones(
-         }
-     }
- 
--    // Deconstruct milestones into the initial active task (task-1) and pending sequential tasks (task-2..N)
--    let mut iter = milestones.into_iter();
--    // Guard against empty iterator; safely return an error rather than panicking if empty
--    let Some(first) = iter.next() else {
--        return Err(StateError::InvalidTransition(
--            "milestones cannot be empty".to_string(),
--        ));
--    };
--
--    let task_1 = TaskSpec {
--        id: "task-1".to_string(),
--        title: first.title,
--        depends_on: Vec::new(),
--        files_modify: first.files,
--        verification_cmd: Some(first.verify_cmd),
--    };
--
--    // Build subsequent tasks in the DAG, each chained to depend on the previous task ID
--    let mut pending_tasks = Vec::new();
--    for (i, milestone) in iter.enumerate() {
--        let current_task_num = i + 2;
--        let prev_task_num = i + 1;
--        pending_tasks.push(TaskSpec {
--            id: format!("task-{}", current_task_num),
--            title: milestone.title,
--            depends_on: vec![format!("task-{}", prev_task_num)],
--            files_modify: milestone.files,
--            verification_cmd: Some(milestone.verify_cmd),
-+    // Build tasks supporting custom id and explicit or sequential DAG dependencies
-+    let mut all_tasks = Vec::with_capacity(milestones.len());
-+    let mut prev_id = String::new();
 +
-+    for (idx, m) in milestones.into_iter().enumerate() {
-+        let task_id = m.id.unwrap_or_else(|| format!("task-{}", idx + 1));
-+        let depends_on = match m.depends_on {
-+            Some(deps) => deps,
-+            None => {
-+                if idx == 0 {
-+                    Vec::new()
-+                } else {
-+                    vec![prev_id.clone()]
-+                }
-+            }
-+        };
-+        prev_id = task_id.clone();
-+
-+        all_tasks.push(TaskSpec {
-+            id: task_id,
-+            title: m.title,
-+            depends_on,
-+            files_modify: m.files,
-+            verification_cmd: Some(m.verify_cmd),
-         });
-     }
- 
-+    // Select the first task whose dependencies are satisfied (or first task if independent)
-+    let completed: Vec<&str> = Vec::new();
-+    let active_idx = all_tasks
-+        .iter()
-+        .position(|task| {
-+            task.depends_on
-+                .iter()
-+                .all(|dep| is_dependency_satisfied(dep, &completed))
-+        })
-+        .unwrap_or(0);
-+
-+    let active_task = Some(all_tasks.remove(active_idx));
-+    let pending_tasks = all_tasks;
-+
-     // Assemble initial ExecutionState at step 1 in progress with configured base branch
-     Ok(ExecutionState {
-         status: ExecutionStatus::InProgress,
-         step: 1,
--        active_task: Some(task_1),
-+        active_task,
-         pending_tasks,
-         completed_tasks: Vec::new(),
-         modified_files: Vec::new(),
-@@ -236,16 +246,26 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
-                 task.depends_on
-                     .iter()
-                     .all(|dep| is_dependency_satisfied(dep, &completed))
--            })
--            .unwrap_or(0);
--
--        // Reset active worktree and branch tracking for intermediate tasks to ensure
--        // subsequent sequential milestones provision their own clean workspaces
--        state.active_worktree = None;
--        state.active_branch = None;
--        state.active_task = Some(state.pending_tasks.remove(next_idx));
--        state.step += 1;
--        state.status = ExecutionStatus::InProgress;
-+            });
-+
-+        match next_idx {
-+            Some(idx) => {
-+                // Reset active worktree and branch tracking for intermediate tasks to ensure
-+                // subsequent sequential milestones provision their own clean workspaces
-+                state.active_worktree = None;
-+                state.active_branch = None;
-+                state.active_task = Some(state.pending_tasks.remove(idx));
-+                state.step += 1;
-+                state.status = ExecutionStatus::InProgress;
-+            }
-+            None => {
-+                state.active_task = None;
-+                state.status = ExecutionStatus::Blocked;
-+                return Err(StateError::InvalidTransition(
-+                    "Cannot advance: pending tasks exist but none have satisfied dependencies".to_string(),
-+                ));
-+            }
-+        }
-     } else {
-         // Milestone DAG completed: preserve active_worktree and active_branch intact
-         // so that the daemon completion lifecycle can execute auto-merge and workspace cleanup
-diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-index 417791b..5d70367 100644
---- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
-+++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-@@ -56,6 +56,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
-         title: "Clean Milestone".to_string(),
-         verify_cmd: "test -f README.md".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -101,6 +102,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
-         title: "Vacuous Gate Milestone".to_string(),
-         verify_cmd: "true".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -168,6 +170,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
-         title: "Strict Gate Milestone".to_string(),
-         verify_cmd: "echo gate_ok".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -225,6 +228,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
-         title: "Secure Auth Handler".to_string(),
-         verify_cmd: "echo gate_ok".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -282,6 +286,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
-         title: "Multi Issue Milestone".to_string(),
-         verify_cmd: "echo ok".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -332,6 +337,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
-         title: "Subproject Milestone".to_string(),
-         verify_cmd: "echo ok".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-index 6884f67..33aa0d0 100644
---- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
-+++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-@@ -56,6 +56,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
-         title: "Strict Gate Milestone".to_string(),
-         verify_cmd: "test -f README.md".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -137,6 +138,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
-         title: "Clean Milestone".to_string(),
-         verify_cmd: "test -f README.md".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -198,6 +200,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
-         title: "Non Vacuous Gate Milestone".to_string(),
-         verify_cmd: "test -f README.md".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -262,6 +265,7 @@ fn test_daemon_tracks_milestone_start_commit_across_retries() {
-         title: "Milestone With Commits".to_string(),
-         verify_cmd: "test -f README.md".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
-index 00fd554..f62e449 100644
---- a/crates/superstate-core/tests/test_daemon_runner.rs
-+++ b/crates/superstate-core/tests/test_daemon_runner.rs
-@@ -15,11 +15,13 @@ fn test_daemon_run_step_success() {
-             title: "Milestone 1".to_string(),
-             verify_cmd: "test -f worker-ran.txt".to_string(),
-             files: vec![PathBuf::from("file1.txt")],
-+            ..Default::default()
-         },
-         MilestoneSpec {
-             title: "Milestone 2".to_string(),
-             verify_cmd: "test -f worker-ran.txt".to_string(),
-             files: vec![PathBuf::from("file2.txt")],
-+            ..Default::default()
-         },
-     ];
- 
-@@ -59,6 +61,7 @@ fn test_daemon_run_step_verification_failure() {
-         title: "Failing Milestone".to_string(),
-         verify_cmd: "false".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-@@ -98,11 +101,13 @@ fn test_daemon_run_to_completion() {
-             title: "Task A".to_string(),
-             verify_cmd: "true".to_string(),
-             files: vec![],
-+            ..Default::default()
-         },
-         MilestoneSpec {
-             title: "Task B".to_string(),
-             verify_cmd: "true".to_string(),
-             files: vec![],
-+            ..Default::default()
-         },
-     ];
- 
-@@ -145,6 +150,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
-         title: "Task Branch Alpha".to_string(),
-         verify_cmd: "true".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = init_state_milestones(Some("Branch Goal"), milestones, None, true).unwrap();
-@@ -197,6 +203,7 @@ fn test_daemon_step_advancer_invoked() {
-         title: "Advancer Milestone".to_string(),
-         verify_cmd: "test -f worker-ran.txt".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-@@ -244,6 +251,7 @@ fn test_daemon_step_advancer_error_propagation() {
-         title: "Advancer Failure Milestone".to_string(),
-         verify_cmd: "test -f worker-ran.txt".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     // Initialize state with in-place execution mode
-@@ -291,6 +299,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
-         title: "Rescue Milestone Bounded Stderr".to_string(),
-         verify_cmd: format!("test -f {}", target_str),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = init_state_milestones(Some("Rescue Goal"), milestones, None, true).unwrap();
-@@ -356,6 +365,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
-         title: "Rescue Milestone".to_string(),
-         verify_cmd: format!("test -f {}", target_str),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = init_state_milestones(Some("Rescue Goal"), milestones, None, true).unwrap();
-@@ -404,6 +414,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
-         title: "Failing Milestone".to_string(),
-         verify_cmd: "sh -c 'echo \"syntax error in main.rs line 42\" >&2 && exit 1'".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = init_state_milestones(Some("Retry Goal"), milestones, None, true).unwrap();
-@@ -499,6 +510,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
-         title: "Create Feature".to_string(),
-         verify_cmd: "test -f feature.txt".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     // Note: 4th arg is `no_worktree: true` -> in-place mode
-@@ -558,6 +570,7 @@ fn test_progress_renews_the_retry_budget() {
-         title: "Never satisfied".to_string(),
-         verify_cmd: "false".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -602,6 +615,7 @@ fn test_stalled_worker_still_blocks() {
-         title: "Never satisfied".to_string(),
-         verify_cmd: "false".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -657,6 +671,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
-         title: "Never satisfied".to_string(),
-         verify_cmd: "false".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -704,6 +719,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
-         title: "Never satisfied".to_string(),
-         verify_cmd: "false".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -758,6 +774,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
-         title: "Ungated".to_string(),
-         verify_cmd: "true".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -809,6 +826,7 @@ fn test_real_gate_completes_immediately() {
-         title: "Gated".to_string(),
-         verify_cmd: "test -f produced.txt".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -847,6 +865,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
-         title: "Ungated, no driver".to_string(),
-         verify_cmd: "true".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
-     save_state_atomic(&state_path, &state).unwrap();
-@@ -899,6 +918,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
-                 title: "Never satisfiable".to_string(),
-                 verify_cmd: "false".to_string(),
-                 files: vec![],
-+                ..Default::default()
-             }],
-             None,
-             true,
-diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
-index a83b91e..d35b400 100644
---- a/crates/superstate-core/tests/test_driver_presets.rs
-+++ b/crates/superstate-core/tests/test_driver_presets.rs
-@@ -157,6 +157,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
-         title: "Worktree Env Test".to_string(),
-         verify_cmd: "test -f env_ok.txt".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
- 
-     let state = superstate_core::state_machine::init_state_milestones(
-diff --git a/crates/superstate-core/tests/test_state_machine_dag.rs b/crates/superstate-core/tests/test_state_machine_dag.rs
-new file mode 100644
-index 0000000..33ab7d0
---- /dev/null
-+++ b/crates/superstate-core/tests/test_state_machine_dag.rs
-@@ -0,0 +1,212 @@
-+use std::path::PathBuf;
-+use superstate_core::models::{ExecutionState, ExecutionStatus, MilestoneSpec, TaskSpec};
-+use superstate_core::state_machine::{advance_step, init_state_milestones, StateError};
-+
-+#[test]
-+fn test_init_state_milestones_with_custom_dag_dependencies() {
-+    let milestones = vec![
-+        MilestoneSpec {
-+            id: Some("prep".to_string()),
-+            title: "Preparation".to_string(),
-+            verify_cmd: "cargo test --test prep".to_string(),
-+            depends_on: None, // should default to vec![] for idx == 0
-+            files: vec![PathBuf::from("src/prep.rs")],
-+        },
-+        MilestoneSpec {
-+            id: Some("worker-a".to_string()),
-+            title: "Worker A".to_string(),
-+            verify_cmd: "cargo test --test a".to_string(),
-+            depends_on: Some(vec!["prep".to_string()]),
-+            files: vec![PathBuf::from("src/worker_a.rs")],
-+        },
-+        MilestoneSpec {
-+            id: Some("worker-b".to_string()),
-+            title: "Worker B".to_string(),
-+            verify_cmd: "cargo test --test b".to_string(),
-+            depends_on: Some(vec!["prep".to_string()]),
-+            files: vec![PathBuf::from("src/worker_b.rs")],
-+        },
-+        MilestoneSpec {
-+            id: None, // should default to task-4
-+            title: "Worker C (Sequential Fallback)".to_string(),
-+            verify_cmd: "cargo test --test c".to_string(),
-+            depends_on: None, // should default to prev_id ("worker-b")
-+            files: vec![PathBuf::from("src/worker_c.rs")],
-+        },
-+    ];
-+
-+    let state = init_state_milestones(
-+        Some("Run custom DAG"),
-+        milestones,
-+        Some("feat/custom-dag"),
-+        false,
-+    )
-+    .expect("Failed to initialize state with custom DAG milestones");
-+
-+    assert_eq!(state.status, ExecutionStatus::InProgress);
-+    assert_eq!(state.step, 1);
-+    assert_eq!(state.base_branch, Some("feat/custom-dag".to_string()));
-+    assert_eq!(state.goal, Some("Run custom DAG".to_string()));
-+
-+    let active = state
-+        .active_task
-+        .as_ref()
-+        .expect("Active task must be set");
-+    assert_eq!(active.id, "prep");
-+    assert_eq!(active.title, "Preparation");
-+    assert!(active.depends_on.is_empty());
-+
-+    assert_eq!(state.pending_tasks.len(), 3);
-+
-+    let task_a = &state.pending_tasks[0];
-+    assert_eq!(task_a.id, "worker-a");
-+    assert_eq!(task_a.depends_on, vec!["prep".to_string()]);
-+
-+    let task_b = &state.pending_tasks[1];
-+    assert_eq!(task_b.id, "worker-b");
-+    assert_eq!(task_b.depends_on, vec!["prep".to_string()]);
-+
-+    let task_c = &state.pending_tasks[2];
-+    assert_eq!(task_c.id, "task-4");
-+    assert_eq!(task_c.depends_on, vec!["worker-b".to_string()]);
++/// Helper to verify that a matched keyword in a command string respects word boundaries.
++///
++/// Ensures the matched keyword is not an arbitrary substring of a larger identifier
++/// (e.g. `run_pytest_suite.sh` vs `pytest`).
++fn is_word_boundary_match(s: &str, idx: usize, word_len: usize) -> bool {
++    let bytes = s.as_bytes();
++    // Prior character must be start of string or a path/argument separator
++    let before_ok =
++        idx == 0 || bytes[idx - 1] == b' ' || bytes[idx - 1] == b'\t' || bytes[idx - 1] == b'/';
++    let after_idx = idx + word_len;
++    // Succeeding character must be end of string or a whitespace separator
++    let after_ok = after_idx == bytes.len()
++        || bytes[after_idx] == b' '
++        || bytes[after_idx] == b'\t'
++        || bytes[after_idx] == b'\n';
++    before_ok && after_ok
 +}
 +
-+#[test]
-+fn test_advance_step_resolves_diamond_dag_topologically() {
-+    // Diamond DAG:
-+    //      task-a
-+    //      /    \
-+    //  task-b  task-c
-+    //      \    /
-+    //      task-d
-+    // To ensure topological resolution doesn't just happen by luck of index 0,
-+    // pending tasks are ordered: [task-d, task-b, task-c].
-+    let task_a = TaskSpec {
-+        id: "task-a".to_string(),
-+        title: "Task A".to_string(),
-+        depends_on: vec![],
-+        files_modify: vec![],
-+        verification_cmd: Some("cargo test -p task-a".to_string()),
-+    };
-+    let task_b = TaskSpec {
-+        id: "task-b".to_string(),
-+        title: "Task B".to_string(),
-+        depends_on: vec!["task-a".to_string()],
-+        files_modify: vec![],
-+        verification_cmd: Some("cargo test -p task-b".to_string()),
-+    };
-+    let task_c = TaskSpec {
-+        id: "task-c".to_string(),
-+        title: "Task C".to_string(),
-+        depends_on: vec!["task-a".to_string()],
-+        files_modify: vec![],
-+        verification_cmd: Some("cargo test -p task-c".to_string()),
-+    };
-+    let task_d = TaskSpec {
-+        id: "task-d".to_string(),
-+        title: "Task D".to_string(),
-+        depends_on: vec!["task-b".to_string(), "task-c".to_string()],
-+        files_modify: vec![],
-+        verification_cmd: Some("cargo test -p task-d".to_string()),
-+    };
-+
-+    let mut state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
-+        active_task: Some(task_a),
-+        // Note: task_d is placed first in pending_tasks to strictly test dependency resolution
-+        pending_tasks: vec![task_d, task_b, task_c],
-+        ..Default::default()
-+    };
-+
-+    // Step 1: Complete task-a. Among [task-d, task-b, task-c], task-b is the first satisfied.
-+    advance_step(&mut state).expect("Advance step after task-a failed");
-+    assert_eq!(state.step, 2);
-+    assert_eq!(state.status, ExecutionStatus::InProgress);
-+    assert_eq!(state.completed_tasks.len(), 1);
-+    assert_eq!(state.completed_tasks[0].id, "task-a");
-+    assert_eq!(state.active_task.as_ref().unwrap().id, "task-b");
-+    // Remaining pending: [task-d, task-c]
-+    assert_eq!(state.pending_tasks.len(), 2);
-+    assert_eq!(state.pending_tasks[0].id, "task-d");
-+    assert_eq!(state.pending_tasks[1].id, "task-c");
-+
-+    // Step 2: Complete task-b. Among [task-d, task-c], task-d still needs task-c, so task-c is selected.
-+    advance_step(&mut state).expect("Advance step after task-b failed");
-+    assert_eq!(state.step, 3);
-+    assert_eq!(state.status, ExecutionStatus::InProgress);
-+    assert_eq!(state.completed_tasks.len(), 2);
-+    assert_eq!(state.completed_tasks[1].id, "task-b");
-+    assert_eq!(state.active_task.as_ref().unwrap().id, "task-c");
-+    // Remaining pending: [task-d]
-+    assert_eq!(state.pending_tasks.len(), 1);
-+    assert_eq!(state.pending_tasks[0].id, "task-d");
-+
-+    // Step 3: Complete task-c. Now task-d has both dependencies (task-b and task-c) satisfied.
-+    advance_step(&mut state).expect("Advance step after task-c failed");
-+    assert_eq!(state.step, 4);
-+    assert_eq!(state.status, ExecutionStatus::InProgress);
-+    assert_eq!(state.completed_tasks.len(), 3);
-+    assert_eq!(state.completed_tasks[2].id, "task-c");
-+    assert_eq!(state.active_task.as_ref().unwrap().id, "task-d");
-+    assert_eq!(state.pending_tasks.len(), 0);
-+
-+    // Step 4: Complete task-d. All tasks are completed.
-+    advance_step(&mut state).expect("Advance step after task-d failed");
-+    assert_eq!(state.step, 5);
-+    assert_eq!(state.status, ExecutionStatus::Completed);
-+    assert!(state.active_task.is_none());
-+    assert_eq!(state.completed_tasks.len(), 4);
-+}
-+
-+#[test]
-+fn test_advance_step_deadlock_halts_with_blocked_status() {
-+    let task_1 = TaskSpec {
-+        id: "task-1".to_string(),
-+        title: "Task 1".to_string(),
-+        depends_on: vec![],
-+        files_modify: vec![],
-+        verification_cmd: None,
-+    };
-+    // Circular dependency: task-2 depends on task-3, task-3 depends on task-2
-+    let task_2 = TaskSpec {
-+        id: "task-2".to_string(),
-+        title: "Task 2".to_string(),
-+        depends_on: vec!["task-3".to_string()],
-+        files_modify: vec![],
-+        verification_cmd: None,
-+    };
-+    let task_3 = TaskSpec {
-+        id: "task-3".to_string(),
-+        title: "Task 3".to_string(),
-+        depends_on: vec!["task-2".to_string()],
-+        files_modify: vec![],
-+        verification_cmd: None,
-+    };
-+
-+    let mut state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
-+        active_task: Some(task_1),
-+        pending_tasks: vec![task_2, task_3],
-+        ..Default::default()
-+    };
-+
-+    let result = advance_step(&mut state);
-+    match result {
-+        Err(StateError::InvalidTransition(msg)) => {
-+            assert!(
-+                msg.contains("Cannot advance: pending tasks exist but none have satisfied dependencies"),
-+                "Unexpected error message: {}",
-+                msg
-+            );
-+        }
-+        _ => panic!("Expected StateError::InvalidTransition, got: {:?}", result),
++/// Specialize a base verification command to execute only the impacted test files.
++///
++/// Inspects the base command to recognize common test runners:
++/// - Pytest: `pytest`, `python -m pytest`, or prefixed commands like `./run-in-container pytest`
++/// - Cargo: `cargo test`
++/// - Go: `go test`
++/// - Node/Vitest/Jest: `npm test`, `npx vitest`, `yarn test`, `pnpm test`, `jest`
++///
++/// When a recognized runner is identified, the command is specialized by targeting
++/// the impacted test files directly, replacing generic test directory arguments.
++///
++/// # Parameters
++/// - `base_cmd`: The raw base verification command string (e.g. `pytest tests/`).
++/// - `impacted_files`: Slice of test file paths discovered by impact analysis.
++/// - `repo_root`: The base repository directory against which relative paths are formed.
++///
++/// # Returns
++/// - `Some(specialized_cmd)` if the test runner is recognized and sliceable.
++/// - `None` if `impacted_files` is empty or if the runner command is unrecognized.
++pub fn build_sliced_test_cmd(
++    base_cmd: &str,
++    impacted_files: &[PathBuf],
++    repo_root: &Path,
++) -> Option<String> {
++    // Guard clause: return None immediately if no test files were impacted
++    if impacted_files.is_empty() {
++        return None;
 +    }
 +
-+    assert_eq!(state.status, ExecutionStatus::Blocked);
-+    assert!(state.active_task.is_none());
-+    assert_eq!(state.completed_tasks.len(), 1);
-+    assert_eq!(state.completed_tasks[0].id, "task-1");
-+    assert_eq!(state.pending_tasks.len(), 2);
++    let trimmed = base_cmd.trim();
++
++    // 1. Pytest detection (supports ./run-in-container pytest, python -m pytest, pytest)
++    if let Some(prefix_idx) = trimmed.find("pytest") {
++        if is_word_boundary_match(trimmed, prefix_idx, "pytest".len()) {
++            let prefix = trimmed[..prefix_idx + "pytest".len()].trim();
++            // Format relative paths from repo_root for clean test invocations
++            let mut rel_paths: Vec<String> = impacted_files
++                .iter()
++                .map(|p| {
++                    p.strip_prefix(repo_root)
++                        .unwrap_or(p)
++                        .to_string_lossy()
++                        .to_string()
++                })
++                .collect();
++            rel_paths.sort();
++            rel_paths.dedup();
++
++            if !rel_paths.is_empty() {
++                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
++            }
++        }
++    }
++
++    // 2. Cargo test detection
++    if let Some(idx) = trimmed.find("cargo test") {
++        if is_word_boundary_match(trimmed, idx, "cargo test".len()) {
++            let prefix = trimmed[..idx + "cargo test".len()].trim();
++            let mut test_args = Vec::new();
++            // Inspect each file to build appropriate --test flags or test filters
++            for file in impacted_files {
++                let rel = file.strip_prefix(repo_root).unwrap_or(file);
++                if let Some(parent) = rel.parent() {
++                    if parent == Path::new("tests") || parent.ends_with("tests") {
++                        if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
++                            test_args.push(format!("--test {}", stem));
++                            continue;
++                        }
++                    }
++                }
++                if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
++                    test_args.push(stem.to_string());
++                }
++            }
++            test_args.sort();
++            test_args.dedup();
++
++            if !test_args.is_empty() {
++                return Some(format!("{} {}", prefix, test_args.join(" ")));
++            }
++        }
++    }
++
++    // 3. Go test detection
++    if let Some(idx) = trimmed.find("go test") {
++        if is_word_boundary_match(trimmed, idx, "go test".len()) {
++            let prefix = trimmed[..idx + "go test".len()].trim();
++            let mut pkgs = Vec::new();
++            // Translate impacted files to their enclosing Go package directories
++            for file in impacted_files {
++                let rel = file.strip_prefix(repo_root).unwrap_or(file);
++                let parent = rel.parent().unwrap_or(Path::new(""));
++                let pkg = if parent.as_os_str().is_empty() {
++                    ".".to_string()
++                } else if parent.starts_with(".") {
++                    parent.to_string_lossy().to_string()
++                } else {
++                    format!("./{}", parent.to_string_lossy())
++                };
++                pkgs.push(pkg);
++            }
++            pkgs.sort();
++            pkgs.dedup();
++
++            if !pkgs.is_empty() {
++                return Some(format!("{} {}", prefix, pkgs.join(" ")));
++            }
++        }
++    }
++
++    // 4. Node / Vitest / Jest detection
++    let mut rel_paths: Vec<String> = impacted_files
++        .iter()
++        .map(|p| {
++            p.strip_prefix(repo_root)
++                .unwrap_or(p)
++                .to_string_lossy()
++                .to_string()
++        })
++        .collect();
++    rel_paths.sort();
++    rel_paths.dedup();
++
++    if !rel_paths.is_empty() {
++        if let Some(idx) = trimmed.find("npm test") {
++            if is_word_boundary_match(trimmed, idx, "npm test".len()) {
++                let prefix = trimmed[..idx + "npm test".len()].trim();
++                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
++            }
++        }
++        if let Some(idx) = trimmed.find("pnpm test") {
++            if is_word_boundary_match(trimmed, idx, "pnpm test".len()) {
++                let prefix = trimmed[..idx + "pnpm test".len()].trim();
++                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
++            }
++        }
++        if let Some(idx) = trimmed.find("yarn test") {
++            if is_word_boundary_match(trimmed, idx, "yarn test".len()) {
++                let prefix = trimmed[..idx + "yarn test".len()].trim();
++                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
++            }
++        }
++        if let Some(idx) = trimmed.find("vitest run") {
++            if is_word_boundary_match(trimmed, idx, "vitest run".len()) {
++                let prefix = trimmed[..idx + "vitest run".len()].trim();
++                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
++            }
++        }
++        if let Some(idx) = trimmed.find("vitest") {
++            if is_word_boundary_match(trimmed, idx, "vitest".len()) {
++                let prefix = trimmed[..idx + "vitest".len()].trim();
++                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
++            }
++        }
++        if let Some(idx) = trimmed.find("jest") {
++            if is_word_boundary_match(trimmed, idx, "jest".len()) {
++                let prefix = trimmed[..idx + "jest".len()].trim();
++                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
++            }
++        }
++    }
++
++    None
 +}
-diff --git a/crates/superstate-core/tests/test_state_milestones.rs b/crates/superstate-core/tests/test_state_milestones.rs
-index 1ba8d4e..a8747f8 100644
---- a/crates/superstate-core/tests/test_state_milestones.rs
-+++ b/crates/superstate-core/tests/test_state_milestones.rs
-@@ -20,16 +20,19 @@ fn test_init_state_milestones_dag_construction() {
-             title: "Setup Stripe Client".to_string(),
-             verify_cmd: "cargo test -p stripe".to_string(),
-             files: vec![PathBuf::from("src/stripe.rs")],
-+            ..Default::default()
-         },
-         MilestoneSpec {
-             title: "Handle Webhook Events".to_string(),
-             verify_cmd: "cargo test -p stripe-webhook".to_string(),
-             files: vec![PathBuf::from("src/webhook.rs")],
-+            ..Default::default()
-         },
-         MilestoneSpec {
-             title: "Database Persistence".to_string(),
-             verify_cmd: "cargo test -p stripe-db".to_string(),
-             files: vec![PathBuf::from("src/db.rs")],
-+            ..Default::default()
-         },
-     ];
- 
-@@ -92,6 +95,7 @@ fn test_init_state_milestones_validation_errors() {
-         title: "  ".to_string(),
-         verify_cmd: "cargo test".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     assert!(matches!(
-         init_state_milestones(None, empty_title, None, false),
-@@ -102,6 +106,7 @@ fn test_init_state_milestones_validation_errors() {
-         title: "Valid Title".to_string(),
-         verify_cmd: "   ".to_string(),
-         files: vec![],
-+        ..Default::default()
-     }];
-     assert!(matches!(
-         init_state_milestones(None, empty_verify, None, false),
-@@ -117,6 +122,7 @@ fn test_init_state_milestones_single_milestone() {
-         title: "Single task".to_string(),
-         verify_cmd: "cargo test".to_string(),
-         files: vec![PathBuf::from("src/single.rs")],
-+        ..Default::default()
-     }];
- 
-     // Initialize state with single milestone and verify immediate transition to task-1
-@@ -163,6 +169,7 @@ fn test_milestone_spec_and_execution_state_serde() {
-         title: "Test with files".to_string(),
-         verify_cmd: "cargo test".to_string(),
-         files: vec![PathBuf::from("crates/core/src/lib.rs")],
-+        ..Default::default()
-     };
-     let serialized_milestone = serde_json::to_string(&milestone_with_files)
-         .expect("MilestoneSpec serialization must succeed");
+diff --git a/crates/superstate-core/tests/test_impact_slicing.rs b/crates/superstate-core/tests/test_impact_slicing.rs
+new file mode 100644
+index 0000000..d5a137a
+--- /dev/null
++++ b/crates/superstate-core/tests/test_impact_slicing.rs
+@@ -0,0 +1,91 @@
++use std::path::{Path, PathBuf};
++use superstate_core::impact::build_sliced_test_cmd;
++
++#[test]
++fn test_build_sliced_test_cmd_pytest() {
++    let repo = Path::new("/workspace");
++    let files = vec![
++        PathBuf::from("/workspace/tests/test_auth.py"),
++        PathBuf::from("/workspace/tests/test_token.py"),
++    ];
++    let res = build_sliced_test_cmd("pytest tests/", &files, repo);
++    assert_eq!(
++        res,
++        Some("pytest tests/test_auth.py tests/test_token.py".to_string())
++    );
++}
++
++#[test]
++fn test_build_sliced_test_cmd_pytest_container_prefix() {
++    let repo = Path::new("/workspace");
++    let files = vec![PathBuf::from("/workspace/tests/test_auth.py")];
++    let res = build_sliced_test_cmd("./run-in-container pytest tests/", &files, repo);
++    assert_eq!(
++        res,
++        Some("./run-in-container pytest tests/test_auth.py".to_string())
++    );
++}
++
++#[test]
++fn test_build_sliced_test_cmd_cargo() {
++    let repo = Path::new("/workspace");
++    let files = vec![PathBuf::from("/workspace/tests/test_lexer.rs")];
++    let res = build_sliced_test_cmd("cargo test", &files, repo);
++    assert_eq!(res, Some("cargo test --test test_lexer".to_string()));
++}
++
++#[test]
++fn test_build_sliced_test_cmd_unrecognized_returns_none() {
++    let repo = Path::new("/workspace");
++    let files = vec![PathBuf::from("/workspace/tests/test_auth.py")];
++    let res = build_sliced_test_cmd("sh verify.sh", &files, repo);
++    assert_eq!(res, None);
++}
++
++#[test]
++fn test_build_sliced_test_cmd_empty_impacted_files_returns_none() {
++    let repo = Path::new("/workspace");
++    let files: Vec<PathBuf> = vec![];
++    let res = build_sliced_test_cmd("pytest tests/", &files, repo);
++    assert_eq!(res, None);
++}
++
++#[test]
++fn test_build_sliced_test_cmd_cargo_multiple_targets() {
++    let repo = Path::new("/workspace");
++    let files = vec![
++        PathBuf::from("/workspace/tests/test_parser.rs"),
++        PathBuf::from("/workspace/tests/test_lexer.rs"),
++    ];
++    let res = build_sliced_test_cmd("cargo test", &files, repo);
++    assert_eq!(
++        res,
++        Some("cargo test --test test_lexer --test test_parser".to_string())
++    );
++}
++
++#[test]
++fn test_build_sliced_test_cmd_node_vitest_and_jest() {
++    let repo = Path::new("/workspace");
++    let files = vec![PathBuf::from("/workspace/tests/auth.test.ts")];
++
++    let res_vitest = build_sliced_test_cmd("npx vitest run tests/", &files, repo);
++    assert_eq!(
++        res_vitest,
++        Some("npx vitest run tests/auth.test.ts".to_string())
++    );
++
++    let res_jest = build_sliced_test_cmd("npx jest tests/", &files, repo);
++    assert_eq!(res_jest, Some("npx jest tests/auth.test.ts".to_string()));
++
++    let res_npm = build_sliced_test_cmd("npm test", &files, repo);
++    assert_eq!(res_npm, Some("npm test -- tests/auth.test.ts".to_string()));
++}
++
++#[test]
++fn test_build_sliced_test_cmd_go_package() {
++    let repo = Path::new("/workspace");
++    let files = vec![PathBuf::from("/workspace/pkg/server/server_test.go")];
++    let res = build_sliced_test_cmd("go test ./...", &files, repo);
++    assert_eq!(res, Some("go test ./pkg/server".to_string()));
++}

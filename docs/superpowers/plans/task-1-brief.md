@@ -1,75 +1,42 @@
-# Task 1 Brief: Model Enhancements & State Machine DAG Advancement
-
-## Working Directory
-`/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-dag-execution`
-Branch: `feat/daemon-dag-execution`
-
-## Goal
-Extend `MilestoneSpec` in `crates/superstate-core/src/models.rs` to support optional explicit `id` and `depends_on`.
-Upgrade `advance_step` and `init_state_milestones` in `crates/superstate-core/src/state_machine.rs` to resolve arbitrary DAGs, eliminate the blind `.unwrap_or(0)` fallback, and fail-closed with `ExecutionStatus::Blocked` when remaining pending tasks are deadlocked.
+# Task 1 Brief: Command Specialization in `impact.rs`
 
 ## Global Constraints
 - Compile cleanly with `cargo check --all` and pass `cargo test --all`.
-- No new external crate dependencies.
-- Zero network I/O or direct API keys in Rust binary.
-- Use `--no-gpg-sign` for git commits.
-- Follow strict Test-Driven Development (TDD).
+- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
+- Skip GPG verification on all commits (`--no-gpg-sign`).
+- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
 
-## Requirements
+## Task Details
+- **Task:** Task 1: Command Specialization in `impact.rs`
+- **Depends on:** none
+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
 
-### 1. `crates/superstate-core/src/models.rs`
-Update `MilestoneSpec`:
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MilestoneSpec {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub title: String,
-    pub verify_cmd: String,
-    #[serde(default)]
-    pub depends_on: Option<Vec<String>>,
-    #[serde(default)]
-    pub files: Vec<PathBuf>,
-}
-```
+**Files:**
+- Create: `crates/superstate-core/tests/test_impact_slicing.rs`
+- Modify: `crates/superstate-core/src/impact.rs`
 
-### 2. `crates/superstate-core/src/state_machine.rs`
-#### `init_state_milestones`
-- Support custom `id`: `m.id.clone().unwrap_or_else(|| format!("task-{}", idx + 1))`.
-- Support custom `depends_on`:
-  - If `Some(deps)`, use `deps`.
-  - If `None`, if `idx == 0`, `vec![]`; if `idx > 0`, `vec![prev_id]`.
-- Build the task list. The first task whose `depends_on` are satisfied (or first task if independent) becomes `active_task`. The rest go into `pending_tasks`.
+**Interfaces:**
+- Produces: `pub fn build_sliced_test_cmd(base_cmd: &str, impacted_files: &[PathBuf], repo_root: &Path) -> Option<String>`
 
-#### `advance_step`
-- When `state.active_task` is taken, push to `state.completed_tasks`.
-- If `!state.pending_tasks.is_empty()`:
-  - Search `pending_tasks.iter().position(|t| t.depends_on.iter().all(|dep| is_dependency_satisfied(dep, &completed)))`.
-  - If `Some(idx)`:
-    - `state.active_worktree = None;`
-    - `state.active_branch = None;`
-    - `state.active_task = Some(state.pending_tasks.remove(idx));`
-    - `state.step += 1;`
-    - `state.status = ExecutionStatus::InProgress;`
-  - If `None`:
-    - `state.active_task = None;`
-    - `state.status = ExecutionStatus::Blocked;`
-    - Return `Err(StateError::InvalidTransition("Cannot advance: pending tasks exist but none have satisfied dependencies".to_string()))`.
-- If `state.pending_tasks.is_empty()`:
-  - `state.active_task = None;`
-  - `state.status = ExecutionStatus::Completed;`
-
-### 3. Integration Tests
-Write tests in `crates/superstate-core/tests/test_state_machine_dag.rs`:
-- `test_init_state_milestones_with_custom_dag_dependencies`
-- `test_advance_step_resolves_diamond_dag_topologically`
-- `test_advance_step_deadlock_halts_with_blocked_status`
-
-## Verification
-- `cargo test -p superstate-core --test test_state_machine_dag`
-- `cargo test -p superstate-core`
-- `cargo check --all`
-
-## Completion
-- Commit with: `git commit --no-gpg-sign -m "feat(core): implement DAG milestone resolution and deadlock detection in advance_step"`
-- Write detailed report to `docs/superpowers/plans/task-1-report.md`.
+## Implementation Steps
+Follow TDD strictly:
+1. Write failing unit tests in `crates/superstate-core/tests/test_impact_slicing.rs`:
+   - `test_build_sliced_test_cmd_pytest`: `pytest tests/` with `tests/test_auth.py` and `tests/test_token.py` $\rightarrow$ `Some("pytest tests/test_auth.py tests/test_token.py")`.
+   - `test_build_sliced_test_cmd_pytest_container_prefix`: `./run-in-container pytest tests/` with `tests/test_auth.py` $\rightarrow$ `Some("./run-in-container pytest tests/test_auth.py")`.
+   - `test_build_sliced_test_cmd_cargo`: `cargo test` with `tests/test_lexer.rs` $\rightarrow$ `Some("cargo test --test test_lexer")`.
+   - `test_build_sliced_test_cmd_unrecognized_returns_none`: `sh verify.sh` with `tests/test_auth.py` $\rightarrow$ `None`.
+2. Run `cargo test -p superstate-core --test test_impact_slicing` to confirm failure (unresolved function).
+3. Implement `pub fn build_sliced_test_cmd` in `crates/superstate-core/src/impact.rs`:
+   - Inspects `base_cmd` to detect Pytest, Cargo, Node/Vitest/Jest, etc.
+   - If `impacted_files` is empty, returns `None`.
+   - Translates impacted test files into relative paths from `repo_root`.
+   - Returns `Some(specialized_cmd)` or `None`.
+4. Run `cargo test -p superstate-core --test test_impact_slicing` and verify PASS.
+5. Run `cargo clippy -p superstate-core --all-targets -- -D warnings`.
+6. Commit changes:
+   ```bash
+   git add crates/superstate-core/src/impact.rs crates/superstate-core/tests/test_impact_slicing.rs
+   git commit --no-gpg-sign -m "feat(core): implement test runner command specialization for impact slicing"
+   ```
+7. Write implementer report to `docs/superpowers/plans/task-1-report.md`.
+8. Report status: DONE / DONE_WITH_CONCERNS / BLOCKED.
