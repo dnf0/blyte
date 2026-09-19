@@ -158,6 +158,8 @@ pub enum DaemonError {
     NoActiveTask,
     #[error("Maximum retries ({0}) exceeded for task {1}")]
     MaxRetriesExceeded(usize, String),
+    #[error("Execution blocked for task {task_id}: {reason}")]
+    Blocked { task_id: String, reason: String },
 }
 
 fn default_true() -> bool {
@@ -452,6 +454,11 @@ impl DaemonRunner {
     /// # Returns
     /// An initialized `DaemonRunner` with empty retry tracking and no custom step advancer.
     pub fn new(config: DaemonConfig) -> Result<Self, DaemonError> {
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+
         Ok(Self {
             config,
             retry_counts: HashMap::new(),
@@ -949,7 +956,7 @@ impl DaemonRunner {
                             active_task.id, active_task.title
                         );
                         let _ = Command::new("git")
-                            .args(["commit", "-m", &commit_msg])
+                            .args(["commit", "--no-gpg-sign", "-m", &commit_msg])
                             .current_dir(&working_dir)
                             .output();
                     }
@@ -963,23 +970,57 @@ impl DaemonRunner {
                 let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
                 if updated_state.status == ExecutionStatus::Completed {
                     finalize_completed_execution(&self.config.state_path, &updated_state)?;
+                } else if updated_state.status == ExecutionStatus::Blocked {
+                    let reason = updated_state
+                        .notes
+                        .last()
+                        .map(|n| n.note.clone())
+                        .unwrap_or_else(|| "remaining tasks cannot advance".to_string());
+                    return Ok(DaemonStepOutcome::Blocked {
+                        task_id: active_task.id,
+                        reason,
+                    });
                 }
                 Ok(DaemonStepOutcome::Advanced {
                     completed_task_id: active_task.id,
                     next_task_id,
                 })
             } else {
-                advance_step(&mut state)?;
-                save_state_atomic(&self.config.state_path, &state)?;
+                // In-process advancement evaluates dependency satisfaction across pending milestones.
+                // If remaining tasks have unresolved or cyclical dependencies, transition to Blocked
+                // rather than failing unrecoverably, recording a ledger entry for epistemic tracking.
+                match advance_step(&mut state) {
+                    Ok(()) => {
+                        save_state_atomic(&self.config.state_path, &state)?;
 
-                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
-                if state.status == ExecutionStatus::Completed {
-                    finalize_completed_execution(&self.config.state_path, &state)?;
+                        let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                        if state.status == ExecutionStatus::Completed {
+                            finalize_completed_execution(&self.config.state_path, &state)?;
+                        }
+                        Ok(DaemonStepOutcome::Advanced {
+                            completed_task_id: active_task.id,
+                            next_task_id,
+                        })
+                    }
+                    Err(StateError::InvalidTransition(msg)) => {
+                        // Guard against DAG deadlock: milestone completed successfully, but remaining
+                        // pending tasks cannot advance due to missing or cyclical dependencies.
+                        state.status = ExecutionStatus::Blocked;
+                        state.notes.push(LedgerEntry::new(
+                            "superstate-daemon",
+                            format!(
+                                "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
+                                active_task.id, msg
+                            ),
+                        ));
+                        save_state_atomic(&self.config.state_path, &state)?;
+                        Ok(DaemonStepOutcome::Blocked {
+                            task_id: active_task.id,
+                            reason: msg,
+                        })
+                    }
+                    Err(e) => Err(DaemonError::State(e)),
                 }
-                Ok(DaemonStepOutcome::Advanced {
-                    completed_task_id: active_task.id,
-                    next_task_id,
-                })
             }
         } else {
             // Verification gate failed: record failure diagnostics and update retry budget.
@@ -1043,10 +1084,7 @@ impl DaemonRunner {
                 ),
             ));
 
-            if self.config.auto_rollback
-                && is_inside_git_repo(&working_dir)
-                && attempts_so_far < attempt_ceiling
-            {
+            if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
                 self.perform_rollback(&active_task.id, attempts_spent, &working_dir, &mut state)?;
             }
 
@@ -1140,10 +1178,7 @@ impl DaemonRunner {
                     continue;
                 }
                 DaemonStepOutcome::Blocked { task_id, reason } => {
-                    return Err(DaemonError::MaxRetriesExceeded(
-                        self.config.max_retries,
-                        format!("{}: {}", task_id, reason),
-                    ));
+                    return Err(DaemonError::Blocked { task_id, reason });
                 }
             }
         }

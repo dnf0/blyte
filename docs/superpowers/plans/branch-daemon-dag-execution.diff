@@ -1,0 +1,1613 @@
+diff --git a/crates/superstate-cli/src/commands/state.rs b/crates/superstate-cli/src/commands/state.rs
+index d36b31a..c9ba53d 100644
+--- a/crates/superstate-cli/src/commands/state.rs
++++ b/crates/superstate-cli/src/commands/state.rs
+@@ -369,7 +369,12 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
+             base_branch.as_deref(),
+             no_worktree,
+         )
+-        .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?;
++        .map_err(|e| match e {
++            superstate_core::state_machine::StateError::InvalidTransition(msg) => {
++                format!("Failed to initialize state from milestones: {}", msg)
++            }
++            other => format!("Failed to initialize state from milestones: {}", other),
++        })?;
+ 
+         // Provision isolated worktree for initial active task only if use_worktree is set
+         if use_worktree && root.join(".git").exists() {
+@@ -794,39 +799,62 @@ pub fn cmd_next(
+         }
+     }
+ 
+-    advance_step(&mut state).map_err(|e| format!("Failed to advance step: {}", e))?;
+-    save_state_atomic(state_path, &state).map_err(|e| format!("Failed to save state: {}", e))?;
++    match advance_step(&mut state) {
++        Ok(()) => {
++            save_state_atomic(state_path, &state).map_err(|e| format!("Failed to save state: {}", e))?;
++
++            // Provision worktree for newly active task in sequential progression
++            if !state.no_worktree && repo_root.join(".git").exists() {
++                if let Some(ref next_task) = state.active_task {
++                    let manager = WorktreeManager::new(&repo_root)
++                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
++                    let wt = manager
++                        .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
++                        .map_err(|e| {
++                            format!("Failed to ensure worktree for task {}: {}", next_task.id, e)
++                        })?;
++                    state.active_worktree = Some(wt.path);
++                    state.active_branch = Some(wt.branch);
++                    save_state_atomic(state_path, &state)
++                        .map_err(|e| format!("Failed to save state: {}", e))?;
++                }
++            }
+ 
+-    // Provision worktree for newly active task in sequential progression
+-    if !state.no_worktree && repo_root.join(".git").exists() {
+-        if let Some(ref next_task) = state.active_task {
+-            let manager = WorktreeManager::new(&repo_root)
+-                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+-            let wt = manager
+-                .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
+-                .map_err(|e| {
+-                    format!("Failed to ensure worktree for task {}: {}", next_task.id, e)
+-                })?;
+-            state.active_worktree = Some(wt.path);
+-            state.active_branch = Some(wt.branch);
++            if let Some(ref next_task) = state.active_task {
++                println!(
++                    "State advanced: active_task={}: {} (status={:?})",
++                    next_task.id, next_task.title, state.status
++                );
++            } else {
++                println!(
++                    "State completed: all tasks finished (status={:?})",
++                    state.status
++                );
++            }
++
++            Ok(())
++        }
++        Err(superstate_core::state_machine::StateError::InvalidTransition(msg)) => {
++            // Guard against DAG deadlock: milestone completed successfully, but remaining
++            // pending tasks cannot advance due to missing or cyclical dependencies.
++            state.status = ExecutionStatus::Blocked;
++            state.notes.push(LedgerEntry::new(
++                "superstate-daemon",
++                format!(
++                    "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
++                    active_task.id, msg
++                ),
++            ));
+             save_state_atomic(state_path, &state)
+                 .map_err(|e| format!("Failed to save state: {}", e))?;
++            println!(
++                "State blocked: Milestone {} completed, but remaining tasks cannot advance: {}",
++                active_task.id, msg
++            );
++            Ok(())
+         }
++        Err(e) => Err(format!("Failed to advance step: {}", e)),
+     }
+-
+-    if let Some(ref next_task) = state.active_task {
+-        println!(
+-            "State advanced: active_task={}: {} (status={:?})",
+-            next_task.id, next_task.title, state.status
+-        );
+-    } else {
+-        println!(
+-            "State completed: all tasks finished (status={:?})",
+-            state.status
+-        );
+-    }
+-
+-    Ok(())
+ }
+ 
+ /// Generate the turnkey prompt for a task.
+diff --git a/crates/superstate-cli/tests/test_cli_blocking_review.rs b/crates/superstate-cli/tests/test_cli_blocking_review.rs
+index 073585a..dbaeb54 100644
+--- a/crates/superstate-cli/tests/test_cli_blocking_review.rs
++++ b/crates/superstate-cli/tests/test_cli_blocking_review.rs
+@@ -89,6 +89,7 @@ fn test_cli_daemon_accepts_review_blocking_flag() {
+         title: "Test Task".to_string(),
+         verify_cmd: "true".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = superstate_core::state_machine::init_state_milestones(
+         Some("Test Goal"),
+diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+index 0c6f70f..11fd383 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
++++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+@@ -18,11 +18,13 @@ fn test_cli_daemon_lifecycle() {
+             title: "Task 1".to_string(),
+             verify_cmd: "sleep 0.2 && true".to_string(),
+             files: vec![],
++            ..Default::default()
+         },
+         MilestoneSpec {
+             title: "Task 2".to_string(),
+             verify_cmd: "sleep 0.2 && true".to_string(),
+             files: vec![],
++            ..Default::default()
+         },
+     ];
+ 
+@@ -91,6 +93,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
+         title: "Fast Task".to_string(),
+         verify_cmd: "true".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+diff --git a/crates/superstate-cli/tests/test_cli_dag_daemon.rs b/crates/superstate-cli/tests/test_cli_dag_daemon.rs
+new file mode 100644
+index 0000000..cbcf26e
+--- /dev/null
++++ b/crates/superstate-cli/tests/test_cli_dag_daemon.rs
+@@ -0,0 +1,272 @@
++//! Integration tests for arbitrary DAG milestone execution via CLI and daemon.
++
++use std::fs;
++use std::path::Path;
++use std::process::Command;
++use superstate_core::models::{ExecutionState, ExecutionStatus};
++
++fn bin() -> &'static str {
++    env!("CARGO_BIN_EXE_superstate")
++}
++
++fn init_git_repo(path: &Path, branch: &str) {
++    let status = Command::new("git")
++        .args(["init", "-b", branch])
++        .current_dir(path)
++        .status()
++        .expect("git init failed");
++    assert!(status.success());
++
++    Command::new("git")
++        .args(["config", "user.name", "Test User"])
++        .current_dir(path)
++        .status()
++        .unwrap();
++    Command::new("git")
++        .args(["config", "user.email", "test@example.com"])
++        .current_dir(path)
++        .status()
++        .unwrap();
++
++    fs::write(path.join("README.md"), b"# Base Repository\n").unwrap();
++    Command::new("git")
++        .args(["add", "README.md"])
++        .current_dir(path)
++        .status()
++        .unwrap();
++    Command::new("git")
++        .args(["commit", "-m", "chore: initial baseline"])
++        .current_dir(path)
++        .status()
++        .unwrap();
++}
++
++#[test]
++fn test_cli_diamond_dag_daemon_execution() {
++    let dir = tempfile::tempdir().unwrap();
++    let repo_root = dir.path().canonicalize().unwrap();
++    init_git_repo(&repo_root, "main");
++
++    // Diamond DAG:
++    //      task-a
++    //      /    \
++    //   task-b  task-c
++    //      \    /
++    //      task-d
++    let diamond_json = r#"[
++        {"id": "task-a", "title": "Task A", "verify_cmd": "test -f a.txt", "depends_on": []},
++        {"id": "task-b", "title": "Task B", "verify_cmd": "test -f b.txt", "depends_on": ["task-a"]},
++        {"id": "task-c", "title": "Task C", "verify_cmd": "test -f c.txt", "depends_on": ["task-a"]},
++        {"id": "task-d", "title": "Task D", "verify_cmd": "test -f d.txt", "depends_on": ["task-b", "task-c"]}
++    ]"#;
++
++    let init_output = Command::new(bin())
++        .args(["state", "init", "--milestones", diamond_json, "--no-worktree"])
++        .current_dir(&repo_root)
++        .output()
++        .expect("Failed to run superstate state init");
++
++    assert!(
++        init_output.status.success(),
++        "state init failed: stderr={}",
++        String::from_utf8_lossy(&init_output.stderr)
++    );
++
++    let state_file = repo_root.join(".agent-state").join("state.json");
++    assert!(state_file.exists(), "state file must exist after init");
++
++    // Mock driver script touches the file corresponding to active task
++    let driver_script = r#"
++case "$SUPERSTATE_ACTIVE_TASK" in
++    task-a) echo "done a" > a.txt ;;
++    task-b) echo "done b" > b.txt ;;
++    task-c) echo "done c" > c.txt ;;
++    task-d) echo "done d" > d.txt ;;
++esac
++"#;
++
++    let daemon_output = Command::new(bin())
++        .args([
++            "state",
++            "daemon",
++            "--driver",
++            driver_script,
++            "--max-retries",
++            "2",
++            "--timeout",
++            "10",
++        ])
++        .current_dir(&repo_root)
++        .output()
++        .expect("Failed to run superstate state daemon");
++
++    assert!(
++        daemon_output.status.success(),
++        "daemon run failed: stderr={}, stdout={}",
++        String::from_utf8_lossy(&daemon_output.stderr),
++        String::from_utf8_lossy(&daemon_output.stdout)
++    );
++
++    // Verify all files were created
++    assert!(repo_root.join("a.txt").exists(), "a.txt must exist");
++    assert!(repo_root.join("b.txt").exists(), "b.txt must exist");
++    assert!(repo_root.join("c.txt").exists(), "c.txt must exist");
++    assert!(repo_root.join("d.txt").exists(), "d.txt must exist");
++
++    // Verify state reaches completed with all 4 tasks in completed_tasks
++    let content = fs::read_to_string(&state_file).unwrap();
++    let state: ExecutionState = serde_json::from_str(&content).unwrap();
++    assert_eq!(state.status, ExecutionStatus::Completed);
++    assert!(state.active_task.is_none());
++    assert_eq!(state.completed_tasks.len(), 4);
++
++    let completed_ids: Vec<&str> = state
++        .completed_tasks
++        .iter()
++        .map(|t| t.id.as_str())
++        .collect();
++    assert_eq!(
++        completed_ids,
++        vec!["task-a", "task-b", "task-c", "task-d"],
++        "all 4 tasks must be in completed_tasks in execution order"
++    );
++
++    // Verify git history has milestone checkpoint commits for all 4 tasks
++    let log_output = Command::new("git")
++        .args(["log", "--oneline"])
++        .current_dir(&repo_root)
++        .output()
++        .expect("git log failed");
++    assert!(log_output.status.success());
++    let log_text = String::from_utf8_lossy(&log_output.stdout);
++
++    assert!(
++        log_text.contains("checkpoint completed milestone task-a: Task A"),
++        "git log must contain checkpoint for task-a, got:\n{}",
++        log_text
++    );
++    assert!(
++        log_text.contains("checkpoint completed milestone task-b: Task B"),
++        "git log must contain checkpoint for task-b, got:\n{}",
++        log_text
++    );
++    assert!(
++        log_text.contains("checkpoint completed milestone task-c: Task C"),
++        "git log must contain checkpoint for task-c, got:\n{}",
++        log_text
++    );
++    assert!(
++        log_text.contains("checkpoint completed milestone task-d: Task D"),
++        "git log must contain checkpoint for task-d, got:\n{}",
++        log_text
++    );
++}
++
++#[test]
++fn test_cli_deadlocked_dag_daemon_halts_blocked() {
++    let dir = tempfile::tempdir().unwrap();
++    let repo_root = dir.path().canonicalize().unwrap();
++    init_git_repo(&repo_root, "main");
++
++    // Deadlocked DAG: task-1 succeeds immediately, but task-2 depends on a nonexistent task
++    let deadlocked_json = r#"[
++        {"id": "task-1", "title": "Task 1", "verify_cmd": "true", "depends_on": []},
++        {"id": "task-2", "title": "Task 2", "verify_cmd": "true", "depends_on": ["nonexistent-task"]}
++    ]"#;
++
++    let init_output = Command::new(bin())
++        .args(["state", "init", "--milestones", deadlocked_json, "--no-worktree"])
++        .current_dir(&repo_root)
++        .output()
++        .expect("Failed to run superstate state init");
++
++    assert!(
++        init_output.status.success(),
++        "state init failed: stderr={}",
++        String::from_utf8_lossy(&init_output.stderr)
++    );
++
++    let state_file = repo_root.join(".agent-state").join("state.json");
++    assert!(state_file.exists());
++
++    // Run daemon: task-1 passes, but advancement cannot satisfy task-2's dependency
++    let daemon_output = Command::new(bin())
++        .args([
++            "state",
++            "daemon",
++            "--max-retries",
++            "1",
++            "--timeout",
++            "5",
++        ])
++        .current_dir(&repo_root)
++        .output()
++        .expect("Failed to run superstate state daemon");
++
++    // Daemon should halt (exiting non-zero due to blocked condition)
++    assert!(
++        !daemon_output.status.success(),
++        "daemon should exit non-zero when blocked, stdout={}, stderr={}",
++        String::from_utf8_lossy(&daemon_output.stdout),
++        String::from_utf8_lossy(&daemon_output.stderr)
++    );
++
++    // Verify state file has status: "blocked"
++    let content = fs::read_to_string(&state_file).unwrap();
++    let state: ExecutionState = serde_json::from_str(&content).unwrap();
++    assert_eq!(
++        state.status,
++        ExecutionStatus::Blocked,
++        "state status must be Blocked"
++    );
++
++    // Verify state notes contain a [dag-blocked] note
++    let dag_blocked_note = state
++        .notes
++        .iter()
++        .find(|n| n.note.contains("[dag-blocked]"));
++    assert!(
++        dag_blocked_note.is_some(),
++        "state notes must contain [dag-blocked] note, notes={:?}",
++        state.notes
++    );
++
++    let note_text = &dag_blocked_note.unwrap().note;
++    assert!(
++        note_text.contains("Milestone task-1 completed, but remaining tasks cannot advance"),
++        "note text must describe the blocked milestone, got: {}",
++        note_text
++    );
++}
++
++#[test]
++fn test_cli_init_initial_deadlock_error_reporting() {
++    let dir = tempfile::tempdir().unwrap();
++    let repo_root = dir.path().canonicalize().unwrap();
++    init_git_repo(&repo_root, "main");
++
++    // Cyclic dependency with no starting task
++    let cyclic_json = r#"[
++        {"id": "task-1", "title": "Task 1", "verify_cmd": "true", "depends_on": ["task-2"]},
++        {"id": "task-2", "title": "Task 2", "verify_cmd": "true", "depends_on": ["task-1"]}
++    ]"#;
++
++    let init_output = Command::new(bin())
++        .args(["state", "init", "--milestones", cyclic_json, "--no-worktree"])
++        .current_dir(&repo_root)
++        .output()
++        .expect("Failed to run superstate state init");
++
++    assert!(
++        !init_output.status.success(),
++        "state init should fail on cyclical dependency without starting task"
++    );
++
++    let stderr = String::from_utf8_lossy(&init_output.stderr);
++    assert!(
++        stderr.contains("Failed to initialize state from milestones")
++            && stderr.contains("satisfied dependencies"),
++        "stderr should cleanly report failure to find starting task with satisfied dependencies: {}",
++        stderr
++    );
++}
+diff --git a/crates/superstate-cli/tests/test_cli_rollback.rs b/crates/superstate-cli/tests/test_cli_rollback.rs
+index 88916a1..d1ebe5c 100644
+--- a/crates/superstate-cli/tests/test_cli_rollback.rs
++++ b/crates/superstate-cli/tests/test_cli_rollback.rs
+@@ -181,6 +181,7 @@ fn test_cli_daemon_auto_rollback_execution() {
+         title: "Test Task".to_string(),
+         verify_cmd: "test -f must_exist.txt".to_string(),
+         files: vec![PathBuf::from("tracked.txt")],
++        ..Default::default()
+     }];
+     let state = superstate_core::state_machine::init_state_milestones(
+         Some("Test Goal"),
+@@ -252,6 +253,7 @@ fn test_cli_daemon_auto_rollback_enabled_by_default() {
+         title: "Test Task".to_string(),
+         verify_cmd: "test -f must_exist.txt".to_string(),
+         files: vec![PathBuf::from("tracked.txt")],
++        ..Default::default()
+     }];
+     let state = superstate_core::state_machine::init_state_milestones(
+         Some("Test Goal"),
+@@ -322,6 +324,7 @@ fn test_cli_daemon_auto_rollback_disabled_with_flag() {
+         title: "Test Task".to_string(),
+         verify_cmd: "test -f must_exist.txt".to_string(),
+         files: vec![PathBuf::from("tracked.txt")],
++        ..Default::default()
+     }];
+     let state = superstate_core::state_machine::init_state_milestones(
+         Some("Test Goal"),
+@@ -394,6 +397,7 @@ fn test_cli_daemon_auto_rollback_disabled_via_env_var() {
+         title: "Test Task".to_string(),
+         verify_cmd: "test -f must_exist.txt".to_string(),
+         files: vec![PathBuf::from("tracked.txt")],
++        ..Default::default()
+     }];
+     let state = superstate_core::state_machine::init_state_milestones(
+         Some("Test Goal"),
+@@ -464,6 +468,7 @@ fn test_cli_daemon_detached_forwarding() {
+         title: "Test Task".to_string(),
+         verify_cmd: "test -f must_exist.txt".to_string(),
+         files: vec![PathBuf::from("tracked.txt")],
++        ..Default::default()
+     }];
+     let state = superstate_core::state_machine::init_state_milestones(
+         Some("Test Goal"),
+diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
+index 32931f9..a1e56ea 100644
+--- a/crates/superstate-core/src/daemon.rs
++++ b/crates/superstate-core/src/daemon.rs
+@@ -949,7 +949,7 @@ impl DaemonRunner {
+                             active_task.id, active_task.title
+                         );
+                         let _ = Command::new("git")
+-                            .args(["commit", "-m", &commit_msg])
++                            .args(["commit", "--no-gpg-sign", "-m", &commit_msg])
+                             .current_dir(&working_dir)
+                             .output();
+                     }
+@@ -963,23 +963,52 @@ impl DaemonRunner {
+                 let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
+                 if updated_state.status == ExecutionStatus::Completed {
+                     finalize_completed_execution(&self.config.state_path, &updated_state)?;
++                } else if updated_state.status == ExecutionStatus::Blocked {
++                    return Ok(DaemonStepOutcome::Blocked {
++                        task_id: active_task.id,
++                        reason: "remaining tasks cannot advance".to_string(),
++                    });
+                 }
+                 Ok(DaemonStepOutcome::Advanced {
+                     completed_task_id: active_task.id,
+                     next_task_id,
+                 })
+             } else {
+-                advance_step(&mut state)?;
+-                save_state_atomic(&self.config.state_path, &state)?;
+-
+-                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+-                if state.status == ExecutionStatus::Completed {
+-                    finalize_completed_execution(&self.config.state_path, &state)?;
++                // In-process advancement evaluates dependency satisfaction across pending milestones.
++                // If remaining tasks have unresolved or cyclical dependencies, transition to Blocked
++                // rather than failing unrecoverably, recording a ledger entry for epistemic tracking.
++                match advance_step(&mut state) {
++                    Ok(()) => {
++                        save_state_atomic(&self.config.state_path, &state)?;
++
++                        let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
++                        if state.status == ExecutionStatus::Completed {
++                            finalize_completed_execution(&self.config.state_path, &state)?;
++                        }
++                        Ok(DaemonStepOutcome::Advanced {
++                            completed_task_id: active_task.id,
++                            next_task_id,
++                        })
++                    }
++                    Err(StateError::InvalidTransition(msg)) => {
++                        // Guard against DAG deadlock: milestone completed successfully, but remaining
++                        // pending tasks cannot advance due to missing or cyclical dependencies.
++                        state.status = ExecutionStatus::Blocked;
++                        state.notes.push(LedgerEntry::new(
++                            "superstate-daemon",
++                            format!(
++                                "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
++                                active_task.id, msg
++                            ),
++                        ));
++                        save_state_atomic(&self.config.state_path, &state)?;
++                        Ok(DaemonStepOutcome::Blocked {
++                            task_id: active_task.id,
++                            reason: msg,
++                        })
++                    }
++                    Err(e) => Err(DaemonError::State(e)),
+                 }
+-                Ok(DaemonStepOutcome::Advanced {
+-                    completed_task_id: active_task.id,
+-                    next_task_id,
+-                })
+             }
+         } else {
+             // Verification gate failed: record failure diagnostics and update retry budget.
+diff --git a/crates/superstate-core/src/models.rs b/crates/superstate-core/src/models.rs
+index a608a33..a87797b 100644
+--- a/crates/superstate-core/src/models.rs
++++ b/crates/superstate-core/src/models.rs
+@@ -119,11 +119,15 @@ impl LedgerEntry {
+     }
+ }
+ 
+-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+ pub struct MilestoneSpec {
++    #[serde(default)]
++    pub id: Option<String>,
+     pub title: String,
+     pub verify_cmd: String,
+     #[serde(default)]
++    pub depends_on: Option<Vec<String>>,
++    #[serde(default)]
+     pub files: Vec<PathBuf>,
+ }
+ 
+diff --git a/crates/superstate-core/src/state_machine.rs b/crates/superstate-core/src/state_machine.rs
+index 243761e..335f333 100644
+--- a/crates/superstate-core/src/state_machine.rs
++++ b/crates/superstate-core/src/state_machine.rs
+@@ -150,42 +150,56 @@ pub fn init_state_milestones(
+         }
+     }
+ 
+-    // Deconstruct milestones into the initial active task (task-1) and pending sequential tasks (task-2..N)
+-    let mut iter = milestones.into_iter();
+-    // Guard against empty iterator; safely return an error rather than panicking if empty
+-    let Some(first) = iter.next() else {
+-        return Err(StateError::InvalidTransition(
+-            "milestones cannot be empty".to_string(),
+-        ));
+-    };
+-
+-    let task_1 = TaskSpec {
+-        id: "task-1".to_string(),
+-        title: first.title,
+-        depends_on: Vec::new(),
+-        files_modify: first.files,
+-        verification_cmd: Some(first.verify_cmd),
+-    };
+-
+-    // Build subsequent tasks in the DAG, each chained to depend on the previous task ID
+-    let mut pending_tasks = Vec::new();
+-    for (i, milestone) in iter.enumerate() {
+-        let current_task_num = i + 2;
+-        let prev_task_num = i + 1;
+-        pending_tasks.push(TaskSpec {
+-            id: format!("task-{}", current_task_num),
+-            title: milestone.title,
+-            depends_on: vec![format!("task-{}", prev_task_num)],
+-            files_modify: milestone.files,
+-            verification_cmd: Some(milestone.verify_cmd),
++    // Build tasks supporting custom id and explicit or sequential DAG dependencies
++    let mut all_tasks = Vec::with_capacity(milestones.len());
++    let mut prev_id = String::new();
++
++    for (idx, m) in milestones.into_iter().enumerate() {
++        let task_id = m.id.unwrap_or_else(|| format!("task-{}", idx + 1));
++        let depends_on = match m.depends_on {
++            Some(deps) => deps,
++            None => {
++                if idx == 0 {
++                    Vec::new()
++                } else {
++                    vec![prev_id.clone()]
++                }
++            }
++        };
++        prev_id = task_id.clone();
++
++        all_tasks.push(TaskSpec {
++            id: task_id,
++            title: m.title,
++            depends_on,
++            files_modify: m.files,
++            verification_cmd: Some(m.verify_cmd),
+         });
+     }
+ 
++    // Select the first task whose dependencies are satisfied (or first task if independent)
++    let completed: Vec<&str> = Vec::new();
++    let active_idx = all_tasks
++        .iter()
++        .position(|task| {
++            task.depends_on
++                .iter()
++                .all(|dep| is_dependency_satisfied(dep, &completed))
++        })
++        .ok_or_else(|| {
++            StateError::InvalidTransition(
++                "Cannot initialize state: milestones contain no starting task with satisfied dependencies".to_string(),
++            )
++        })?;
++
++    let active_task = Some(all_tasks.remove(active_idx));
++    let pending_tasks = all_tasks;
++
+     // Assemble initial ExecutionState at step 1 in progress with configured base branch
+     Ok(ExecutionState {
+         status: ExecutionStatus::InProgress,
+         step: 1,
+-        active_task: Some(task_1),
++        active_task,
+         pending_tasks,
+         completed_tasks: Vec::new(),
+         modified_files: Vec::new(),
+@@ -205,9 +219,14 @@ fn is_dependency_satisfied(dep: &str, completed: &[&str]) -> bool {
+     if dep.is_empty() || dep.eq_ignore_ascii_case("none") {
+         return true;
+     }
+-    completed
+-        .iter()
+-        .any(|done| done.eq_ignore_ascii_case(dep) || dep.starts_with(*done))
++    completed.iter().any(|done| {
++        done.eq_ignore_ascii_case(dep)
++            || (dep.starts_with(*done)
++                && dep
++                    .as_bytes()
++                    .get(done.len())
++                    .is_some_and(|&b| b == b' ' || b == b':' || b == b'-'))
++    })
+ }
+ 
+ /// Advances execution state to the next task, completing the current active task.
+@@ -217,6 +236,10 @@ fn is_dependency_satisfied(dep: &str, completed: &[&str]) -> bool {
+ /// When the entire milestone graph reaches completion, worktree references are preserved
+ /// so that the completion lifecycle can cleanly auto-merge and remove them.
+ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
++    if state.status == ExecutionStatus::Completed {
++        return Ok(());
++    }
++
+     if let Some(completed) = state.active_task.take() {
+         state.completed_tasks.push(completed);
+     }
+@@ -236,16 +259,26 @@ pub fn advance_step(state: &mut ExecutionState) -> Result<(), StateError> {
+                 task.depends_on
+                     .iter()
+                     .all(|dep| is_dependency_satisfied(dep, &completed))
+-            })
+-            .unwrap_or(0);
+-
+-        // Reset active worktree and branch tracking for intermediate tasks to ensure
+-        // subsequent sequential milestones provision their own clean workspaces
+-        state.active_worktree = None;
+-        state.active_branch = None;
+-        state.active_task = Some(state.pending_tasks.remove(next_idx));
+-        state.step += 1;
+-        state.status = ExecutionStatus::InProgress;
++            });
++
++        match next_idx {
++            Some(idx) => {
++                // Reset active worktree and branch tracking for intermediate tasks to ensure
++                // subsequent sequential milestones provision their own clean workspaces
++                state.active_worktree = None;
++                state.active_branch = None;
++                state.active_task = Some(state.pending_tasks.remove(idx));
++                state.step += 1;
++                state.status = ExecutionStatus::InProgress;
++            }
++            None => {
++                state.active_task = None;
++                state.status = ExecutionStatus::Blocked;
++                return Err(StateError::InvalidTransition(
++                    "Cannot advance: pending tasks exist but none have satisfied dependencies".to_string(),
++                ));
++            }
++        }
+     } else {
+         // Milestone DAG completed: preserve active_worktree and active_branch intact
+         // so that the daemon completion lifecycle can execute auto-merge and workspace cleanup
+diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+index 417791b..5d70367 100644
+--- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
++++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+@@ -56,6 +56,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
+         title: "Clean Milestone".to_string(),
+         verify_cmd: "test -f README.md".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -101,6 +102,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
+         title: "Vacuous Gate Milestone".to_string(),
+         verify_cmd: "true".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -168,6 +170,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
+         title: "Strict Gate Milestone".to_string(),
+         verify_cmd: "echo gate_ok".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -225,6 +228,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
+         title: "Secure Auth Handler".to_string(),
+         verify_cmd: "echo gate_ok".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -282,6 +286,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
+         title: "Multi Issue Milestone".to_string(),
+         verify_cmd: "echo ok".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -332,6 +337,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
+         title: "Subproject Milestone".to_string(),
+         verify_cmd: "echo ok".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+index 6884f67..33aa0d0 100644
+--- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
++++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+@@ -56,6 +56,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
+         title: "Strict Gate Milestone".to_string(),
+         verify_cmd: "test -f README.md".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -137,6 +138,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
+         title: "Clean Milestone".to_string(),
+         verify_cmd: "test -f README.md".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -198,6 +200,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
+         title: "Non Vacuous Gate Milestone".to_string(),
+         verify_cmd: "test -f README.md".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -262,6 +265,7 @@ fn test_daemon_tracks_milestone_start_commit_across_retries() {
+         title: "Milestone With Commits".to_string(),
+         verify_cmd: "test -f README.md".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+diff --git a/crates/superstate-core/tests/test_daemon_dag_execution.rs b/crates/superstate-core/tests/test_daemon_dag_execution.rs
+new file mode 100644
+index 0000000..80ea367
+--- /dev/null
++++ b/crates/superstate-core/tests/test_daemon_dag_execution.rs
+@@ -0,0 +1,322 @@
++use std::fs;
++use std::path::PathBuf;
++use std::process::Command;
++use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
++use superstate_core::models::{ExecutionStatus, MilestoneSpec};
++use superstate_core::state_machine::{init_state_milestones, load_state, save_state_atomic};
++
++/// Helper to configure a temporary git repository rooted on the main branch.
++fn setup_temp_git_repo(path: &std::path::Path) -> String {
++    let init_res = Command::new("git")
++        .args(["init", "-b", "main"])
++        .current_dir(path)
++        .output();
++    if let Ok(out) = init_res {
++        if !out.status.success() {
++            let _ = Command::new("git").arg("init").current_dir(path).output();
++            let _ = Command::new("git")
++                .args(["checkout", "-b", "main"])
++                .current_dir(path)
++                .output();
++        }
++    }
++
++    let _ = Command::new("git")
++        .args(["config", "user.name", "Superstate Test"])
++        .current_dir(path)
++        .output();
++    let _ = Command::new("git")
++        .args(["config", "user.email", "test@superstate.local"])
++        .current_dir(path)
++        .output();
++    let _ = Command::new("git")
++        .args(["config", "commit.gpgsign", "false"])
++        .current_dir(path)
++        .output();
++
++    // Create an initial tracked file and commit
++    fs::write(path.join("tracked.txt"), "initial content\n").expect("write tracked.txt");
++    let _ = Command::new("git")
++        .args(["add", "tracked.txt"])
++        .current_dir(path)
++        .output();
++    let _ = Command::new("git")
++        .args(["commit", "-m", "initial commit"])
++        .current_dir(path)
++        .output();
++
++    let head_out = Command::new("git")
++        .args(["rev-parse", "HEAD"])
++        .current_dir(path)
++        .output()
++        .expect("git rev-parse HEAD");
++    String::from_utf8_lossy(&head_out.stdout).trim().to_string()
++}
++
++#[test]
++fn test_daemon_executes_sequential_milestones_with_checkpoints() {
++    let temp_dir = tempfile::tempdir().expect("create temp dir");
++    let repo_root = temp_dir.path();
++    setup_temp_git_repo(repo_root);
++
++    let state_dir = repo_root.join(".agent-state");
++    fs::create_dir_all(&state_dir).expect("create state dir");
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![
++        MilestoneSpec {
++            id: Some("task-1".to_string()),
++            title: "Create A".to_string(),
++            verify_cmd: "test -f a.txt".to_string(),
++            files: vec![PathBuf::from("a.txt")],
++            ..Default::default()
++        },
++        MilestoneSpec {
++            id: Some("task-2".to_string()),
++            title: "Create B".to_string(),
++            verify_cmd: "test -f b.txt".to_string(),
++            files: vec![PathBuf::from("b.txt")],
++            ..Default::default()
++        },
++    ];
++
++    let state = init_state_milestones(Some("Sequential checkpoints"), milestones, None, true)
++        .expect("init state");
++    save_state_atomic(&state_path, &state).expect("save state");
++
++    // Mock driver creates a.txt for task-1 and b.txt for task-2 based on SUPERSTATE_ACTIVE_TASK
++    let driver_script = r#"
++        if [ "$SUPERSTATE_ACTIVE_TASK" = "task-1" ]; then
++            echo "alpha" > a.txt
++        elif [ "$SUPERSTATE_ACTIVE_TASK" = "task-2" ]; then
++            echo "beta" > b.txt
++        fi
++    "#;
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(driver_script.to_string()),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: true,
++        shunt_driver_output: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).expect("create runner");
++    let report = runner.run_to_completion().expect("run_to_completion");
++
++    assert_eq!(report.status, ExecutionStatus::Completed);
++    assert_eq!(report.milestones_completed, 2);
++
++    // Verify both files exist on disk
++    assert!(repo_root.join("a.txt").exists(), "a.txt must exist");
++    assert!(repo_root.join("b.txt").exists(), "b.txt must exist");
++
++    // Verify git log contains checkpoint commits for both task-1 and task-2
++    let git_log = Command::new("git")
++        .args(["log", "--oneline"])
++        .current_dir(repo_root)
++        .output()
++        .expect("git log");
++    let log_str = String::from_utf8_lossy(&git_log.stdout);
++    assert!(
++        log_str.contains("checkpoint completed milestone task-1"),
++        "git log must contain checkpoint commit for task-1, got: {}",
++        log_str
++    );
++    assert!(
++        log_str.contains("checkpoint completed milestone task-2"),
++        "git log must contain checkpoint commit for task-2, got: {}",
++        log_str
++    );
++}
++
++#[test]
++fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
++    let temp_dir = tempfile::tempdir().expect("create temp dir");
++    let repo_root = temp_dir.path();
++    setup_temp_git_repo(repo_root);
++
++    let state_dir = repo_root.join(".agent-state");
++    fs::create_dir_all(&state_dir).expect("create state dir");
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![
++        MilestoneSpec {
++            id: Some("task-1".to_string()),
++            title: "Task 1".to_string(),
++            verify_cmd: "test -f a.txt".to_string(),
++            files: vec![PathBuf::from("a.txt")],
++            ..Default::default()
++        },
++        MilestoneSpec {
++            id: Some("task-2".to_string()),
++            title: "Task 2".to_string(),
++            verify_cmd: "test -f b.txt".to_string(),
++            files: vec![PathBuf::from("b.txt")],
++            ..Default::default()
++        },
++    ];
++
++    let state = init_state_milestones(Some("Rollback isolation"), milestones, None, true)
++        .expect("init state");
++    save_state_atomic(&state_path, &state).expect("save state");
++
++    // Track attempts outside the git repo so git clean does not erase the counter
++    let marker_dir = tempfile::tempdir().expect("marker dir");
++    let marker_file = marker_dir.path().join("attempt_marker");
++    let marker_file_str = marker_file.to_str().expect("valid path");
++
++    // Driver: creates a.txt for task-1.
++    // For task-2 attempt 1 (marker does not exist): creates marker and bad.txt (fails verification).
++    // For task-2 attempt 2 (marker exists): creates b.txt (passes verification).
++    let driver_script = format!(
++        r#"
++        if [ "$SUPERSTATE_ACTIVE_TASK" = "task-1" ]; then
++            echo "a_content" > a.txt
++        elif [ ! -f "{}" ]; then
++            touch "{}"
++            echo "corrupt" > bad.txt
++        else
++            echo "b_content" > b.txt
++        fi
++        "#,
++        marker_file_str, marker_file_str
++    );
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: Some(driver_script),
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: true,
++        shunt_driver_output: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).expect("create runner");
++
++    // Step 1: Task 1 succeeds
++    let outcome1 = runner.run_step().expect("step 1");
++    assert!(outcome1.is_advanced());
++    assert!(repo_root.join("a.txt").exists(), "a.txt created in task-1");
++
++    // Step 2: Task 2 Attempt 1 writes bad.txt and fails verification, triggering auto-rollback
++    let outcome2 = runner.run_step().expect("step 2");
++    assert!(
++        outcome2.is_failed(),
++        "step 2 must fail verification and trigger rollback, got {:?}",
++        outcome2
++    );
++
++    // Verify rollback isolation: a.txt is STILL present in repo, while bad.txt is removed
++    assert!(
++        repo_root.join("a.txt").exists(),
++        "a.txt must still be present after task-2 rollback"
++    );
++    assert!(
++        !repo_root.join("bad.txt").exists(),
++        "bad.txt must be removed by rollback"
++    );
++
++    // Step 3: Task 2 Attempt 2 writes b.txt and passes verification
++    let outcome3 = runner.run_step().expect("step 3");
++    assert!(
++        outcome3.is_advanced(),
++        "step 3 must advance task-2, got {:?}",
++        outcome3
++    );
++
++    // Final state verification
++    assert!(repo_root.join("a.txt").exists(), "a.txt exists at end");
++    assert!(repo_root.join("b.txt").exists(), "b.txt exists at end");
++    assert!(!repo_root.join("bad.txt").exists(), "bad.txt does not exist at end");
++
++    let final_state = load_state(&state_path).expect("load final state");
++    assert_eq!(final_state.status, ExecutionStatus::Completed);
++    assert_eq!(final_state.completed_tasks.len(), 2);
++}
++
++#[test]
++fn test_daemon_deadlock_halts_with_blocked_outcome() {
++    let temp_dir = tempfile::tempdir().expect("create temp dir");
++    let state_dir = temp_dir.path().join(".agent-state");
++    fs::create_dir_all(&state_dir).expect("create state dir");
++    let state_path = state_dir.join("state.json");
++
++    let milestones = vec![
++        MilestoneSpec {
++            id: Some("task-1".to_string()),
++            title: "Task 1".to_string(),
++            verify_cmd: "true".to_string(),
++            depends_on: Some(vec![]),
++            ..Default::default()
++        },
++        MilestoneSpec {
++            id: Some("task-2".to_string()),
++            title: "Task 2".to_string(),
++            verify_cmd: "true".to_string(),
++            depends_on: Some(vec!["task-99".to_string()]),
++            ..Default::default()
++        },
++    ];
++
++    let state = init_state_milestones(Some("Deadlock test"), milestones, None, true)
++        .expect("init state");
++    save_state_atomic(&state_path, &state).expect("save state");
++
++    let config = DaemonConfig {
++        state_path: state_path.clone(),
++        driver_cmd: None,
++        max_retries: 3,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: false,
++        shunt_driver_output: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).expect("create runner");
++
++    // Run step on task-1: verification passes, but advance_step detects deadlock with task-2
++    let outcome = runner.run_step().expect("run_step should return Ok(Blocked)");
++
++    // Must return DaemonStepOutcome::Blocked
++    match outcome {
++        DaemonStepOutcome::Blocked { task_id, reason } => {
++            assert_eq!(task_id, "task-1");
++            assert!(
++                reason.contains("pending tasks exist but none have satisfied dependencies"),
++                "reason should mention unsatisfied dependencies, got: {}",
++                reason
++            );
++        }
++        other => panic!("expected DaemonStepOutcome::Blocked, got {:?}", other),
++    }
++
++    // Verify state was transitioned to Blocked and saved
++    let loaded_state = load_state(&state_path).expect("load state");
++    assert_eq!(loaded_state.status, ExecutionStatus::Blocked);
++
++    // Verify [dag-blocked] note was recorded
++    let dag_blocked_note = loaded_state
++        .notes
++        .iter()
++        .find(|n| n.note.contains("[dag-blocked]"));
++    assert!(
++        dag_blocked_note.is_some(),
++        "state notes must contain [dag-blocked] note"
++    );
++    let note_content = &dag_blocked_note.unwrap().note;
++    assert!(
++        note_content.contains("Milestone task-1 completed, but remaining tasks cannot advance"),
++        "note must format correctly: {}",
++        note_content
++    );
++}
+diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
+index 00fd554..f62e449 100644
+--- a/crates/superstate-core/tests/test_daemon_runner.rs
++++ b/crates/superstate-core/tests/test_daemon_runner.rs
+@@ -15,11 +15,13 @@ fn test_daemon_run_step_success() {
+             title: "Milestone 1".to_string(),
+             verify_cmd: "test -f worker-ran.txt".to_string(),
+             files: vec![PathBuf::from("file1.txt")],
++            ..Default::default()
+         },
+         MilestoneSpec {
+             title: "Milestone 2".to_string(),
+             verify_cmd: "test -f worker-ran.txt".to_string(),
+             files: vec![PathBuf::from("file2.txt")],
++            ..Default::default()
+         },
+     ];
+ 
+@@ -59,6 +61,7 @@ fn test_daemon_run_step_verification_failure() {
+         title: "Failing Milestone".to_string(),
+         verify_cmd: "false".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+@@ -98,11 +101,13 @@ fn test_daemon_run_to_completion() {
+             title: "Task A".to_string(),
+             verify_cmd: "true".to_string(),
+             files: vec![],
++            ..Default::default()
+         },
+         MilestoneSpec {
+             title: "Task B".to_string(),
+             verify_cmd: "true".to_string(),
+             files: vec![],
++            ..Default::default()
+         },
+     ];
+ 
+@@ -145,6 +150,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
+         title: "Task Branch Alpha".to_string(),
+         verify_cmd: "true".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = init_state_milestones(Some("Branch Goal"), milestones, None, true).unwrap();
+@@ -197,6 +203,7 @@ fn test_daemon_step_advancer_invoked() {
+         title: "Advancer Milestone".to_string(),
+         verify_cmd: "test -f worker-ran.txt".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+@@ -244,6 +251,7 @@ fn test_daemon_step_advancer_error_propagation() {
+         title: "Advancer Failure Milestone".to_string(),
+         verify_cmd: "test -f worker-ran.txt".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     // Initialize state with in-place execution mode
+@@ -291,6 +299,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
+         title: "Rescue Milestone Bounded Stderr".to_string(),
+         verify_cmd: format!("test -f {}", target_str),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = init_state_milestones(Some("Rescue Goal"), milestones, None, true).unwrap();
+@@ -356,6 +365,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
+         title: "Rescue Milestone".to_string(),
+         verify_cmd: format!("test -f {}", target_str),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = init_state_milestones(Some("Rescue Goal"), milestones, None, true).unwrap();
+@@ -404,6 +414,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
+         title: "Failing Milestone".to_string(),
+         verify_cmd: "sh -c 'echo \"syntax error in main.rs line 42\" >&2 && exit 1'".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = init_state_milestones(Some("Retry Goal"), milestones, None, true).unwrap();
+@@ -499,6 +510,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
+         title: "Create Feature".to_string(),
+         verify_cmd: "test -f feature.txt".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     // Note: 4th arg is `no_worktree: true` -> in-place mode
+@@ -558,6 +570,7 @@ fn test_progress_renews_the_retry_budget() {
+         title: "Never satisfied".to_string(),
+         verify_cmd: "false".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -602,6 +615,7 @@ fn test_stalled_worker_still_blocks() {
+         title: "Never satisfied".to_string(),
+         verify_cmd: "false".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -657,6 +671,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
+         title: "Never satisfied".to_string(),
+         verify_cmd: "false".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -704,6 +719,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
+         title: "Never satisfied".to_string(),
+         verify_cmd: "false".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -758,6 +774,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
+         title: "Ungated".to_string(),
+         verify_cmd: "true".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -809,6 +826,7 @@ fn test_real_gate_completes_immediately() {
+         title: "Gated".to_string(),
+         verify_cmd: "test -f produced.txt".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -847,6 +865,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
+         title: "Ungated, no driver".to_string(),
+         verify_cmd: "true".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
+     save_state_atomic(&state_path, &state).unwrap();
+@@ -899,6 +918,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
+                 title: "Never satisfiable".to_string(),
+                 verify_cmd: "false".to_string(),
+                 files: vec![],
++                ..Default::default()
+             }],
+             None,
+             true,
+diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
+index a83b91e..d35b400 100644
+--- a/crates/superstate-core/tests/test_driver_presets.rs
++++ b/crates/superstate-core/tests/test_driver_presets.rs
+@@ -157,6 +157,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
+         title: "Worktree Env Test".to_string(),
+         verify_cmd: "test -f env_ok.txt".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+ 
+     let state = superstate_core::state_machine::init_state_milestones(
+diff --git a/crates/superstate-core/tests/test_state_machine_dag.rs b/crates/superstate-core/tests/test_state_machine_dag.rs
+new file mode 100644
+index 0000000..918f176
+--- /dev/null
++++ b/crates/superstate-core/tests/test_state_machine_dag.rs
+@@ -0,0 +1,241 @@
++use std::path::PathBuf;
++use superstate_core::models::{ExecutionState, ExecutionStatus, MilestoneSpec, TaskSpec};
++use superstate_core::state_machine::{advance_step, init_state_milestones, StateError};
++
++#[test]
++fn test_init_state_milestones_with_custom_dag_dependencies() {
++    let milestones = vec![
++        MilestoneSpec {
++            id: Some("prep".to_string()),
++            title: "Preparation".to_string(),
++            verify_cmd: "cargo test --test prep".to_string(),
++            depends_on: None, // should default to vec![] for idx == 0
++            files: vec![PathBuf::from("src/prep.rs")],
++        },
++        MilestoneSpec {
++            id: Some("worker-a".to_string()),
++            title: "Worker A".to_string(),
++            verify_cmd: "cargo test --test a".to_string(),
++            depends_on: Some(vec!["prep".to_string()]),
++            files: vec![PathBuf::from("src/worker_a.rs")],
++        },
++        MilestoneSpec {
++            id: Some("worker-b".to_string()),
++            title: "Worker B".to_string(),
++            verify_cmd: "cargo test --test b".to_string(),
++            depends_on: Some(vec!["prep".to_string()]),
++            files: vec![PathBuf::from("src/worker_b.rs")],
++        },
++        MilestoneSpec {
++            id: None, // should default to task-4
++            title: "Worker C (Sequential Fallback)".to_string(),
++            verify_cmd: "cargo test --test c".to_string(),
++            depends_on: None, // should default to prev_id ("worker-b")
++            files: vec![PathBuf::from("src/worker_c.rs")],
++        },
++    ];
++
++    let state = init_state_milestones(
++        Some("Run custom DAG"),
++        milestones,
++        Some("feat/custom-dag"),
++        false,
++    )
++    .expect("Failed to initialize state with custom DAG milestones");
++
++    assert_eq!(state.status, ExecutionStatus::InProgress);
++    assert_eq!(state.step, 1);
++    assert_eq!(state.base_branch, Some("feat/custom-dag".to_string()));
++    assert_eq!(state.goal, Some("Run custom DAG".to_string()));
++
++    let active = state
++        .active_task
++        .as_ref()
++        .expect("Active task must be set");
++    assert_eq!(active.id, "prep");
++    assert_eq!(active.title, "Preparation");
++    assert!(active.depends_on.is_empty());
++
++    assert_eq!(state.pending_tasks.len(), 3);
++
++    let task_a = &state.pending_tasks[0];
++    assert_eq!(task_a.id, "worker-a");
++    assert_eq!(task_a.depends_on, vec!["prep".to_string()]);
++
++    let task_b = &state.pending_tasks[1];
++    assert_eq!(task_b.id, "worker-b");
++    assert_eq!(task_b.depends_on, vec!["prep".to_string()]);
++
++    let task_c = &state.pending_tasks[2];
++    assert_eq!(task_c.id, "task-4");
++    assert_eq!(task_c.depends_on, vec!["worker-b".to_string()]);
++}
++
++#[test]
++fn test_advance_step_resolves_diamond_dag_topologically() {
++    // Diamond DAG:
++    //      task-a
++    //      /    \
++    //  task-b  task-c
++    //      \    /
++    //      task-d
++    // To ensure topological resolution doesn't just happen by luck of index 0,
++    // pending tasks are ordered: [task-d, task-b, task-c].
++    let task_a = TaskSpec {
++        id: "task-a".to_string(),
++        title: "Task A".to_string(),
++        depends_on: vec![],
++        files_modify: vec![],
++        verification_cmd: Some("cargo test -p task-a".to_string()),
++    };
++    let task_b = TaskSpec {
++        id: "task-b".to_string(),
++        title: "Task B".to_string(),
++        depends_on: vec!["task-a".to_string()],
++        files_modify: vec![],
++        verification_cmd: Some("cargo test -p task-b".to_string()),
++    };
++    let task_c = TaskSpec {
++        id: "task-c".to_string(),
++        title: "Task C".to_string(),
++        depends_on: vec!["task-a".to_string()],
++        files_modify: vec![],
++        verification_cmd: Some("cargo test -p task-c".to_string()),
++    };
++    let task_d = TaskSpec {
++        id: "task-d".to_string(),
++        title: "Task D".to_string(),
++        depends_on: vec!["task-b".to_string(), "task-c".to_string()],
++        files_modify: vec![],
++        verification_cmd: Some("cargo test -p task-d".to_string()),
++    };
++
++    let mut state = ExecutionState {
++        status: ExecutionStatus::InProgress,
++        step: 1,
++        active_task: Some(task_a),
++        // Note: task_d is placed first in pending_tasks to strictly test dependency resolution
++        pending_tasks: vec![task_d, task_b, task_c],
++        ..Default::default()
++    };
++
++    // Step 1: Complete task-a. Among [task-d, task-b, task-c], task-b is the first satisfied.
++    advance_step(&mut state).expect("Advance step after task-a failed");
++    assert_eq!(state.step, 2);
++    assert_eq!(state.status, ExecutionStatus::InProgress);
++    assert_eq!(state.completed_tasks.len(), 1);
++    assert_eq!(state.completed_tasks[0].id, "task-a");
++    assert_eq!(state.active_task.as_ref().unwrap().id, "task-b");
++    // Remaining pending: [task-d, task-c]
++    assert_eq!(state.pending_tasks.len(), 2);
++    assert_eq!(state.pending_tasks[0].id, "task-d");
++    assert_eq!(state.pending_tasks[1].id, "task-c");
++
++    // Step 2: Complete task-b. Among [task-d, task-c], task-d still needs task-c, so task-c is selected.
++    advance_step(&mut state).expect("Advance step after task-b failed");
++    assert_eq!(state.step, 3);
++    assert_eq!(state.status, ExecutionStatus::InProgress);
++    assert_eq!(state.completed_tasks.len(), 2);
++    assert_eq!(state.completed_tasks[1].id, "task-b");
++    assert_eq!(state.active_task.as_ref().unwrap().id, "task-c");
++    // Remaining pending: [task-d]
++    assert_eq!(state.pending_tasks.len(), 1);
++    assert_eq!(state.pending_tasks[0].id, "task-d");
++
++    // Step 3: Complete task-c. Now task-d has both dependencies (task-b and task-c) satisfied.
++    advance_step(&mut state).expect("Advance step after task-c failed");
++    assert_eq!(state.step, 4);
++    assert_eq!(state.status, ExecutionStatus::InProgress);
++    assert_eq!(state.completed_tasks.len(), 3);
++    assert_eq!(state.completed_tasks[2].id, "task-c");
++    assert_eq!(state.active_task.as_ref().unwrap().id, "task-d");
++    assert_eq!(state.pending_tasks.len(), 0);
++
++    // Step 4: Complete task-d. All tasks are completed.
++    advance_step(&mut state).expect("Advance step after task-d failed");
++    assert_eq!(state.step, 5);
++    assert_eq!(state.status, ExecutionStatus::Completed);
++    assert!(state.active_task.is_none());
++    assert_eq!(state.completed_tasks.len(), 4);
++}
++
++#[test]
++fn test_advance_step_deadlock_halts_with_blocked_status() {
++    let task_1 = TaskSpec {
++        id: "task-1".to_string(),
++        title: "Task 1".to_string(),
++        depends_on: vec![],
++        files_modify: vec![],
++        verification_cmd: None,
++    };
++    // Circular dependency: task-2 depends on task-3, task-3 depends on task-2
++    let task_2 = TaskSpec {
++        id: "task-2".to_string(),
++        title: "Task 2".to_string(),
++        depends_on: vec!["task-3".to_string()],
++        files_modify: vec![],
++        verification_cmd: None,
++    };
++    let task_3 = TaskSpec {
++        id: "task-3".to_string(),
++        title: "Task 3".to_string(),
++        depends_on: vec!["task-2".to_string()],
++        files_modify: vec![],
++        verification_cmd: None,
++    };
++
++    let mut state = ExecutionState {
++        status: ExecutionStatus::InProgress,
++        step: 1,
++        active_task: Some(task_1),
++        pending_tasks: vec![task_2, task_3],
++        ..Default::default()
++    };
++
++    let result = advance_step(&mut state);
++    match result {
++        Err(StateError::InvalidTransition(msg)) => {
++            assert!(
++                msg.contains("Cannot advance: pending tasks exist but none have satisfied dependencies"),
++                "Unexpected error message: {}",
++                msg
++            );
++        }
++        _ => panic!("Expected StateError::InvalidTransition, got: {:?}", result),
++    }
++
++    assert_eq!(state.status, ExecutionStatus::Blocked);
++    assert!(state.active_task.is_none());
++    assert_eq!(state.completed_tasks.len(), 1);
++    assert_eq!(state.completed_tasks[0].id, "task-1");
++    assert_eq!(state.pending_tasks.len(), 2);
++}
++
++#[test]
++fn test_init_state_milestones_initial_deadlock_fails_closed() {
++    let milestones = vec![
++        MilestoneSpec {
++            id: Some("task-a".to_string()),
++            title: "Task A".to_string(),
++            verify_cmd: "test -f a".to_string(),
++            depends_on: Some(vec!["task-b".to_string()]),
++            ..Default::default()
++        },
++        MilestoneSpec {
++            id: Some("task-b".to_string()),
++            title: "Task B".to_string(),
++            verify_cmd: "test -f b".to_string(),
++            depends_on: Some(vec!["task-a".to_string()]),
++            ..Default::default()
++        },
++    ];
++
++    let result = init_state_milestones(Some("Deadlocked init"), milestones, None, true);
++    assert!(result.is_err());
++    match result {
++        Err(StateError::InvalidTransition(msg)) => {
++            assert!(msg.contains("milestones contain no starting task with satisfied dependencies"));
++        }
++        _ => panic!("Expected StateError::InvalidTransition, got {:?}", result),
++    }
++}
+diff --git a/crates/superstate-core/tests/test_state_milestones.rs b/crates/superstate-core/tests/test_state_milestones.rs
+index 1ba8d4e..a8747f8 100644
+--- a/crates/superstate-core/tests/test_state_milestones.rs
++++ b/crates/superstate-core/tests/test_state_milestones.rs
+@@ -20,16 +20,19 @@ fn test_init_state_milestones_dag_construction() {
+             title: "Setup Stripe Client".to_string(),
+             verify_cmd: "cargo test -p stripe".to_string(),
+             files: vec![PathBuf::from("src/stripe.rs")],
++            ..Default::default()
+         },
+         MilestoneSpec {
+             title: "Handle Webhook Events".to_string(),
+             verify_cmd: "cargo test -p stripe-webhook".to_string(),
+             files: vec![PathBuf::from("src/webhook.rs")],
++            ..Default::default()
+         },
+         MilestoneSpec {
+             title: "Database Persistence".to_string(),
+             verify_cmd: "cargo test -p stripe-db".to_string(),
+             files: vec![PathBuf::from("src/db.rs")],
++            ..Default::default()
+         },
+     ];
+ 
+@@ -92,6 +95,7 @@ fn test_init_state_milestones_validation_errors() {
+         title: "  ".to_string(),
+         verify_cmd: "cargo test".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     assert!(matches!(
+         init_state_milestones(None, empty_title, None, false),
+@@ -102,6 +106,7 @@ fn test_init_state_milestones_validation_errors() {
+         title: "Valid Title".to_string(),
+         verify_cmd: "   ".to_string(),
+         files: vec![],
++        ..Default::default()
+     }];
+     assert!(matches!(
+         init_state_milestones(None, empty_verify, None, false),
+@@ -117,6 +122,7 @@ fn test_init_state_milestones_single_milestone() {
+         title: "Single task".to_string(),
+         verify_cmd: "cargo test".to_string(),
+         files: vec![PathBuf::from("src/single.rs")],
++        ..Default::default()
+     }];
+ 
+     // Initialize state with single milestone and verify immediate transition to task-1
+@@ -163,6 +169,7 @@ fn test_milestone_spec_and_execution_state_serde() {
+         title: "Test with files".to_string(),
+         verify_cmd: "cargo test".to_string(),
+         files: vec![PathBuf::from("crates/core/src/lib.rs")],
++        ..Default::default()
+     };
+     let serialized_milestone = serde_json::to_string(&milestone_with_files)
+         .expect("MilestoneSpec serialization must succeed");

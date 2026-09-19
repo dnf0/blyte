@@ -89,6 +89,7 @@ fn test_cli_daemon_accepts_review_blocking_flag() {
         title: "Test Task".to_string(),
         verify_cmd: "true".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = superstate_core::state_machine::init_state_milestones(
         Some("Test Goal"),

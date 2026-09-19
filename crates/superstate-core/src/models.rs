@@ -119,10 +119,14 @@ impl LedgerEntry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MilestoneSpec {
+    #[serde(default)]
+    pub id: Option<String>,
     pub title: String,
     pub verify_cmd: String,
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     #[serde(default)]
     pub files: Vec<PathBuf>,
 }

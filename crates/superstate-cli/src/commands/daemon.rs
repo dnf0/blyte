@@ -130,6 +130,11 @@ pub fn cmd_daemon(
 
     let paths = daemon_paths_for_state(state_path);
 
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     // Enforce per-job PID lock
     if paths.pid_file.exists() {
         if let Ok(pid_str) = fs::read_to_string(&paths.pid_file) {

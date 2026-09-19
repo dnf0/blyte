@@ -157,6 +157,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
         title: "Worktree Env Test".to_string(),
         verify_cmd: "test -f env_ok.txt".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = superstate_core::state_machine::init_state_milestones(

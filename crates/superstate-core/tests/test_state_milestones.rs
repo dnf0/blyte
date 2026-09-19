@@ -20,16 +20,19 @@ fn test_init_state_milestones_dag_construction() {
             title: "Setup Stripe Client".to_string(),
             verify_cmd: "cargo test -p stripe".to_string(),
             files: vec![PathBuf::from("src/stripe.rs")],
+            ..Default::default()
         },
         MilestoneSpec {
             title: "Handle Webhook Events".to_string(),
             verify_cmd: "cargo test -p stripe-webhook".to_string(),
             files: vec![PathBuf::from("src/webhook.rs")],
+            ..Default::default()
         },
         MilestoneSpec {
             title: "Database Persistence".to_string(),
             verify_cmd: "cargo test -p stripe-db".to_string(),
             files: vec![PathBuf::from("src/db.rs")],
+            ..Default::default()
         },
     ];
 
@@ -92,6 +95,7 @@ fn test_init_state_milestones_validation_errors() {
         title: "  ".to_string(),
         verify_cmd: "cargo test".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     assert!(matches!(
         init_state_milestones(None, empty_title, None, false),
@@ -102,6 +106,7 @@ fn test_init_state_milestones_validation_errors() {
         title: "Valid Title".to_string(),
         verify_cmd: "   ".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     assert!(matches!(
         init_state_milestones(None, empty_verify, None, false),
@@ -117,6 +122,7 @@ fn test_init_state_milestones_single_milestone() {
         title: "Single task".to_string(),
         verify_cmd: "cargo test".to_string(),
         files: vec![PathBuf::from("src/single.rs")],
+        ..Default::default()
     }];
 
     // Initialize state with single milestone and verify immediate transition to task-1
@@ -163,6 +169,7 @@ fn test_milestone_spec_and_execution_state_serde() {
         title: "Test with files".to_string(),
         verify_cmd: "cargo test".to_string(),
         files: vec![PathBuf::from("crates/core/src/lib.rs")],
+        ..Default::default()
     };
     let serialized_milestone = serde_json::to_string(&milestone_with_files)
         .expect("MilestoneSpec serialization must succeed");

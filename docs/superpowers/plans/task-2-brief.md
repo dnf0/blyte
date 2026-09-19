@@ -1,59 +1,65 @@
-# Task 2 Brief: Milestone Base Commit Tracking & `--review-blocking` in `crates/superstate-core`
+# Task 2 Brief: Daemon Runner Topological Advancement & Scoped Rollback
 
-## Context
-Working directory: `/Users/danielfisher/repos/superstate`
-Branch: `feat/blocking-code-review`
-Plan: `docs/superpowers/plans/2026-09-17-advisory-review-diff-and-blocking.md`
+## Working Directory
+`/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-dag-execution`
+Branch: `feat/daemon-dag-execution`
 
-## What to Implement
+## Goal
+Wire `DaemonRunner` in `crates/superstate-core/src/daemon.rs` to support multi-milestone DAG execution:
+1. Handle `advance_step()` deadlock errors gracefully by transitioning state to `ExecutionStatus::Blocked`, appending a `[dag-blocked]` ledger entry, and returning `DaemonStepOutcome::Blocked`.
+2. Ensure milestone checkpoint commits and baseline commit tracking cleanly isolate `--auto-rollback` resets to the active milestone, so rolling back Milestone 2 never loses or mutates Milestone 1's completed work.
+3. Verify sequential, multi-attempt rollback, and deadlock handling in end-to-end integration tests.
 
-In `crates/superstate-core/src/daemon.rs`:
+## Global Constraints
+- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
+- No new external crate dependencies.
+- Zero network I/O or direct API keys in Rust binary.
+- Use `--no-gpg-sign` for git commits.
+- Follow strict Test-Driven Development (TDD).
 
-1. **`DaemonConfig` Addition**:
-   Add `pub review_blocking: bool` to `DaemonConfig` (default: `false`).
+## Requirements
 
-2. **Track Milestone Base Commits in `DaemonRunner`**:
-   Add field `milestone_start_commits: HashMap<String, String>` to `DaemonRunner`.
-   Initialize it empty in `DaemonRunner::new`.
-   In `DaemonRunner::step`:
-   - When an `active_task` is running (before or after driver turn):
-     If `milestone_start_commits` does not contain `active_task.id`:
-     Resolve current `HEAD` commit via `git rev-parse HEAD` in `working_dir` and insert it into `self.milestone_start_commits.insert(active_task.id.clone(), head_hash)`.
-   - When a milestone successfully finishes or is marked completed/cleaned up:
-     Remove `active_task.id` from `self.milestone_start_commits`.
+### 1. `crates/superstate-core/src/daemon.rs`
+In `run_step()`:
+- When verification passes and `self.step_advancer` is `None`:
+  Call `advance_step(&mut state)`.
+  - On `Ok(())`:
+    - Save updated state.
+    - If `state.status == ExecutionStatus::Completed`, finalize execution (`finalize_completed_execution`).
+    - Emit `DaemonStepOutcome::Advanced { completed_task_id: active_task.id, next_task_id: state.active_task.as_ref().map(|t| t.id.clone()) }`.
+  - On `Err(StateError::InvalidTransition(msg))`:
+    - Transition `state.status = ExecutionStatus::Blocked`.
+    - Record note `LedgerEntry::new("superstate-daemon", format!("[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}", active_task.id, msg))`.
+    - `save_state_atomic(&self.config.state_path, &state)?;`
+    - Emit `DaemonStepOutcome::Blocked { task_id: active_task.id, reason: msg }`.
+  - On other `Err(e)`:
+    - Return `Err(DaemonError::State(e))`.
 
-3. **Wire `get_milestone_diff` and Review Blocking**:
-   In `DaemonRunner::step`:
-   When `gate_res.passed` is true and `(self.config.advisory_review || self.config.review_blocking)` is true:
-   - Retrieve `start_commit` from `self.milestone_start_commits.get(&active_task.id).map(|s| s.as_str())`.
-   - Call `superstate_review::diff::get_milestone_diff(&working_dir, start_commit)` instead of the old `get_git_diff(&working_dir, Some("HEAD"))`.
-   - Execute review via `superstate_review::runner::execute_review`.
-   - If findings exist, record them to `state.notes` as before.
-   - **Enforce Blocking**:
-     ```rust
-     let should_block = report.has_blocking_issues && (
-         self.config.review_blocking || is_vacuous_gate(verify_cmd)
-     );
-     
-     if should_block && self.config.driver_cmd.is_some() && attempts_so_far < attempt_ceiling {
-         *self.total_attempts.entry(active_task.id.clone()).or_insert(0) += 1;
-         return Ok(DaemonStepOutcome::Failed {
-             task_id: active_task.id,
-             reason: format!("code-review: {} blocking issue(s) detected", report.findings.len()),
-             retries_remaining: self.config.max_retries.saturating_sub(attempts_so_far),
-         });
-     }
-     ```
-   - If `!should_block` (either review was clean, or findings were non-blocking, or `--review-blocking` was false on a non-vacuous gate):
-     Clear failures, commit/auto-merge if configured, and mark task completed as usual.
+### 2. Integration Tests: `crates/superstate-core/tests/test_daemon_dag_execution.rs`
+Write 3 tests:
+1. `test_daemon_executes_sequential_milestones_with_checkpoints`:
+   - 2-milestone DAG (task-1 -> task-2).
+   - Mock driver creates `a.txt` for task-1 and `b.txt` for task-2.
+   - Run `runner.run_to_completion()`.
+   - Verify report status is `"completed"`. Both `a.txt` and `b.txt` exist.
+   - Verify git log contains checkpoint commits for both `task-1` and `task-2`.
+2. `test_daemon_rollback_isolation_preserves_earlier_milestone_commits`:
+   - 2-milestone DAG (task-1 -> task-2).
+   - Mock driver creates `a.txt` for task-1 (passes).
+   - On task-2 attempt 1: writes `bad.txt` (fails verification). Daemon triggers rollback.
+   - Verify `a.txt` is STILL present in repo, while `bad.txt` is removed.
+   - On task-2 attempt 2: writes `b.txt` (passes).
+   - Final state is completed with both `a.txt` and `b.txt`, and no `bad.txt`.
+3. `test_daemon_deadlock_halts_with_blocked_outcome`:
+   - Task 1 passes, but pending Task 2 depends on non-existent `task-99`.
+   - Daemon advances Task 1, detects deadlock in remaining tasks, records `[dag-blocked]` note, and transitions state to `Blocked`.
+   - `run_step()` returns `DaemonStepOutcome::Blocked`.
 
-## TDD Instructions
-1. Write failing integration tests in `crates/superstate-core/tests/test_daemon_blocking_review.rs`:
-   - Test 1: Milestone on non-vacuous gate with committed code changes and `--review-blocking`. Mock review returns `has_blocking_issues: true`. Verify `DaemonStepOutcome::Failed` with reason containing `"code-review"`.
-   - Test 2: Milestone on non-vacuous gate with `--review-blocking`. Mock review returns clean report. Verify `DaemonStepOutcome::TaskCompleted`.
-   - Test 3: Milestone on non-vacuous gate with `--advisory-review` (and `review_blocking: false`). Mock review returns `has_blocking_issues: true`. Verify note is appended to `state.notes`, but outcome is `DaemonStepOutcome::TaskCompleted`.
-2. Run `cargo test -p superstate-core --test test_daemon_blocking_review` and verify RED failure.
-3. Implement in `crates/superstate-core/src/daemon.rs`. Update existing tests if `DaemonConfig` construction needs `review_blocking: false`.
-4. Run `cargo test -p superstate-core` and verify all tests pass GREEN.
-5. Commit with conventional commit message `feat(daemon): track milestone start commit and support review_blocking` (skip GPG with `--no-gpg-sign`).
-6. Write full report to `docs/superpowers/plans/task-2-report.md`.
+## Verification
+- `cargo test -p superstate-core --test test_daemon_dag_execution`
+- `cargo test -p superstate-core`
+- `cargo check --all`
+
+## Completion
+- Commit with: `git commit --no-gpg-sign -m "feat(daemon): wire DAG milestone transitions, checkpoint commits, and scoped rollback"`
+- Write detailed report to `docs/superpowers/plans/task-2-report.md`.

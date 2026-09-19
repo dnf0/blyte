@@ -18,11 +18,13 @@ fn test_cli_daemon_lifecycle() {
             title: "Task 1".to_string(),
             verify_cmd: "sleep 0.2 && true".to_string(),
             files: vec![],
+            ..Default::default()
         },
         MilestoneSpec {
             title: "Task 2".to_string(),
             verify_cmd: "sleep 0.2 && true".to_string(),
             files: vec![],
+            ..Default::default()
         },
     ];
 
@@ -91,6 +93,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
         title: "Fast Task".to_string(),
         verify_cmd: "true".to_string(),
         files: vec![],
+        ..Default::default()
     }];
 
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();

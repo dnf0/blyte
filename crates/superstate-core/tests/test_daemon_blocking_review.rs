@@ -56,6 +56,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
         title: "Strict Gate Milestone".to_string(),
         verify_cmd: "test -f README.md".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -137,6 +138,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
         title: "Clean Milestone".to_string(),
         verify_cmd: "test -f README.md".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -198,6 +200,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
         title: "Non Vacuous Gate Milestone".to_string(),
         verify_cmd: "test -f README.md".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -262,6 +265,7 @@ fn test_daemon_tracks_milestone_start_commit_across_retries() {
         title: "Milestone With Commits".to_string(),
         verify_cmd: "test -f README.md".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();

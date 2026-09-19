@@ -12,6 +12,7 @@ description = "Daemon-less zero-noise adversarial code reviewer and diff analyze
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

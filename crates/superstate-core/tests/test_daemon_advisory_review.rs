@@ -56,6 +56,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
         title: "Clean Milestone".to_string(),
         verify_cmd: "test -f README.md".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -101,6 +102,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
         title: "Vacuous Gate Milestone".to_string(),
         verify_cmd: "true".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -168,6 +170,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
         title: "Strict Gate Milestone".to_string(),
         verify_cmd: "echo gate_ok".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -225,6 +228,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix() 
         title: "Secure Auth Handler".to_string(),
         verify_cmd: "echo gate_ok".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -282,6 +286,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
         title: "Multi Issue Milestone".to_string(),
         verify_cmd: "echo ok".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();
@@ -332,6 +337,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
         title: "Subproject Milestone".to_string(),
         verify_cmd: "echo ok".to_string(),
         files: vec![],
+        ..Default::default()
     }];
     let state = init_state_milestones(Some("Goal"), milestones, None, true).unwrap();
     save_state_atomic(&state_path, &state).unwrap();

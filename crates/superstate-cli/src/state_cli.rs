@@ -334,6 +334,8 @@ impl DaemonArgs {
     pub fn use_auto_rollback(&self) -> bool {
         if self.no_auto_rollback {
             false
+        } else if self.auto_rollback {
+            true
         } else if let Ok(val) = std::env::var("SUPERSTATE_DAEMON_AUTO_ROLLBACK") {
             let s = val.trim();
             s != "0" && !s.eq_ignore_ascii_case("false")

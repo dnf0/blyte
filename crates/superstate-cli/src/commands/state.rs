@@ -369,7 +369,12 @@ pub fn cmd_init(args: &InitArgs) -> Result<(), String> {
             base_branch.as_deref(),
             no_worktree,
         )
-        .map_err(|e| format!("Failed to initialize state from milestones: {}", e))?;
+        .map_err(|e| match e {
+            superstate_core::state_machine::StateError::InvalidTransition(msg) => {
+                format!("Failed to initialize state from milestones: {}", msg)
+            }
+            other => format!("Failed to initialize state from milestones: {}", other),
+        })?;
 
         // Provision isolated worktree for initial active task only if use_worktree is set
         if use_worktree && root.join(".git").exists() {
@@ -794,39 +799,63 @@ pub fn cmd_next(
         }
     }
 
-    advance_step(&mut state).map_err(|e| format!("Failed to advance step: {}", e))?;
-    save_state_atomic(state_path, &state).map_err(|e| format!("Failed to save state: {}", e))?;
-
-    // Provision worktree for newly active task in sequential progression
-    if !state.no_worktree && repo_root.join(".git").exists() {
-        if let Some(ref next_task) = state.active_task {
-            let manager = WorktreeManager::new(&repo_root)
-                .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
-            let wt = manager
-                .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
-                .map_err(|e| {
-                    format!("Failed to ensure worktree for task {}: {}", next_task.id, e)
-                })?;
-            state.active_worktree = Some(wt.path);
-            state.active_branch = Some(wt.branch);
+    match advance_step(&mut state) {
+        Ok(()) => {
             save_state_atomic(state_path, &state)
                 .map_err(|e| format!("Failed to save state: {}", e))?;
+
+            // Provision worktree for newly active task in sequential progression
+            if !state.no_worktree && repo_root.join(".git").exists() {
+                if let Some(ref next_task) = state.active_task {
+                    let manager = WorktreeManager::new(&repo_root)
+                        .map_err(|e| format!("Failed to initialize WorktreeManager: {}", e))?;
+                    let wt = manager
+                        .ensure_task_worktree(&next_task.id, state.base_branch.as_deref())
+                        .map_err(|e| {
+                            format!("Failed to ensure worktree for task {}: {}", next_task.id, e)
+                        })?;
+                    state.active_worktree = Some(wt.path);
+                    state.active_branch = Some(wt.branch);
+                    save_state_atomic(state_path, &state)
+                        .map_err(|e| format!("Failed to save state: {}", e))?;
+                }
+            }
+
+            if let Some(ref next_task) = state.active_task {
+                println!(
+                    "State advanced: active_task={}: {} (status={:?})",
+                    next_task.id, next_task.title, state.status
+                );
+            } else {
+                println!(
+                    "State completed: all tasks finished (status={:?})",
+                    state.status
+                );
+            }
+
+            Ok(())
         }
+        Err(superstate_core::state_machine::StateError::InvalidTransition(msg)) => {
+            // Guard against DAG deadlock: milestone completed successfully, but remaining
+            // pending tasks cannot advance due to missing or cyclical dependencies.
+            state.status = ExecutionStatus::Blocked;
+            state.notes.push(LedgerEntry::new(
+                "superstate-daemon",
+                format!(
+                    "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
+                    active_task.id, msg
+                ),
+            ));
+            save_state_atomic(state_path, &state)
+                .map_err(|e| format!("Failed to save state: {}", e))?;
+            println!(
+                "State blocked: Milestone {} completed, but remaining tasks cannot advance: {}",
+                active_task.id, msg
+            );
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to advance step: {}", e)),
     }
-
-    if let Some(ref next_task) = state.active_task {
-        println!(
-            "State advanced: active_task={}: {} (status={:?})",
-            next_task.id, next_task.title, state.status
-        );
-    } else {
-        println!(
-            "State completed: all tasks finished (status={:?})",
-            state.status
-        );
-    }
-
-    Ok(())
 }
 
 /// Generate the turnkey prompt for a task.
