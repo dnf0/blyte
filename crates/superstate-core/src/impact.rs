@@ -344,3 +344,186 @@ pub fn infer_impacted_tests(repo_root: &Path, base_branch: Option<&str>) -> Vec<
     tests.dedup();
     tests
 }
+
+/// Helper to verify that a matched keyword in a command string respects word boundaries.
+///
+/// Ensures the matched keyword is not an arbitrary substring of a larger identifier
+/// (e.g. `run_pytest_suite.sh` vs `pytest`).
+fn is_word_boundary_match(s: &str, idx: usize, word_len: usize) -> bool {
+    let bytes = s.as_bytes();
+    // Prior character must be start of string or a path/argument separator
+    let before_ok =
+        idx == 0 || bytes[idx - 1] == b' ' || bytes[idx - 1] == b'\t' || bytes[idx - 1] == b'/';
+    let after_idx = idx + word_len;
+    // Succeeding character must be end of string or a whitespace separator
+    let after_ok = after_idx == bytes.len()
+        || bytes[after_idx] == b' '
+        || bytes[after_idx] == b'\t'
+        || bytes[after_idx] == b'\n';
+    before_ok && after_ok
+}
+
+/// Specialize a base verification command to execute only the impacted test files.
+///
+/// Inspects the base command to recognize common test runners:
+/// - Pytest: `pytest`, `python -m pytest`, or prefixed commands like `./run-in-container pytest`
+/// - Cargo: `cargo test`
+/// - Go: `go test`
+/// - Node/Vitest/Jest: `npm test`, `npx vitest`, `yarn test`, `pnpm test`, `jest`
+///
+/// When a recognized runner is identified, the command is specialized by targeting
+/// the impacted test files directly, replacing generic test directory arguments.
+///
+/// # Parameters
+/// - `base_cmd`: The raw base verification command string (e.g. `pytest tests/`).
+/// - `impacted_files`: Slice of test file paths discovered by impact analysis.
+/// - `repo_root`: The base repository directory against which relative paths are formed.
+///
+/// # Returns
+/// - `Some(specialized_cmd)` if the test runner is recognized and sliceable.
+/// - `None` if `impacted_files` is empty or if the runner command is unrecognized.
+pub fn build_sliced_test_cmd(
+    base_cmd: &str,
+    impacted_files: &[PathBuf],
+    repo_root: &Path,
+) -> Option<String> {
+    // Guard clause: return None immediately if no test files were impacted
+    if impacted_files.is_empty() {
+        return None;
+    }
+
+    let trimmed = base_cmd.trim();
+
+    // 1. Pytest detection (supports ./run-in-container pytest, python -m pytest, pytest)
+    if let Some(prefix_idx) = trimmed.find("pytest") {
+        if is_word_boundary_match(trimmed, prefix_idx, "pytest".len()) {
+            let prefix = trimmed[..prefix_idx + "pytest".len()].trim();
+            // Format relative paths from repo_root for clean test invocations
+            let mut rel_paths: Vec<String> = impacted_files
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(repo_root)
+                        .unwrap_or(p)
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .collect();
+            rel_paths.sort();
+            rel_paths.dedup();
+
+            if !rel_paths.is_empty() {
+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
+            }
+        }
+    }
+
+    // 2. Cargo test detection
+    if let Some(idx) = trimmed.find("cargo test") {
+        if is_word_boundary_match(trimmed, idx, "cargo test".len()) {
+            let prefix = trimmed[..idx + "cargo test".len()].trim();
+            let mut test_args = Vec::new();
+            // Inspect each file to build appropriate --test flags or test filters
+            for file in impacted_files {
+                let rel = file.strip_prefix(repo_root).unwrap_or(file);
+                if let Some(parent) = rel.parent() {
+                    if parent == Path::new("tests") || parent.ends_with("tests") {
+                        if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
+                            test_args.push(format!("--test {}", stem));
+                            continue;
+                        }
+                    }
+                }
+                if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
+                    test_args.push(stem.to_string());
+                }
+            }
+            test_args.sort();
+            test_args.dedup();
+
+            if !test_args.is_empty() {
+                return Some(format!("{} {}", prefix, test_args.join(" ")));
+            }
+        }
+    }
+
+    // 3. Go test detection
+    if let Some(idx) = trimmed.find("go test") {
+        if is_word_boundary_match(trimmed, idx, "go test".len()) {
+            let prefix = trimmed[..idx + "go test".len()].trim();
+            let mut pkgs = Vec::new();
+            // Translate impacted files to their enclosing Go package directories
+            for file in impacted_files {
+                let rel = file.strip_prefix(repo_root).unwrap_or(file);
+                let parent = rel.parent().unwrap_or(Path::new(""));
+                let pkg = if parent.as_os_str().is_empty() {
+                    ".".to_string()
+                } else if parent.starts_with(".") {
+                    parent.to_string_lossy().to_string()
+                } else {
+                    format!("./{}", parent.to_string_lossy())
+                };
+                pkgs.push(pkg);
+            }
+            pkgs.sort();
+            pkgs.dedup();
+
+            if !pkgs.is_empty() {
+                return Some(format!("{} {}", prefix, pkgs.join(" ")));
+            }
+        }
+    }
+
+    // 4. Node / Vitest / Jest detection
+    let mut rel_paths: Vec<String> = impacted_files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(repo_root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    rel_paths.sort();
+    rel_paths.dedup();
+
+    if !rel_paths.is_empty() {
+        if let Some(idx) = trimmed.find("npm test") {
+            if is_word_boundary_match(trimmed, idx, "npm test".len()) {
+                let prefix = trimmed[..idx + "npm test".len()].trim();
+                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
+            }
+        }
+        if let Some(idx) = trimmed.find("pnpm test") {
+            if is_word_boundary_match(trimmed, idx, "pnpm test".len()) {
+                let prefix = trimmed[..idx + "pnpm test".len()].trim();
+                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
+            }
+        }
+        if let Some(idx) = trimmed.find("yarn test") {
+            if is_word_boundary_match(trimmed, idx, "yarn test".len()) {
+                let prefix = trimmed[..idx + "yarn test".len()].trim();
+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
+            }
+        }
+        if let Some(idx) = trimmed.find("vitest run") {
+            if is_word_boundary_match(trimmed, idx, "vitest run".len()) {
+                let prefix = trimmed[..idx + "vitest run".len()].trim();
+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
+            }
+        }
+        if let Some(idx) = trimmed.find("vitest") {
+            if is_word_boundary_match(trimmed, idx, "vitest".len()) {
+                let prefix = trimmed[..idx + "vitest".len()].trim();
+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
+            }
+        }
+        if let Some(idx) = trimmed.find("jest") {
+            if is_word_boundary_match(trimmed, idx, "jest".len()) {
+                let prefix = trimmed[..idx + "jest".len()].trim();
+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
+            }
+        }
+    }
+
+    None
+}
