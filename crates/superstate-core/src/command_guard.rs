@@ -212,12 +212,13 @@ pub fn evaluate_command_guard(
     history.insert(classification_key, now_sec);
 
     // 8. Persist updated history atomically to disk; ignore write errors under fail-open policy
-    if let Some(parent) = state_path.parent() {
+    if let Some(parent) = state_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(serialized) = serde_json::to_string_pretty(&history) {
-        let parent = state_path.parent().unwrap_or_else(|| Path::new("."));
-        let temp_file_path = parent.join(format!(".command_guard.{}.tmp", std::process::id()));
+        let parent = state_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let temp_file_path = parent.join(format!(".command_guard.{}.{}.tmp", std::process::id(), nanos));
         if fs::write(&temp_file_path, serialized.as_bytes()).is_ok() {
             let _ = fs::rename(&temp_file_path, &state_path);
         }
