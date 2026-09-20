@@ -88,6 +88,11 @@ enum Commands {
     },
     /// Inspect AST symbols, outlines, and code slices
     Inspect(commands::inspect::InspectArgs),
+    /// Intercept and evaluate agent tool invocations before execution
+    Guard {
+        #[command(subcommand)]
+        cmd: commands::guard::GuardCommands,
+    },
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -172,6 +177,7 @@ fn main() {
         }
         Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
         Commands::Inspect(args) => commands::inspect::cmd_inspect(&args),
+        Commands::Guard { cmd } => commands::guard::dispatch_guard(cmd),
         Commands::Shunt {
             threshold_lines,
             logs_dir,
