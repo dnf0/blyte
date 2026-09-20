@@ -1,605 +1,728 @@
 diff --git a/crates/superstate-core/Cargo.toml b/crates/superstate-core/Cargo.toml
-index ac17cbd..52c83bc 100644
+index 52c83bc..795df67 100644
 --- a/crates/superstate-core/Cargo.toml
 +++ b/crates/superstate-core/Cargo.toml
-@@ -16,6 +16,7 @@ thiserror.workspace = true
+@@ -15,6 +15,7 @@ chrono.workspace = true
+ thiserror.workspace = true
  fd-lock.workspace = true
  libc = "0.2"
++regex = "1.11"
  superstate-review = { path = "../superstate-review" }
-+superstate-syntax = { path = "../superstate-syntax" }
+ superstate-syntax = { path = "../superstate-syntax" }
  
- [dev-dependencies]
- tempfile.workspace = true
-diff --git a/crates/superstate-core/src/guard.rs b/crates/superstate-core/src/guard.rs
+diff --git a/crates/superstate-core/src/command_guard.rs b/crates/superstate-core/src/command_guard.rs
 new file mode 100644
-index 0000000..c5f7f47
+index 0000000..672954e
 --- /dev/null
-+++ b/crates/superstate-core/src/guard.rs
-@@ -0,0 +1,141 @@
-+//! PreToolUse file read guard engine and AST shunting logic.
++++ b/crates/superstate-core/src/command_guard.rs
+@@ -0,0 +1,227 @@
++//! PreToolUse command and polling guard engine.
 +//!
-+//! This module intercepts file read attempts before their payload enters an agent's
-+//! LLM context window. When an agent requests a read exceeding the threshold budget
-+//! without explicit range bounds, the guard blocks the read and returns an AST symbol
-+//! outline or structural preview, guiding the agent to request bounded slices.
++//! Intercepts process inspection, task status checks, and repeated commands before
++//! their execution. By enforcing a deterministic cooldown debounce, this engine blocks
++//! wasteful LLM busy-wait polling loops while tasks run in the background.
 +
-+use std::fs::File;
-+use std::io::Read;
-+use std::path::Path;
++use regex::Regex;
 +use serde::{Deserialize, Serialize};
++use std::collections::BTreeMap;
++use std::fs;
++use std::path::{Path, PathBuf};
++use std::sync::LazyLock;
++use std::time::{SystemTime, UNIX_EPOCH};
 +
-+/// Decision returned by the file read guard evaluation.
++/// Compiled regular expression matching procfs process interrogation patterns.
++///
++/// Detects attempts to poll `/proc/<pid>/cmdline`, `/proc/<pid>/stat`, or `/proc/<pid>/status`.
++static PROCFS_RE: LazyLock<Regex> = LazyLock::new(|| {
++    Regex::new(r"/proc/(\d+|\*)/(cmdline|stat|status)").expect("valid procfs regex")
++});
++
++/// Compiled regular expression matching process interrogation and inspection commands.
++///
++/// Detects invocations of process list inspection (`ps aux`, `ps -ef`, `pgrep`, `top`, `htop`, `jobs`).
++static PROCESS_INSPECT_RE: LazyLock<Regex> = LazyLock::new(|| {
++    Regex::new(r"\b(ps\s+aux|ps\s+-ef|pgrep|top|htop|jobs)\b")
++        .expect("valid process inspection regex")
++});
++
++/// Configuration parameters for command cooldown and polling debounce.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct CommandGuardConfig {
++    /// Number of seconds a polling classification remains on cooldown before next permitted run.
++    pub debounce_sec: u64,
++    /// Optional custom path for the state history JSON document.
++    pub state_path: Option<PathBuf>,
++}
++
++impl Default for CommandGuardConfig {
++    /// Defaults to a 30-second cooldown window and default workspace state path.
++    fn default() -> Self {
++        Self {
++            debounce_sec: 30,
++            state_path: None,
++        }
++    }
++}
++
++/// Outcome of evaluating a proposed tool execution against the command guard.
 +#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 +#[serde(tag = "decision", rename_all = "snake_case")]
-+pub enum GuardDecision {
-+    /// Read is permitted to proceed into agent context.
++pub enum CommandGuardDecision {
++    /// Command is permitted to execute.
 +    Allow,
-+    /// Read is blocked; `reason` contains guidance and AST outline or line preview.
++    /// Command is blocked by an active polling cooldown.
 +    Deny { reason: String },
 +}
 +
-+/// Configuration settings for the file read guard.
-+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-+pub struct FileReadGuardConfig {
-+    /// Maximum line count permitted for an unbounded or bounded file read.
-+    pub threshold_lines: usize,
++/// Normalizes command line string by collapsing contiguous whitespace tokens.
++///
++/// Ensures minor whitespace variations (e.g. extra spaces) do not bypass duplicate detection.
++fn normalize_command(cmd: &str) -> String {
++    cmd.split_whitespace().collect::<Vec<_>>().join(" ")
 +}
 +
-+impl Default for FileReadGuardConfig {
-+    /// Default threshold is 200 lines, bounding token ingestion per tool call.
-+    fn default() -> Self {
-+        Self {
-+            threshold_lines: 200,
-+        }
-+    }
++/// Determines whether a tool name corresponds to a shell execution tool.
++fn is_shell_tool(tool_name: &str) -> bool {
++    let lower = tool_name.to_ascii_lowercase();
++    matches!(
++        lower.as_str(),
++        "run_command"
++            | "runcommand"
++            | "bash"
++            | "sh"
++            | "execute_command"
++            | "executecommand"
++            | "shell"
++            | "exec_command"
++            | "run_shell_command"
++            | "terminal"
++    )
 +}
 +
-+/// Evaluates whether a proposed file read is permitted or should be shunted.
++/// Determines if a tool invocation represents a polling command and derives its state tracking key.
 +///
 +/// # Parameters
-+/// - `path`: Path to the target file to be read.
-+/// - `start_line`: Optional 1-indexed starting line number of the requested slice.
-+/// - `end_line`: Optional 1-indexed ending line number of the requested slice.
-+/// - `config`: File read guard configuration holding line thresholds.
++/// - `tool_name`: Identifier of the tool being called (e.g. `run_command`, `manage_task`).
++/// - `args`: JSON arguments map passed to the tool.
 +///
 +/// # Returns
-+/// - `GuardDecision::Allow` if the file does not exist, is a directory, is within
-+///   budget, or has a bounded slice within threshold.
-+/// - `GuardDecision::Deny` if the file is binary or exceeds the line budget.
-+pub fn evaluate_file_read_guard(
-+    path: &Path,
-+    start_line: Option<usize>,
-+    end_line: Option<usize>,
-+    config: &FileReadGuardConfig,
-+) -> GuardDecision {
-+    // Non-existent target: allow tool invocation so standard runtime errors surface to agent.
-+    if !path.exists() {
-+        return GuardDecision::Allow;
-+    }
++/// - `Some(String)` containing the classification key if the command is subject to cooldown.
++/// - `None` if the command is non-polling or an unrelated tool.
++fn classify_tool_invocation(
++    tool_name: &str,
++    args: &serde_json::Map<String, serde_json::Value>,
++) -> Option<String> {
++    // Inspect manage_task tool calls for polling actions
++    if tool_name.eq_ignore_ascii_case("manage_task") {
++        let action = args
++            .get("Action")
++            .or_else(|| args.get("action"))
++            .and_then(|v| v.as_str())?;
 +
-+    // Directory target: allow tool invocation so standard directory reading error handling runs.
-+    if path.is_dir() {
-+        return GuardDecision::Allow;
-+    }
-+
-+    // Attempt to open file to inspect the initial byte header for binary detection.
-+    // If opening fails (e.g. permission error), allow tool execution so runtime reports error.
-+    let mut file = match File::open(path) {
-+        Ok(f) => f,
-+        Err(_) => return GuardDecision::Allow,
-+    };
-+
-+    // Read up to 8KB to inspect for null bytes indicating non-text binary formats.
-+    let mut buf = [0u8; 8192];
-+    let bytes_read = match file.read(&mut buf) {
-+        Ok(n) => n,
-+        Err(_) => return GuardDecision::Allow,
-+    };
-+
-+    // Block binary files from entering LLM context to avoid corrupting agent prompt state.
-+    if buf[..bytes_read].contains(&0x00) {
-+        return GuardDecision::Deny {
-+            reason: format!(
-+                "[superstate-guard] Binary file read blocked: {}",
-+                path.display()
-+            ),
-+        };
-+    }
-+
-+    // Read full text content to count lines and extract AST symbol outlines if needed.
-+    // If read_to_string fails (e.g. non-UTF8), allow runtime tool to handle error.
-+    let content = match std::fs::read_to_string(path) {
-+        Ok(c) => c,
-+        Err(_) => return GuardDecision::Allow,
-+    };
-+
-+    // Calculate total line count in file.
-+    let total_lines = content.lines().count();
-+
-+    // Files within the line budget are permitted unconditionally.
-+    if total_lines <= config.threshold_lines {
-+        return GuardDecision::Allow;
-+    }
-+
-+    // If caller specified an explicit slice and the span is within threshold, permit read.
-+    if let (Some(start), Some(end)) = (start_line, end_line) {
-+        if end.saturating_sub(start) <= config.threshold_lines {
-+            return GuardDecision::Allow;
++        let norm_action = action.trim().to_ascii_lowercase();
++        // Only "status" and "list" trigger the polling cooldown guard; "kill" and "send_input" pass through
++        if norm_action == "status" || norm_action == "list" {
++            return Some("manage_task_status".to_string());
 +        }
++        return None;
 +    }
 +
-+    // Attempt AST extraction via superstate-syntax for supported languages (Rust, Python, TS, Go).
-+    let ast_outline = superstate_syntax::inspect::detect_language(path)
-+        .and_then(|lang| superstate_syntax::symbols::extract_symbols(&content, lang).ok())
-+        .map(|symbols| superstate_syntax::inspect::format_outline(&symbols))
-+        .filter(|outline| !outline.trim().is_empty());
++    // Inspect shell execution tools for procfs, process inspection, or exact duplicates
++    if is_shell_tool(tool_name) {
++        let cmd = args
++            .get("CommandLine")
++            .or_else(|| args.get("command_line"))
++            .or_else(|| args.get("commandLine"))
++            .or_else(|| args.get("command"))
++            .or_else(|| args.get("cmd"))
++            .or_else(|| args.get("script"))
++            .and_then(|v| v.as_str())?;
 +
-+    // When an AST outline is available, return symbol structure so agent can target specific symbols.
-+    if let Some(outline) = ast_outline {
-+        GuardDecision::Deny {
-+            reason: format!(
-+                "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nAST Symbol Outline:\n{}\n\nRe-read using bounded StartLine and EndLine (<= {} lines), or inspect specific symbols with 'superstate inspect'.",
-+                total_lines, config.threshold_lines, outline, config.threshold_lines
-+            ),
++        let trimmed = cmd.trim();
++        if trimmed.is_empty() {
++            return None;
 +        }
++
++        // Procfs polling patterns (e.g. /proc/123/status)
++        if PROCFS_RE.is_match(trimmed) {
++            return Some("procfs_polling".to_string());
++        }
++
++        // Process inspection patterns (e.g. ps aux, pgrep)
++        if PROCESS_INSPECT_RE.is_match(trimmed) {
++            return Some("process_inspection".to_string());
++        }
++
++        // Exact duplicate command detection keyed by normalized command string
++        let normalized = normalize_command(trimmed);
++        return Some(format!("cmd:{}", normalized));
++    }
++
++    // Unrelated tools are never debounced
++    None
++}
++
++/// Evaluates whether a proposed tool execution is permitted or denied by an active cooldown.
++///
++/// Adheres strictly to fail-open behavior: any file I/O error, corrupt state file, or permission
++/// issue results in permitting the command rather than failing tool execution.
++///
++/// # Parameters
++/// - `tool_name`: Identifier of the tool being called.
++/// - `args`: JSON argument map supplied with the tool invocation.
++/// - `config`: Guard configuration containing debounce interval and state path.
++///
++/// # Returns
++/// - `CommandGuardDecision::Allow` if allowed or fail-open triggered.
++/// - `CommandGuardDecision::Deny` if cooldown is currently active.
++pub fn evaluate_command_guard(
++    tool_name: &str,
++    args: &serde_json::Map<String, serde_json::Value>,
++    config: &CommandGuardConfig,
++) -> CommandGuardDecision {
++    // 1. Tool Classification: return Allow immediately if not a debounced polling pattern
++    let classification_key = match classify_tool_invocation(tool_name, args) {
++        Some(k) => k,
++        None => return CommandGuardDecision::Allow,
++    };
++
++    // 2. Resolve state file location (defaults to .agent-state/command_guard_history.json)
++    let state_path = config
++        .state_path
++        .clone()
++        .unwrap_or_else(|| PathBuf::from(".agent-state/command_guard_history.json"));
++
++    // 3. Current timestamp in seconds since UNIX epoch
++    let now_sec = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_secs();
++
++    // 4. Load history map from disk (fail-open on corrupt JSON or missing file)
++    let mut history: BTreeMap<String, u64> = if state_path.exists() {
++        fs::read_to_string(&state_path)
++            .ok()
++            .and_then(|content| serde_json::from_str(&content).ok())
++            .unwrap_or_default()
 +    } else {
-+        // Fall back to a structural preview of first 30 lines for unsupported languages or symbol-less files.
-+        let preview = content
-+            .lines()
-+            .take(30)
-+            .collect::<Vec<_>>()
-+            .join("\n");
-+        GuardDecision::Deny {
-+            reason: format!(
-+                "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nFile preview (first 30 lines):\n{}\n...\nRe-read using bounded StartLine and EndLine (<= {} lines).",
-+                total_lines, config.threshold_lines, preview, config.threshold_lines
-+            ),
++        BTreeMap::new()
++    };
++
++    // 5. Cooldown check: if entry exists and within debounce window, deny execution
++    if let Some(&last_sec) = history.get(&classification_key) {
++        let elapsed = now_sec.saturating_sub(last_sec);
++        if elapsed < config.debounce_sec {
++            let remaining = config.debounce_sec.saturating_sub(elapsed);
++            return CommandGuardDecision::Deny {
++                reason: format!(
++                    "[superstate-guard] Busy-wait polling blocked: command was executed {}s ago. Cooldown active ({}s remaining). Do not loop on status; yield turn to await background task completion notification.",
++                    elapsed, remaining
++                ),
++            };
 +        }
 +    }
++
++    // 6. Prune stale history entries older than 2x debounce window to bound file size
++    let retention_limit = config.debounce_sec.saturating_mul(2);
++    history.retain(|_, &mut ts| now_sec.saturating_sub(ts) <= retention_limit);
++
++    // 7. Update timestamp for the current classification key
++    history.insert(classification_key, now_sec);
++
++    // 8. Persist updated history atomically to disk; ignore write errors under fail-open policy
++    if let Some(parent) = state_path.parent() {
++        let _ = fs::create_dir_all(parent);
++    }
++    if let Ok(serialized) = serde_json::to_string_pretty(&history) {
++        let parent = state_path.parent().unwrap_or_else(|| Path::new("."));
++        let temp_file_path = parent.join(format!(".command_guard.{}.tmp", std::process::id()));
++        if fs::write(&temp_file_path, serialized.as_bytes()).is_ok() {
++            let _ = fs::rename(&temp_file_path, &state_path);
++        }
++    }
++
++    CommandGuardDecision::Allow
 +}
 diff --git a/crates/superstate-core/src/lib.rs b/crates/superstate-core/src/lib.rs
-index 0b3df10..5d08f24 100644
+index 5d08f24..a8acf06 100644
 --- a/crates/superstate-core/src/lib.rs
 +++ b/crates/superstate-core/src/lib.rs
-@@ -1,5 +1,6 @@
+@@ -1,4 +1,5 @@
  pub mod checkpoint;
++pub mod command_guard;
  pub mod daemon;
-+pub mod guard;
+ pub mod guard;
  pub mod handoff;
- pub mod impact;
- pub mod ledger;
-@@ -16,6 +17,7 @@ pub use daemon::{
+@@ -13,6 +14,7 @@ pub mod shunt;
+ pub mod state_machine;
+ pub mod verifier;
+ 
++pub use command_guard::{evaluate_command_guard, CommandGuardConfig, CommandGuardDecision};
+ pub use daemon::{
      finalize_completed_execution, CompletionReport, DaemonConfig, DaemonError, DaemonRunner,
      DaemonStepOutcome, StepAdvancer,
- };
-+pub use guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
- pub use handoff::{
-     generate_handoff_markdown, generate_resumption_command, write_handoff_package, HandoffSpec,
- };
-diff --git a/crates/superstate-core/tests/test_guard.rs b/crates/superstate-core/tests/test_guard.rs
+diff --git a/crates/superstate-core/tests/test_command_guard.rs b/crates/superstate-core/tests/test_command_guard.rs
 new file mode 100644
-index 0000000..a9fc169
+index 0000000..03a0181
 --- /dev/null
-+++ b/crates/superstate-core/tests/test_guard.rs
-@@ -0,0 +1,300 @@
++++ b/crates/superstate-core/tests/test_command_guard.rs
+@@ -0,0 +1,459 @@
++use std::collections::BTreeMap;
 +use std::fs;
-+use std::io::Write;
-+use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
++use std::time::{SystemTime, UNIX_EPOCH};
++use superstate_core::command_guard::{
++    evaluate_command_guard, CommandGuardConfig, CommandGuardDecision,
++};
 +use tempfile::tempdir;
 +
 +#[test]
-+fn test_config_default_threshold() {
-+    let config = FileReadGuardConfig::default();
-+    assert_eq!(config.threshold_lines, 200);
++fn test_config_default() {
++    let config = CommandGuardConfig::default();
++    assert_eq!(config.debounce_sec, 30);
++    assert_eq!(config.state_path, None);
 +}
 +
 +#[test]
-+fn test_serde_guard_decision() {
-+    let allow = GuardDecision::Allow;
++fn test_serde_command_guard_decision() {
++    let allow = CommandGuardDecision::Allow;
 +    let allow_json = serde_json::to_string(&allow).unwrap();
 +    assert_eq!(allow_json, r#"{"decision":"allow"}"#);
-+    let deserialized_allow: GuardDecision = serde_json::from_str(&allow_json).unwrap();
++    let deserialized_allow: CommandGuardDecision = serde_json::from_str(&allow_json).unwrap();
 +    assert_eq!(deserialized_allow, allow);
 +
-+    let deny = GuardDecision::Deny {
-+        reason: "file too large".to_string(),
++    let deny = CommandGuardDecision::Deny {
++        reason: "busy-wait blocked".to_string(),
 +    };
 +    let deny_json = serde_json::to_string(&deny).unwrap();
-+    assert_eq!(deny_json, r#"{"decision":"deny","reason":"file too large"}"#);
-+    let deserialized_deny: GuardDecision = serde_json::from_str(&deny_json).unwrap();
++    assert_eq!(
++        deny_json,
++        r#"{"decision":"deny","reason":"busy-wait blocked"}"#
++    );
++    let deserialized_deny: CommandGuardDecision = serde_json::from_str(&deny_json).unwrap();
 +    assert_eq!(deserialized_deny, deny);
 +}
 +
 +#[test]
-+fn test_non_existent_file_allows() {
++fn test_unrelated_tool_allows_immediately() {
 +    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("does_not_exist.py");
-+    let config = FileReadGuardConfig::default();
-+
-+    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
-+    assert_eq!(decision, GuardDecision::Allow);
-+}
-+
-+#[test]
-+fn test_directory_allows() {
-+    let dir = tempdir().unwrap();
-+    let config = FileReadGuardConfig::default();
-+
-+    let decision = evaluate_file_read_guard(dir.path(), None, None, &config);
-+    assert_eq!(decision, GuardDecision::Allow);
-+}
-+
-+#[test]
-+fn test_small_file_allows() {
-+    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("small.rs");
-+    let content = "fn main() {\n    println!(\"hello\");\n}\n";
-+    fs::write(&file_path, content).unwrap();
-+
-+    let config = FileReadGuardConfig::default();
-+    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
-+    assert_eq!(decision, GuardDecision::Allow);
-+}
-+
-+#[test]
-+fn test_file_exactly_at_threshold_allows() {
-+    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("threshold.txt");
-+    let content = (1..=200)
-+        .map(|i| format!("line {}", i))
-+        .collect::<Vec<_>>()
-+        .join("\n");
-+    fs::write(&file_path, content).unwrap();
-+
-+    let config = FileReadGuardConfig {
-+        threshold_lines: 200,
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file.clone()),
 +    };
-+    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
-+    assert_eq!(decision, GuardDecision::Allow);
++
++    let mut args = serde_json::Map::new();
++    args.insert(
++        "path".to_string(),
++        serde_json::Value::String("/foo/bar".to_string()),
++    );
++
++    let decision = evaluate_command_guard("view_file", &args, &config);
++    assert_eq!(decision, CommandGuardDecision::Allow);
++    // State file must not be created for unrelated tools
++    assert!(!state_file.exists());
 +}
 +
 +#[test]
-+fn test_bounded_slice_under_threshold_allows() {
++fn test_manage_task_status_blocks_within_cooldown() {
 +    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("large.rs");
-+    // 300 lines file
-+    let content = (1..=300)
-+        .map(|i| format!("// line {}", i))
-+        .collect::<Vec<_>>()
-+        .join("\n");
-+    fs::write(&file_path, content).unwrap();
-+
-+    let config = FileReadGuardConfig {
-+        threshold_lines: 200,
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file.clone()),
 +    };
-+    // Request 50..=240 -> 190 lines (<= 200)
-+    let decision = evaluate_file_read_guard(&file_path, Some(50), Some(240), &config);
-+    assert_eq!(decision, GuardDecision::Allow);
 +
-+    // Request 1..=201 -> 200 lines (<= 200)
-+    let decision2 = evaluate_file_read_guard(&file_path, Some(1), Some(201), &config);
-+    assert_eq!(decision2, GuardDecision::Allow);
-+}
++    let mut args = serde_json::Map::new();
++    args.insert(
++        "Action".to_string(),
++        serde_json::Value::String("status".to_string()),
++    );
++    args.insert(
++        "TaskId".to_string(),
++        serde_json::Value::String("task-123".to_string()),
++    );
 +
-+#[test]
-+fn test_large_file_unbounded_denies_with_ast_outline() {
-+    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("large.py");
++    // First call: allowed
++    let decision1 = evaluate_command_guard("manage_task", &args, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
++    assert!(state_file.exists());
 +
-+    let mut lines = Vec::new();
-+    lines.push("class Alpha:".to_string());
-+    lines.push("    def foo(self):".to_string());
-+    lines.push("        pass".to_string());
-+    for i in 4..=250 {
-+        lines.push(format!("    # filler line {}", i));
-+    }
-+    lines.push("def bar():".to_string());
-+    lines.push("    return 42".to_string());
-+    let content = lines.join("\n");
-+    fs::write(&file_path, content).unwrap();
-+
-+    let config = FileReadGuardConfig {
-+        threshold_lines: 200,
-+    };
-+    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
-+
-+    match decision {
-+        GuardDecision::Deny { reason } => {
++    // Immediate second call: denied with expected reason format
++    let decision2 = evaluate_command_guard("manage_task", &args, &config);
++    match decision2 {
++        CommandGuardDecision::Deny { reason } => {
 +            assert!(
-+                reason.contains("[superstate-guard] Full file read blocked"),
-+                "reason should mention blocked full read: {}",
++                reason.contains("[superstate-guard] Busy-wait polling blocked:"),
++                "unexpected reason: {}",
 +                reason
 +            );
 +            assert!(
-+                reason.contains("252 lines exceeds 200-line budget"),
-+                "reason should state line counts: {}",
++                reason.contains("Cooldown active"),
++                "reason missing cooldown: {}",
 +                reason
 +            );
 +            assert!(
-+                reason.contains("AST Symbol Outline:"),
-+                "reason should have AST Symbol Outline header: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("Alpha"),
-+                "reason should outline Alpha class: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("bar"),
-+                "reason should outline bar function: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("Re-read using bounded StartLine and EndLine (<= 200 lines)"),
-+                "reason should include re-read instructions: {}",
++                reason.contains("Do not loop on status; yield turn to await background task completion notification."),
++                "reason missing guidance: {}",
 +                reason
 +            );
 +        }
-+        GuardDecision::Allow => panic!("Expected Deny for unbounded large file"),
++        CommandGuardDecision::Allow => panic!("Expected Deny on immediate status poll"),
 +    }
 +}
 +
 +#[test]
-+fn test_large_file_bounded_slice_exceeding_threshold_denies() {
++fn test_manage_task_list_shares_cooldown_with_status() {
 +    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("large.py");
-+
-+    let mut lines = Vec::new();
-+    lines.push("class Beta:".to_string());
-+    for i in 2..=300 {
-+        lines.push(format!("    # filler line {}", i));
-+    }
-+    let content = lines.join("\n");
-+    fs::write(&file_path, content).unwrap();
-+
-+    let config = FileReadGuardConfig {
-+        threshold_lines: 200,
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file),
 +    };
-+    // Request range 1..=250 -> 249 lines > 200
-+    let decision = evaluate_file_read_guard(&file_path, Some(1), Some(250), &config);
 +
-+    match decision {
-+        GuardDecision::Deny { reason } => {
-+            assert!(reason.contains("[superstate-guard] Full file read blocked"));
-+            assert!(reason.contains("AST Symbol Outline:"));
-+            assert!(reason.contains("Beta"));
-+        }
-+        GuardDecision::Allow => panic!("Expected Deny for slice exceeding threshold"),
-+    }
++    let mut args_list = serde_json::Map::new();
++    args_list.insert(
++        "action".to_string(),
++        serde_json::Value::String("list".to_string()),
++    );
++
++    let decision1 = evaluate_command_guard("manage_task", &args_list, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
++
++    let mut args_status = serde_json::Map::new();
++    args_status.insert(
++        "action".to_string(),
++        serde_json::Value::String("status".to_string()),
++    );
++
++    let decision2 = evaluate_command_guard("manage_task", &args_status, &config);
++    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
 +}
 +
 +#[test]
-+fn test_binary_file_denies() {
++fn test_manage_task_non_polling_action_allows() {
 +    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("data.bin");
-+
-+    let mut file = fs::File::create(&file_path).unwrap();
-+    let mut data = vec![0x41u8; 100];
-+    data[50] = 0x00; // null byte within first 8KB
-+    file.write_all(&data).unwrap();
-+
-+    let config = FileReadGuardConfig::default();
-+    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
-+
-+    match decision {
-+        GuardDecision::Deny { reason } => {
-+            assert!(
-+                reason.contains("[superstate-guard] Binary file read blocked:"),
-+                "reason should mention binary blocked: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains(&file_path.display().to_string()),
-+                "reason should include path: {}",
-+                reason
-+            );
-+        }
-+        GuardDecision::Allow => panic!("Expected Deny for binary file"),
-+    }
-+}
-+
-+#[test]
-+fn test_unsupported_language_falls_back_to_preview() {
-+    let dir = tempdir().unwrap();
-+    let file_path = dir.path().join("data.unsupported_ext");
-+
-+    let lines: Vec<String> = (1..=250)
-+        .map(|i| format!("unsupported raw line content number {}", i))
-+        .collect();
-+    fs::write(&file_path, lines.join("\n")).unwrap();
-+
-+    let config = FileReadGuardConfig {
-+        threshold_lines: 200,
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file),
 +    };
-+    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
 +
-+    match decision {
-+        GuardDecision::Deny { reason } => {
-+            assert!(
-+                reason.contains("[superstate-guard] Full file read blocked (250 lines exceeds 200-line budget)"),
-+                "header mismatch: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("File preview (first 30 lines):"),
-+                "should mention preview: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("unsupported raw line content number 1"),
-+                "should include first line: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("unsupported raw line content number 30"),
-+                "should include 30th line: {}",
-+                reason
-+            );
-+            assert!(
-+                !reason.contains("unsupported raw line content number 31"),
-+                "should not include 31st line: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("...\nRe-read using bounded StartLine and EndLine (<= 200 lines)."),
-+                "should include ellipsis and re-read guidance: {}",
-+                reason
-+            );
-+        }
-+        GuardDecision::Allow => panic!("Expected Deny for unsupported language exceeding threshold"),
-+    }
++    let mut args_kill = serde_json::Map::new();
++    args_kill.insert(
++        "Action".to_string(),
++        serde_json::Value::String("kill".to_string()),
++    );
++    args_kill.insert(
++        "TaskId".to_string(),
++        serde_json::Value::String("task-1".to_string()),
++    );
++
++    let decision1 = evaluate_command_guard("manage_task", &args_kill, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
++
++    let decision2 = evaluate_command_guard("manage_task", &args_kill, &config);
++    assert_eq!(decision2, CommandGuardDecision::Allow);
++
++    let mut args_input = serde_json::Map::new();
++    args_input.insert(
++        "Action".to_string(),
++        serde_json::Value::String("send_input".to_string()),
++    );
++    let decision3 = evaluate_command_guard("manage_task", &args_input, &config);
++    assert_eq!(decision3, CommandGuardDecision::Allow);
 +}
 +
 +#[test]
-+fn test_empty_ast_outline_falls_back_to_preview() {
++fn test_run_command_procfs_polling_blocks() {
 +    let dir = tempdir().unwrap();
-+    // A python file with 250 lines of comments only (no symbols)
-+    let file_path = dir.path().join("comments_only.py");
-+    let lines: Vec<String> = (1..=250)
-+        .map(|i| format!("# just a comment {}", i))
-+        .collect();
-+    fs::write(&file_path, lines.join("\n")).unwrap();
-+
-+    let config = FileReadGuardConfig {
-+        threshold_lines: 200,
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file),
 +    };
-+    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
 +
-+    match decision {
-+        GuardDecision::Deny { reason } => {
-+            assert!(
-+                reason.contains("File preview (first 30 lines):"),
-+                "empty AST outline should fall back to file preview: {}",
-+                reason
-+            );
-+            assert!(
-+                reason.contains("# just a comment 1"),
-+                "preview should show first line: {}",
-+                reason
-+            );
-+        }
-+        GuardDecision::Allow => panic!("Expected Deny for comments-only large file"),
-+    }
-+}
-diff --git a/docs/superpowers/plans/task-1-brief.md b/docs/superpowers/plans/task-1-brief.md
-index 7a6008f..d487541 100644
---- a/docs/superpowers/plans/task-1-brief.md
-+++ b/docs/superpowers/plans/task-1-brief.md
-@@ -1,42 +1,74 @@
--# Task 1 Brief: Command Specialization in `impact.rs`
--
--## Global Constraints
--- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
--- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
--- Skip GPG verification on all commits (`--no-gpg-sign`).
--- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
--
--## Task Details
--- **Task:** Task 1: Command Specialization in `impact.rs`
--- **Depends on:** none
--- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
--
--**Files:**
--- Create: `crates/superstate-core/tests/test_impact_slicing.rs`
--- Modify: `crates/superstate-core/src/impact.rs`
--
--**Interfaces:**
--- Produces: `pub fn build_sliced_test_cmd(base_cmd: &str, impacted_files: &[PathBuf], repo_root: &Path) -> Option<String>`
--
--## Implementation Steps
--Follow TDD strictly:
--1. Write failing unit tests in `crates/superstate-core/tests/test_impact_slicing.rs`:
--   - `test_build_sliced_test_cmd_pytest`: `pytest tests/` with `tests/test_auth.py` and `tests/test_token.py` $\rightarrow$ `Some("pytest tests/test_auth.py tests/test_token.py")`.
--   - `test_build_sliced_test_cmd_pytest_container_prefix`: `./run-in-container pytest tests/` with `tests/test_auth.py` $\rightarrow$ `Some("./run-in-container pytest tests/test_auth.py")`.
--   - `test_build_sliced_test_cmd_cargo`: `cargo test` with `tests/test_lexer.rs` $\rightarrow$ `Some("cargo test --test test_lexer")`.
--   - `test_build_sliced_test_cmd_unrecognized_returns_none`: `sh verify.sh` with `tests/test_auth.py` $\rightarrow$ `None`.
--2. Run `cargo test -p superstate-core --test test_impact_slicing` to confirm failure (unresolved function).
--3. Implement `pub fn build_sliced_test_cmd` in `crates/superstate-core/src/impact.rs`:
--   - Inspects `base_cmd` to detect Pytest, Cargo, Node/Vitest/Jest, etc.
--   - If `impacted_files` is empty, returns `None`.
--   - Translates impacted test files into relative paths from `repo_root`.
--   - Returns `Some(specialized_cmd)` or `None`.
--4. Run `cargo test -p superstate-core --test test_impact_slicing` and verify PASS.
--5. Run `cargo clippy -p superstate-core --all-targets -- -D warnings`.
--6. Commit changes:
--   ```bash
--   git add crates/superstate-core/src/impact.rs crates/superstate-core/tests/test_impact_slicing.rs
--   git commit --no-gpg-sign -m "feat(core): implement test runner command specialization for impact slicing"
--   ```
--7. Write implementer report to `docs/superpowers/plans/task-1-report.md`.
--8. Report status: DONE / DONE_WITH_CONCERNS / BLOCKED.
-+# Task 1 Brief: `superstate-core` Guard Engine & Evaluation Logic
++    let mut args1 = serde_json::Map::new();
++    args1.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("cat /proc/1234/status".to_string()),
++    );
 +
-+## Context & Base Commit
-+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`
-+- **Base Commit:** `e1add33`
-+- **Spec:** `docs/superpowers/specs/2026-09-20-file-read-guard-design.md`
-+- **Plan:** `docs/superpowers/plans/2026-09-20-file-read-guard.md`
++    let decision1 = evaluate_command_guard("run_command", &args1, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
 +
-+## What Needs to be Built
-+Implement the file read guard evaluation engine in `crates/superstate-core/src/guard.rs` and re-export in `lib.rs`.
++    // Another procfs query on cmdline within debounce window should block
++    let mut args2 = serde_json::Map::new();
++    args2.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("cat /proc/1234/cmdline".to_string()),
++    );
 +
-+### Types & Interface
-+```rust
-+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-+#[serde(tag = "decision", rename_all = "snake_case")]
-+pub enum GuardDecision {
-+    Allow,
-+    Deny { reason: String },
++    let decision2 = evaluate_command_guard("run_command", &args2, &config);
++    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
++
++    // Wildcard procfs query should also match pattern
++    let mut args3 = serde_json::Map::new();
++    args3.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("ls /proc/*/stat".to_string()),
++    );
++    let decision3 = evaluate_command_guard("run_command", &args3, &config);
++    assert!(matches!(decision3, CommandGuardDecision::Deny { .. }));
 +}
 +
-+#[derive(Debug, Clone)]
-+pub struct FileReadGuardConfig {
-+    pub threshold_lines: usize,
++#[test]
++fn test_run_command_process_inspection_blocks() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file),
++    };
++
++    // ps aux
++    let mut args1 = serde_json::Map::new();
++    args1.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("ps aux | grep worker".to_string()),
++    );
++    let decision1 = evaluate_command_guard("run_command", &args1, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
++
++    // pgrep within cooldown should block
++    let mut args2 = serde_json::Map::new();
++    args2.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("pgrep -f worker".to_string()),
++    );
++    let decision2 = evaluate_command_guard("run_command", &args2, &config);
++    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
++
++    // Non-matching words like 'stop_server' or 'laptop' should not trigger process inspection regex false-positives
++    // Create new clean state
++    let state_file_clean = dir.path().join("clean_history.json");
++    let config_clean = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file_clean),
++    };
++    let mut args_benign = serde_json::Map::new();
++    args_benign.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("./scripts/stop_server.sh".to_string()),
++    );
++    let decision_benign = evaluate_command_guard("run_command", &args_benign, &config_clean);
++    assert_eq!(decision_benign, CommandGuardDecision::Allow);
 +}
 +
-+impl Default for FileReadGuardConfig {
-+    fn default() -> Self {
-+        Self { threshold_lines: 200 }
-+    }
++#[test]
++fn test_run_command_exact_duplicate_blocks() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file),
++    };
++
++    let mut args = serde_json::Map::new();
++    args.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("cargo test --test foo".to_string()),
++    );
++
++    let decision1 = evaluate_command_guard("run_command", &args, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
++
++    // Exact duplicate within cooldown blocks
++    let decision2 = evaluate_command_guard("run_command", &args, &config);
++    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
++
++    // Different command is allowed!
++    let mut args_diff = serde_json::Map::new();
++    args_diff.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("cargo check".to_string()),
++    );
++    let decision3 = evaluate_command_guard("run_command", &args_diff, &config);
++    assert_eq!(decision3, CommandGuardDecision::Allow);
 +}
 +
-+pub fn evaluate_file_read_guard(
-+    path: &std::path::Path,
-+    start_line: Option<usize>,
-+    end_line: Option<usize>,
-+    config: &FileReadGuardConfig,
-+) -> GuardDecision;
-+```
++#[test]
++fn test_run_command_exact_duplicate_whitespace_normalization() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file),
++    };
 +
-+### Evaluation Logic Rules
-+1. **File non-existent:** If `!path.exists()`, return `GuardDecision::Allow` (lets tool fail naturally).
-+2. **Directory:** If `path.is_dir()`, return `GuardDecision::Allow`.
-+3. **Binary detection:** If file content contains null bytes (`0x00`) in the first 8KB, return:
-+   `GuardDecision::Deny { reason: format!("[superstate-guard] Binary file read blocked: {}", path.display()) }`.
-+4. **Line count:** Read text. Count lines (`lines().count()`).
-+5. **Permitted reads:**
-+   - If total lines $\le$ `config.threshold_lines`: return `GuardDecision::Allow`.
-+   - If `start_line` and `end_line` are specified, and `end_line.saturating_sub(start_line) <= config.threshold_lines`: return `GuardDecision::Allow`.
-+6. **Denied reads (unbounded or range > threshold):**
-+   - Attempt AST symbol outline using `superstate_syntax::inspect::format_outline(path)`:
-+     - If successful and outline is non-empty:
-+       ```rust
-+       format!(
-+           "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nAST Symbol Outline:\n{}\n\nRe-read using bounded StartLine and EndLine (<= {} lines), or inspect specific symbols with 'superstate inspect'.",
-+           total_lines, config.threshold_lines, outline, config.threshold_lines
-+       )
-+       ```
-+     - If language is unsupported or outline empty:
-+       Format a structural summary with total line count, the first 30 lines, and guidance:
-+       ```rust
-+       format!(
-+           "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nFile preview (first 30 lines):\n{}\n...\nRe-read using bounded StartLine and EndLine (<= {} lines).",
-+           total_lines, config.threshold_lines, preview, config.threshold_lines
-+       )
-+       ```
++    let mut args1 = serde_json::Map::new();
++    args1.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("npm   run   build".to_string()),
++    );
++    let decision1 = evaluate_command_guard("run_command", &args1, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
 +
-+## Steps (Follow TDD Strictly)
-+1. Write failing integration tests in `crates/superstate-core/tests/test_guard.rs`.
-+2. Run `cargo test -p superstate-core --test test_guard` to verify failure.
-+3. Implement `crates/superstate-core/src/guard.rs` and update `crates/superstate-core/src/lib.rs`.
-+4. Run `cargo test -p superstate-core --test test_guard` to verify passing.
-+5. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
-+6. Commit using `git commit --no-gpg-sign -m "feat(core): implement file read guard engine and ast shunting"`.
-+7. Write your report to `docs/superpowers/plans/task-1-report.md`.
++    let mut args2 = serde_json::Map::new();
++    args2.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("  npm run build  ".to_string()),
++    );
++    let decision2 = evaluate_command_guard("run_command", &args2, &config);
++    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
++}
++
++#[test]
++fn test_cooldown_expiry_allows_subsequent_execution() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("guard_history.json");
++
++    let now_sec = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap()
++        .as_secs();
++
++    // Pre-populate state file with an entry from 40 seconds ago (debounce is 30s)
++    let mut history = BTreeMap::new();
++    history.insert("manage_task_status".to_string(), now_sec - 40);
++    fs::write(&state_file, serde_json::to_string(&history).unwrap()).unwrap();
++
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file.clone()),
++    };
++
++    let mut args = serde_json::Map::new();
++    args.insert(
++        "Action".to_string(),
++        serde_json::Value::String("status".to_string()),
++    );
++
++    // Call after expiry should be Allowed
++    let decision = evaluate_command_guard("manage_task", &args, &config);
++    assert_eq!(decision, CommandGuardDecision::Allow);
++
++    // Timestamp should be refreshed
++    let content = fs::read_to_string(&state_file).unwrap();
++    let updated: BTreeMap<String, u64> = serde_json::from_str(&content).unwrap();
++    assert!(updated.get("manage_task_status").unwrap() >= &now_sec);
++}
++
++#[test]
++fn test_prunes_entries_older_than_twice_debounce() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("guard_history.json");
++
++    let now_sec = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap()
++        .as_secs();
++
++    // Setup history with:
++    // - "recent": 10 seconds ago (should keep)
++    // - "stale": 70 seconds ago (> 2 * 30s = 60s, should be pruned)
++    let mut history = BTreeMap::new();
++    history.insert("recent_cmd".to_string(), now_sec - 10);
++    history.insert("stale_cmd".to_string(), now_sec - 70);
++    fs::write(&state_file, serde_json::to_string(&history).unwrap()).unwrap();
++
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file.clone()),
++    };
++
++    let mut args = serde_json::Map::new();
++    args.insert(
++        "CommandLine".to_string(),
++        serde_json::Value::String("cargo build".to_string()),
++    );
++
++    let decision = evaluate_command_guard("run_command", &args, &config);
++    assert_eq!(decision, CommandGuardDecision::Allow);
++
++    let content = fs::read_to_string(&state_file).unwrap();
++    let updated: BTreeMap<String, u64> = serde_json::from_str(&content).unwrap();
++    assert!(updated.contains_key("recent_cmd"));
++    assert!(!updated.contains_key("stale_cmd"));
++    assert!(updated.contains_key("cmd:cargo build"));
++}
++
++#[test]
++fn test_fail_open_on_corrupted_state_file() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("guard_history.json");
++
++    // Write invalid JSON
++    fs::write(&state_file, "{ corrupted json syntax !@#").unwrap();
++
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file.clone()),
++    };
++
++    let mut args = serde_json::Map::new();
++    args.insert(
++        "Action".to_string(),
++        serde_json::Value::String("status".to_string()),
++    );
++
++    // Fail-open: returns Allow, does not panic, and rewrites clean JSON
++    let decision = evaluate_command_guard("manage_task", &args, &config);
++    assert_eq!(decision, CommandGuardDecision::Allow);
++
++    let content = fs::read_to_string(&state_file).unwrap();
++    let parsed: Result<BTreeMap<String, u64>, _> = serde_json::from_str(&content);
++    assert!(parsed.is_ok(), "State file should be overwritten with valid JSON");
++}
++
++#[test]
++fn test_fail_open_on_unwritable_directory() {
++    let dir = tempdir().unwrap();
++    // Create a regular file and try to place state file as a child of it
++    let blocking_file = dir.path().join("blocking_file");
++    fs::write(&blocking_file, "blocking").unwrap();
++    let invalid_state_file = blocking_file.join("sub").join("guard_history.json");
++
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(invalid_state_file),
++    };
++
++    let mut args = serde_json::Map::new();
++    args.insert(
++        "Action".to_string(),
++        serde_json::Value::String("status".to_string()),
++    );
++
++    // Should return Allow without panicking
++    let decision = evaluate_command_guard("manage_task", &args, &config);
++    assert_eq!(decision, CommandGuardDecision::Allow);
++}
++
++#[test]
++fn test_case_insensitivity_of_tool_and_arg_keys() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("guard_history.json");
++    let config = CommandGuardConfig {
++        debounce_sec: 30,
++        state_path: Some(state_file),
++    };
++
++    // Tool name in uppercase "RUN_COMMAND" and argument "command"
++    let mut args1 = serde_json::Map::new();
++    args1.insert(
++        "command".to_string(),
++        serde_json::Value::String("ps -ef".to_string()),
++    );
++    let decision1 = evaluate_command_guard("RUN_COMMAND", &args1, &config);
++    assert_eq!(decision1, CommandGuardDecision::Allow);
++
++    // Immediate repeat with "cmd"
++    let mut args2 = serde_json::Map::new();
++    args2.insert(
++        "cmd".to_string(),
++        serde_json::Value::String("ps   aux".to_string()),
++    );
++    let decision2 = evaluate_command_guard("run_command", &args2, &config);
++    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
++}
