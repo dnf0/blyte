@@ -103,6 +103,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
         review_blocking: false,
         auto_rollback: true,
         shunt_driver_output: false,
+        guard_file_reads: false,
         impact_slicing: false,
     };
 
@@ -198,6 +199,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
         review_blocking: false,
         auto_rollback: true,
         shunt_driver_output: false,
+        guard_file_reads: false,
         impact_slicing: false,
     };
 
@@ -285,6 +287,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
         impact_slicing: false,
     };
 
