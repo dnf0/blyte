@@ -79,6 +79,9 @@ enum Commands {
         /// Line count threshold before shunting triggers
         #[arg(long, default_value = "50")]
         threshold_lines: usize,
+        /// Directory where full unstripped command logs are stored
+        #[arg(long)]
+        logs_dir: Option<PathBuf>,
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
@@ -167,8 +170,9 @@ fn main() {
         Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
         Commands::Shunt {
             threshold_lines,
+            logs_dir,
             cmd,
-        } => match commands::shunt::execute_shunt(&cmd, threshold_lines) {
+        } => match commands::shunt::execute_shunt(&cmd, threshold_lines, logs_dir) {
             Ok(code) => std::process::exit(code),
             Err(e) => {
                 eprintln!("Error: {}", e);
