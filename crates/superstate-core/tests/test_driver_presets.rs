@@ -181,6 +181,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();

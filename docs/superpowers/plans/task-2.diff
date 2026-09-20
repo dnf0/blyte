@@ -1,384 +1,538 @@
+diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
+index dce6438..67c8543 100644
+--- a/crates/superstate-cli/src/commands/daemon.rs
++++ b/crates/superstate-cli/src/commands/daemon.rs
+@@ -115,6 +115,7 @@ pub fn cmd_daemon(
+     review_blocking: bool,
+     auto_rollback: bool,
+     shunt_driver_output: bool,
++    impact_slicing: bool,
+ ) -> Result<(), String> {
+     let auto_rollback = if !auto_rollback {
+         false
+@@ -194,6 +195,9 @@ pub fn cmd_daemon(
+         if !shunt_driver_output {
+             cmd.arg("--no-shunt");
+         }
++        if impact_slicing {
++            cmd.arg("--impact-slicing");
++        }
+         cmd.stdout(std::process::Stdio::from(log_out));
+         cmd.stderr(std::process::Stdio::from(log_err));
+         cmd.stdin(std::process::Stdio::null());
+@@ -273,6 +277,7 @@ pub fn cmd_daemon(
+             review_blocking,
+             auto_rollback,
+             shunt_driver_output,
++            impact_slicing,
+         };
+ 
+         let mut runner = DaemonRunner::new(config)
+diff --git a/crates/superstate-cli/src/commands/handoff.rs b/crates/superstate-cli/src/commands/handoff.rs
+index d8e6fed..78a350c 100644
+--- a/crates/superstate-cli/src/commands/handoff.rs
++++ b/crates/superstate-cli/src/commands/handoff.rs
+@@ -180,6 +180,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
+             false,
+             false,
+             true,
++            false,
+         )
+     } else if args.json {
+         let active_task_str = state
+diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
+index 6a2f801..1b57ca9 100644
+--- a/crates/superstate-cli/src/main.rs
++++ b/crates/superstate-cli/src/main.rs
+@@ -155,6 +155,7 @@ fn main() {
+                 args.review_blocking,
+                 args.use_auto_rollback(),
+                 args.use_shunt(),
++                args.impact_slicing,
+             ),
+         },
+         Commands::Cancel(args) => {
+diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
+index b4db427..1793353 100644
+--- a/crates/superstate-cli/src/state_cli.rs
++++ b/crates/superstate-cli/src/state_cli.rs
+@@ -111,7 +111,7 @@ impl Default for ShowArgs {
+     }
+ }
+ 
+-#[derive(Subcommand)]
++#[derive(Subcommand, Debug, Clone)]
+ pub enum StateCommands {
+     /// Initialize state from plan markdown or direct goal
+     Init(InitArgs),
+@@ -272,6 +272,22 @@ pub enum StateCommands {
+     Handoff(HandoffArgs),
+ }
+ 
++/// Type alias for `StateCommands` providing naming symmetry with standard CLI subcommand enums.
++pub type Subcommands = StateCommands;
++/// Type alias for `StateCommands` providing naming symmetry with standard CLI commands enums.
++pub type Commands = StateCommands;
++
++/// Arguments parser for `state` CLI invocations.
++#[derive(clap::Parser, Debug, Clone)]
++#[command(
++    name = "state",
++    about = "Deterministic state machine operations for agent execution"
++)]
++pub struct StateArgs {
++    #[command(subcommand)]
++    pub command: StateCommands,
++}
++
+ #[derive(Subcommand, Debug, Clone)]
+ pub enum DaemonSubcommands {
+     /// List active and managed daemon processes
+@@ -328,6 +344,12 @@ pub struct DaemonArgs {
+         help = "Disable automatic tool output shunting during driver execution"
+     )]
+     pub no_shunt: bool,
++    /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
++    #[arg(
++        long,
++        help = "Enable milestone-scoped test impact slicing for fast fail-fast feedback"
++    )]
++    pub impact_slicing: bool,
+ }
+ 
+ impl DaemonArgs {
+@@ -575,6 +597,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
+                     args.review_blocking,
+                     auto_rollback,
+                     shunt_driver_output,
++                    args.impact_slicing,
+                 )
+             }
+         },
+diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+index 11fd383..c3b0645 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
++++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+@@ -44,6 +44,7 @@ fn test_cli_daemon_lifecycle() {
+         false,
+         false,
+         true,
++        false,
+     )
+     .unwrap();
+ 
+@@ -103,7 +104,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
+     fs::write(&legacy_pid, "99999").unwrap();
+ 
+     // Run daemon to completion synchronously
+-    cmd_daemon(&state_path, None, false, 1, 5, false, false, false, true).unwrap();
++    cmd_daemon(&state_path, None, false, 1, 5, false, false, false, true, false).unwrap();
+ 
+     assert!(
+         !legacy_pid.exists(),
+diff --git a/crates/superstate-cli/tests/test_cli_impact_slicing.rs b/crates/superstate-cli/tests/test_cli_impact_slicing.rs
+new file mode 100644
+index 0000000..83ae6e7
+--- /dev/null
++++ b/crates/superstate-cli/tests/test_cli_impact_slicing.rs
+@@ -0,0 +1,26 @@
++use clap::Parser;
++use superstate_cli::state_cli::{Commands, StateArgs, Subcommands};
++
++#[test]
++fn test_cli_impact_slicing_flag_parsing() {
++    let args = StateArgs::try_parse_from(["state", "daemon", "--impact-slicing"])
++        .expect("Failed to parse --impact-slicing flag");
++    match args.command {
++        Subcommands::Daemon(daemon_args) => {
++            assert!(daemon_args.impact_slicing, "Expected impact_slicing to be true");
++        }
++        _ => panic!("Expected Subcommands::Daemon"),
++    }
++}
++
++#[test]
++fn test_cli_impact_slicing_flag_default_false() {
++    let args = StateArgs::try_parse_from(["state", "daemon"])
++        .expect("Failed to parse daemon args");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(!daemon_args.impact_slicing, "Expected impact_slicing to default to false");
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
 diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
-index 32931f9..5a28185 100644
+index e60b2c1..c58fb26 100644
 --- a/crates/superstate-core/src/daemon.rs
 +++ b/crates/superstate-core/src/daemon.rs
-@@ -969,17 +969,41 @@ impl DaemonRunner {
-                     next_task_id,
-                 })
-             } else {
--                advance_step(&mut state)?;
--                save_state_atomic(&self.config.state_path, &state)?;
--
--                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
--                if state.status == ExecutionStatus::Completed {
--                    finalize_completed_execution(&self.config.state_path, &state)?;
-+                // In-process advancement evaluates dependency satisfaction across pending milestones.
-+                // If remaining tasks have unresolved or cyclical dependencies, transition to Blocked
-+                // rather than failing unrecoverably, recording a ledger entry for epistemic tracking.
-+                match advance_step(&mut state) {
-+                    Ok(()) => {
-+                        save_state_atomic(&self.config.state_path, &state)?;
-+
-+                        let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
-+                        if state.status == ExecutionStatus::Completed {
-+                            finalize_completed_execution(&self.config.state_path, &state)?;
-+                        }
-+                        Ok(DaemonStepOutcome::Advanced {
-+                            completed_task_id: active_task.id,
-+                            next_task_id,
-+                        })
-+                    }
-+                    Err(StateError::InvalidTransition(msg)) => {
-+                        // Guard against DAG deadlock: milestone completed successfully, but remaining
-+                        // pending tasks cannot advance due to missing or cyclical dependencies.
-+                        state.status = ExecutionStatus::Blocked;
-+                        state.notes.push(LedgerEntry::new(
-+                            "superstate-daemon",
-+                            format!(
-+                                "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
-+                                active_task.id, msg
-+                            ),
-+                        ));
-+                        save_state_atomic(&self.config.state_path, &state)?;
-+                        Ok(DaemonStepOutcome::Blocked {
-+                            task_id: active_task.id,
-+                            reason: msg,
-+                        })
-+                    }
-+                    Err(e) => Err(DaemonError::State(e)),
-                 }
--                Ok(DaemonStepOutcome::Advanced {
--                    completed_task_id: active_task.id,
--                    next_task_id,
--                })
-             }
-         } else {
-             // Verification gate failed: record failure diagnostics and update retry budget.
+@@ -189,6 +189,9 @@ pub struct DaemonConfig {
+     /// Automatically enable tool output shunting during driver worker execution
+     #[serde(default = "default_true")]
+     pub shunt_driver_output: bool,
++    /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
++    #[serde(default)]
++    pub impact_slicing: bool,
+ }
+ 
+ impl Default for DaemonConfig {
+@@ -203,6 +206,7 @@ impl Default for DaemonConfig {
+             review_blocking: false,
+             auto_rollback: true,
+             shunt_driver_output: true,
++            impact_slicing: false,
+         }
+     }
+ }
+diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+index 5d70367..d44e325 100644
+--- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
++++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+@@ -71,6 +71,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -124,6 +125,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -191,6 +193,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -248,6 +251,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -306,6 +310,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -357,6 +362,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
+index 0ba3cfd..9629375 100644
+--- a/crates/superstate-core/tests/test_daemon_automerge.rs
++++ b/crates/superstate-core/tests/test_daemon_automerge.rs
+@@ -123,6 +123,7 @@ fn test_daemon_automerge_on_completion() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -219,6 +220,7 @@ fn test_daemon_completion_in_place_mode() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -281,6 +283,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
+@@ -303,6 +306,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     })
+     .expect("create second runner");
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+index 33aa0d0..4c6be6b 100644
+--- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
++++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+@@ -93,6 +93,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
+         review_blocking: true,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -175,6 +176,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
+         review_blocking: true,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -221,6 +223,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -298,6 +301,7 @@ EOF
+         review_blocking: true,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
 diff --git a/crates/superstate-core/tests/test_daemon_dag_execution.rs b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-new file mode 100644
-index 0000000..80ea367
---- /dev/null
+index 44b8061..5fe451f 100644
+--- a/crates/superstate-core/tests/test_daemon_dag_execution.rs
 +++ b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-@@ -0,0 +1,322 @@
-+use std::fs;
-+use std::path::PathBuf;
-+use std::process::Command;
-+use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
-+use superstate_core::models::{ExecutionStatus, MilestoneSpec};
-+use superstate_core::state_machine::{init_state_milestones, load_state, save_state_atomic};
-+
-+/// Helper to configure a temporary git repository rooted on the main branch.
-+fn setup_temp_git_repo(path: &std::path::Path) -> String {
-+    let init_res = Command::new("git")
-+        .args(["init", "-b", "main"])
-+        .current_dir(path)
-+        .output();
-+    if let Ok(out) = init_res {
-+        if !out.status.success() {
-+            let _ = Command::new("git").arg("init").current_dir(path).output();
-+            let _ = Command::new("git")
-+                .args(["checkout", "-b", "main"])
-+                .current_dir(path)
-+                .output();
-+        }
-+    }
-+
-+    let _ = Command::new("git")
-+        .args(["config", "user.name", "Superstate Test"])
-+        .current_dir(path)
-+        .output();
-+    let _ = Command::new("git")
-+        .args(["config", "user.email", "test@superstate.local"])
-+        .current_dir(path)
-+        .output();
-+    let _ = Command::new("git")
-+        .args(["config", "commit.gpgsign", "false"])
-+        .current_dir(path)
-+        .output();
-+
-+    // Create an initial tracked file and commit
-+    fs::write(path.join("tracked.txt"), "initial content\n").expect("write tracked.txt");
-+    let _ = Command::new("git")
-+        .args(["add", "tracked.txt"])
-+        .current_dir(path)
-+        .output();
-+    let _ = Command::new("git")
-+        .args(["commit", "-m", "initial commit"])
-+        .current_dir(path)
-+        .output();
-+
-+    let head_out = Command::new("git")
-+        .args(["rev-parse", "HEAD"])
-+        .current_dir(path)
-+        .output()
-+        .expect("git rev-parse HEAD");
-+    String::from_utf8_lossy(&head_out.stdout).trim().to_string()
-+}
-+
-+#[test]
-+fn test_daemon_executes_sequential_milestones_with_checkpoints() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    setup_temp_git_repo(repo_root);
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let milestones = vec![
-+        MilestoneSpec {
-+            id: Some("task-1".to_string()),
-+            title: "Create A".to_string(),
-+            verify_cmd: "test -f a.txt".to_string(),
-+            files: vec![PathBuf::from("a.txt")],
-+            ..Default::default()
-+        },
-+        MilestoneSpec {
-+            id: Some("task-2".to_string()),
-+            title: "Create B".to_string(),
-+            verify_cmd: "test -f b.txt".to_string(),
-+            files: vec![PathBuf::from("b.txt")],
-+            ..Default::default()
-+        },
-+    ];
-+
-+    let state = init_state_milestones(Some("Sequential checkpoints"), milestones, None, true)
-+        .expect("init state");
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    // Mock driver creates a.txt for task-1 and b.txt for task-2 based on SUPERSTATE_ACTIVE_TASK
-+    let driver_script = r#"
-+        if [ "$SUPERSTATE_ACTIVE_TASK" = "task-1" ]; then
-+            echo "alpha" > a.txt
-+        elif [ "$SUPERSTATE_ACTIVE_TASK" = "task-2" ]; then
-+            echo "beta" > b.txt
-+        fi
-+    "#;
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: Some(driver_script.to_string()),
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: true,
-+        shunt_driver_output: false,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let report = runner.run_to_completion().expect("run_to_completion");
-+
-+    assert_eq!(report.status, ExecutionStatus::Completed);
-+    assert_eq!(report.milestones_completed, 2);
-+
-+    // Verify both files exist on disk
-+    assert!(repo_root.join("a.txt").exists(), "a.txt must exist");
-+    assert!(repo_root.join("b.txt").exists(), "b.txt must exist");
-+
-+    // Verify git log contains checkpoint commits for both task-1 and task-2
-+    let git_log = Command::new("git")
-+        .args(["log", "--oneline"])
-+        .current_dir(repo_root)
-+        .output()
-+        .expect("git log");
-+    let log_str = String::from_utf8_lossy(&git_log.stdout);
-+    assert!(
-+        log_str.contains("checkpoint completed milestone task-1"),
-+        "git log must contain checkpoint commit for task-1, got: {}",
-+        log_str
-+    );
-+    assert!(
-+        log_str.contains("checkpoint completed milestone task-2"),
-+        "git log must contain checkpoint commit for task-2, got: {}",
-+        log_str
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    setup_temp_git_repo(repo_root);
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let milestones = vec![
-+        MilestoneSpec {
-+            id: Some("task-1".to_string()),
-+            title: "Task 1".to_string(),
-+            verify_cmd: "test -f a.txt".to_string(),
-+            files: vec![PathBuf::from("a.txt")],
-+            ..Default::default()
-+        },
-+        MilestoneSpec {
-+            id: Some("task-2".to_string()),
-+            title: "Task 2".to_string(),
-+            verify_cmd: "test -f b.txt".to_string(),
-+            files: vec![PathBuf::from("b.txt")],
-+            ..Default::default()
-+        },
-+    ];
-+
-+    let state = init_state_milestones(Some("Rollback isolation"), milestones, None, true)
-+        .expect("init state");
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    // Track attempts outside the git repo so git clean does not erase the counter
-+    let marker_dir = tempfile::tempdir().expect("marker dir");
-+    let marker_file = marker_dir.path().join("attempt_marker");
-+    let marker_file_str = marker_file.to_str().expect("valid path");
-+
-+    // Driver: creates a.txt for task-1.
-+    // For task-2 attempt 1 (marker does not exist): creates marker and bad.txt (fails verification).
-+    // For task-2 attempt 2 (marker exists): creates b.txt (passes verification).
-+    let driver_script = format!(
-+        r#"
-+        if [ "$SUPERSTATE_ACTIVE_TASK" = "task-1" ]; then
-+            echo "a_content" > a.txt
-+        elif [ ! -f "{}" ]; then
-+            touch "{}"
-+            echo "corrupt" > bad.txt
-+        else
-+            echo "b_content" > b.txt
-+        fi
-+        "#,
-+        marker_file_str, marker_file_str
-+    );
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: Some(driver_script),
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: true,
-+        shunt_driver_output: false,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+
-+    // Step 1: Task 1 succeeds
-+    let outcome1 = runner.run_step().expect("step 1");
-+    assert!(outcome1.is_advanced());
-+    assert!(repo_root.join("a.txt").exists(), "a.txt created in task-1");
-+
-+    // Step 2: Task 2 Attempt 1 writes bad.txt and fails verification, triggering auto-rollback
-+    let outcome2 = runner.run_step().expect("step 2");
-+    assert!(
-+        outcome2.is_failed(),
-+        "step 2 must fail verification and trigger rollback, got {:?}",
-+        outcome2
-+    );
-+
-+    // Verify rollback isolation: a.txt is STILL present in repo, while bad.txt is removed
-+    assert!(
-+        repo_root.join("a.txt").exists(),
-+        "a.txt must still be present after task-2 rollback"
-+    );
-+    assert!(
-+        !repo_root.join("bad.txt").exists(),
-+        "bad.txt must be removed by rollback"
-+    );
-+
-+    // Step 3: Task 2 Attempt 2 writes b.txt and passes verification
-+    let outcome3 = runner.run_step().expect("step 3");
-+    assert!(
-+        outcome3.is_advanced(),
-+        "step 3 must advance task-2, got {:?}",
-+        outcome3
-+    );
-+
-+    // Final state verification
-+    assert!(repo_root.join("a.txt").exists(), "a.txt exists at end");
-+    assert!(repo_root.join("b.txt").exists(), "b.txt exists at end");
-+    assert!(!repo_root.join("bad.txt").exists(), "bad.txt does not exist at end");
-+
-+    let final_state = load_state(&state_path).expect("load final state");
-+    assert_eq!(final_state.status, ExecutionStatus::Completed);
-+    assert_eq!(final_state.completed_tasks.len(), 2);
-+}
-+
-+#[test]
-+fn test_daemon_deadlock_halts_with_blocked_outcome() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let state_dir = temp_dir.path().join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let milestones = vec![
-+        MilestoneSpec {
-+            id: Some("task-1".to_string()),
-+            title: "Task 1".to_string(),
-+            verify_cmd: "true".to_string(),
-+            depends_on: Some(vec![]),
-+            ..Default::default()
-+        },
-+        MilestoneSpec {
-+            id: Some("task-2".to_string()),
-+            title: "Task 2".to_string(),
-+            verify_cmd: "true".to_string(),
-+            depends_on: Some(vec!["task-99".to_string()]),
-+            ..Default::default()
-+        },
-+    ];
-+
-+    let state = init_state_milestones(Some("Deadlock test"), milestones, None, true)
-+        .expect("init state");
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+
-+    // Run step on task-1: verification passes, but advance_step detects deadlock with task-2
-+    let outcome = runner.run_step().expect("run_step should return Ok(Blocked)");
-+
-+    // Must return DaemonStepOutcome::Blocked
-+    match outcome {
-+        DaemonStepOutcome::Blocked { task_id, reason } => {
-+            assert_eq!(task_id, "task-1");
-+            assert!(
-+                reason.contains("pending tasks exist but none have satisfied dependencies"),
-+                "reason should mention unsatisfied dependencies, got: {}",
-+                reason
-+            );
-+        }
-+        other => panic!("expected DaemonStepOutcome::Blocked, got {:?}", other),
-+    }
-+
-+    // Verify state was transitioned to Blocked and saved
-+    let loaded_state = load_state(&state_path).expect("load state");
-+    assert_eq!(loaded_state.status, ExecutionStatus::Blocked);
-+
-+    // Verify [dag-blocked] note was recorded
-+    let dag_blocked_note = loaded_state
-+        .notes
-+        .iter()
-+        .find(|n| n.note.contains("[dag-blocked]"));
-+    assert!(
-+        dag_blocked_note.is_some(),
-+        "state notes must contain [dag-blocked] note"
-+    );
-+    let note_content = &dag_blocked_note.unwrap().note;
-+    assert!(
-+        note_content.contains("Milestone task-1 completed, but remaining tasks cannot advance"),
-+        "note must format correctly: {}",
-+        note_content
-+    );
-+}
+@@ -103,6 +103,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
+         review_blocking: false,
+         auto_rollback: true,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create runner");
+@@ -197,6 +198,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
+         review_blocking: false,
+         auto_rollback: true,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create runner");
+@@ -283,6 +285,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create runner");
+diff --git a/crates/superstate-core/tests/test_daemon_rollback.rs b/crates/superstate-core/tests/test_daemon_rollback.rs
+index 91c4669..feb8a1d 100644
+--- a/crates/superstate-core/tests/test_daemon_rollback.rs
++++ b/crates/superstate-core/tests/test_daemon_rollback.rs
+@@ -99,6 +99,7 @@ fn test_daemon_rollback_on_verification_failure() {
+         review_blocking: false,
+         auto_rollback: true,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create runner");
+@@ -194,6 +195,7 @@ fn test_daemon_no_rollback_when_disabled() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).expect("create runner");
+diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
+index f62e449..6fd396d 100644
+--- a/crates/superstate-core/tests/test_daemon_runner.rs
++++ b/crates/superstate-core/tests/test_daemon_runner.rs
+@@ -38,6 +38,7 @@ fn test_daemon_run_step_success() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -77,6 +78,7 @@ fn test_daemon_run_step_verification_failure() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -124,6 +126,7 @@ fn test_daemon_run_to_completion() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -166,6 +169,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -219,6 +223,7 @@ fn test_daemon_step_advancer_invoked() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     use std::sync::{Arc, Mutex};
+@@ -268,6 +273,7 @@ fn test_daemon_step_advancer_error_propagation() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     // Configure a StepAdvancer that simulates downstream failure during advancement
+@@ -321,6 +327,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -384,6 +391,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -435,6 +443,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -527,6 +536,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -586,6 +596,7 @@ fn test_progress_renews_the_retry_budget() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -631,6 +642,7 @@ fn test_stalled_worker_still_blocks() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -688,6 +700,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -735,6 +748,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -789,6 +803,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+ 
+@@ -841,6 +856,7 @@ fn test_real_gate_completes_immediately() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+     assert!(
+@@ -880,6 +896,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+     assert!(
+@@ -935,6 +952,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
+             review_blocking: false,
+             auto_rollback: false,
+             shunt_driver_output: false,
++            impact_slicing: false,
+         })
+         .unwrap();
+         for _ in 0..4 {
+diff --git a/crates/superstate-core/tests/test_daemon_shunt.rs b/crates/superstate-core/tests/test_daemon_shunt.rs
+index adff0f9..7214551 100644
+--- a/crates/superstate-core/tests/test_daemon_shunt.rs
++++ b/crates/superstate-core/tests/test_daemon_shunt.rs
+@@ -63,6 +63,7 @@ fn test_daemon_runner_injects_shunt_wrapper() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: true,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -126,6 +127,7 @@ fn test_daemon_runner_no_shunt_disables_injection() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = DaemonRunner::new(config).unwrap();
+diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
+index d35b400..809f941 100644
+--- a/crates/superstate-core/tests/test_driver_presets.rs
++++ b/crates/superstate-core/tests/test_driver_presets.rs
+@@ -181,6 +181,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
+         review_blocking: false,
+         auto_rollback: false,
+         shunt_driver_output: false,
++        impact_slicing: false,
+     };
+ 
+     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();

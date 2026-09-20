@@ -63,6 +63,7 @@ fn test_daemon_runner_injects_shunt_wrapper() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: true,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -126,6 +127,7 @@ fn test_daemon_runner_no_shunt_disables_injection() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
