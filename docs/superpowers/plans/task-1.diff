@@ -1,288 +1,605 @@
-diff --git a/crates/superstate-core/src/impact.rs b/crates/superstate-core/src/impact.rs
-index 39bd8bb..c739f98 100644
---- a/crates/superstate-core/src/impact.rs
-+++ b/crates/superstate-core/src/impact.rs
-@@ -344,3 +344,186 @@ pub fn infer_impacted_tests(repo_root: &Path, base_branch: Option<&str>) -> Vec<
-     tests.dedup();
-     tests
- }
+diff --git a/crates/superstate-core/Cargo.toml b/crates/superstate-core/Cargo.toml
+index ac17cbd..52c83bc 100644
+--- a/crates/superstate-core/Cargo.toml
++++ b/crates/superstate-core/Cargo.toml
+@@ -16,6 +16,7 @@ thiserror.workspace = true
+ fd-lock.workspace = true
+ libc = "0.2"
+ superstate-review = { path = "../superstate-review" }
++superstate-syntax = { path = "../superstate-syntax" }
+ 
+ [dev-dependencies]
+ tempfile.workspace = true
+diff --git a/crates/superstate-core/src/guard.rs b/crates/superstate-core/src/guard.rs
+new file mode 100644
+index 0000000..c5f7f47
+--- /dev/null
++++ b/crates/superstate-core/src/guard.rs
+@@ -0,0 +1,141 @@
++//! PreToolUse file read guard engine and AST shunting logic.
++//!
++//! This module intercepts file read attempts before their payload enters an agent's
++//! LLM context window. When an agent requests a read exceeding the threshold budget
++//! without explicit range bounds, the guard blocks the read and returns an AST symbol
++//! outline or structural preview, guiding the agent to request bounded slices.
 +
-+/// Helper to verify that a matched keyword in a command string respects word boundaries.
-+///
-+/// Ensures the matched keyword is not an arbitrary substring of a larger identifier
-+/// (e.g. `run_pytest_suite.sh` vs `pytest`).
-+fn is_word_boundary_match(s: &str, idx: usize, word_len: usize) -> bool {
-+    let bytes = s.as_bytes();
-+    // Prior character must be start of string or a path/argument separator
-+    let before_ok =
-+        idx == 0 || bytes[idx - 1] == b' ' || bytes[idx - 1] == b'\t' || bytes[idx - 1] == b'/';
-+    let after_idx = idx + word_len;
-+    // Succeeding character must be end of string or a whitespace separator
-+    let after_ok = after_idx == bytes.len()
-+        || bytes[after_idx] == b' '
-+        || bytes[after_idx] == b'\t'
-+        || bytes[after_idx] == b'\n';
-+    before_ok && after_ok
++use std::fs::File;
++use std::io::Read;
++use std::path::Path;
++use serde::{Deserialize, Serialize};
++
++/// Decision returned by the file read guard evaluation.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(tag = "decision", rename_all = "snake_case")]
++pub enum GuardDecision {
++    /// Read is permitted to proceed into agent context.
++    Allow,
++    /// Read is blocked; `reason` contains guidance and AST outline or line preview.
++    Deny { reason: String },
 +}
 +
-+/// Specialize a base verification command to execute only the impacted test files.
-+///
-+/// Inspects the base command to recognize common test runners:
-+/// - Pytest: `pytest`, `python -m pytest`, or prefixed commands like `./run-in-container pytest`
-+/// - Cargo: `cargo test`
-+/// - Go: `go test`
-+/// - Node/Vitest/Jest: `npm test`, `npx vitest`, `yarn test`, `pnpm test`, `jest`
-+///
-+/// When a recognized runner is identified, the command is specialized by targeting
-+/// the impacted test files directly, replacing generic test directory arguments.
++/// Configuration settings for the file read guard.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct FileReadGuardConfig {
++    /// Maximum line count permitted for an unbounded or bounded file read.
++    pub threshold_lines: usize,
++}
++
++impl Default for FileReadGuardConfig {
++    /// Default threshold is 200 lines, bounding token ingestion per tool call.
++    fn default() -> Self {
++        Self {
++            threshold_lines: 200,
++        }
++    }
++}
++
++/// Evaluates whether a proposed file read is permitted or should be shunted.
 +///
 +/// # Parameters
-+/// - `base_cmd`: The raw base verification command string (e.g. `pytest tests/`).
-+/// - `impacted_files`: Slice of test file paths discovered by impact analysis.
-+/// - `repo_root`: The base repository directory against which relative paths are formed.
++/// - `path`: Path to the target file to be read.
++/// - `start_line`: Optional 1-indexed starting line number of the requested slice.
++/// - `end_line`: Optional 1-indexed ending line number of the requested slice.
++/// - `config`: File read guard configuration holding line thresholds.
 +///
 +/// # Returns
-+/// - `Some(specialized_cmd)` if the test runner is recognized and sliceable.
-+/// - `None` if `impacted_files` is empty or if the runner command is unrecognized.
-+pub fn build_sliced_test_cmd(
-+    base_cmd: &str,
-+    impacted_files: &[PathBuf],
-+    repo_root: &Path,
-+) -> Option<String> {
-+    // Guard clause: return None immediately if no test files were impacted
-+    if impacted_files.is_empty() {
-+        return None;
++/// - `GuardDecision::Allow` if the file does not exist, is a directory, is within
++///   budget, or has a bounded slice within threshold.
++/// - `GuardDecision::Deny` if the file is binary or exceeds the line budget.
++pub fn evaluate_file_read_guard(
++    path: &Path,
++    start_line: Option<usize>,
++    end_line: Option<usize>,
++    config: &FileReadGuardConfig,
++) -> GuardDecision {
++    // Non-existent target: allow tool invocation so standard runtime errors surface to agent.
++    if !path.exists() {
++        return GuardDecision::Allow;
 +    }
 +
-+    let trimmed = base_cmd.trim();
-+
-+    // 1. Pytest detection (supports ./run-in-container pytest, python -m pytest, pytest)
-+    if let Some(prefix_idx) = trimmed.find("pytest") {
-+        if is_word_boundary_match(trimmed, prefix_idx, "pytest".len()) {
-+            let prefix = trimmed[..prefix_idx + "pytest".len()].trim();
-+            // Format relative paths from repo_root for clean test invocations
-+            let mut rel_paths: Vec<String> = impacted_files
-+                .iter()
-+                .map(|p| {
-+                    p.strip_prefix(repo_root)
-+                        .unwrap_or(p)
-+                        .to_string_lossy()
-+                        .to_string()
-+                })
-+                .collect();
-+            rel_paths.sort();
-+            rel_paths.dedup();
-+
-+            if !rel_paths.is_empty() {
-+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-+            }
-+        }
++    // Directory target: allow tool invocation so standard directory reading error handling runs.
++    if path.is_dir() {
++        return GuardDecision::Allow;
 +    }
 +
-+    // 2. Cargo test detection
-+    if let Some(idx) = trimmed.find("cargo test") {
-+        if is_word_boundary_match(trimmed, idx, "cargo test".len()) {
-+            let prefix = trimmed[..idx + "cargo test".len()].trim();
-+            let mut test_args = Vec::new();
-+            // Inspect each file to build appropriate --test flags or test filters
-+            for file in impacted_files {
-+                let rel = file.strip_prefix(repo_root).unwrap_or(file);
-+                if let Some(parent) = rel.parent() {
-+                    if parent == Path::new("tests") || parent.ends_with("tests") {
-+                        if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
-+                            test_args.push(format!("--test {}", stem));
-+                            continue;
-+                        }
-+                    }
-+                }
-+                if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
-+                    test_args.push(stem.to_string());
-+                }
-+            }
-+            test_args.sort();
-+            test_args.dedup();
++    // Attempt to open file to inspect the initial byte header for binary detection.
++    // If opening fails (e.g. permission error), allow tool execution so runtime reports error.
++    let mut file = match File::open(path) {
++        Ok(f) => f,
++        Err(_) => return GuardDecision::Allow,
++    };
 +
-+            if !test_args.is_empty() {
-+                return Some(format!("{} {}", prefix, test_args.join(" ")));
-+            }
-+        }
++    // Read up to 8KB to inspect for null bytes indicating non-text binary formats.
++    let mut buf = [0u8; 8192];
++    let bytes_read = match file.read(&mut buf) {
++        Ok(n) => n,
++        Err(_) => return GuardDecision::Allow,
++    };
++
++    // Block binary files from entering LLM context to avoid corrupting agent prompt state.
++    if buf[..bytes_read].contains(&0x00) {
++        return GuardDecision::Deny {
++            reason: format!(
++                "[superstate-guard] Binary file read blocked: {}",
++                path.display()
++            ),
++        };
 +    }
 +
-+    // 3. Go test detection
-+    if let Some(idx) = trimmed.find("go test") {
-+        if is_word_boundary_match(trimmed, idx, "go test".len()) {
-+            let prefix = trimmed[..idx + "go test".len()].trim();
-+            let mut pkgs = Vec::new();
-+            // Translate impacted files to their enclosing Go package directories
-+            for file in impacted_files {
-+                let rel = file.strip_prefix(repo_root).unwrap_or(file);
-+                let parent = rel.parent().unwrap_or(Path::new(""));
-+                let pkg = if parent.as_os_str().is_empty() {
-+                    ".".to_string()
-+                } else if parent.starts_with(".") {
-+                    parent.to_string_lossy().to_string()
-+                } else {
-+                    format!("./{}", parent.to_string_lossy())
-+                };
-+                pkgs.push(pkg);
-+            }
-+            pkgs.sort();
-+            pkgs.dedup();
++    // Read full text content to count lines and extract AST symbol outlines if needed.
++    // If read_to_string fails (e.g. non-UTF8), allow runtime tool to handle error.
++    let content = match std::fs::read_to_string(path) {
++        Ok(c) => c,
++        Err(_) => return GuardDecision::Allow,
++    };
 +
-+            if !pkgs.is_empty() {
-+                return Some(format!("{} {}", prefix, pkgs.join(" ")));
-+            }
++    // Calculate total line count in file.
++    let total_lines = content.lines().count();
++
++    // Files within the line budget are permitted unconditionally.
++    if total_lines <= config.threshold_lines {
++        return GuardDecision::Allow;
++    }
++
++    // If caller specified an explicit slice and the span is within threshold, permit read.
++    if let (Some(start), Some(end)) = (start_line, end_line) {
++        if end.saturating_sub(start) <= config.threshold_lines {
++            return GuardDecision::Allow;
 +        }
 +    }
 +
-+    // 4. Node / Vitest / Jest detection
-+    let mut rel_paths: Vec<String> = impacted_files
-+        .iter()
-+        .map(|p| {
-+            p.strip_prefix(repo_root)
-+                .unwrap_or(p)
-+                .to_string_lossy()
-+                .to_string()
-+        })
-+        .collect();
-+    rel_paths.sort();
-+    rel_paths.dedup();
++    // Attempt AST extraction via superstate-syntax for supported languages (Rust, Python, TS, Go).
++    let ast_outline = superstate_syntax::inspect::detect_language(path)
++        .and_then(|lang| superstate_syntax::symbols::extract_symbols(&content, lang).ok())
++        .map(|symbols| superstate_syntax::inspect::format_outline(&symbols))
++        .filter(|outline| !outline.trim().is_empty());
 +
-+    if !rel_paths.is_empty() {
-+        if let Some(idx) = trimmed.find("npm test") {
-+            if is_word_boundary_match(trimmed, idx, "npm test".len()) {
-+                let prefix = trimmed[..idx + "npm test".len()].trim();
-+                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
-+            }
++    // When an AST outline is available, return symbol structure so agent can target specific symbols.
++    if let Some(outline) = ast_outline {
++        GuardDecision::Deny {
++            reason: format!(
++                "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nAST Symbol Outline:\n{}\n\nRe-read using bounded StartLine and EndLine (<= {} lines), or inspect specific symbols with 'superstate inspect'.",
++                total_lines, config.threshold_lines, outline, config.threshold_lines
++            ),
 +        }
-+        if let Some(idx) = trimmed.find("pnpm test") {
-+            if is_word_boundary_match(trimmed, idx, "pnpm test".len()) {
-+                let prefix = trimmed[..idx + "pnpm test".len()].trim();
-+                return Some(format!("{} -- {}", prefix, rel_paths.join(" ")));
-+            }
-+        }
-+        if let Some(idx) = trimmed.find("yarn test") {
-+            if is_word_boundary_match(trimmed, idx, "yarn test".len()) {
-+                let prefix = trimmed[..idx + "yarn test".len()].trim();
-+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-+            }
-+        }
-+        if let Some(idx) = trimmed.find("vitest run") {
-+            if is_word_boundary_match(trimmed, idx, "vitest run".len()) {
-+                let prefix = trimmed[..idx + "vitest run".len()].trim();
-+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-+            }
-+        }
-+        if let Some(idx) = trimmed.find("vitest") {
-+            if is_word_boundary_match(trimmed, idx, "vitest".len()) {
-+                let prefix = trimmed[..idx + "vitest".len()].trim();
-+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-+            }
-+        }
-+        if let Some(idx) = trimmed.find("jest") {
-+            if is_word_boundary_match(trimmed, idx, "jest".len()) {
-+                let prefix = trimmed[..idx + "jest".len()].trim();
-+                return Some(format!("{} {}", prefix, rel_paths.join(" ")));
-+            }
++    } else {
++        // Fall back to a structural preview of first 30 lines for unsupported languages or symbol-less files.
++        let preview = content
++            .lines()
++            .take(30)
++            .collect::<Vec<_>>()
++            .join("\n");
++        GuardDecision::Deny {
++            reason: format!(
++                "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nFile preview (first 30 lines):\n{}\n...\nRe-read using bounded StartLine and EndLine (<= {} lines).",
++                total_lines, config.threshold_lines, preview, config.threshold_lines
++            ),
 +        }
 +    }
-+
-+    None
 +}
-diff --git a/crates/superstate-core/tests/test_impact_slicing.rs b/crates/superstate-core/tests/test_impact_slicing.rs
+diff --git a/crates/superstate-core/src/lib.rs b/crates/superstate-core/src/lib.rs
+index 0b3df10..5d08f24 100644
+--- a/crates/superstate-core/src/lib.rs
++++ b/crates/superstate-core/src/lib.rs
+@@ -1,5 +1,6 @@
+ pub mod checkpoint;
+ pub mod daemon;
++pub mod guard;
+ pub mod handoff;
+ pub mod impact;
+ pub mod ledger;
+@@ -16,6 +17,7 @@ pub use daemon::{
+     finalize_completed_execution, CompletionReport, DaemonConfig, DaemonError, DaemonRunner,
+     DaemonStepOutcome, StepAdvancer,
+ };
++pub use guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
+ pub use handoff::{
+     generate_handoff_markdown, generate_resumption_command, write_handoff_package, HandoffSpec,
+ };
+diff --git a/crates/superstate-core/tests/test_guard.rs b/crates/superstate-core/tests/test_guard.rs
 new file mode 100644
-index 0000000..d5a137a
+index 0000000..a9fc169
 --- /dev/null
-+++ b/crates/superstate-core/tests/test_impact_slicing.rs
-@@ -0,0 +1,91 @@
-+use std::path::{Path, PathBuf};
-+use superstate_core::impact::build_sliced_test_cmd;
++++ b/crates/superstate-core/tests/test_guard.rs
+@@ -0,0 +1,300 @@
++use std::fs;
++use std::io::Write;
++use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
++use tempfile::tempdir;
 +
 +#[test]
-+fn test_build_sliced_test_cmd_pytest() {
-+    let repo = Path::new("/workspace");
-+    let files = vec![
-+        PathBuf::from("/workspace/tests/test_auth.py"),
-+        PathBuf::from("/workspace/tests/test_token.py"),
-+    ];
-+    let res = build_sliced_test_cmd("pytest tests/", &files, repo);
-+    assert_eq!(
-+        res,
-+        Some("pytest tests/test_auth.py tests/test_token.py".to_string())
-+    );
++fn test_config_default_threshold() {
++    let config = FileReadGuardConfig::default();
++    assert_eq!(config.threshold_lines, 200);
 +}
 +
 +#[test]
-+fn test_build_sliced_test_cmd_pytest_container_prefix() {
-+    let repo = Path::new("/workspace");
-+    let files = vec![PathBuf::from("/workspace/tests/test_auth.py")];
-+    let res = build_sliced_test_cmd("./run-in-container pytest tests/", &files, repo);
-+    assert_eq!(
-+        res,
-+        Some("./run-in-container pytest tests/test_auth.py".to_string())
-+    );
++fn test_serde_guard_decision() {
++    let allow = GuardDecision::Allow;
++    let allow_json = serde_json::to_string(&allow).unwrap();
++    assert_eq!(allow_json, r#"{"decision":"allow"}"#);
++    let deserialized_allow: GuardDecision = serde_json::from_str(&allow_json).unwrap();
++    assert_eq!(deserialized_allow, allow);
++
++    let deny = GuardDecision::Deny {
++        reason: "file too large".to_string(),
++    };
++    let deny_json = serde_json::to_string(&deny).unwrap();
++    assert_eq!(deny_json, r#"{"decision":"deny","reason":"file too large"}"#);
++    let deserialized_deny: GuardDecision = serde_json::from_str(&deny_json).unwrap();
++    assert_eq!(deserialized_deny, deny);
 +}
 +
 +#[test]
-+fn test_build_sliced_test_cmd_cargo() {
-+    let repo = Path::new("/workspace");
-+    let files = vec![PathBuf::from("/workspace/tests/test_lexer.rs")];
-+    let res = build_sliced_test_cmd("cargo test", &files, repo);
-+    assert_eq!(res, Some("cargo test --test test_lexer".to_string()));
++fn test_non_existent_file_allows() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("does_not_exist.py");
++    let config = FileReadGuardConfig::default();
++
++    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
++    assert_eq!(decision, GuardDecision::Allow);
 +}
 +
 +#[test]
-+fn test_build_sliced_test_cmd_unrecognized_returns_none() {
-+    let repo = Path::new("/workspace");
-+    let files = vec![PathBuf::from("/workspace/tests/test_auth.py")];
-+    let res = build_sliced_test_cmd("sh verify.sh", &files, repo);
-+    assert_eq!(res, None);
++fn test_directory_allows() {
++    let dir = tempdir().unwrap();
++    let config = FileReadGuardConfig::default();
++
++    let decision = evaluate_file_read_guard(dir.path(), None, None, &config);
++    assert_eq!(decision, GuardDecision::Allow);
 +}
 +
 +#[test]
-+fn test_build_sliced_test_cmd_empty_impacted_files_returns_none() {
-+    let repo = Path::new("/workspace");
-+    let files: Vec<PathBuf> = vec![];
-+    let res = build_sliced_test_cmd("pytest tests/", &files, repo);
-+    assert_eq!(res, None);
++fn test_small_file_allows() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("small.rs");
++    let content = "fn main() {\n    println!(\"hello\");\n}\n";
++    fs::write(&file_path, content).unwrap();
++
++    let config = FileReadGuardConfig::default();
++    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
++    assert_eq!(decision, GuardDecision::Allow);
 +}
 +
 +#[test]
-+fn test_build_sliced_test_cmd_cargo_multiple_targets() {
-+    let repo = Path::new("/workspace");
-+    let files = vec![
-+        PathBuf::from("/workspace/tests/test_parser.rs"),
-+        PathBuf::from("/workspace/tests/test_lexer.rs"),
-+    ];
-+    let res = build_sliced_test_cmd("cargo test", &files, repo);
-+    assert_eq!(
-+        res,
-+        Some("cargo test --test test_lexer --test test_parser".to_string())
-+    );
++fn test_file_exactly_at_threshold_allows() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("threshold.txt");
++    let content = (1..=200)
++        .map(|i| format!("line {}", i))
++        .collect::<Vec<_>>()
++        .join("\n");
++    fs::write(&file_path, content).unwrap();
++
++    let config = FileReadGuardConfig {
++        threshold_lines: 200,
++    };
++    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
++    assert_eq!(decision, GuardDecision::Allow);
 +}
 +
 +#[test]
-+fn test_build_sliced_test_cmd_node_vitest_and_jest() {
-+    let repo = Path::new("/workspace");
-+    let files = vec![PathBuf::from("/workspace/tests/auth.test.ts")];
++fn test_bounded_slice_under_threshold_allows() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.rs");
++    // 300 lines file
++    let content = (1..=300)
++        .map(|i| format!("// line {}", i))
++        .collect::<Vec<_>>()
++        .join("\n");
++    fs::write(&file_path, content).unwrap();
 +
-+    let res_vitest = build_sliced_test_cmd("npx vitest run tests/", &files, repo);
-+    assert_eq!(
-+        res_vitest,
-+        Some("npx vitest run tests/auth.test.ts".to_string())
-+    );
++    let config = FileReadGuardConfig {
++        threshold_lines: 200,
++    };
++    // Request 50..=240 -> 190 lines (<= 200)
++    let decision = evaluate_file_read_guard(&file_path, Some(50), Some(240), &config);
++    assert_eq!(decision, GuardDecision::Allow);
 +
-+    let res_jest = build_sliced_test_cmd("npx jest tests/", &files, repo);
-+    assert_eq!(res_jest, Some("npx jest tests/auth.test.ts".to_string()));
-+
-+    let res_npm = build_sliced_test_cmd("npm test", &files, repo);
-+    assert_eq!(res_npm, Some("npm test -- tests/auth.test.ts".to_string()));
++    // Request 1..=201 -> 200 lines (<= 200)
++    let decision2 = evaluate_file_read_guard(&file_path, Some(1), Some(201), &config);
++    assert_eq!(decision2, GuardDecision::Allow);
 +}
 +
 +#[test]
-+fn test_build_sliced_test_cmd_go_package() {
-+    let repo = Path::new("/workspace");
-+    let files = vec![PathBuf::from("/workspace/pkg/server/server_test.go")];
-+    let res = build_sliced_test_cmd("go test ./...", &files, repo);
-+    assert_eq!(res, Some("go test ./pkg/server".to_string()));
++fn test_large_file_unbounded_denies_with_ast_outline() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.py");
++
++    let mut lines = Vec::new();
++    lines.push("class Alpha:".to_string());
++    lines.push("    def foo(self):".to_string());
++    lines.push("        pass".to_string());
++    for i in 4..=250 {
++        lines.push(format!("    # filler line {}", i));
++    }
++    lines.push("def bar():".to_string());
++    lines.push("    return 42".to_string());
++    let content = lines.join("\n");
++    fs::write(&file_path, content).unwrap();
++
++    let config = FileReadGuardConfig {
++        threshold_lines: 200,
++    };
++    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
++
++    match decision {
++        GuardDecision::Deny { reason } => {
++            assert!(
++                reason.contains("[superstate-guard] Full file read blocked"),
++                "reason should mention blocked full read: {}",
++                reason
++            );
++            assert!(
++                reason.contains("252 lines exceeds 200-line budget"),
++                "reason should state line counts: {}",
++                reason
++            );
++            assert!(
++                reason.contains("AST Symbol Outline:"),
++                "reason should have AST Symbol Outline header: {}",
++                reason
++            );
++            assert!(
++                reason.contains("Alpha"),
++                "reason should outline Alpha class: {}",
++                reason
++            );
++            assert!(
++                reason.contains("bar"),
++                "reason should outline bar function: {}",
++                reason
++            );
++            assert!(
++                reason.contains("Re-read using bounded StartLine and EndLine (<= 200 lines)"),
++                "reason should include re-read instructions: {}",
++                reason
++            );
++        }
++        GuardDecision::Allow => panic!("Expected Deny for unbounded large file"),
++    }
 +}
++
++#[test]
++fn test_large_file_bounded_slice_exceeding_threshold_denies() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.py");
++
++    let mut lines = Vec::new();
++    lines.push("class Beta:".to_string());
++    for i in 2..=300 {
++        lines.push(format!("    # filler line {}", i));
++    }
++    let content = lines.join("\n");
++    fs::write(&file_path, content).unwrap();
++
++    let config = FileReadGuardConfig {
++        threshold_lines: 200,
++    };
++    // Request range 1..=250 -> 249 lines > 200
++    let decision = evaluate_file_read_guard(&file_path, Some(1), Some(250), &config);
++
++    match decision {
++        GuardDecision::Deny { reason } => {
++            assert!(reason.contains("[superstate-guard] Full file read blocked"));
++            assert!(reason.contains("AST Symbol Outline:"));
++            assert!(reason.contains("Beta"));
++        }
++        GuardDecision::Allow => panic!("Expected Deny for slice exceeding threshold"),
++    }
++}
++
++#[test]
++fn test_binary_file_denies() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("data.bin");
++
++    let mut file = fs::File::create(&file_path).unwrap();
++    let mut data = vec![0x41u8; 100];
++    data[50] = 0x00; // null byte within first 8KB
++    file.write_all(&data).unwrap();
++
++    let config = FileReadGuardConfig::default();
++    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
++
++    match decision {
++        GuardDecision::Deny { reason } => {
++            assert!(
++                reason.contains("[superstate-guard] Binary file read blocked:"),
++                "reason should mention binary blocked: {}",
++                reason
++            );
++            assert!(
++                reason.contains(&file_path.display().to_string()),
++                "reason should include path: {}",
++                reason
++            );
++        }
++        GuardDecision::Allow => panic!("Expected Deny for binary file"),
++    }
++}
++
++#[test]
++fn test_unsupported_language_falls_back_to_preview() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("data.unsupported_ext");
++
++    let lines: Vec<String> = (1..=250)
++        .map(|i| format!("unsupported raw line content number {}", i))
++        .collect();
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    let config = FileReadGuardConfig {
++        threshold_lines: 200,
++    };
++    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
++
++    match decision {
++        GuardDecision::Deny { reason } => {
++            assert!(
++                reason.contains("[superstate-guard] Full file read blocked (250 lines exceeds 200-line budget)"),
++                "header mismatch: {}",
++                reason
++            );
++            assert!(
++                reason.contains("File preview (first 30 lines):"),
++                "should mention preview: {}",
++                reason
++            );
++            assert!(
++                reason.contains("unsupported raw line content number 1"),
++                "should include first line: {}",
++                reason
++            );
++            assert!(
++                reason.contains("unsupported raw line content number 30"),
++                "should include 30th line: {}",
++                reason
++            );
++            assert!(
++                !reason.contains("unsupported raw line content number 31"),
++                "should not include 31st line: {}",
++                reason
++            );
++            assert!(
++                reason.contains("...\nRe-read using bounded StartLine and EndLine (<= 200 lines)."),
++                "should include ellipsis and re-read guidance: {}",
++                reason
++            );
++        }
++        GuardDecision::Allow => panic!("Expected Deny for unsupported language exceeding threshold"),
++    }
++}
++
++#[test]
++fn test_empty_ast_outline_falls_back_to_preview() {
++    let dir = tempdir().unwrap();
++    // A python file with 250 lines of comments only (no symbols)
++    let file_path = dir.path().join("comments_only.py");
++    let lines: Vec<String> = (1..=250)
++        .map(|i| format!("# just a comment {}", i))
++        .collect();
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    let config = FileReadGuardConfig {
++        threshold_lines: 200,
++    };
++    let decision = evaluate_file_read_guard(&file_path, None, None, &config);
++
++    match decision {
++        GuardDecision::Deny { reason } => {
++            assert!(
++                reason.contains("File preview (first 30 lines):"),
++                "empty AST outline should fall back to file preview: {}",
++                reason
++            );
++            assert!(
++                reason.contains("# just a comment 1"),
++                "preview should show first line: {}",
++                reason
++            );
++        }
++        GuardDecision::Allow => panic!("Expected Deny for comments-only large file"),
++    }
++}
+diff --git a/docs/superpowers/plans/task-1-brief.md b/docs/superpowers/plans/task-1-brief.md
+index 7a6008f..d487541 100644
+--- a/docs/superpowers/plans/task-1-brief.md
++++ b/docs/superpowers/plans/task-1-brief.md
+@@ -1,42 +1,74 @@
+-# Task 1 Brief: Command Specialization in `impact.rs`
+-
+-## Global Constraints
+-- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
+-- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
+-- Skip GPG verification on all commits (`--no-gpg-sign`).
+-- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
+-
+-## Task Details
+-- **Task:** Task 1: Command Specialization in `impact.rs`
+-- **Depends on:** none
+-- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
+-
+-**Files:**
+-- Create: `crates/superstate-core/tests/test_impact_slicing.rs`
+-- Modify: `crates/superstate-core/src/impact.rs`
+-
+-**Interfaces:**
+-- Produces: `pub fn build_sliced_test_cmd(base_cmd: &str, impacted_files: &[PathBuf], repo_root: &Path) -> Option<String>`
+-
+-## Implementation Steps
+-Follow TDD strictly:
+-1. Write failing unit tests in `crates/superstate-core/tests/test_impact_slicing.rs`:
+-   - `test_build_sliced_test_cmd_pytest`: `pytest tests/` with `tests/test_auth.py` and `tests/test_token.py` $\rightarrow$ `Some("pytest tests/test_auth.py tests/test_token.py")`.
+-   - `test_build_sliced_test_cmd_pytest_container_prefix`: `./run-in-container pytest tests/` with `tests/test_auth.py` $\rightarrow$ `Some("./run-in-container pytest tests/test_auth.py")`.
+-   - `test_build_sliced_test_cmd_cargo`: `cargo test` with `tests/test_lexer.rs` $\rightarrow$ `Some("cargo test --test test_lexer")`.
+-   - `test_build_sliced_test_cmd_unrecognized_returns_none`: `sh verify.sh` with `tests/test_auth.py` $\rightarrow$ `None`.
+-2. Run `cargo test -p superstate-core --test test_impact_slicing` to confirm failure (unresolved function).
+-3. Implement `pub fn build_sliced_test_cmd` in `crates/superstate-core/src/impact.rs`:
+-   - Inspects `base_cmd` to detect Pytest, Cargo, Node/Vitest/Jest, etc.
+-   - If `impacted_files` is empty, returns `None`.
+-   - Translates impacted test files into relative paths from `repo_root`.
+-   - Returns `Some(specialized_cmd)` or `None`.
+-4. Run `cargo test -p superstate-core --test test_impact_slicing` and verify PASS.
+-5. Run `cargo clippy -p superstate-core --all-targets -- -D warnings`.
+-6. Commit changes:
+-   ```bash
+-   git add crates/superstate-core/src/impact.rs crates/superstate-core/tests/test_impact_slicing.rs
+-   git commit --no-gpg-sign -m "feat(core): implement test runner command specialization for impact slicing"
+-   ```
+-7. Write implementer report to `docs/superpowers/plans/task-1-report.md`.
+-8. Report status: DONE / DONE_WITH_CONCERNS / BLOCKED.
++# Task 1 Brief: `superstate-core` Guard Engine & Evaluation Logic
++
++## Context & Base Commit
++- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`
++- **Base Commit:** `e1add33`
++- **Spec:** `docs/superpowers/specs/2026-09-20-file-read-guard-design.md`
++- **Plan:** `docs/superpowers/plans/2026-09-20-file-read-guard.md`
++
++## What Needs to be Built
++Implement the file read guard evaluation engine in `crates/superstate-core/src/guard.rs` and re-export in `lib.rs`.
++
++### Types & Interface
++```rust
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(tag = "decision", rename_all = "snake_case")]
++pub enum GuardDecision {
++    Allow,
++    Deny { reason: String },
++}
++
++#[derive(Debug, Clone)]
++pub struct FileReadGuardConfig {
++    pub threshold_lines: usize,
++}
++
++impl Default for FileReadGuardConfig {
++    fn default() -> Self {
++        Self { threshold_lines: 200 }
++    }
++}
++
++pub fn evaluate_file_read_guard(
++    path: &std::path::Path,
++    start_line: Option<usize>,
++    end_line: Option<usize>,
++    config: &FileReadGuardConfig,
++) -> GuardDecision;
++```
++
++### Evaluation Logic Rules
++1. **File non-existent:** If `!path.exists()`, return `GuardDecision::Allow` (lets tool fail naturally).
++2. **Directory:** If `path.is_dir()`, return `GuardDecision::Allow`.
++3. **Binary detection:** If file content contains null bytes (`0x00`) in the first 8KB, return:
++   `GuardDecision::Deny { reason: format!("[superstate-guard] Binary file read blocked: {}", path.display()) }`.
++4. **Line count:** Read text. Count lines (`lines().count()`).
++5. **Permitted reads:**
++   - If total lines $\le$ `config.threshold_lines`: return `GuardDecision::Allow`.
++   - If `start_line` and `end_line` are specified, and `end_line.saturating_sub(start_line) <= config.threshold_lines`: return `GuardDecision::Allow`.
++6. **Denied reads (unbounded or range > threshold):**
++   - Attempt AST symbol outline using `superstate_syntax::inspect::format_outline(path)`:
++     - If successful and outline is non-empty:
++       ```rust
++       format!(
++           "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nAST Symbol Outline:\n{}\n\nRe-read using bounded StartLine and EndLine (<= {} lines), or inspect specific symbols with 'superstate inspect'.",
++           total_lines, config.threshold_lines, outline, config.threshold_lines
++       )
++       ```
++     - If language is unsupported or outline empty:
++       Format a structural summary with total line count, the first 30 lines, and guidance:
++       ```rust
++       format!(
++           "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nFile preview (first 30 lines):\n{}\n...\nRe-read using bounded StartLine and EndLine (<= {} lines).",
++           total_lines, config.threshold_lines, preview, config.threshold_lines
++       )
++       ```
++
++## Steps (Follow TDD Strictly)
++1. Write failing integration tests in `crates/superstate-core/tests/test_guard.rs`.
++2. Run `cargo test -p superstate-core --test test_guard` to verify failure.
++3. Implement `crates/superstate-core/src/guard.rs` and update `crates/superstate-core/src/lib.rs`.
++4. Run `cargo test -p superstate-core --test test_guard` to verify passing.
++5. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
++6. Commit using `git commit --no-gpg-sign -m "feat(core): implement file read guard engine and ast shunting"`.
++7. Write your report to `docs/superpowers/plans/task-1-report.md`.

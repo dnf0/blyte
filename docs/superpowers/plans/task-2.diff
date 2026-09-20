@@ -1,538 +1,1104 @@
-diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
-index dce6438..67c8543 100644
---- a/crates/superstate-cli/src/commands/daemon.rs
-+++ b/crates/superstate-cli/src/commands/daemon.rs
-@@ -115,6 +115,7 @@ pub fn cmd_daemon(
-     review_blocking: bool,
-     auto_rollback: bool,
-     shunt_driver_output: bool,
-+    impact_slicing: bool,
- ) -> Result<(), String> {
-     let auto_rollback = if !auto_rollback {
-         false
-@@ -194,6 +195,9 @@ pub fn cmd_daemon(
-         if !shunt_driver_output {
-             cmd.arg("--no-shunt");
-         }
-+        if impact_slicing {
-+            cmd.arg("--impact-slicing");
+diff --git a/crates/superstate-cli/src/commands/guard.rs b/crates/superstate-cli/src/commands/guard.rs
+new file mode 100644
+index 0000000..55c4d29
+--- /dev/null
++++ b/crates/superstate-cli/src/commands/guard.rs
+@@ -0,0 +1,236 @@
++//! PreToolUse file read guard CLI command handler.
++//!
++//! Evaluates incoming tool call payloads on `stdin` conforming to agent
++//! PreToolUse protocols (e.g. Antigravity, Claude Code) against deterministic
++//! context boundaries and line budgets.
++
++use clap::{Args, Subcommand};
++use std::io::Read;
++use std::path::Path;
++use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
++
++/// Subcommands for the `superstate guard` namespace.
++#[derive(Subcommand, Debug, Clone)]
++pub enum GuardCommands {
++    /// Evaluate tool invocation against deterministic context boundaries
++    PreToolUse(PreToolUseArgs),
++}
++
++/// Command-line arguments for `superstate guard pre-tool-use`.
++#[derive(Args, Debug, Clone)]
++pub struct PreToolUseArgs {
++    /// Maximum lines permitted before shunting to symbol outline
++    #[arg(long, default_value_t = 200)]
++    pub threshold_lines: usize,
++}
++
++/// Serializes and prints the guard decision JSON to standard output.
++///
++/// # Parameters
++/// - `decision`: The `GuardDecision` outcome to emit.
++fn emit_decision(decision: &GuardDecision) {
++    // Decision is serialized to JSON string conforming to hook stdout protocol.
++    // Infallible serialization of GuardDecision enum.
++    if let Ok(json) = serde_json::to_string(decision) {
++        println!("{}", json);
++    } else {
++        println!(r#"{{"decision":"allow"}}"#);
++    }
++}
++
++/// Helper to emit an `allow` decision when fail-open behavior is triggered.
++fn emit_allow() {
++    emit_decision(&GuardDecision::Allow);
++}
++
++/// Extracts tool name and arguments from a JSON container.
++///
++/// Supports various agent hook payload conventions including `toolName`, `tool_name`,
++/// `name`, `args`, `arguments`, `parameters`, and `tool_input`.
++fn extract_from_container(
++    container: &serde_json::Value,
++) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
++    // Extract tool name string from common key variants.
++    let raw_name = container
++        .get("name")
++        .or_else(|| container.get("toolName"))
++        .or_else(|| container.get("tool_name"))
++        .and_then(|v| v.as_str())?;
++
++    // Extract arguments map or parse if arguments was encoded as a JSON string.
++    let raw_args = container
++        .get("args")
++        .or_else(|| container.get("arguments"))
++        .or_else(|| container.get("parameters"))
++        .or_else(|| container.get("tool_input"));
++
++    let args_map = match raw_args {
++        Some(serde_json::Value::Object(map)) => map.clone(),
++        Some(serde_json::Value::String(s)) => {
++            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s)
++                .unwrap_or_default()
 +        }
-         cmd.stdout(std::process::Stdio::from(log_out));
-         cmd.stderr(std::process::Stdio::from(log_err));
-         cmd.stdin(std::process::Stdio::null());
-@@ -273,6 +277,7 @@ pub fn cmd_daemon(
-             review_blocking,
-             auto_rollback,
-             shunt_driver_output,
-+            impact_slicing,
-         };
- 
-         let mut runner = DaemonRunner::new(config)
-diff --git a/crates/superstate-cli/src/commands/handoff.rs b/crates/superstate-cli/src/commands/handoff.rs
-index d8e6fed..78a350c 100644
---- a/crates/superstate-cli/src/commands/handoff.rs
-+++ b/crates/superstate-cli/src/commands/handoff.rs
-@@ -180,6 +180,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
-             false,
-             false,
-             true,
-+            false,
-         )
-     } else if args.json {
-         let active_task_str = state
++        _ => serde_json::Map::new(),
++    };
++
++    Some((raw_name.to_string(), args_map))
++}
++
++/// Finds the tool name and arguments map from standard and alternate hook payload formats.
++///
++/// Checks both nested objects (`toolCall` or `tool_call`) and top-level fields.
++fn extract_tool_invocation(
++    root: &serde_json::Value,
++) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
++    // First inspect nested tool call wrapper if present.
++    if let Some(nested) = root.get("toolCall").or_else(|| root.get("tool_call")) {
++        if let Some(res) = extract_from_container(nested) {
++            return Some(res);
++        }
++    }
++    // Fall back to inspecting top-level payload attributes.
++    extract_from_container(root)
++}
++
++/// Extracts the target file path from common argument key variants.
++///
++/// Returns `None` if no path key is present or the string is empty/whitespace.
++fn extract_path(args: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
++    const PATH_KEYS: &[&str] = &[
++        "AbsolutePath",
++        "path",
++        "file_path",
++        "filePath",
++        "TargetFile",
++        "target_file",
++        "file",
++    ];
++
++    for &key in PATH_KEYS {
++        if let Some(val) = args.get(key) {
++            if let Some(s) = val.as_str() {
++                let trimmed = s.trim();
++                if !trimmed.is_empty() {
++                    return Some(trimmed.to_string());
++                }
++            }
++        }
++    }
++    None
++}
++
++/// Extracts a 1-indexed line number from the arguments map.
++///
++/// Handles numeric integers as well as string-encoded numbers.
++fn extract_line(args: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<usize> {
++    for &key in keys {
++        if let Some(val) = args.get(key) {
++            if let Some(n) = val.as_u64() {
++                return Some(n as usize);
++            }
++            if let Some(n) = val.as_i64() {
++                if n >= 0 {
++                    return Some(n as usize);
++                }
++            }
++            if let Some(s) = val.as_str() {
++                if let Ok(n) = s.parse::<usize>() {
++                    return Some(n);
++                }
++            }
++        }
++    }
++    None
++}
++
++/// Executes the `pre-tool-use` hook logic.
++///
++/// # Parameters
++/// - `args`: CLI arguments specifying threshold limits.
++///
++/// # Returns
++/// - `Ok(())` on completion; exits 0 in all cases (fail-open on parse error).
++pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
++    // Read complete payload from stdin.
++    let mut input = String::new();
++    if std::io::stdin().read_to_string(&mut input).is_err() {
++        // Fail-open: if stdin read encounters an I/O error, allow tool invocation.
++        emit_allow();
++        return Ok(());
++    }
++
++    // Fail-open if stdin is empty.
++    if input.trim().is_empty() {
++        emit_allow();
++        return Ok(());
++    }
++
++    // Parse JSON root payload; fail-open on malformed JSON to prevent agent aborts.
++    let root: serde_json::Value = match serde_json::from_str(&input) {
++        Ok(v) => v,
++        Err(_) => {
++            emit_allow();
++            return Ok(());
++        }
++    };
++
++    // Extract tool invocation; fail-open if no recognisable tool invocation is found.
++    let (tool_name, tool_args) = match extract_tool_invocation(&root) {
++        Some(inv) => inv,
++        None => {
++            emit_allow();
++            return Ok(());
++        }
++    };
++
++    // Normalize tool name to lowercase and verify it is a file-reading tool.
++    let norm_name = tool_name.to_lowercase();
++    if !matches!(
++        norm_name.as_str(),
++        "view_file" | "view" | "read_file" | "readfile" | "viewfile"
++    ) {
++        // Non-file-reading tools are permitted unconditionally.
++        emit_allow();
++        return Ok(());
++    }
++
++    // Extract target file path; fail-open if path is absent or blank.
++    let path_str = match extract_path(&tool_args) {
++        Some(p) => p,
++        None => {
++            emit_allow();
++            return Ok(());
++        }
++    };
++
++    // Extract optional line range boundaries.
++    let mut start_line = extract_line(
++        &tool_args,
++        &["StartLine", "start_line", "startLine", "offset"],
++    );
++    let end_line = extract_line(&tool_args, &["EndLine", "end_line", "endLine", "limit"]);
++
++    // Crucial Normalization: If end_line is specified without start_line (e.g. head slice),
++    // default start_line to 1 so the bounded slice calculation succeeds.
++    if end_line.is_some() && start_line.is_none() {
++        start_line = Some(1);
++    }
++
++    // Configure guard with CLI threshold settings.
++    let config = FileReadGuardConfig {
++        threshold_lines: args.threshold_lines,
++    };
++
++    // Evaluate proposed file read via superstate-core engine.
++    let decision = evaluate_file_read_guard(Path::new(&path_str), start_line, end_line, &config);
++    emit_decision(&decision);
++
++    Ok(())
++}
++
++/// Dispatches guard subcommands to their respective handlers.
++pub fn dispatch_guard(cmd: GuardCommands) -> Result<(), String> {
++    match cmd {
++        GuardCommands::PreToolUse(args) => cmd_pre_tool_use(args),
++    }
++}
+diff --git a/crates/superstate-cli/src/commands/mod.rs b/crates/superstate-cli/src/commands/mod.rs
+index 568b32d..28b0a50 100644
+--- a/crates/superstate-cli/src/commands/mod.rs
++++ b/crates/superstate-cli/src/commands/mod.rs
+@@ -1,5 +1,6 @@
+ pub mod daemon;
+ pub mod doctor;
++pub mod guard;
+ pub mod handoff;
+ pub mod init;
+ pub mod inspect;
 diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
-index 6a2f801..1b57ca9 100644
+index 069702c..6d23ea9 100644
 --- a/crates/superstate-cli/src/main.rs
 +++ b/crates/superstate-cli/src/main.rs
-@@ -155,6 +155,7 @@ fn main() {
-                 args.review_blocking,
-                 args.use_auto_rollback(),
-                 args.use_shunt(),
-+                args.impact_slicing,
-             ),
-         },
-         Commands::Cancel(args) => {
-diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
-index b4db427..1793353 100644
---- a/crates/superstate-cli/src/state_cli.rs
-+++ b/crates/superstate-cli/src/state_cli.rs
-@@ -111,7 +111,7 @@ impl Default for ShowArgs {
-     }
+@@ -88,6 +88,11 @@ enum Commands {
+     },
+     /// Inspect AST symbols, outlines, and code slices
+     Inspect(commands::inspect::InspectArgs),
++    /// Intercept and evaluate agent tool invocations before execution
++    Guard {
++        #[command(subcommand)]
++        cmd: commands::guard::GuardCommands,
++    },
  }
  
--#[derive(Subcommand)]
-+#[derive(Subcommand, Debug, Clone)]
- pub enum StateCommands {
-     /// Initialize state from plan markdown or direct goal
-     Init(InitArgs),
-@@ -272,6 +272,22 @@ pub enum StateCommands {
-     Handoff(HandoffArgs),
- }
- 
-+/// Type alias for `StateCommands` providing naming symmetry with standard CLI subcommand enums.
-+pub type Subcommands = StateCommands;
-+/// Type alias for `StateCommands` providing naming symmetry with standard CLI commands enums.
-+pub type Commands = StateCommands;
-+
-+/// Arguments parser for `state` CLI invocations.
-+#[derive(clap::Parser, Debug, Clone)]
-+#[command(
-+    name = "state",
-+    about = "Deterministic state machine operations for agent execution"
-+)]
-+pub struct StateArgs {
-+    #[command(subcommand)]
-+    pub command: StateCommands,
-+}
-+
- #[derive(Subcommand, Debug, Clone)]
- pub enum DaemonSubcommands {
-     /// List active and managed daemon processes
-@@ -328,6 +344,12 @@ pub struct DaemonArgs {
-         help = "Disable automatic tool output shunting during driver execution"
-     )]
-     pub no_shunt: bool,
-+    /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
-+    #[arg(
-+        long,
-+        help = "Enable milestone-scoped test impact slicing for fast fail-fast feedback"
-+    )]
-+    pub impact_slicing: bool,
- }
- 
- impl DaemonArgs {
-@@ -575,6 +597,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
-                     args.review_blocking,
-                     auto_rollback,
-                     shunt_driver_output,
-+                    args.impact_slicing,
-                 )
-             }
-         },
-diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-index 11fd383..c3b0645 100644
---- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-+++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-@@ -44,6 +44,7 @@ fn test_cli_daemon_lifecycle() {
-         false,
-         false,
-         true,
-+        false,
-     )
-     .unwrap();
- 
-@@ -103,7 +104,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
-     fs::write(&legacy_pid, "99999").unwrap();
- 
-     // Run daemon to completion synchronously
--    cmd_daemon(&state_path, None, false, 1, 5, false, false, false, true).unwrap();
-+    cmd_daemon(&state_path, None, false, 1, 5, false, false, false, true, false).unwrap();
- 
-     assert!(
-         !legacy_pid.exists(),
-diff --git a/crates/superstate-cli/tests/test_cli_impact_slicing.rs b/crates/superstate-cli/tests/test_cli_impact_slicing.rs
-new file mode 100644
-index 0000000..83ae6e7
---- /dev/null
-+++ b/crates/superstate-cli/tests/test_cli_impact_slicing.rs
-@@ -0,0 +1,26 @@
-+use clap::Parser;
-+use superstate_cli::state_cli::{Commands, StateArgs, Subcommands};
-+
-+#[test]
-+fn test_cli_impact_slicing_flag_parsing() {
-+    let args = StateArgs::try_parse_from(["state", "daemon", "--impact-slicing"])
-+        .expect("Failed to parse --impact-slicing flag");
-+    match args.command {
-+        Subcommands::Daemon(daemon_args) => {
-+            assert!(daemon_args.impact_slicing, "Expected impact_slicing to be true");
-+        }
-+        _ => panic!("Expected Subcommands::Daemon"),
-+    }
-+}
-+
-+#[test]
-+fn test_cli_impact_slicing_flag_default_false() {
-+    let args = StateArgs::try_parse_from(["state", "daemon"])
-+        .expect("Failed to parse daemon args");
-+    match args.command {
-+        Commands::Daemon(daemon_args) => {
-+            assert!(!daemon_args.impact_slicing, "Expected impact_slicing to default to false");
-+        }
-+        _ => panic!("Expected Commands::Daemon"),
-+    }
-+}
-diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
-index e60b2c1..c58fb26 100644
---- a/crates/superstate-core/src/daemon.rs
-+++ b/crates/superstate-core/src/daemon.rs
-@@ -189,6 +189,9 @@ pub struct DaemonConfig {
-     /// Automatically enable tool output shunting during driver worker execution
-     #[serde(default = "default_true")]
-     pub shunt_driver_output: bool,
-+    /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
-+    #[serde(default)]
-+    pub impact_slicing: bool,
- }
- 
- impl Default for DaemonConfig {
-@@ -203,6 +206,7 @@ impl Default for DaemonConfig {
-             review_blocking: false,
-             auto_rollback: true,
-             shunt_driver_output: true,
-+            impact_slicing: false,
+ /// Restore the default SIGPIPE behaviour.
+@@ -172,6 +177,7 @@ fn main() {
          }
-     }
- }
-diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-index 5d70367..d44e325 100644
---- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
-+++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-@@ -71,6 +71,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+         Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
+         Commands::Inspect(args) => commands::inspect::cmd_inspect(&args),
++        Commands::Guard { cmd } => commands::guard::dispatch_guard(cmd),
+         Commands::Shunt {
+             threshold_lines,
+             logs_dir,
+diff --git a/crates/superstate-cli/tests/test_cli_guard.rs b/crates/superstate-cli/tests/test_cli_guard.rs
+new file mode 100644
+index 0000000..849c875
+--- /dev/null
++++ b/crates/superstate-cli/tests/test_cli_guard.rs
+@@ -0,0 +1,341 @@
++use std::fs;
++use std::io::Write;
++use std::process::{Command, Stdio};
++use tempfile::tempdir;
++
++fn run_guard(stdin_data: &str, extra_args: &[&str]) -> (i32, String, serde_json::Value) {
++    let mut cmd = Command::new(env!("CARGO_BIN_EXE_superstate"));
++    cmd.args(["guard", "pre-tool-use"]);
++    cmd.args(extra_args);
++    cmd.stdin(Stdio::piped());
++    cmd.stdout(Stdio::piped());
++    cmd.stderr(Stdio::piped());
++
++    let mut child = cmd.spawn().expect("failed to spawn superstate");
++    if let Some(mut stdin) = child.stdin.take() {
++        let _ = stdin.write_all(stdin_data.as_bytes());
++    }
++    let output = child.wait_with_output().expect("failed to wait on child");
++    let code = output.status.code().unwrap_or(-1);
++    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
++    let parsed: serde_json::Value = serde_json::from_str(stdout_str.trim()).unwrap_or_else(|e| {
++        panic!(
++            "failed to parse stdout as JSON: '{}', error: {}, stderr: '{}'",
++            stdout_str,
++            e,
++            String::from_utf8_lossy(&output.stderr)
++        )
++    });
++    (code, stdout_str, parsed)
++}
++
++#[test]
++fn test_empty_stdin_allows() {
++    let (code, stdout, json) = run_guard("", &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++    assert!(stdout.ends_with('\n'), "stdout must end with newline");
++}
++
++#[test]
++fn test_invalid_json_allows() {
++    let (code, _, json) = run_guard("this is not valid json {{{", &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
++
++#[test]
++fn test_non_file_tool_call_allows() {
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "run_command",
++            "args": {
++                "command": "cargo test"
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
++
++#[test]
++fn test_missing_or_empty_path_allows() {
++    let payload_missing = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {}
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload_missing, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++
++    let payload_empty = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": "   "
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload_empty, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
++
++#[test]
++fn test_non_existent_file_allows() {
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": "/non/existent/file.rs"
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
++
++#[test]
++fn test_small_file_allows() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("small.py");
++    let content = "def hello():\n    return 'world'\n";
++    fs::write(&file_path, content).unwrap();
++
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": file_path.to_str().unwrap()
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
++
++#[test]
++fn test_large_file_unbounded_denies_with_ast_outline() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.py");
++
++    let mut lines = Vec::new();
++    lines.push("class AlphaService:".to_string());
++    lines.push("    def process(self):".to_string());
++    lines.push("        pass".to_string());
++    for i in 4..=250 {
++        lines.push(format!("    # filler line {}", i));
++    }
++    lines.push("def helper():".to_string());
++    lines.push("    return 1".to_string());
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": file_path.to_str().unwrap()
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "deny");
++    let reason = json["reason"].as_str().unwrap();
++    assert!(
++        reason.contains("[superstate-guard] Full file read blocked"),
++        "reason should mention blocked full read: {}",
++        reason
++    );
++    assert!(
++        reason.contains("252 lines exceeds 200-line budget"),
++        "reason should mention lines: {}",
++        reason
++    );
++    assert!(
++        reason.contains("AST Symbol Outline:"),
++        "reason should mention AST outline: {}",
++        reason
++    );
++    assert!(
++        reason.contains("AlphaService"),
++        "reason should contain class name: {}",
++        reason
++    );
++    assert!(
++        reason.contains("helper"),
++        "reason should contain function name: {}",
++        reason
++    );
++}
++
++#[test]
++fn test_bounded_slice_under_threshold_allows() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.py");
++    let lines: Vec<String> = (1..=250).map(|i| format!("# line {}", i)).collect();
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": file_path.to_str().unwrap(),
++                "StartLine": 1,
++                "EndLine": 50
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
++
++#[test]
++fn test_head_slice_with_only_end_line_allows() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.py");
++    let lines: Vec<String> = (1..=250).map(|i| format!("# line {}", i)).collect();
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    // Only EndLine specified: should normalize start_line to 1
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": file_path.to_str().unwrap(),
++                "EndLine": 50
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
++
++#[test]
++fn test_bounded_slice_exceeding_threshold_denies() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.py");
++    let lines: Vec<String> = (1..=250).map(|i| format!("# line {}", i)).collect();
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": file_path.to_str().unwrap(),
++                "StartLine": 1,
++                "EndLine": 240
++            }
++        }
++    })
++    .to_string();
++
++    let (code, _, json) = run_guard(&payload, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "deny");
++}
++
++#[test]
++fn test_custom_threshold_lines_parameter() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("medium.txt");
++    let lines: Vec<String> = (1..=80).map(|i| format!("line {}", i)).collect();
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    let payload = serde_json::json!({
++        "toolCall": {
++            "name": "view_file",
++            "args": {
++                "AbsolutePath": file_path.to_str().unwrap()
++            }
++        }
++    })
++    .to_string();
++
++    // Default threshold (200) allows 80 lines
++    let (code_default, _, json_default) = run_guard(&payload, &[]);
++    assert_eq!(code_default, 0);
++    assert_eq!(json_default["decision"], "allow");
++
++    // Custom threshold (50) denies 80 lines
++    let (code_custom, _, json_custom) = run_guard(&payload, &["--threshold-lines", "50"]);
++    assert_eq!(code_custom, 0);
++    assert_eq!(json_custom["decision"], "deny");
++    let reason = json_custom["reason"].as_str().unwrap();
++    assert!(reason.contains("80 lines exceeds 50-line budget"));
++}
++
++#[test]
++fn test_flexible_payload_formats_and_tool_names() {
++    let dir = tempdir().unwrap();
++    let file_path = dir.path().join("large.py");
++    let lines: Vec<String> = (1..=250).map(|i| format!("# line {}", i)).collect();
++    fs::write(&file_path, lines.join("\n")).unwrap();
++
++    // Claude Code style: "View" with "filePath"
++    let payload_claude = serde_json::json!({
++        "toolCall": {
++            "name": "View",
++            "args": {
++                "filePath": file_path.to_str().unwrap()
++            }
++        }
++    })
++    .to_string();
++    let (code, _, json) = run_guard(&payload_claude, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "deny");
++
++    // Snake case tool_call: "read_file" with "file_path", "start_line", "end_line"
++    let payload_snake = serde_json::json!({
++        "tool_call": {
++            "name": "read_file",
++            "args": {
++                "file_path": file_path.to_str().unwrap(),
++                "start_line": 10,
++                "end_line": 30
++            }
++        }
++    })
++    .to_string();
++    let (code, _, json) = run_guard(&payload_snake, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++
++    // Top-level toolName and args with "file" and "readfile"
++    let payload_top_level = serde_json::json!({
++        "toolName": "readfile",
++        "args": {
++            "file": file_path.to_str().unwrap(),
++            "offset": 5,
++            "limit": 25
++        }
++    })
++    .to_string();
++    let (code, _, json) = run_guard(&payload_top_level, &[]);
++    assert_eq!(code, 0);
++    assert_eq!(json["decision"], "allow");
++}
+diff --git a/docs/superpowers/plans/task-1-report.md b/docs/superpowers/plans/task-1-report.md
+index 05deb66..3f50c4e 100644
+--- a/docs/superpowers/plans/task-1-report.md
++++ b/docs/superpowers/plans/task-1-report.md
+@@ -1,75 +1,88 @@
+-# Task 1 Report: Command Specialization in `impact.rs`
++# Task 1 Report: `superstate-core` Guard Engine & Evaluation Logic
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -124,6 +125,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ **Status:** Completed (DONE)  
+-**Commit SHA:** `1e6547e3e0d4b83da692cab152353e5dbf0a7660` (`1e6547e`)  
+-**Branch:** `feat/daemon-test-impact-slicing`  
+-**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`  
+-**Date:** 2026-09-19  
++**Commit SHA:** `57263284f50d55c0ea57a48bd400a1ef6dae4c34` (`5726328`)  
++**Branch:** `feat/pre-tool-use-file-guard`  
++**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`  
++**Date:** 2026-09-20  
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -191,6 +193,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ---
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -248,6 +251,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ## Executive Summary
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -306,6 +310,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-Task 1 implemented command specialization in `crates/superstate-core/src/impact.rs` via `pub fn build_sliced_test_cmd(base_cmd: &str, impacted_files: &[PathBuf], repo_root: &Path) -> Option<String>`.
++Task 1 implemented the core evaluation engine for deterministic `PreToolUse` file read guards in `crates/superstate-core/src/guard.rs` and re-exported its types in `crates/superstate-core/src/lib.rs`.
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -357,6 +362,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-In the two-tier milestone-scoped test impact slicing architecture, `infer_impacted_tests` identifies which test files are affected by changes in a milestone. `build_sliced_test_cmd` inspects the base milestone verification command (`verify_cmd`), detects the underlying test runner harness (Pytest, Cargo, Go, Vitest/Jest/Node), and specializes the command invocation to target only the impacted test files. If the verification command is generic or unrecognized (e.g. `sh verify.sh`, `make test`, or ungated commands like `exit 0`), or if no files were impacted, it returns `None`, safely falling back to the standard verification workflow.
++The guard inspects incoming file read targets and bounded slice parameters against a configurable threshold budget (default 200 lines):
++1. Non-existent files and directories are allowed (`GuardDecision::Allow`), allowing native agent runtime error mechanisms to function normally.
++2. Binary files (null bytes in first 8KB) are denied (`GuardDecision::Deny`), preventing LLM prompt state corruption.
++3. Reads within the threshold budget ($\le 200$ lines total or bounded range $\le 200$ lines) are allowed.
++4. Large unbounded reads or slices exceeding the threshold are denied and shunted:
++   - For supported AST languages (Rust, Python, TypeScript, Go), tree-sitter extracts symbols and outputs a structured AST outline with line ranges and guidance to inspect specific symbols or re-read with bounded parameters.
++   - For unsupported languages or files without extracted symbols, a structured fallback preview of the first 30 lines is returned alongside bounded re-read instructions.
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
-index 0ba3cfd..9629375 100644
---- a/crates/superstate-core/tests/test_daemon_automerge.rs
-+++ b/crates/superstate-core/tests/test_daemon_automerge.rs
-@@ -123,6 +123,7 @@ fn test_daemon_automerge_on_completion() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ---
  
-     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
-@@ -219,6 +220,7 @@ fn test_daemon_completion_in_place_mode() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ## TDD Execution
  
-     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
-@@ -281,6 +283,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ### 1. Red Phase
+-Created unit tests in `crates/superstate-core/tests/test_impact_slicing.rs` validating:
+-- `test_build_sliced_test_cmd_pytest`: Verifies `pytest tests/` with `tests/test_auth.py` and `tests/test_token.py` specializes to `Some("pytest tests/test_auth.py tests/test_token.py")`.
+-- `test_build_sliced_test_cmd_pytest_container_prefix`: Verifies container-prefixed `./run-in-container pytest tests/` specializes to `Some("./run-in-container pytest tests/test_auth.py")`.
+-- `test_build_sliced_test_cmd_cargo`: Verifies `cargo test` with `tests/test_lexer.rs` maps to `Some("cargo test --test test_lexer")`.
+-- `test_build_sliced_test_cmd_unrecognized_returns_none`: Verifies generic scripts like `sh verify.sh` yield `None`.
+-- `test_build_sliced_test_cmd_empty_impacted_files_returns_none`: Verifies empty `impacted_files` yields `None`.
+-- `test_build_sliced_test_cmd_cargo_multiple_targets`: Verifies multiple integration test targets are formatted as `--test <target>`, sorted, and deduplicated.
+-- `test_build_sliced_test_cmd_node_vitest_and_jest`: Verifies `npx vitest run`, `npx jest`, and `npm test` invocations.
+-- `test_build_sliced_test_cmd_go_package`: Verifies Go test package directory slicing (`go test ./...` with `pkg/server/server_test.go` $\rightarrow$ `go test ./pkg/server`).
+-
+-Ran `cargo test -p superstate-core --test test_impact_slicing` to verify RED failure:
++Created comprehensive integration tests in `crates/superstate-core/tests/test_guard.rs` validating:
++- `test_config_default_threshold`: Verifies default threshold is 200 lines.
++- `test_serde_guard_decision`: Verifies JSON serialization and deserialization of `GuardDecision::Allow` (`{"decision":"allow"}`) and `GuardDecision::Deny` (`{"decision":"deny","reason":"..."}`).
++- `test_non_existent_file_allows`: Verifies non-existent files return `Allow`.
++- `test_directory_allows`: Verifies directory paths return `Allow`.
++- `test_small_file_allows`: Verifies files $\le 200$ lines return `Allow`.
++- `test_file_exactly_at_threshold_allows`: Verifies files at exactly 200 lines return `Allow`.
++- `test_bounded_slice_under_threshold_allows`: Verifies explicit slice requests $\le 200$ lines return `Allow`.
++- `test_large_file_unbounded_denies_with_ast_outline`: Verifies unbounded reads $> 200$ lines return `Deny` with an AST outline.
++- `test_large_file_bounded_slice_exceeding_threshold_denies`: Verifies bounded requests $> 200$ lines return `Deny` with an AST outline.
++- `test_binary_file_denies`: Verifies files containing null bytes in initial 8KB return `Deny` with binary file message.
++- `test_unsupported_language_falls_back_to_preview`: Verifies unsupported extensions return `Deny` with first 30 lines preview.
++- `test_empty_ast_outline_falls_back_to_preview`: Verifies files with no AST symbols (e.g. comment-only files) fall back to preview.
++
++Ran `cargo test -p superstate-core --test test_guard` to verify RED failure:
+ ```text
+-error[E0432]: unresolved import `superstate_core::impact::build_sliced_test_cmd`
+- --> crates/superstate-core/tests/test_impact_slicing.rs:2:5
++error[E0432]: unresolved import `superstate_core::guard`
++ --> crates/superstate-core/tests/test_guard.rs:4:22
+   |
+-2 | use superstate_core::impact::build_sliced_test_cmd;
+-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `build_sliced_test_cmd` in `impact`
+-error: could not compile `superstate-core` (test "test_impact_slicing") due to 1 previous error
++4 | use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
++  |                      ^^^^^ could not find `guard` in `superstate_core`
++error: could not compile `superstate-core` (test "test_guard") due to 1 previous error
+ ```
  
-     let mut runner = DaemonRunner::new(config).expect("create daemon runner");
-@@ -303,6 +306,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     })
-     .expect("create second runner");
+ ### 2. Green Phase
+-Implemented `pub fn build_sliced_test_cmd` and `is_word_boundary_match` in `crates/superstate-core/src/impact.rs`:
+-- Added word boundary validation to prevent substring false-positives (e.g. `run_pytest_suite.sh`).
+-- Detected Pytest, supporting direct, container-prefixed (`./run-in-container`), `python -m pytest`, and `uv run pytest` prefixes.
+-- Detected Cargo test, transforming integration tests under `tests/` directories into `--test <target>` flags, and unit test files into name filters.
+-- Detected Go test, translating file paths into package directories (`./<dir>`).
+-- Detected Node/Vitest/Jest, supporting `npm test --`, `pnpm test --`, `yarn test`, `npx vitest run`, `npx vitest`, and `npx jest`.
+-- Relativized all file paths against `repo_root` with deterministic sorting and deduplication.
+-
+-Ran `cargo test -p superstate-core --test test_impact_slicing`:
++1. Added `superstate-syntax = { path = "../superstate-syntax" }` to `crates/superstate-core/Cargo.toml`.
++2. Implemented `GuardDecision`, `FileReadGuardConfig`, and `evaluate_file_read_guard` in `crates/superstate-core/src/guard.rs`:
++   - Checks file existence and directory status.
++   - Detects binary content via 8KB null byte scanning.
++   - Computes line counts using `content.lines().count()`.
++   - Permits reads $\le$ `threshold_lines` or slices with `end_line.saturating_sub(start_line) <= threshold_lines`.
++   - Extracts AST symbols via `superstate_syntax::inspect::detect_language` and `superstate_syntax::symbols::extract_symbols`.
++   - Formats AST outlines via `superstate_syntax::inspect::format_outline`.
++   - Falls back to 30-line previews when unsupported or outline is empty.
++3. Re-exported `guard` module and items in `crates/superstate-core/src/lib.rs`.
++
++Ran `cargo test -p superstate-core --test test_guard`:
+ ```text
+-running 8 tests
+-test test_build_sliced_test_cmd_empty_impacted_files_returns_none ... ok
+-test test_build_sliced_test_cmd_unrecognized_returns_none ... ok
+-test test_build_sliced_test_cmd_cargo ... ok
+-test test_build_sliced_test_cmd_cargo_multiple_targets ... ok
+-test test_build_sliced_test_cmd_pytest ... ok
+-test test_build_sliced_test_cmd_pytest_container_prefix ... ok
+-test test_build_sliced_test_cmd_node_vitest_and_jest ... ok
+-test test_build_sliced_test_cmd_go_package ... ok
+-
+-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++running 12 tests
++test test_config_default_threshold ... ok
++test test_serde_guard_decision ... ok
++test test_directory_allows ... ok
++test test_non_existent_file_allows ... ok
++test test_small_file_allows ... ok
++test test_binary_file_denies ... ok
++test test_large_file_bounded_slice_exceeding_threshold_denies ... ok
++test test_unsupported_language_falls_back_to_preview ... ok
++test test_file_exactly_at_threshold_allows ... ok
++test test_empty_ast_outline_falls_back_to_preview ... ok
++test test_large_file_unbounded_denies_with_ast_outline ... ok
++test test_bounded_slice_under_threshold_allows ... ok
++
++test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+ ```
  
-diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-index 33aa0d0..4c6be6b 100644
---- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
-+++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-@@ -93,6 +93,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
-         review_blocking: true,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-Ran `cargo test -p superstate-core`: All 24 test suites passed.
+-
+-### 3. Static Analysis & Verification
+-- `cargo clippy -p superstate-core --all-targets -- -D warnings`: Passed with 0 warnings.
++### 3. Static Analysis & Full Workspace Verification
+ - `cargo clippy --all-targets -- -D warnings`: Passed across entire workspace with 0 warnings.
+-- `cargo check --all`: Clean compilation across all crates.
+-- `cargo fmt --all -- --check`: Checked and confirmed clean.
++- `cargo test --all`: All unit, integration, and doc tests across all crates passed.
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -175,6 +176,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
-         review_blocking: true,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ---
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -221,6 +223,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+@@ -77,13 +90,16 @@ Ran `cargo test -p superstate-core`: All 24 test suites passed.
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -298,6 +301,7 @@ EOF
-         review_blocking: true,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ | File | Status | Description |
+ |---|---|---|
+-| `crates/superstate-core/tests/test_impact_slicing.rs` | Created | Added 8 unit tests for test runner command specialization |
+-| `crates/superstate-core/src/impact.rs` | Modified | Implemented `build_sliced_test_cmd` and `is_word_boundary_match` helper |
++| `crates/superstate-core/Cargo.toml` | Modified | Added `superstate-syntax` dependency |
++| `crates/superstate-core/src/guard.rs` | Created | Implemented `evaluate_file_read_guard`, `FileReadGuardConfig`, and `GuardDecision` |
++| `crates/superstate-core/src/lib.rs` | Modified | Declared and re-exported `guard` module |
++| `crates/superstate-core/tests/test_guard.rs` | Created | Added 12 unit tests for guard evaluation and AST shunting |
++| `docs/superpowers/plans/task-1-brief.md` | Modified | Updated task brief for Task 1 |
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-diff --git a/crates/superstate-core/tests/test_daemon_dag_execution.rs b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-index 44b8061..5fe451f 100644
---- a/crates/superstate-core/tests/test_daemon_dag_execution.rs
-+++ b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-@@ -103,6 +103,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
-         review_blocking: false,
-         auto_rollback: true,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ---
  
-     let mut runner = DaemonRunner::new(config).expect("create runner");
-@@ -197,6 +198,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
-         review_blocking: false,
-         auto_rollback: true,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ## Commit Details
  
-     let mut runner = DaemonRunner::new(config).expect("create runner");
-@@ -283,6 +285,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-- **Commit SHA:** `1e6547e3e0d4b83da692cab152353e5dbf0a7660` (`1e6547e`)
+-- **Message:** `feat(core): implement test runner command specialization for impact slicing`
++- **Commit SHA:** `57263284f50d55c0ea57a48bd400a1ef6dae4c34` (`5726328`)
++- **Message:** `feat(core): implement file read guard engine and ast shunting`
+ - **GPG Verification:** Skipped (`--no-gpg-sign`) per repository guidance.
+diff --git a/docs/superpowers/plans/task-2-brief.md b/docs/superpowers/plans/task-2-brief.md
+index b5ceab5..1959db8 100644
+--- a/docs/superpowers/plans/task-2-brief.md
++++ b/docs/superpowers/plans/task-2-brief.md
+@@ -1,59 +1,76 @@
+-# Task 2 Brief: Configuration & CLI Flag (`--impact-slicing`)
++# Task 2 Brief: `superstate guard pre-tool-use` CLI Subcommand
  
-     let mut runner = DaemonRunner::new(config).expect("create runner");
-diff --git a/crates/superstate-core/tests/test_daemon_rollback.rs b/crates/superstate-core/tests/test_daemon_rollback.rs
-index 91c4669..feb8a1d 100644
---- a/crates/superstate-core/tests/test_daemon_rollback.rs
-+++ b/crates/superstate-core/tests/test_daemon_rollback.rs
-@@ -99,6 +99,7 @@ fn test_daemon_rollback_on_verification_failure() {
-         review_blocking: false,
-         auto_rollback: true,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-## Global Constraints
+-- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
+-- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
+-- Skip GPG verification on all commits (`--no-gpg-sign`).
+-- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
++## Context & Base Commit
++- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`
++- **Base Commit:** `5726328`
++- **Spec:** `docs/superpowers/specs/2026-09-20-file-read-guard-design.md`
++- **Plan:** `docs/superpowers/plans/2026-09-20-file-read-guard.md`
  
-     let mut runner = DaemonRunner::new(config).expect("create runner");
-@@ -194,6 +195,7 @@ fn test_daemon_no_rollback_when_disabled() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-## Task Details
+-- **Task:** Task 2: Configuration & CLI Flag (`--impact-slicing`)
+-- **Depends on:** Task 1
+-- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
++## What Needs to be Built
++Implement the CLI entrypoint for `superstate guard pre-tool-use [--threshold-lines <N>]` in `crates/superstate-cli`.
  
-     let mut runner = DaemonRunner::new(config).expect("create runner");
-diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
-index f62e449..6fd396d 100644
---- a/crates/superstate-core/tests/test_daemon_runner.rs
-+++ b/crates/superstate-core/tests/test_daemon_runner.rs
-@@ -38,6 +38,7 @@ fn test_daemon_run_step_success() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-**Files:**
+-- Modify: `crates/superstate-core/src/daemon.rs`
+-- Modify: `crates/superstate-cli/src/state_cli.rs`
+-- Modify: `crates/superstate-cli/src/commands/daemon.rs`
+-- Create: `crates/superstate-cli/tests/test_cli_impact_slicing.rs`
++### Clap Definition
++Add `Guard` command to `superstate-cli`:
++```rust
++#[derive(clap::Subcommand, Debug)]
++pub enum GuardCommands {
++    /// Evaluate tool invocation against deterministic context boundaries
++    PreToolUse(PreToolUseArgs),
++}
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -77,6 +78,7 @@ fn test_daemon_run_step_verification_failure() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-**Interfaces:**
+-- Consumes: `DaemonConfig`
+-- Produces: `DaemonConfig.impact_slicing: bool`, CLI `--impact-slicing` flag
++#[derive(clap::Args, Debug)]
++pub struct PreToolUseArgs {
++    /// Maximum lines permitted before shunting to symbol outline
++    #[arg(long, default_value_t = 200)]
++    pub threshold_lines: usize,
++}
++```
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -124,6 +126,7 @@ fn test_daemon_run_to_completion() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-## Implementation Steps
+-Follow TDD strictly:
+-1. Write CLI parsing test in `crates/superstate-cli/tests/test_cli_impact_slicing.rs`:
+-   ```rust
+-   use clap::Parser;
+-   use superstate_cli::state_cli::{Commands, StateArgs, Subcommands};
+-
+-   #[test]
+-   fn test_cli_impact_slicing_flag_parsing() {
+-       let args = StateArgs::try_parse_from(["state", "daemon", "--impact-slicing"])
+-           .expect("Failed to parse --impact-slicing flag");
+-       match args.command {
+-           Subcommands::Daemon(daemon_args) => {
+-               assert!(daemon_args.impact_slicing, "Expected impact_slicing to be true");
+-           }
+-           _ => panic!("Expected Subcommands::Daemon"),
++### Stdin/Stdout JSON Protocol
++1. Read `stdin` to string (`std::io::read_to_string`).
++2. If `stdin` is empty or malformed JSON, emit `{"decision":"allow"}` and exit 0 (fail-open to protect runtime).
++3. Parse payload into a flexible JSON value:
++   ```json
++   {
++     "toolCall": {
++       "name": "view_file",
++       "args": {
++         "AbsolutePath": "...",
++         "StartLine": 1,
++         "EndLine": 800
+        }
++     }
+    }
+    ```
+-2. Run `cargo test -p superstate-cli --test test_cli_impact_slicing` to confirm failure (unrecognized argument `--impact-slicing`).
+-3. Add `impact_slicing` to `DaemonConfig` and CLI args:
+-   - In `crates/superstate-core/src/daemon.rs`:
+-     - Add `pub impact_slicing: bool` to `DaemonConfig` (defaulting to `false` in `Default::default()`).
+-   - In `crates/superstate-cli/src/state_cli.rs`:
+-     - Add `#[arg(long, help = "Enable milestone-scoped test impact slicing for fast fail-fast feedback")] pub impact_slicing: bool` to `DaemonArgs`.
+-   - In `crates/superstate-cli/src/commands/daemon.rs`:
+-     - Wire `impact_slicing: args.impact_slicing` when constructing `DaemonConfig`.
+-4. Run `cargo test -p superstate-cli --test test_cli_impact_slicing` and verify PASS.
++   (Also handle case where `tool_call` is snake_case or top-level `toolName` / `args`).
++4. Tool Name Evaluation:
++   - Normalize tool name to lowercase.
++   - If tool name is NOT one of `view_file`, `view`, `read_file`, `readfile`:
++     Emit `{"decision":"allow"}` and exit 0.
++5. Arguments Extraction & Normalization:
++   - Extract path from `AbsolutePath`, `path`, `file_path`, `filePath`, `TargetFile`, `target_file`, or `file`.
++   - If path is missing or empty, emit `{"decision":"allow"}` and exit 0.
++   - Extract start line from `StartLine`, `start_line`, `startLine`, `offset`.
++   - Extract end line from `EndLine`, `end_line`, `endLine`, `limit`.
++   - **Crucial Normalization:** If `end_line` is present but `start_line` is `None`, default `start_line` to `Some(1)`.
++6. Evaluation:
++   - Call `superstate_core::guard::evaluate_file_read_guard(Path::new(&path), start_line, end_line, &config)`.
++   - Print serialized JSON (`serde_json::to_string(&decision)`) to `stdout` followed by newline.
++   - Exit with code 0.
++
++## Steps (Follow TDD Strictly)
++1. Write failing integration tests in `crates/superstate-cli/tests/test_cli_guard.rs`.
++   Test scenarios:
++   - Allowed tool call (`view_file` on small file).
++   - Denied tool call (`view_file` unbounded on large file > 200 lines) emitting `decision: "deny"` with AST outline.
++   - Bounded slice tool call (`view_file` with `StartLine: 1, EndLine: 50`) emitting `decision: "allow"`.
++   - Head slice tool call (`view_file` with only `EndLine: 50`) emitting `decision: "allow"`.
++   - Non-file tool call (`run_command`) emitting `decision: "allow"`.
++   - Invalid or empty JSON on stdin emitting `decision: "allow"`.
++   - Custom `--threshold-lines 50` parameter.
++2. Run `cargo test -p superstate --test test_cli_guard` to verify failure.
++3. Implement `crates/superstate-cli/src/commands/guard.rs`, register in `commands/mod.rs` and `main.rs`.
++4. Run `cargo test -p superstate --test test_cli_guard` to verify passing.
+ 5. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
+-6. Commit changes:
+-   ```bash
+-   git add crates/superstate-core/src/daemon.rs crates/superstate-cli/src/state_cli.rs crates/superstate-cli/src/commands/daemon.rs crates/superstate-cli/tests/test_cli_impact_slicing.rs
+-   git commit --no-gpg-sign -m "feat(cli): wire --impact-slicing flag into daemon configuration"
+-   ```
+-7. Write implementer report to `docs/superpowers/plans/task-2-report.md`.
+-8. Report status: DONE / DONE_WITH_CONCERNS / BLOCKED.
++6. Commit using `git commit --no-gpg-sign -m "feat(cli): add superstate guard pre-tool-use CLI subcommand"`.
++7. Write your implementer report to `docs/superpowers/plans/task-2-report.md`.
+diff --git a/docs/superpowers/plans/task-2-report.md b/docs/superpowers/plans/task-2-report.md
+index 965ff85..9fb57ef 100644
+--- a/docs/superpowers/plans/task-2-report.md
++++ b/docs/superpowers/plans/task-2-report.md
+@@ -1,76 +1,102 @@
+-# Task 2 Report: Configuration & CLI Flag (`--impact-slicing`)
++# Task 2 Report: `superstate guard pre-tool-use` CLI Subcommand
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -166,6 +169,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ **Status:** Completed (DONE)  
+-**Commit SHA:** `7e0b77e4d07bc9b8c902176e639c7444deae4dbc` (`7e0b77e`)  
+-**Branch:** `feat/daemon-test-impact-slicing`  
+-**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`  
+-**Date:** 2026-09-19  
++**Commit SHA:** `244d3c969b6702e17c63f9f4715e97b8e3fed8c9` (`244d3c9`)  
++**Branch:** `feat/pre-tool-use-file-guard`  
++**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`  
++**Date:** 2026-09-20  
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -219,6 +223,7 @@ fn test_daemon_step_advancer_invoked() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ---
  
-     use std::sync::{Arc, Mutex};
-@@ -268,6 +273,7 @@ fn test_daemon_step_advancer_error_propagation() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ## Executive Summary
  
-     // Configure a StepAdvancer that simulates downstream failure during advancement
-@@ -321,6 +327,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+-Task 2 added the `--impact-slicing` CLI flag and wired configuration support through `DaemonConfig` in `superstate-core` and the CLI parsers in `superstate-cli`.
+-
+-This allows operators and automated harnesses to invoke the autonomous daemon with milestone-scoped test impact slicing enabled (e.g. `state daemon --impact-slicing` or `superstate daemon --impact-slicing`), propagating the setting to detached daemon background processes and configuring `DaemonRunner` with `impact_slicing: true`.
++Task 2 implemented the CLI command `superstate guard pre-tool-use [--threshold-lines <N>]` in `crates/superstate-cli` to enable deterministic, hook-driven interception of file reading tool calls before payloads enter the LLM context.
++
++The command operates via a robust stdin/stdout JSON protocol conforming to Antigravity and Claude Code `PreToolUse` hook contracts:
++1. **Stdin Payload Processing & Fail-Open Resilience:**
++   - Reads `stdin` to string.
++   - If `stdin` is empty, missing, or malformed JSON, outputs `{"decision":"allow"}` and exits 0 to ensure agent runtimes never abort or deadlock due to hook evaluation errors.
++2. **Tool Invocations & Normalization:**
++   - Detects tool calls formatted across multiple standard agent conventions: nested `toolCall` / `tool_call` or top-level properties (`toolName`, `name`, `args`, `arguments`, `parameters`, `tool_input`).
++   - Normalizes tool names to lowercase; permits non-file-reading tools (e.g. `run_command`, `write_to_file`) unconditionally with `{"decision":"allow"}`.
++   - Evaluates targeted file-reading tools: `view_file`, `view`, `read_file`, `readfile`, `viewfile`.
++3. **Argument Extraction & Range Normalization:**
++   - Extracts target file path across common argument conventions (`AbsolutePath`, `path`, `file_path`, `filePath`, `TargetFile`, `target_file`, `file`). Permits empty or missing paths with `{"decision":"allow"}`.
++   - Extracts line ranges from `StartLine`, `start_line`, `startLine`, `offset`, and `EndLine`, `end_line`, `endLine`, `limit` (supporting numeric and string values).
++   - Normalizes head slice requests: when `end_line` is present but `start_line` is omitted, defaults `start_line` to `Some(1)`.
++4. **Deterministic Guard Evaluation:**
++   - Evaluates the read request against `superstate_core::guard::evaluate_file_read_guard` using configured or default line thresholds (default 200 lines).
++   - Serializes outcome directly to stdout followed by newline (`{"decision":"allow"}` or `{"decision":"deny","reason":"..."}`) and exits code 0.
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -384,6 +391,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ---
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -435,6 +443,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ## TDD Execution
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -527,6 +536,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ### 1. Red Phase
+-Created unit tests in `crates/superstate-cli/tests/test_cli_impact_slicing.rs`:
+-- `test_cli_impact_slicing_flag_parsing`: Verifies parsing `["state", "daemon", "--impact-slicing"]` into `StateArgs`, matching `Subcommands::Daemon(daemon_args)` and asserting `daemon_args.impact_slicing == true`.
+-- `test_cli_impact_slicing_flag_default_false`: Verifies default invocation `["state", "daemon"]` parses with `daemon_args.impact_slicing == false`.
+-
+-Exposed `StateArgs`, `Commands`, and `Subcommands` aliases in `crates/superstate-cli/src/state_cli.rs` to allow external CLI parsing tests against the `state` command hierarchy.
+-
+-Ran `cargo test -p superstate --test test_cli_impact_slicing` to confirm RED failure:
++Created integration test suite in `crates/superstate-cli/tests/test_cli_guard.rs` covering:
++- `test_empty_stdin_allows`: Empty input safely produces `{"decision":"allow"}` with exit code 0.
++- `test_invalid_json_allows`: Malformed JSON input produces `{"decision":"allow"}` with exit code 0.
++- `test_non_file_tool_call_allows`: Non-file tools (such as `run_command`) produce `{"decision":"allow"}`.
++- `test_missing_or_empty_path_allows`: Tool calls with empty or absent path parameters produce `{"decision":"allow"}`.
++- `test_non_existent_file_allows`: Reads on non-existent targets produce `{"decision":"allow"}` so runtime errors surface normally.
++- `test_small_file_allows`: Reads on files $\le 200$ lines produce `{"decision":"allow"}`.
++- `test_large_file_unbounded_denies_with_ast_outline`: Unbounded reads on files $> 200$ lines produce `{"decision":"deny"}` with AST symbol outline.
++- `test_bounded_slice_under_threshold_allows`: Bounded slice requests $\le 200$ lines produce `{"decision":"allow"}`.
++- `test_head_slice_with_only_end_line_allows`: Slice requests with only `EndLine: 50` properly normalize start line to 1 and produce `{"decision":"allow"}`.
++- `test_bounded_slice_exceeding_threshold_denies`: Slices $> 200$ lines produce `{"decision":"deny"}`.
++- `test_custom_threshold_lines_parameter`: Verifies `--threshold-lines 50` enforces smaller budget on an 80-line file.
++- `test_flexible_payload_formats_and_tool_names`: Verifies Claude Code (`View`), snake_case (`tool_call`), and top-level schema compatibility.
++
++Ran `cargo test -p superstate --test test_cli_guard` to confirm RED failure:
+ ```text
+-running 1 test
+-test test_cli_impact_slicing_flag_parsing ... FAILED
+-
+ failures:
+-
+----- test_cli_impact_slicing_flag_parsing stdout ----
+-thread 'test_cli_impact_slicing_flag_parsing' panicked at crates/superstate-cli/tests/test_cli_impact_slicing.rs:7:10:
+-Failed to parse --impact-slicing flag: ErrorInner { kind: UnknownArgument, ... unexpected argument '--impact-slicing' found ... }
++    test_bounded_slice_exceeding_threshold_denies
++    test_bounded_slice_under_threshold_allows
++    test_custom_threshold_lines_parameter
++    test_empty_stdin_allows
++    test_flexible_payload_formats_and_tool_names
++    test_head_slice_with_only_end_line_allows
++    test_invalid_json_allows
++    test_large_file_unbounded_denies_with_ast_outline
++    test_missing_or_empty_path_allows
++    test_non_existent_file_allows
++    test_non_file_tool_call_allows
++    test_small_file_allows
++
++test result: FAILED. 0 passed; 12 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
++stderr: 'error: unrecognized subcommand 'guard'
+ ```
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -586,6 +596,7 @@ fn test_progress_renews_the_retry_budget() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
+ ### 2. Green Phase
+-Implemented `impact_slicing` across configuration and CLI layers:
+-- In `crates/superstate-core/src/daemon.rs`:
+-  - Added `pub impact_slicing: bool` with `#[serde(default)]` to `DaemonConfig`.
+-  - Initialized `impact_slicing: false` in `impl Default for DaemonConfig`.
+-- In `crates/superstate-cli/src/state_cli.rs`:
+-  - Added `pub impact_slicing: bool` with `#[arg(long, help = "Enable milestone-scoped test impact slicing for fast fail-fast feedback")]` to `DaemonArgs`.
+-  - Passed `args.impact_slicing` to `cmd_daemon` in subcommand dispatch.
+-- In `crates/superstate-cli/src/commands/daemon.rs`:
+-  - Added `impact_slicing: bool` parameter to `cmd_daemon`.
+-  - Added `--impact-slicing` flag forwarding in detached background process spawning (`if impact_slicing { cmd.arg("--impact-slicing"); }`).
+-  - Wired `impact_slicing` into `DaemonConfig` construction.
+-- In `crates/superstate-cli/src/main.rs`:
+-  - Passed `args.impact_slicing` in `Commands::Daemon(args)`.
+-- In `crates/superstate-cli/src/commands/handoff.rs`:
+-  - Supplied `impact_slicing: false` in `cmd_daemon` invocation.
+-- In `crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs`:
+-  - Updated `cmd_daemon` test calls with `impact_slicing: false`.
+-- In `crates/superstate-core/tests/`:
+-  - Updated explicit `DaemonConfig` test fixtures with `impact_slicing: false`.
+-
+-Ran `cargo test -p superstate --test test_cli_impact_slicing`:
++1. Implemented `crates/superstate-cli/src/commands/guard.rs`:
++   - Defined `GuardCommands` and `PreToolUseArgs`.
++   - Implemented `cmd_pre_tool_use` with stdin streaming, fail-open error handling, argument extraction, head slice normalization, and `evaluate_file_read_guard` invocation.
++   - Implemented `dispatch_guard`.
++2. Registered `guard` module in `crates/superstate-cli/src/commands/mod.rs`.
++3. Registered `Guard` subcommand in `crates/superstate-cli/src/main.rs` in `Commands` enum and dispatched in `main()`.
++
++Ran `cargo test -p superstate --test test_cli_guard`:
+ ```text
+-running 2 tests
+-test test_cli_impact_slicing_flag_default_false ... ok
+-test test_cli_impact_slicing_flag_parsing ... ok
+-
+-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++running 12 tests
++test test_invalid_json_allows ... ok
++test test_non_existent_file_allows ... ok
++test test_empty_stdin_allows ... ok
++test test_non_file_tool_call_allows ... ok
++test test_bounded_slice_under_threshold_allows ... ok
++test test_small_file_allows ... ok
++test test_bounded_slice_exceeding_threshold_denies ... ok
++test test_head_slice_with_only_end_line_allows ... ok
++test test_missing_or_empty_path_allows ... ok
++test test_large_file_unbounded_denies_with_ast_outline ... ok
++test test_custom_threshold_lines_parameter ... ok
++test test_flexible_payload_formats_and_tool_names ... ok
++
++test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+ ```
  
-@@ -631,6 +642,7 @@ fn test_stalled_worker_still_blocks() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
+-### 3. Static Analysis & Verification
+-- `cargo test --all`: All unit, integration, and doc tests across all crates passed.
+-- `cargo clippy --all-targets -- -D warnings`: Passed with 0 warnings.
+-- `cargo check --all`: Clean compilation across all crates.
++### 3. Static Analysis & Full Workspace Verification
++- `cargo clippy --all-targets -- -D warnings`: Finished with 0 warnings.
++- `cargo test --all`: All unit, integration, and doc tests across the entire repository workspace passed.
  
-@@ -688,6 +700,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
+ ---
  
-@@ -735,6 +748,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -78,19 +104,16 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
  
-@@ -789,6 +803,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
+ | File | Status | Description |
+ |---|---|---|
+-| `crates/superstate-cli/tests/test_cli_impact_slicing.rs` | Created | Added unit tests verifying CLI parsing of `--impact-slicing` and default `false` |
+-| `crates/superstate-core/src/daemon.rs` | Modified | Added `impact_slicing: bool` to `DaemonConfig` and `Default` impl |
+-| `crates/superstate-cli/src/state_cli.rs` | Modified | Added `StateArgs`, `Commands`, `Subcommands` aliases; added `impact_slicing` to `DaemonArgs` and dispatch |
+-| `crates/superstate-cli/src/commands/daemon.rs` | Modified | Added `impact_slicing` parameter to `cmd_daemon`, child process flag propagation, and `DaemonConfig` wiring |
+-| `crates/superstate-cli/src/main.rs` | Modified | Passed `args.impact_slicing` from top-level `daemon` command to `cmd_daemon` |
+-| `crates/superstate-cli/src/commands/handoff.rs` | Modified | Passed default `false` to `cmd_daemon` |
+-| `crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs` | Modified | Updated test calls to `cmd_daemon` with `impact_slicing: false` |
+-| `crates/superstate-core/tests/*.rs` | Modified | Updated explicit `DaemonConfig` initializers in core tests |
++| `crates/superstate-cli/src/commands/guard.rs` | Created | Implemented `superstate guard pre-tool-use` logic and clap arguments |
++| `crates/superstate-cli/src/commands/mod.rs` | Modified | Registered `pub mod guard;` |
++| `crates/superstate-cli/src/main.rs` | Modified | Added `Commands::Guard` variant and dispatch invocation |
++| `crates/superstate-cli/tests/test_cli_guard.rs` | Created | Added 12 comprehensive integration tests for CLI guard subcommand |
++| `docs/superpowers/plans/task-2-brief.md` | Modified | Updated task brief for Task 2 |
  
-@@ -841,6 +856,7 @@ fn test_real_gate_completes_immediately() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-     assert!(
-@@ -880,6 +896,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-     assert!(
-@@ -935,6 +952,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
-             review_blocking: false,
-             auto_rollback: false,
-             shunt_driver_output: false,
-+            impact_slicing: false,
-         })
-         .unwrap();
-         for _ in 0..4 {
-diff --git a/crates/superstate-core/tests/test_daemon_shunt.rs b/crates/superstate-core/tests/test_daemon_shunt.rs
-index adff0f9..7214551 100644
---- a/crates/superstate-core/tests/test_daemon_shunt.rs
-+++ b/crates/superstate-core/tests/test_daemon_shunt.rs
-@@ -63,6 +63,7 @@ fn test_daemon_runner_injects_shunt_wrapper() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: true,
-+        impact_slicing: false,
-     };
+ ---
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -126,6 +127,7 @@ fn test_daemon_runner_no_shunt_disables_injection() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
+ ## Commit Details
  
-     let mut runner = DaemonRunner::new(config).unwrap();
-diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
-index d35b400..809f941 100644
---- a/crates/superstate-core/tests/test_driver_presets.rs
-+++ b/crates/superstate-core/tests/test_driver_presets.rs
-@@ -181,6 +181,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        impact_slicing: false,
-     };
- 
-     let mut runner = superstate_core::daemon::DaemonRunner::new(config).unwrap();
+-- **Commit SHA:** `7e0b77e4d07bc9b8c902176e639c7444deae4dbc` (`7e0b77e`)
+-- **Message:** `feat(cli): wire --impact-slicing flag into daemon configuration`
++- **Commit SHA:** `244d3c969b6702e17c63f9f4715e97b8e3fed8c9` (`244d3c9`)
++- **Message:** `feat(cli): add superstate guard pre-tool-use CLI subcommand`
+ - **GPG Verification:** Skipped (`--no-gpg-sign`) per repository guidance.
