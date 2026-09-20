@@ -99,6 +99,7 @@ fn test_daemon_rollback_on_verification_failure() {
         review_blocking: false,
         auto_rollback: true,
         shunt_driver_output: false,
+        guard_file_reads: false,
         impact_slicing: false,
     };
 
@@ -195,6 +196,7 @@ fn test_daemon_no_rollback_when_disabled() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
         impact_slicing: false,
     };
 

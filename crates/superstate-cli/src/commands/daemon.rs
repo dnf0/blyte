@@ -115,6 +115,7 @@ pub fn cmd_daemon(
     review_blocking: bool,
     auto_rollback: bool,
     shunt_driver_output: bool,
+    guard_file_reads: bool,
     impact_slicing: bool,
 ) -> Result<(), String> {
     let auto_rollback = if !auto_rollback {
@@ -194,6 +195,9 @@ pub fn cmd_daemon(
         }
         if !shunt_driver_output {
             cmd.arg("--no-shunt");
+        }
+        if !guard_file_reads {
+            cmd.arg("--no-guard");
         }
         if impact_slicing {
             cmd.arg("--impact-slicing");
@@ -277,6 +281,7 @@ pub fn cmd_daemon(
             review_blocking,
             auto_rollback,
             shunt_driver_output,
+            guard_file_reads,
             impact_slicing,
         };
 

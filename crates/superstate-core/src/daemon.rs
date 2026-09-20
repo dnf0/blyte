@@ -192,6 +192,9 @@ pub struct DaemonConfig {
     /// Automatically enable tool output shunting during driver worker execution
     #[serde(default = "default_true")]
     pub shunt_driver_output: bool,
+    /// Automatically guard file reads and shunt large files to symbol outlines
+    #[serde(default = "default_true")]
+    pub guard_file_reads: bool,
     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
     #[serde(default)]
     pub impact_slicing: bool,
@@ -209,6 +212,7 @@ impl Default for DaemonConfig {
             review_blocking: false,
             auto_rollback: true,
             shunt_driver_output: true,
+            guard_file_reads: true,
             impact_slicing: false,
         }
     }
@@ -773,6 +777,32 @@ impl DaemonRunner {
                 paths.extend(std::env::split_paths(&current_paths));
                 if let Ok(new_path) = std::env::join_paths(paths) {
                     cmd.env("PATH", new_path);
+                }
+            }
+
+            // WHY: Intercept driver file read operations (> 200 lines) transparently via PreToolUse hooks
+            // WHAT: Provision .agents/hooks.json in the workspace root if not already present
+            // HOW: Serialize PreToolUse matcher invoking `superstate guard pre-tool-use`
+            if self.config.guard_file_reads {
+                let agents_dir = working_dir.join(".agents");
+                fs::create_dir_all(&agents_dir)?;
+                let hooks_file = agents_dir.join("hooks.json");
+                if !hooks_file.exists() {
+                    let hooks_content = serde_json::json!({
+                        "superstate-file-guard": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "view_file|View|read_file",
+                                    "hooks": [
+                                        {
+                                            "command": "superstate guard pre-tool-use --threshold-lines 200"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    });
+                    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_content)?)?;
                 }
             }
 

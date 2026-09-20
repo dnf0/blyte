@@ -165,6 +165,7 @@ fn main() {
                 args.review_blocking,
                 args.use_auto_rollback(),
                 args.use_shunt(),
+                args.use_guard(),
                 args.impact_slicing,
             ),
         },

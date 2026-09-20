@@ -344,6 +344,12 @@ pub struct DaemonArgs {
         help = "Disable automatic tool output shunting during driver execution"
     )]
     pub no_shunt: bool,
+    /// Disable automatic file read guard during driver execution
+    #[arg(
+        long,
+        help = "Disable automatic file read guard during driver execution"
+    )]
+    pub no_guard: bool,
     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
     #[arg(
         long,
@@ -371,6 +377,10 @@ impl DaemonArgs {
 
     pub fn use_shunt(&self) -> bool {
         !self.no_shunt
+    }
+
+    pub fn use_guard(&self) -> bool {
+        !self.no_guard
     }
 }
 
@@ -587,6 +597,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             None => {
                 let auto_rollback = args.use_auto_rollback();
                 let shunt_driver_output = args.use_shunt();
+                let guard_file_reads = args.use_guard();
                 commands::daemon::cmd_daemon(
                     &resolve(args.state),
                     args.driver.as_deref(),
@@ -597,6 +608,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     args.review_blocking,
                     auto_rollback,
                     shunt_driver_output,
+                    guard_file_reads,
                     args.impact_slicing,
                 )
             }
