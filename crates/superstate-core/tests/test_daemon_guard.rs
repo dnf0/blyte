@@ -1,5 +1,5 @@
 use std::fs;
-use superstate_core::daemon::{DaemonConfig, DaemonRunner};
+use superstate_core::daemon::{workspace_fingerprint, DaemonConfig, DaemonRunner};
 use superstate_core::models::{ExecutionState, TaskSpec};
 use superstate_core::state_machine::save_state_atomic;
 use tempfile::tempdir;
@@ -189,3 +189,73 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
         "existing .agents/hooks.json must not be overwritten"
     );
 }
+
+#[test]
+fn test_workspace_fingerprint_excludes_agents_dir() {
+    let dir = tempdir().unwrap();
+    let base_file = dir.path().join("file.txt");
+    fs::write(&base_file, "initial content").unwrap();
+
+    let initial_fp = workspace_fingerprint(dir.path());
+
+    let agents_dir = dir.path().join(".agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    let hooks_file = agents_dir.join("hooks.json");
+    fs::write(&hooks_file, r#"{"superstate-file-guard": {}}"#).unwrap();
+
+    let after_fp = workspace_fingerprint(dir.path());
+    assert_eq!(
+        initial_fp, after_fp,
+        "workspace_fingerprint must not change when .agents/hooks.json is added"
+    );
+}
+
+#[test]
+fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
+    let dir = tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    let git_info_dir = dir.path().join(".git/info");
+    fs::create_dir_all(&git_info_dir).unwrap();
+    let exclude_file = git_info_dir.join("exclude");
+    fs::write(&exclude_file, "# git exclude\n*.tmp\n").unwrap();
+
+    let state = ExecutionState {
+        active_task: Some(TaskSpec {
+            id: "task-exclude".to_string(),
+            title: "Test Git Exclude".to_string(),
+            depends_on: vec![],
+            files_modify: vec![],
+            verification_cmd: Some("test -f exclude_evidence.txt".to_string()),
+        }),
+        no_worktree: true,
+        goal: Some("Test git exclude provisioning".to_string()),
+        ..Default::default()
+    };
+    save_state_atomic(&state_file, &state).unwrap();
+
+    let driver_cmd = "echo 'exclude ran' > exclude_evidence.txt";
+    let config = DaemonConfig {
+        state_path: state_file,
+        driver_cmd: Some(driver_cmd.to_string()),
+        max_retries: 1,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
+        shunt_driver_output: false,
+        guard_file_reads: true,
+        impact_slicing: false,
+    };
+
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let outcome = runner.step().unwrap();
+    assert!(outcome.is_advanced());
+
+    let exclude_content = fs::read_to_string(&exclude_file).unwrap();
+    assert!(
+        exclude_content.lines().any(|line| line.trim() == ".agents/" || line.trim() == ".agents"),
+        ".git/info/exclude must contain .agents/ after provisioning"
+    );
+}
+

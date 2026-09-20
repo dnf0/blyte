@@ -29,10 +29,17 @@ const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
 /// Directories never counted as progress.
 ///
 /// `.agent-state` is written by the daemon itself on every attempt (prompts, logs, driver
-/// turns), and test runners create `.pytest_cache` and `__pycache__` when executing gates,
+/// turns), `.agents` contains ephemeral hooks provisioned for the file read guard, and
+/// test runners create `.pytest_cache` and `__pycache__` when executing gates,
 /// so including them would make every attempt look like progress and the retry budget would
 /// never expire.
-const FINGERPRINT_SKIP_DIRS: [&str; 4] = [".git", ".agent-state", ".pytest_cache", "__pycache__"];
+const FINGERPRINT_SKIP_DIRS: [&str; 5] = [
+    ".git",
+    ".agent-state",
+    ".agents",
+    ".pytest_cache",
+    "__pycache__",
+];
 
 /// A verification command that cannot fail, so it certifies nothing.
 ///
@@ -94,7 +101,7 @@ const FINGERPRINT_MAX_FILES: usize = 20_000;
 /// a repository without a HEAD. A worker unpacking and editing a freshly cloned source
 /// tree therefore produced a byte-identical git fingerprint on every attempt and was
 /// blocked as stalled while it was in fact progressing.
-fn workspace_fingerprint(dir: &Path) -> String {
+pub fn workspace_fingerprint(dir: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     let mut entries: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -803,6 +810,26 @@ impl DaemonRunner {
                         }
                     });
                     fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_content)?)?;
+
+                    // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
+                    // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
+                    // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
+                    let git_info_dir = working_dir.join(".git").join("info");
+                    if git_info_dir.exists() {
+                        let exclude_file = git_info_dir.join("exclude");
+                        let content = fs::read_to_string(&exclude_file).unwrap_or_default();
+                        let already_excluded = content
+                            .lines()
+                            .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
+                        if !already_excluded {
+                            let mut new_content = content;
+                            if !new_content.is_empty() && !new_content.ends_with('\n') {
+                                new_content.push('\n');
+                            }
+                            new_content.push_str(".agents/\n");
+                            fs::write(&exclude_file, new_content)?;
+                        }
+                    }
                 }
             }
 
