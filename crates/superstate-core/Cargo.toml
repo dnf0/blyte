@@ -16,6 +16,7 @@ thiserror.workspace = true
 fd-lock.workspace = true
 libc = "0.2"
 superstate-review = { path = "../superstate-review" }
+superstate-syntax = { path = "../superstate-syntax" }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,5 +1,6 @@
 pub mod checkpoint;
 pub mod daemon;
+pub mod guard;
 pub mod handoff;
 pub mod impact;
 pub mod ledger;
@@ -16,6 +17,7 @@ pub use daemon::{
     finalize_completed_execution, CompletionReport, DaemonConfig, DaemonError, DaemonRunner,
     DaemonStepOutcome, StepAdvancer,
 };
+pub use guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
 pub use handoff::{
     generate_handoff_markdown, generate_resumption_command, write_handoff_package, HandoffSpec,
 };
