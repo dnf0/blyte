@@ -6,14 +6,17 @@
 
 use clap::{Args, Subcommand};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig};
 use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
 
 /// Subcommands for the `superstate guard` namespace.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GuardCommands {
-    /// Evaluate tool invocation against deterministic context boundaries
+    /// Evaluate file read operations against deterministic line boundaries
     PreToolUse(PreToolUseArgs),
+    /// Evaluate command and task tool invocations against cooldown debounce
+    PreCommand(PreCommandArgs),
 }
 
 /// Command-line arguments for `superstate guard pre-tool-use`.
@@ -24,13 +27,24 @@ pub struct PreToolUseArgs {
     pub threshold_lines: usize,
 }
 
+/// Command-line arguments for `superstate guard pre-command`.
+#[derive(Args, Debug, Clone)]
+pub struct PreCommandArgs {
+    /// Cooldown window in seconds before allowing repeated polling queries
+    #[arg(long, default_value_t = 30)]
+    pub debounce_sec: u64,
+
+    /// Optional path to state file tracking execution history
+    #[arg(long)]
+    pub state_path: Option<PathBuf>,
+}
+
 /// Serializes and prints the guard decision JSON to standard output.
 ///
 /// # Parameters
-/// - `decision`: The `GuardDecision` outcome to emit.
-fn emit_decision(decision: &GuardDecision) {
+/// - `decision`: The outcome to emit.
+fn emit_decision<T: serde::Serialize>(decision: &T) {
     // Decision is serialized to JSON string conforming to hook stdout protocol.
-    // Infallible serialization of GuardDecision enum.
     if let Ok(json) = serde_json::to_string(decision) {
         println!("{}", json);
     } else {
@@ -55,6 +69,7 @@ fn extract_from_container(
         .get("name")
         .or_else(|| container.get("toolName"))
         .or_else(|| container.get("tool_name"))
+        .or_else(|| container.get("tool"))
         .and_then(|v| v.as_str())?;
 
     // Extract arguments map or parse if arguments was encoded as a JSON string.
@@ -228,9 +243,66 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Executes the `pre-command` hook logic.
+///
+/// Evaluates incoming tool execution payloads against debounce and cooldown rules.
+///
+/// # Parameters
+/// - `args`: CLI arguments specifying debounce window and optional state file path.
+///
+/// # Returns
+/// - `Ok(())` on completion; exits 0 in all cases (fail-open on parse error).
+pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
+    // Read complete payload from stdin.
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        // Fail-open: if stdin read encounters an I/O error, allow tool invocation.
+        emit_allow();
+        return Ok(());
+    }
+
+    // Fail-open if stdin is empty.
+    if input.trim().is_empty() {
+        emit_allow();
+        return Ok(());
+    }
+
+    // Parse JSON root payload; fail-open on malformed JSON to prevent agent aborts.
+    let root: serde_json::Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(_) => {
+            emit_allow();
+            return Ok(());
+        }
+    };
+
+    // Extract tool invocation; fail-open if no recognisable tool invocation is found.
+    let (tool_name, tool_args) = match extract_tool_invocation(&root) {
+        Some(inv) => inv,
+        None => {
+            emit_allow();
+            return Ok(());
+        }
+    };
+
+    // Configure command guard with CLI parameters.
+    let config = CommandGuardConfig {
+        debounce_sec: args.debounce_sec,
+        state_path: args.state_path,
+    };
+
+    // Evaluate proposed command execution via superstate-core engine.
+    let decision = evaluate_command_guard(&tool_name, &tool_args, &config);
+    emit_decision(&decision);
+
+    Ok(())
+}
+
 /// Dispatches guard subcommands to their respective handlers.
 pub fn dispatch_guard(cmd: GuardCommands) -> Result<(), String> {
     match cmd {
         GuardCommands::PreToolUse(args) => cmd_pre_tool_use(args),
+        GuardCommands::PreCommand(args) => cmd_pre_command(args),
     }
 }
+

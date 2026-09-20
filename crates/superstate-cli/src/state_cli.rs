@@ -270,6 +270,11 @@ pub enum StateCommands {
     Logs(LogsArgs),
     /// Prepare standardized cross-agent handoff package
     Handoff(HandoffArgs),
+    /// Intercept and evaluate agent tool invocations before execution
+    Guard {
+        #[command(subcommand)]
+        cmd: crate::commands::guard::GuardCommands,
+    },
 }
 
 /// Type alias for `StateCommands` providing naming symmetry with standard CLI subcommand enums.
@@ -623,5 +628,6 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 .map(|_| ())
         }
         StateCommands::Handoff(args) => commands::handoff::cmd_handoff(&args),
+        StateCommands::Guard { cmd } => commands::guard::dispatch_guard(cmd),
     }
 }
