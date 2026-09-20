@@ -1,116 +1,223 @@
 diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
-index 67c8543..268f8e3 100644
+index 268f8e3..266847b 100644
 --- a/crates/superstate-cli/src/commands/daemon.rs
 +++ b/crates/superstate-cli/src/commands/daemon.rs
-@@ -115,6 +115,7 @@ pub fn cmd_daemon(
-     review_blocking: bool,
+@@ -116,6 +116,7 @@ pub fn cmd_daemon(
      auto_rollback: bool,
      shunt_driver_output: bool,
-+    guard_file_reads: bool,
+     guard_file_reads: bool,
++    guard_commands: bool,
      impact_slicing: bool,
  ) -> Result<(), String> {
      let auto_rollback = if !auto_rollback {
-@@ -195,6 +196,9 @@ pub fn cmd_daemon(
+@@ -196,8 +197,15 @@ pub fn cmd_daemon(
          if !shunt_driver_output {
              cmd.arg("--no-shunt");
          }
-+        if !guard_file_reads {
-+            cmd.arg("--no-guard");
-+        }
+-        if !guard_file_reads {
++        if !guard_file_reads && !guard_commands {
+             cmd.arg("--no-guard");
++        } else {
++            if !guard_file_reads {
++                cmd.arg("--no-file-guard");
++            }
++            if !guard_commands {
++                cmd.arg("--no-command-guard");
++            }
+         }
          if impact_slicing {
              cmd.arg("--impact-slicing");
-         }
-@@ -277,6 +281,7 @@ pub fn cmd_daemon(
-             review_blocking,
+@@ -282,6 +290,7 @@ pub fn cmd_daemon(
              auto_rollback,
              shunt_driver_output,
-+            guard_file_reads,
+             guard_file_reads,
++            guard_commands,
              impact_slicing,
          };
  
 diff --git a/crates/superstate-cli/src/commands/handoff.rs b/crates/superstate-cli/src/commands/handoff.rs
-index 78a350c..79bf0c7 100644
+index 79bf0c7..f585d7b 100644
 --- a/crates/superstate-cli/src/commands/handoff.rs
 +++ b/crates/superstate-cli/src/commands/handoff.rs
-@@ -180,6 +180,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
+@@ -181,6 +181,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
              false,
-             false,
+             true,
              true,
 +            true,
              false,
          )
      } else if args.json {
 diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
-index 6d23ea9..ef14cbb 100644
+index ef14cbb..2a8e73c 100644
 --- a/crates/superstate-cli/src/main.rs
 +++ b/crates/superstate-cli/src/main.rs
-@@ -165,6 +165,7 @@ fn main() {
-                 args.review_blocking,
+@@ -166,6 +166,7 @@ fn main() {
                  args.use_auto_rollback(),
                  args.use_shunt(),
-+                args.use_guard(),
+                 args.use_guard(),
++                args.use_command_guard(),
                  args.impact_slicing,
              ),
          },
 diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
-index 1793353..7ab3ffa 100644
+index 7b9ce09..8ddd93b 100644
 --- a/crates/superstate-cli/src/state_cli.rs
 +++ b/crates/superstate-cli/src/state_cli.rs
-@@ -344,6 +344,12 @@ pub struct DaemonArgs {
+@@ -349,12 +349,26 @@ pub struct DaemonArgs {
          help = "Disable automatic tool output shunting during driver execution"
      )]
      pub no_shunt: bool,
-+    /// Disable automatic file read guard during driver execution
++    /// Disable all automated PreToolUse guards during driver execution
 +    #[arg(
 +        long,
-+        help = "Disable automatic file read guard during driver execution"
++        help = "Disable all automated PreToolUse guards during driver execution"
 +    )]
 +    pub no_guard: bool,
+     /// Disable automatic file read guard during driver execution
+     #[arg(
+         long,
++        default_value_t = false,
+         help = "Disable automatic file read guard during driver execution"
+     )]
+-    pub no_guard: bool,
++    pub no_file_guard: bool,
++    /// Disable automated PreToolUse command & polling guard
++    #[arg(
++        long,
++        default_value_t = false,
++        help = "Disable automated PreToolUse command & polling guard"
++    )]
++    pub no_command_guard: bool,
      /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
      #[arg(
          long,
-@@ -372,6 +378,10 @@ impl DaemonArgs {
-     pub fn use_shunt(&self) -> bool {
-         !self.no_shunt
+@@ -385,7 +399,11 @@ impl DaemonArgs {
      }
-+
-+    pub fn use_guard(&self) -> bool {
-+        !self.no_guard
+ 
+     pub fn use_guard(&self) -> bool {
+-        !self.no_guard
++        !self.no_guard && !self.no_file_guard
 +    }
++
++    pub fn use_command_guard(&self) -> bool {
++        !self.no_guard && !self.no_command_guard
+     }
  }
  
- #[derive(clap::Args, Debug, Clone)]
-@@ -587,6 +597,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
-             None => {
+@@ -603,6 +621,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                  let auto_rollback = args.use_auto_rollback();
                  let shunt_driver_output = args.use_shunt();
-+                let guard_file_reads = args.use_guard();
+                 let guard_file_reads = args.use_guard();
++                let guard_commands = args.use_command_guard();
                  commands::daemon::cmd_daemon(
                      &resolve(args.state),
                      args.driver.as_deref(),
-@@ -597,6 +608,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
-                     args.review_blocking,
+@@ -614,6 +633,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                      auto_rollback,
                      shunt_driver_output,
-+                    guard_file_reads,
+                     guard_file_reads,
++                    guard_commands,
                      args.impact_slicing,
                  )
              }
 diff --git a/crates/superstate-cli/tests/test_cli_daemon_guard.rs b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
-new file mode 100644
-index 0000000..3edbcc5
---- /dev/null
+index efe5416..38956c3 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_guard.rs
 +++ b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
-@@ -0,0 +1,39 @@
-+use clap::Parser;
-+use superstate_cli::state_cli::{Commands, StateArgs, Subcommands};
+@@ -15,6 +15,10 @@ fn test_cli_no_guard_flag_parsing() {
+                 !daemon_args.use_guard(),
+                 "Expected use_guard() to return false when --no-guard is passed"
+             );
++            assert!(
++                !daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return false when --no-guard is passed"
++            );
+         }
+         _ => panic!("Expected Commands::Daemon"),
+     }
+@@ -33,6 +37,97 @@ fn test_cli_no_guard_flag_default_false() {
+                 daemon_args.use_guard(),
+                 "Expected use_guard() to default to true"
+             );
++            assert!(
++                daemon_args.use_command_guard(),
++                "Expected use_command_guard() to default to true"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
 +
 +#[test]
-+fn test_cli_no_guard_flag_parsing() {
++fn test_cli_no_command_guard_flag_parsing() {
++    let args = StateArgs::try_parse_from(["state", "daemon", "--no-command-guard"])
++        .expect("Failed to parse --no-command-guard flag");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(
++                daemon_args.no_command_guard,
++                "Expected no_command_guard to be true when --no-command-guard is passed"
++            );
++            assert!(
++                !daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return false when --no-command-guard is passed"
++            );
++            assert!(
++                daemon_args.use_guard(),
++                "Expected use_guard() to return true when only --no-command-guard is passed"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
++
++#[test]
++fn test_cli_no_command_guard_default_false() {
++    let args = StateArgs::try_parse_from(["state", "daemon"]).expect("Failed to parse daemon args");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(
++                !daemon_args.no_command_guard,
++                "Expected no_command_guard to default to false"
++            );
++            assert!(
++                daemon_args.use_command_guard(),
++                "Expected use_command_guard() to default to true"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
++
++#[test]
++fn test_cli_no_file_guard_flag_parsing() {
++    let args = StateArgs::try_parse_from(["state", "daemon", "--no-file-guard"])
++        .expect("Failed to parse --no-file-guard flag");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(
++                daemon_args.no_file_guard,
++                "Expected no_file_guard to be true when --no-file-guard is passed"
++            );
++            assert!(
++                !daemon_args.use_guard(),
++                "Expected use_guard() to return false when --no-file-guard is passed"
++            );
++            assert!(
++                daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return true when only --no-file-guard is passed"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
++
++#[test]
++fn test_cli_no_guard_disables_both() {
 +    let args = StateArgs::try_parse_from(["state", "daemon", "--no-guard"])
 +        .expect("Failed to parse --no-guard flag");
 +    match args.command {
-+        Subcommands::Daemon(daemon_args) => {
++        Commands::Daemon(daemon_args) => {
 +            assert!(
 +                daemon_args.no_guard,
 +                "Expected no_guard to be true when --no-guard is passed"
@@ -119,278 +226,339 @@ index 0000000..3edbcc5
 +                !daemon_args.use_guard(),
 +                "Expected use_guard() to return false when --no-guard is passed"
 +            );
-+        }
-+        _ => panic!("Expected Subcommands::Daemon"),
-+    }
-+}
-+
-+#[test]
-+fn test_cli_no_guard_flag_default_false() {
-+    let args = StateArgs::try_parse_from(["state", "daemon"]).expect("Failed to parse daemon args");
-+    match args.command {
-+        Commands::Daemon(daemon_args) => {
 +            assert!(
-+                !daemon_args.no_guard,
-+                "Expected no_guard to default to false"
++                !daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return false when --no-guard is passed"
 +            );
-+            assert!(
-+                daemon_args.use_guard(),
-+                "Expected use_guard() to default to true"
-+            );
-+        }
-+        _ => panic!("Expected Commands::Daemon"),
-+    }
-+}
+         }
+         _ => panic!("Expected Commands::Daemon"),
+     }
 diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-index e4374bd..7da21c0 100644
+index 7da21c0..2fd7828 100644
 --- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
 +++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-@@ -44,6 +44,7 @@ fn test_cli_daemon_lifecycle() {
+@@ -45,6 +45,7 @@ fn test_cli_daemon_lifecycle() {
          false,
-         false,
+         true,
          true,
 +        true,
          false,
      )
      .unwrap();
-@@ -114,6 +115,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
+@@ -116,6 +117,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
          false,
-         false,
+         true,
          true,
 +        true,
          false,
      )
      .unwrap();
 diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
-index 6cc271a..52cf50b 100644
+index 0f400e4..893a826 100644
 --- a/crates/superstate-core/src/daemon.rs
 +++ b/crates/superstate-core/src/daemon.rs
-@@ -192,6 +192,9 @@ pub struct DaemonConfig {
-     /// Automatically enable tool output shunting during driver worker execution
+@@ -202,6 +202,9 @@ pub struct DaemonConfig {
+     /// Automatically guard file reads and shunt large files to symbol outlines
      #[serde(default = "default_true")]
-     pub shunt_driver_output: bool,
-+    /// Automatically guard file reads and shunt large files to symbol outlines
+     pub guard_file_reads: bool,
++    /// Automatically guard tool execution and poll commands with debounce
 +    #[serde(default = "default_true")]
-+    pub guard_file_reads: bool,
++    pub guard_commands: bool,
      /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
      #[serde(default)]
      pub impact_slicing: bool,
-@@ -209,6 +212,7 @@ impl Default for DaemonConfig {
-             review_blocking: false,
+@@ -220,6 +223,7 @@ impl Default for DaemonConfig {
              auto_rollback: true,
              shunt_driver_output: true,
-+            guard_file_reads: true,
+             guard_file_reads: true,
++            guard_commands: true,
              impact_slicing: false,
          }
      }
-@@ -776,6 +780,32 @@ impl DaemonRunner {
+@@ -787,16 +791,28 @@ impl DaemonRunner {
                  }
              }
  
-+            // WHY: Intercept driver file read operations (> 200 lines) transparently via PreToolUse hooks
-+            // WHAT: Provision .agents/hooks.json in the workspace root if not already present
-+            // HOW: Serialize PreToolUse matcher invoking `superstate guard pre-tool-use`
-+            if self.config.guard_file_reads {
-+                let agents_dir = working_dir.join(".agents");
-+                fs::create_dir_all(&agents_dir)?;
-+                let hooks_file = agents_dir.join("hooks.json");
-+                if !hooks_file.exists() {
-+                    let hooks_content = serde_json::json!({
-+                        "superstate-file-guard": {
+-            // WHY: Intercept driver file read operations (> 200 lines) transparently via PreToolUse hooks
+-            // WHAT: Provision .agents/hooks.json in the workspace root if not already present
+-            // HOW: Serialize PreToolUse matcher invoking `superstate guard pre-tool-use`
+-            if self.config.guard_file_reads {
++            // WHY: Intercept driver file reads (> 200 lines) and rapid polling commands via PreToolUse hooks
++            // WHAT: Provision or merge hooks into .agents/hooks.json in the workspace root
++            // HOW: Serialize PreToolUse matchers for active guards, merging with existing hooks if present
++            if self.config.guard_file_reads || self.config.guard_commands {
+                 let agents_dir = working_dir.join(".agents");
+                 fs::create_dir_all(&agents_dir)?;
+                 let hooks_file = agents_dir.join("hooks.json");
+-                if !hooks_file.exists() {
+-                    let hooks_content = serde_json::json!({
+-                        "superstate-file-guard": {
++
++                let mut hooks_obj = if hooks_file.exists() {
++                    let existing_content = fs::read_to_string(&hooks_file).unwrap_or_default();
++                    match serde_json::from_str::<serde_json::Value>(&existing_content) {
++                        Ok(serde_json::Value::Object(map)) => map,
++                        _ => serde_json::Map::new(),
++                    }
++                } else {
++                    serde_json::Map::new()
++                };
++
++                if self.config.guard_file_reads && !hooks_obj.contains_key("superstate-file-guard") {
++                    hooks_obj.insert(
++                        "superstate-file-guard".to_string(),
++                        serde_json::json!({
+                             "PreToolUse": [
+                                 {
+                                     "matcher": "view_file|View|read_file",
+@@ -807,28 +823,48 @@ impl DaemonRunner {
+                                     ]
+                                 }
+                             ]
++                        }),
++                    );
++                }
++
++                if self.config.guard_commands && !hooks_obj.contains_key("superstate-command-guard") {
++                    hooks_obj.insert(
++                        "superstate-command-guard".to_string(),
++                        serde_json::json!({
 +                            "PreToolUse": [
 +                                {
-+                                    "matcher": "view_file|View|read_file",
++                                    "matcher": "run_command|manage_task",
 +                                    "hooks": [
 +                                        {
-+                                            "command": "superstate guard pre-tool-use --threshold-lines 200"
++                                            "command": "superstate guard pre-command --debounce-sec 30"
 +                                        }
 +                                    ]
 +                                }
 +                            ]
-+                        }
-+                    });
-+                    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_content)?)?;
++                        }),
++                    );
 +                }
-+            }
 +
-             let mut child = cmd.spawn()?;
- 
-             // Pipe prompt into driver stdin on a background thread to avoid pipe buffer deadlock
++                let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(hooks_obj))?;
++                fs::write(&hooks_file, serialized)?;
++
++                // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
++                // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
++                // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
++                let git_info_dir = working_dir.join(".git").join("info");
++                if git_info_dir.exists() {
++                    let exclude_file = git_info_dir.join("exclude");
++                    let content = fs::read_to_string(&exclude_file).unwrap_or_default();
++                    let already_excluded = content
++                        .lines()
++                        .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
++                    if !already_excluded {
++                        let mut new_content = content;
++                        if !new_content.is_empty() && !new_content.ends_with('\n') {
++                            new_content.push('\n');
+                         }
+-                    });
+-                    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_content)?)?;
+-
+-                    // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
+-                    // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
+-                    // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
+-                    let git_info_dir = working_dir.join(".git").join("info");
+-                    if git_info_dir.exists() {
+-                        let exclude_file = git_info_dir.join("exclude");
+-                        let content = fs::read_to_string(&exclude_file).unwrap_or_default();
+-                        let already_excluded = content
+-                            .lines()
+-                            .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
+-                        if !already_excluded {
+-                            let mut new_content = content;
+-                            if !new_content.is_empty() && !new_content.ends_with('\n') {
+-                                new_content.push('\n');
+-                            }
+-                            new_content.push_str(".agents/\n");
+-                            fs::write(&exclude_file, new_content)?;
+-                        }
++                        new_content.push_str(".agents/\n");
++                        fs::write(&exclude_file, new_content)?;
+                     }
+                 }
+             }
 diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-index d44e325..0bae88d 100644
+index 0bae88d..a9cc1e0 100644
 --- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
 +++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-@@ -71,6 +71,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
-         review_blocking: false,
+@@ -72,6 +72,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -125,6 +126,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
-         review_blocking: false,
+@@ -127,6 +128,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -193,6 +195,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
-         review_blocking: false,
+@@ -196,6 +198,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -251,6 +254,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
-         review_blocking: false,
+@@ -255,6 +258,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -310,6 +314,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
-         review_blocking: false,
+@@ -315,6 +319,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -362,6 +367,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
-         review_blocking: false,
+@@ -368,6 +373,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
 diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
-index 9629375..997a5f6 100644
+index 997a5f6..87ca59b 100644
 --- a/crates/superstate-core/tests/test_daemon_automerge.rs
 +++ b/crates/superstate-core/tests/test_daemon_automerge.rs
-@@ -123,6 +123,7 @@ fn test_daemon_automerge_on_completion() {
-         review_blocking: false,
+@@ -124,6 +124,7 @@ fn test_daemon_automerge_on_completion() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -220,6 +221,7 @@ fn test_daemon_completion_in_place_mode() {
-         review_blocking: false,
+@@ -222,6 +223,7 @@ fn test_daemon_completion_in_place_mode() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -283,6 +285,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         review_blocking: false,
+@@ -286,6 +288,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -306,6 +309,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         review_blocking: false,
+@@ -310,6 +313,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      })
      .expect("create second runner");
 diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-index 4c6be6b..3edeeb0 100644
+index 3edeeb0..397f683 100644
 --- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
 +++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-@@ -93,6 +93,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
-         review_blocking: true,
+@@ -94,6 +94,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -176,6 +177,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
-         review_blocking: true,
+@@ -178,6 +179,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -223,6 +225,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
-         review_blocking: false,
+@@ -226,6 +228,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -301,6 +304,7 @@ EOF
-         review_blocking: true,
+@@ -305,6 +308,7 @@ EOF
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
 diff --git a/crates/superstate-core/tests/test_daemon_dag_execution.rs b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-index 5fe451f..38e143e 100644
+index 38e143e..daff0f5 100644
 --- a/crates/superstate-core/tests/test_daemon_dag_execution.rs
 +++ b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-@@ -103,6 +103,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
-         review_blocking: false,
+@@ -104,6 +104,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
          auto_rollback: true,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -198,6 +199,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
-         review_blocking: false,
+@@ -200,6 +201,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
          auto_rollback: true,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -285,6 +287,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
-         review_blocking: false,
+@@ -288,6 +290,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
 diff --git a/crates/superstate-core/tests/test_daemon_guard.rs b/crates/superstate-core/tests/test_daemon_guard.rs
-new file mode 100644
-index 0000000..19853eb
---- /dev/null
+index 17cfedb..897c57d 100644
+--- a/crates/superstate-core/tests/test_daemon_guard.rs
 +++ b/crates/superstate-core/tests/test_daemon_guard.rs
-@@ -0,0 +1,191 @@
-+use std::fs;
-+use superstate_core::daemon::{DaemonConfig, DaemonRunner};
-+use superstate_core::models::{ExecutionState, TaskSpec};
-+use superstate_core::state_machine::save_state_atomic;
-+use tempfile::tempdir;
-+
+@@ -13,6 +13,15 @@ fn test_daemon_config_default_guard_file_reads() {
+     );
+ }
+ 
 +#[test]
-+fn test_daemon_config_default_guard_file_reads() {
++fn test_daemon_config_default_guard_commands() {
 +    let config = DaemonConfig::default();
 +    assert!(
-+        config.guard_file_reads,
-+        "DaemonConfig::default().guard_file_reads must default to true"
++        config.guard_commands,
++        "DaemonConfig::default().guard_commands must default to true"
 +    );
 +}
 +
+ #[test]
+ fn test_daemon_config_deserialize_defaults_guard_file_reads_to_true() {
+     let json_str = r#"{
+@@ -31,6 +40,24 @@ fn test_daemon_config_deserialize_defaults_guard_file_reads_to_true() {
+     );
+ }
+ 
 +#[test]
-+fn test_daemon_config_deserialize_defaults_guard_file_reads_to_true() {
++fn test_daemon_config_deserialize_defaults_guard_commands_to_true() {
 +    let json_str = r#"{
 +        "state_path": ".agent-state/state.json",
 +        "driver_cmd": null,
@@ -402,26 +570,76 @@ index 0000000..19853eb
 +    }"#;
 +    let config: DaemonConfig = serde_json::from_str(json_str).expect("deserialize config");
 +    assert!(
-+        config.guard_file_reads,
-+        "deserialized DaemonConfig without guard_file_reads field must default to true"
++        config.guard_commands,
++        "deserialized DaemonConfig without guard_commands field must default to true"
++    );
++}
++
+ #[test]
+ fn test_daemon_runner_provisions_hooks_json() {
+     let dir = tempdir().unwrap();
+@@ -63,6 +90,7 @@ fn test_daemon_runner_provisions_hooks_json() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: true,
++        guard_commands: true,
+         impact_slicing: false,
+     };
+ 
+@@ -73,23 +101,153 @@ fn test_daemon_runner_provisions_hooks_json() {
+     let hooks_file = dir.path().join(".agents/hooks.json");
+     assert!(
+         hooks_file.exists(),
+-        ".agents/hooks.json must be provisioned when guard_file_reads is true"
++        ".agents/hooks.json must be provisioned when guards are active"
+     );
+ 
+     let content = fs::read_to_string(&hooks_file).unwrap();
+     let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
+ 
+-    let hook_entry = &json["superstate-file-guard"]["PreToolUse"][0];
++    let file_hook_entry = &json["superstate-file-guard"]["PreToolUse"][0];
+     assert_eq!(
+-        hook_entry["matcher"].as_str(),
++        file_hook_entry["matcher"].as_str(),
+         Some("view_file|View|read_file"),
+         "matcher must match view_file|View|read_file"
+     );
+     assert_eq!(
+-        hook_entry["hooks"][0]["command"].as_str(),
++        file_hook_entry["hooks"][0]["command"].as_str(),
+         Some("superstate guard pre-tool-use --threshold-lines 200"),
+         "hook command must be superstate guard pre-tool-use --threshold-lines 200"
+     );
++
++    let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
++    assert_eq!(
++        cmd_hook_entry["matcher"].as_str(),
++        Some("run_command|manage_task"),
++        "matcher must match run_command|manage_task"
++    );
++    assert_eq!(
++        cmd_hook_entry["hooks"][0]["command"].as_str(),
++        Some("superstate guard pre-command --debounce-sec 30"),
++        "hook command must be superstate guard pre-command --debounce-sec 30"
 +    );
 +}
 +
 +#[test]
-+fn test_daemon_runner_provisions_hooks_json() {
++fn test_daemon_provisions_command_guard_in_hooks_json() {
 +    let dir = tempdir().unwrap();
 +    let state_file = dir.path().join("state.json");
 +
 +    let state = ExecutionState {
 +        active_task: Some(TaskSpec {
-+            id: "task-1".to_string(),
-+            title: "Test Guard".to_string(),
++            id: "task-cmd-guard".to_string(),
++            title: "Test Command Guard".to_string(),
 +            depends_on: vec![],
 +            files_modify: vec![],
 +            verification_cmd: Some("test -f driver_evidence.txt".to_string()),
 +        }),
 +        no_worktree: true,
-+        goal: Some("Test automated workspace hook provisioning".to_string()),
++        goal: Some("Test automated command guard hook provisioning".to_string()),
 +        ..Default::default()
 +    };
 +    save_state_atomic(&state_file, &state).unwrap();
@@ -439,6 +657,7 @@ index 0000000..19853eb
 +        auto_rollback: false,
 +        shunt_driver_output: false,
 +        guard_file_reads: true,
++        guard_commands: true,
 +        impact_slicing: false,
 +    };
 +
@@ -449,97 +668,45 @@ index 0000000..19853eb
 +    let hooks_file = dir.path().join(".agents/hooks.json");
 +    assert!(
 +        hooks_file.exists(),
-+        ".agents/hooks.json must be provisioned when guard_file_reads is true"
++        ".agents/hooks.json must be provisioned when guard_commands is true"
 +    );
 +
 +    let content = fs::read_to_string(&hooks_file).unwrap();
 +    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
 +
-+    let hook_entry = &json["superstate-file-guard"]["PreToolUse"][0];
++    let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
 +    assert_eq!(
-+        hook_entry["matcher"].as_str(),
-+        Some("view_file|View|read_file"),
-+        "matcher must match view_file|View|read_file"
++        cmd_hook_entry["matcher"].as_str(),
++        Some("run_command|manage_task"),
++        "matcher must match run_command|manage_task"
 +    );
 +    assert_eq!(
-+        hook_entry["hooks"][0]["command"].as_str(),
-+        Some("superstate guard pre-tool-use --threshold-lines 200"),
-+        "hook command must be superstate guard pre-tool-use --threshold-lines 200"
++        cmd_hook_entry["hooks"][0]["command"].as_str(),
++        Some("superstate guard pre-command --debounce-sec 30"),
++        "hook command must be superstate guard pre-command --debounce-sec 30"
 +    );
 +}
 +
 +#[test]
-+fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
++fn test_daemon_no_command_guard_disables_provisioning() {
 +    let dir = tempdir().unwrap();
 +    let state_file = dir.path().join("state.json");
 +
 +    let state = ExecutionState {
 +        active_task: Some(TaskSpec {
-+            id: "task-2".to_string(),
-+            title: "Test No Guard".to_string(),
++            id: "task-no-cmd".to_string(),
++            title: "Test No Command Guard".to_string(),
 +            depends_on: vec![],
 +            files_modify: vec![],
-+            verification_cmd: Some("test -f no_guard_evidence.txt".to_string()),
++            verification_cmd: Some("test -f no_cmd_evidence.txt".to_string()),
 +        }),
 +        no_worktree: true,
-+        goal: Some("Test disabling guard hook provisioning".to_string()),
++        goal: Some("Test disabling command guard provisioning".to_string()),
 +        ..Default::default()
 +    };
 +    save_state_atomic(&state_file, &state).unwrap();
 +
-+    let driver_cmd = "echo 'no guard ran' > no_guard_evidence.txt";
-+
-+    let config = DaemonConfig {
-+        state_path: state_file,
-+        driver_cmd: Some(driver_cmd.to_string()),
-+        max_retries: 1,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+        guard_file_reads: false,
-+        impact_slicing: false,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).unwrap();
-+    let outcome = runner.step().unwrap();
-+    assert!(outcome.is_advanced());
-+
-+    let hooks_file = dir.path().join(".agents/hooks.json");
-+    assert!(
-+        !hooks_file.exists(),
-+        ".agents/hooks.json must not be provisioned when guard_file_reads is false"
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_runner_preserves_existing_hooks_json() {
-+    let dir = tempdir().unwrap();
-+    let state_file = dir.path().join("state.json");
-+
-+    let agents_dir = dir.path().join(".agents");
-+    fs::create_dir_all(&agents_dir).unwrap();
-+    let hooks_file = agents_dir.join("hooks.json");
-+    let custom_json = r#"{"custom_hook": true}"#;
-+    fs::write(&hooks_file, custom_json).unwrap();
-+
-+    let state = ExecutionState {
-+        active_task: Some(TaskSpec {
-+            id: "task-3".to_string(),
-+            title: "Test Preserve Hooks".to_string(),
-+            depends_on: vec![],
-+            files_modify: vec![],
-+            verification_cmd: Some("test -f preserve_evidence.txt".to_string()),
-+        }),
-+        no_worktree: true,
-+        goal: Some("Test preserving existing hooks.json".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_file, &state).unwrap();
-+
-+    let driver_cmd = "echo 'preserve ran' > preserve_evidence.txt";
++    let driver_cmd = "echo 'ran' > no_cmd_evidence.txt";
 +
 +    let config = DaemonConfig {
 +        state_path: state_file,
@@ -552,6 +719,7 @@ index 0000000..19853eb
 +        auto_rollback: false,
 +        shunt_driver_output: false,
 +        guard_file_reads: true,
++        guard_commands: false,
 +        impact_slicing: false,
 +    };
 +
@@ -559,593 +727,422 @@ index 0000000..19853eb
 +    let outcome = runner.step().unwrap();
 +    assert!(outcome.is_advanced());
 +
++    let hooks_file = dir.path().join(".agents/hooks.json");
++    assert!(hooks_file.exists());
++
 +    let content = fs::read_to_string(&hooks_file).unwrap();
-+    assert_eq!(
-+        content, custom_json,
-+        "existing .agents/hooks.json must not be overwritten"
++    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
++
++    assert!(
++        !json["superstate-file-guard"].is_null(),
++        "superstate-file-guard must be present when guard_file_reads is true"
 +    );
-+}
-diff --git a/crates/superstate-core/tests/test_daemon_impact_slicing.rs b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-index 7ac21a3..4bbddb2 100644
---- a/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-+++ b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-@@ -114,6 +114,7 @@ fn test_daemon_impact_slicing_fast_fail_skips_full_gate() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        guard_file_reads: false,
-         impact_slicing: true,
-     };
++    assert!(
++        json["superstate-command-guard"].is_null(),
++        "superstate-command-guard must NOT be present when guard_commands is false"
++    );
+ }
  
-@@ -207,6 +208,7 @@ fn test_daemon_impact_slicing_passing_slice_executes_full_gate() {
-         review_blocking: false,
+ #[test]
+@@ -124,6 +282,7 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
-         impact_slicing: true,
-     };
- 
-@@ -286,6 +288,7 @@ fn test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        guard_file_reads: false,
-         impact_slicing: true,
-     };
- 
-@@ -378,6 +381,7 @@ fn test_daemon_impact_slicing_disabled_by_default() {
-         review_blocking: false,
-         auto_rollback: false,
-         shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -456,6 +460,7 @@ fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
-         review_blocking: false,
+@@ -134,36 +293,83 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
+     let hooks_file = dir.path().join(".agents/hooks.json");
+     assert!(
+         !hooks_file.exists(),
+-        ".agents/hooks.json must not be provisioned when guard_file_reads is false"
++        ".agents/hooks.json must not be provisioned when both guard flags are false"
+     );
+ }
+ 
+ #[test]
+-fn test_daemon_runner_preserves_existing_hooks_json() {
++fn test_daemon_no_guard_disables_both() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("state.json");
++
++    let state = ExecutionState {
++        active_task: Some(TaskSpec {
++            id: "task-no-guards".to_string(),
++            title: "Test No Guards".to_string(),
++            depends_on: vec![],
++            files_modify: vec![],
++            verification_cmd: Some("test -f no_guards_evidence.txt".to_string()),
++        }),
++        no_worktree: true,
++        goal: Some("Test disabling both guards".to_string()),
++        ..Default::default()
++    };
++    save_state_atomic(&state_file, &state).unwrap();
++
++    let driver_cmd = "echo 'ran' > no_guards_evidence.txt";
++
++    let config = DaemonConfig {
++        state_path: state_file,
++        driver_cmd: Some(driver_cmd.to_string()),
++        max_retries: 1,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: false,
++        shunt_driver_output: false,
++        guard_file_reads: false,
++        guard_commands: false,
++        impact_slicing: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++    assert!(outcome.is_advanced());
++
++    let hooks_file = dir.path().join(".agents/hooks.json");
++    assert!(
++        !hooks_file.exists(),
++        ".agents/hooks.json must not be provisioned when guard_file_reads and guard_commands are false"
++    );
++}
++
++#[test]
++fn test_daemon_merges_hooks_when_file_exists() {
+     let dir = tempdir().unwrap();
+     let state_file = dir.path().join("state.json");
+ 
+     let agents_dir = dir.path().join(".agents");
+     fs::create_dir_all(&agents_dir).unwrap();
+     let hooks_file = agents_dir.join("hooks.json");
+-    let custom_json = r#"{"custom_hook": true}"#;
++    let custom_json = r#"{"custom_hook": {"PreToolUse": [{"matcher": "foo", "hooks": []}]}}"#;
+     fs::write(&hooks_file, custom_json).unwrap();
+ 
+     let state = ExecutionState {
+         active_task: Some(TaskSpec {
+-            id: "task-3".to_string(),
+-            title: "Test Preserve Hooks".to_string(),
++            id: "task-merge".to_string(),
++            title: "Test Merge Hooks".to_string(),
+             depends_on: vec![],
+             files_modify: vec![],
+-            verification_cmd: Some("test -f preserve_evidence.txt".to_string()),
++            verification_cmd: Some("test -f merge_evidence.txt".to_string()),
+         }),
+         no_worktree: true,
+-        goal: Some("Test preserving existing hooks.json".to_string()),
++        goal: Some("Test merging into existing hooks.json".to_string()),
+         ..Default::default()
+     };
+     save_state_atomic(&state_file, &state).unwrap();
+ 
+-    let driver_cmd = "echo 'preserve ran' > preserve_evidence.txt";
++    let driver_cmd = "echo 'ran' > merge_evidence.txt";
+ 
+     let config = DaemonConfig {
+         state_path: state_file,
+@@ -176,6 +382,7 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: true,
++        guard_commands: true,
+         impact_slicing: false,
+     };
+ 
+@@ -184,9 +391,23 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
+     assert!(outcome.is_advanced());
+ 
+     let content = fs::read_to_string(&hooks_file).unwrap();
++    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
++
++    assert!(
++        !json["custom_hook"].is_null(),
++        "existing user hook must be preserved"
++    );
+     assert_eq!(
+-        content, custom_json,
+-        "existing .agents/hooks.json must not be overwritten"
++        json["custom_hook"]["PreToolUse"][0]["matcher"].as_str(),
++        Some("foo")
++    );
++    assert!(
++        !json["superstate-file-guard"].is_null(),
++        "superstate-file-guard must be merged into existing hooks.json"
++    );
++    assert!(
++        !json["superstate-command-guard"].is_null(),
++        "superstate-command-guard must be merged into existing hooks.json"
+     );
+ }
+ 
+@@ -245,6 +466,7 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: true,
++        guard_commands: true,
+         impact_slicing: false,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_impact_slicing.rs b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
+index 4bbddb2..beaa6b3 100644
+--- a/crates/superstate-core/tests/test_daemon_impact_slicing.rs
++++ b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
+@@ -115,6 +115,7 @@ fn test_daemon_impact_slicing_fast_fail_skips_full_gate() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -209,6 +210,7 @@ fn test_daemon_impact_slicing_passing_slice_executes_full_gate() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -289,6 +291,7 @@ fn test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -382,6 +385,7 @@ fn test_daemon_impact_slicing_disabled_by_default() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -461,6 +465,7 @@ fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
          auto_rollback: true,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: true,
      };
  
-@@ -538,6 +543,7 @@ fn test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks() {
-         review_blocking: false,
+@@ -544,6 +549,7 @@ fn test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: true,
      };
  
-@@ -626,6 +632,7 @@ fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
-         review_blocking: false,
+@@ -633,6 +639,7 @@ fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: true,
      };
  
 diff --git a/crates/superstate-core/tests/test_daemon_rollback.rs b/crates/superstate-core/tests/test_daemon_rollback.rs
-index feb8a1d..e6cff5f 100644
+index e6cff5f..648a44a 100644
 --- a/crates/superstate-core/tests/test_daemon_rollback.rs
 +++ b/crates/superstate-core/tests/test_daemon_rollback.rs
-@@ -99,6 +99,7 @@ fn test_daemon_rollback_on_verification_failure() {
-         review_blocking: false,
+@@ -100,6 +100,7 @@ fn test_daemon_rollback_on_verification_failure() {
          auto_rollback: true,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -195,6 +196,7 @@ fn test_daemon_no_rollback_when_disabled() {
-         review_blocking: false,
+@@ -197,6 +198,7 @@ fn test_daemon_no_rollback_when_disabled() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
 diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
-index 6fd396d..e796480 100644
+index e796480..dca1b9c 100644
 --- a/crates/superstate-core/tests/test_daemon_runner.rs
 +++ b/crates/superstate-core/tests/test_daemon_runner.rs
-@@ -38,6 +38,7 @@ fn test_daemon_run_step_success() {
-         review_blocking: false,
+@@ -39,6 +39,7 @@ fn test_daemon_run_step_success() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -78,6 +79,7 @@ fn test_daemon_run_step_verification_failure() {
-         review_blocking: false,
+@@ -80,6 +81,7 @@ fn test_daemon_run_step_verification_failure() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -126,6 +128,7 @@ fn test_daemon_run_to_completion() {
-         review_blocking: false,
+@@ -129,6 +131,7 @@ fn test_daemon_run_to_completion() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -169,6 +172,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
-         review_blocking: false,
+@@ -173,6 +176,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -223,6 +227,7 @@ fn test_daemon_step_advancer_invoked() {
-         review_blocking: false,
+@@ -228,6 +232,7 @@ fn test_daemon_step_advancer_invoked() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -273,6 +278,7 @@ fn test_daemon_step_advancer_error_propagation() {
-         review_blocking: false,
+@@ -279,6 +284,7 @@ fn test_daemon_step_advancer_error_propagation() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -327,6 +333,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
-         review_blocking: false,
+@@ -334,6 +340,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -391,6 +398,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
-         review_blocking: false,
+@@ -399,6 +406,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -443,6 +451,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
-         review_blocking: false,
+@@ -452,6 +460,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -536,6 +545,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
-         review_blocking: false,
+@@ -546,6 +555,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -596,6 +606,7 @@ fn test_progress_renews_the_retry_budget() {
-         review_blocking: false,
+@@ -607,6 +617,7 @@ fn test_progress_renews_the_retry_budget() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
      let mut runner = DaemonRunner::new(config).unwrap();
-@@ -642,6 +653,7 @@ fn test_stalled_worker_still_blocks() {
-         review_blocking: false,
+@@ -654,6 +665,7 @@ fn test_stalled_worker_still_blocks() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
      let mut runner = DaemonRunner::new(config).unwrap();
-@@ -700,6 +712,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
-         review_blocking: false,
+@@ -713,6 +725,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
      let mut runner = DaemonRunner::new(config).unwrap();
-@@ -748,6 +761,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
-         review_blocking: false,
+@@ -762,6 +775,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
      let mut runner = DaemonRunner::new(config).unwrap();
-@@ -803,6 +817,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
-         review_blocking: false,
+@@ -818,6 +832,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
      let mut runner = DaemonRunner::new(config).unwrap();
-@@ -856,6 +871,7 @@ fn test_real_gate_completes_immediately() {
-         review_blocking: false,
+@@ -872,6 +887,7 @@ fn test_real_gate_completes_immediately() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
      let mut runner = DaemonRunner::new(config).unwrap();
-@@ -896,6 +912,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
-         review_blocking: false,
+@@ -913,6 +929,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
      let mut runner = DaemonRunner::new(config).unwrap();
-@@ -952,6 +969,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
-             review_blocking: false,
+@@ -970,6 +987,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
              auto_rollback: false,
              shunt_driver_output: false,
-+            guard_file_reads: false,
+             guard_file_reads: false,
++            guard_commands: false,
              impact_slicing: false,
          })
          .unwrap();
 diff --git a/crates/superstate-core/tests/test_daemon_shunt.rs b/crates/superstate-core/tests/test_daemon_shunt.rs
-index 7214551..ef780fc 100644
+index ef780fc..6d99175 100644
 --- a/crates/superstate-core/tests/test_daemon_shunt.rs
 +++ b/crates/superstate-core/tests/test_daemon_shunt.rs
-@@ -63,6 +63,7 @@ fn test_daemon_runner_injects_shunt_wrapper() {
-         review_blocking: false,
+@@ -64,6 +64,7 @@ fn test_daemon_runner_injects_shunt_wrapper() {
          auto_rollback: false,
          shunt_driver_output: true,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-@@ -127,6 +128,7 @@ fn test_daemon_runner_no_shunt_disables_injection() {
-         review_blocking: false,
+@@ -129,6 +130,7 @@ fn test_daemon_runner_no_shunt_disables_injection() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
 diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
-index 809f941..1ceb669 100644
+index 1ceb669..4a10613 100644
 --- a/crates/superstate-core/tests/test_driver_presets.rs
 +++ b/crates/superstate-core/tests/test_driver_presets.rs
-@@ -181,6 +181,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
-         review_blocking: false,
+@@ -182,6 +182,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
          auto_rollback: false,
          shunt_driver_output: false,
-+        guard_file_reads: false,
+         guard_file_reads: false,
++        guard_commands: false,
          impact_slicing: false,
      };
  
-diff --git a/docs/superpowers/plans/task-3-brief.md b/docs/superpowers/plans/task-3-brief.md
-index 3dd8a2c..d319955 100644
---- a/docs/superpowers/plans/task-3-brief.md
-+++ b/docs/superpowers/plans/task-3-brief.md
-@@ -1,74 +1,78 @@
--# Task 3 Brief: Two-Tier Gate Execution in `DaemonRunner::step()`
-+# Task 3 Brief: Automated Workspace Hook Provisioning & Parity Verification
- 
--## Global Constraints
--- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
--- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
--- Skip GPG verification on all commits (`--no-gpg-sign`).
--- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
-+## Context & Base Commit
-+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`
-+- **Base Commit:** `62e7cfb`
-+- **Spec:** `docs/superpowers/specs/2026-09-20-file-read-guard-design.md`
-+- **Plan:** `docs/superpowers/plans/2026-09-20-file-read-guard.md`
- 
--## Task Details
--- **Task:** Task 3: Two-Tier Gate Execution in `DaemonRunner::step()`
--- **Depends on:** Task 1, Task 2
--- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
-+## What Needs to be Built
-+Wire automated file read guard hook provisioning into `superstate-core::daemon` and `superstate-cli`.
- 
--**Files:**
--- Modify: `crates/superstate-core/src/daemon.rs`
--- Create: `crates/superstate-core/tests/test_daemon_impact_slicing.rs`
-+### 1. `crates/superstate-core/src/daemon.rs`
-+1. Update `DaemonConfig`:
-+   ```rust
-+   /// Automatically guard file reads and shunt large files to symbol outlines
-+   pub guard_file_reads: bool,
-+   ```
-+   In `impl Default for DaemonConfig`:
-+   ```rust
-+   guard_file_reads: true,
-+   ```
-+2. In `DaemonRunner::step()`:
-+   When setting up driver execution (around where `shunt_driver_output` is handled):
-+   If `self.config.guard_file_reads` is true:
-+   - Ensure `working_dir.join(".agents")` exists (`fs::create_dir_all`).
-+   - Check if `working_dir.join(".agents/hooks.json")` exists. If not, write formatted JSON:
-+     ```json
-+     {
-+       "superstate-file-guard": {
-+         "PreToolUse": [
-+           {
-+             "matcher": "view_file|View|read_file",
-+             "hooks": [
-+               {
-+                 "command": "superstate guard pre-tool-use --threshold-lines 200"
-+               }
-+             ]
-+           }
-+         ]
-+       }
-+     }
-+     ```
-+
-+### 2. `crates/superstate-cli/src/state_cli.rs` & `commands/daemon.rs`
-+1. In `DaemonArgs` (`crates/superstate-cli/src/state_cli.rs`):
-+   ```rust
-+   /// Disable automatic file read guard during driver execution
-+   #[arg(
-+       long,
-+       help = "Disable automatic file read guard during driver execution"
-+   )]
-+   pub no_guard: bool,
-+   ```
-+   Add helper:
-+   ```rust
-+   pub fn use_guard(&self) -> bool {
-+       !self.no_guard
-+   }
-+   ```
-+2. In `commands/daemon.rs`:
-+   Forward `guard_file_reads: args.use_guard()` into `DaemonConfig`.
- 
--**Interfaces:**
--- Consumes: `build_sliced_test_cmd`, `infer_impacted_tests`, `DaemonConfig.impact_slicing`
--- Produces: Fast-fail pre-filter before `run_verification_cmd(verify_cmd, ...)` in `DaemonRunner::step()`
-+### 3. Integration Testing
-+1. In `crates/superstate-core/tests/test_daemon_guard.rs`:
-+   - Verify `DaemonRunner` with `guard_file_reads: true` provisions `.agents/hooks.json`.
-+   - Verify `DaemonRunner` with `guard_file_reads: false` does not provision `.agents/hooks.json`.
-+   - Verify valid JSON structure in provisioned file.
-+2. In `crates/superstate-cli/tests/test_cli_daemon_guard.rs`:
-+   - Verify CLI parsing of `--no-guard`.
- 
--## Implementation Steps
--Follow TDD strictly:
--1. Create `crates/superstate-core/tests/test_daemon_impact_slicing.rs`:
--   - `test_daemon_impact_slicing_fast_fail_skips_full_gate`:
--     - Sets up a git repository with an initial commit.
--     - Adds a source file `src/lib.py` and a failing test file `tests/test_lib.py` (which exits 1 when run).
--     - Configures a milestone with `verify_cmd = "touch full_gate_ran.txt && exit 0"`.
--     - Configures `DaemonConfig` with `impact_slicing: true`, `auto_rollback: false` (or true).
--     - Runs `runner.step()`.
--     - Verifies `DaemonStepOutcome::Failed` is returned.
--     - Verifies `full_gate_ran.txt` was NOT created (proving the full gate was skipped on fast-fail).
--     - Verifies `state.notes` contains an `[impact-fail]` entry.
--   - `test_daemon_impact_slicing_passing_slice_executes_full_gate`:
--     - Sets up a git repository with an initial commit.
--     - Adds a source file `src/lib.py` and a passing test file `tests/test_lib.py`.
--     - Configures a milestone with `verify_cmd = "touch full_gate_ran.txt && exit 0"`.
--     - Configures `DaemonConfig` with `impact_slicing: true`.
--     - Runs `runner.step()`.
--     - Verifies `DaemonStepOutcome::Completed` or milestone advancement.
--     - Verifies `full_gate_ran.txt` WAS created.
--     - Verifies `state.notes` contains an `[impact-pass]` entry.
--   - `test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate`:
--     - Sets up a git repo where no test files match the diff.
--     - Verifies daemon directly runs `verify_cmd` without error.
--2. Run `cargo test -p superstate-core --test test_daemon_impact_slicing` to confirm failure (pre-filter not yet implemented).
--3. Implement staged verification in `crates/superstate-core/src/daemon.rs`:
--   - Import `use crate::impact::{build_sliced_test_cmd, infer_impacted_tests};`
--   - In `DaemonRunner::step()` around line 755 (before `run_verification_cmd(verify_cmd, ...)`):
--     - If `self.config.impact_slicing && is_inside_git_repo(&working_dir)`:
--       - Query `start_commit = self.milestone_start_commits.get(&active_task.id)`.
--       - Run `impacted = infer_impacted_tests(&working_dir, start_commit.map(|s| s.as_str()))`.
--       - If `!impacted.is_empty()`:
--         - Call `build_sliced_test_cmd(verify_cmd, &impacted, &working_dir)`.
--         - If `Some(sliced_cmd)`:
--           - Run `slice_res = run_verification_cmd(&sliced_cmd, &working_dir, self.config.timeout_secs)?`.
--           - If `!slice_res.passed`:
--             - Record `[impact-fail]` note in `state.notes`.
--             - Save state atomically.
--             - If `self.config.auto_rollback`, perform rollback.
--             - Return `Ok(DaemonStepOutcome::Failed { task_id, error })`.
--           - If `slice_res.passed`:
--             - Record `[impact-pass]` note in `state.notes`.
--             - Save state atomically.
--             - Fall through to full `verify_cmd`.
--4. Run `cargo test -p superstate-core --test test_daemon_impact_slicing` and verify PASS.
-+## Steps (Follow TDD Strictly)
-+1. Write failing integration tests in `crates/superstate-core/tests/test_daemon_guard.rs` and `crates/superstate-cli/tests/test_cli_daemon_guard.rs`.
-+2. Run `cargo test --test test_daemon_guard --test test_cli_daemon_guard` to confirm failure.
-+3. Implement `guard_file_reads` in `daemon.rs`, `state_cli.rs`, and `commands/daemon.rs`.
-+4. Run `cargo test --test test_daemon_guard --test test_cli_daemon_guard` to confirm it passes.
- 5. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
--6. Commit changes:
--   ```bash
--   git add crates/superstate-core/src/daemon.rs crates/superstate-core/tests/test_daemon_impact_slicing.rs
--   git commit --no-gpg-sign -m "feat(daemon): wire milestone test impact slicing into daemon verification loop"
--   ```
--7. Write implementer report to `docs/superpowers/plans/task-3-report.md`.
--8. Report status: DONE / DONE_WITH_CONCERNS / BLOCKED.
-+6. Commit using `git commit --no-gpg-sign -m "feat(daemon): provision automated file read guard hooks in workspace"`.
-+7. Write your implementer report to `docs/superpowers/plans/task-3-report.md`.
-diff --git a/docs/superpowers/plans/task-3-report.md b/docs/superpowers/plans/task-3-report.md
-index 9d8ae66..ae7e7c2 100644
---- a/docs/superpowers/plans/task-3-report.md
-+++ b/docs/superpowers/plans/task-3-report.md
-@@ -1,45 +1,123 @@
--# Task 3 Implementer Report: Two-Tier Gate Execution in `DaemonRunner::step()`
--
--## 1. Overview & Status
--- **Status:** DONE
--- **Task:** Task 3: Two-Tier Gate Execution in `DaemonRunner::step()`
--- **Commit:** `a4efbae` (`feat(daemon): wire milestone test impact slicing into daemon verification loop`)
--- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
--- **Branch:** `feat/daemon-test-impact-slicing`
--
--## 2. Changes Implemented
--1. **Daemon Staged Verification Integration (`crates/superstate-core/src/daemon.rs`)**:
--   - Imported `build_sliced_test_cmd` and `infer_impacted_tests` from `crate::impact`.
--   - Wired Stage 1 milestone-scoped test impact slicing directly before full verification gate execution (`let gate_res = run_verification_cmd(...)`) in `DaemonRunner::run_step()`:
--     - Checked if `self.config.impact_slicing` is enabled and the working directory is inside a git repository.
--     - Extracted `start_commit` from `self.milestone_start_commits.get(&active_task.id)` to scope the diff to changes introduced since entering the milestone.
--     - Detected impacted test files via `infer_impacted_tests(&working_dir, start_commit)`.
--     - Built specialized sliced test runner command via `build_sliced_test_cmd(verify_cmd, &impacted, &working_dir)`.
--     - Executed sliced command with timing:
--       - **Fast-fail path**: On slice failure (`!slice_res.passed`), extracted bounded diagnostic output (up to 1,000 chars), logged `[impact-fail] Task {}: Fast test slice failed in {}s: {}` into `state.notes`, saved state atomically, incremented attempt counter, performed rollback if `self.config.auto_rollback` is active, stored failure output in `self.last_failure_output`, and returned `DaemonStepOutcome::Failed` without running full verification gate.
--       - **Fast-pass path**: On slice pass (`slice_res.passed`), logged `[impact-pass] Task {}: Fast slice passed ({} test files) in {}s, advancing to full gate` into `state.notes`, saved state atomically, and fell through to full gate execution.
--       - **Bypass / Fallback paths**: When `impact_slicing` is false, repo is non-git, no test files are impacted, or `build_sliced_test_cmd` returns `None`, seamlessly bypasses slice execution and proceeds to the full verification gate.
--
--2. **Integration Test Suite (`crates/superstate-core/tests/test_daemon_impact_slicing.rs`)**:
--   - Created comprehensive integration test suite covering:
--     - `test_daemon_impact_slicing_fast_fail_skips_full_gate`: Confirms failing slice logs `[impact-fail]`, returns `DaemonStepOutcome::Failed`, and completely skips the full verification gate (`full_gate_ran.txt` is not created).
--     - `test_daemon_impact_slicing_passing_slice_executes_full_gate`: Confirms passing slice logs `[impact-pass]`, advances to full verification gate, creates `full_gate_ran.txt`, and advances the milestone.
--     - `test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate`: Confirms that when no tests are impacted, full verification gate executes directly with no impact notes emitted.
--     - `test_daemon_impact_slicing_disabled_by_default`: Confirms that when `impact_slicing: false`, daemon runs full verification gate directly.
--     - `test_daemon_impact_slicing_fast_fail_with_auto_rollback`: Confirms that when `auto_rollback: true` is paired with fast-fail, both `[impact-fail]` and `[rollback]` are recorded, and workspace is cleaned back to milestone baseline.
--
--## 3. TDD Verification Evidence
--1. **RED Phase**:
--   - Ran `cargo test -p superstate-core --test test_daemon_impact_slicing` before implementation.
--   - Result: Failed on `test_daemon_impact_slicing_fast_fail_skips_full_gate` and `test_daemon_impact_slicing_passing_slice_executes_full_gate` because impact slicing pre-filter was not yet present.
--2. **GREEN Phase**:
--   - Implemented staged verification in `DaemonRunner::step()`.
--   - Ran `cargo test -p superstate-core --test test_daemon_impact_slicing`.
--   - Result: All 5 integration tests passed in 1.90s.
--3. **Static Analysis & Full Workspace Verification**:
--   - Ran `cargo clippy --all-targets -- -D warnings`: Completed with exit code 0 and 0 warnings.
--   - Ran `cargo test --all`: All unit tests, integration tests, and doc tests across all crates (`superstate-core`, `superstate-cli`, `superstate-mcp`, `superstate-worktree`, `superstate-syntax`, `superstate-rules`, `superstate-review`) passed cleanly.
--
--## 4. State Note Schemas
--- Failure: `[impact-fail] Task {task_id}: Fast test slice failed in {secs}s: {diag}`
--- Passing: `[impact-pass] Task {task_id}: Fast slice passed ({count} test files) in {secs}s, advancing to full gate`
-+# Task 3 Report: Automated Workspace Hook Provisioning & Parity Verification
-+
-+**Status:** Completed (DONE)  
-+**Commit SHA:** `3cb98380d197cb35946dc49673822b318d184762` (`3cb9838`)  
-+**Branch:** `feat/pre-tool-use-file-guard`  
-+**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`  
-+**Date:** 2026-09-20  
-+
-+---
-+
-+## Executive Summary
-+
-+Task 3 completed the end-to-end integration of the automated file read guard into the `DaemonRunner` lifecycle and CLI interface.
-+
-+Prior to this work, the pre-tool-use file read guard engine (Task 1) and the `superstate guard pre-tool-use` CLI subcommand (Task 2) were operational, but required manual setup of workspace hook definitions. Task 3 brings full automation and CLI parity:
-+
-+1. **Automated Workspace Hook Provisioning in `DaemonRunner::step()`:**
-+   - In `DaemonConfig`, added `pub guard_file_reads: bool` with `#[serde(default = "default_true")]`, defaulting to `true`.
-+   - Before spawning child driver processes in `DaemonRunner::step()`, the runner checks `self.config.guard_file_reads`.
-+   - If enabled and `.agents/hooks.json` does not already exist in the working directory, the daemon automatically creates `.agents/` and provisions a formatted hook definition:
-+     ```json
-+     {
-+       "superstate-file-guard": {
-+         "PreToolUse": [
-+           {
-+             "matcher": "view_file|View|read_file",
-+             "hooks": [
-+               {
-+                 "command": "superstate guard pre-tool-use --threshold-lines 200"
-+               }
-+             ]
-+           }
-+         ]
-+       }
-+     }
-+     ```
-+   - If `.agents/hooks.json` already exists, existing user hook configuration is preserved without modification.
-+   - If `guard_file_reads` is explicitly disabled (`false`), no hook file is created.
-+
-+2. **CLI Parity & `--no-guard` Flag:**
-+   - Added `pub no_guard: bool` to `DaemonArgs` in `crates/superstate-cli/src/state_cli.rs`, mapped to CLI argument `--no-guard`.
-+   - Added helper method `args.use_guard() -> bool` returning `!self.no_guard`.
-+   - Forwarded `guard_file_reads: args.use_guard()` across all CLI entry points (`main.rs`, `state_cli.rs`, `commands/daemon.rs`).
-+   - Propagated `--no-guard` to child daemon processes when running in detached mode with `guard_file_reads == false`.
-+
-+3. **Auxiliary Test Suite Updates & Invariant Preservation:**
-+   - Updated existing integration test fixtures across `superstate-core` and `superstate-cli` to accommodate the new `guard_file_reads` field in `DaemonConfig`.
-+
-+---
-+
-+## TDD Execution
-+
-+### 1. Red Phase
-+Created comprehensive integration tests in:
-+- `crates/superstate-core/tests/test_daemon_guard.rs`:
-+  - `test_daemon_config_default_guard_file_reads_true`: Confirms `DaemonConfig::default()` sets `guard_file_reads: true`.
-+  - `test_daemon_deserialization_defaults_guard_file_reads_to_true`: Confirms deserializing JSON state files omitting `guard_file_reads` preserves backwards compatibility and defaults to `true`.
-+  - `test_daemon_runner_provisions_hooks_json_when_enabled`: Confirms `DaemonRunner::step()` creates `.agents/hooks.json` with correct JSON matching `view_file|View|read_file` and command `superstate guard pre-tool-use --threshold-lines 200`.
-+  - `test_daemon_runner_does_not_provision_when_disabled`: Confirms that setting `guard_file_reads: false` avoids creating `.agents/hooks.json`.
-+  - `test_daemon_runner_preserves_existing_hooks_json`: Confirms that pre-existing `.agents/hooks.json` files are not overwritten.
-+- `crates/superstate-cli/tests/test_cli_daemon_guard.rs`:
-+  - `test_cli_no_guard_flag_parsing`: Confirms `--no-guard` CLI argument properly parses to `no_guard: true` and `use_guard(): false`.
-+  - `test_cli_no_guard_flag_default_false`: Confirms standard invocation defaults `no_guard: false` and `use_guard(): true`.
-+
-+Ran `cargo test --test test_daemon_guard --test test_cli_daemon_guard` to verify compilation and RED failure:
-+```text
-+error[E0609]: no field `guard_file_reads` on type `DaemonConfig`
-+error[E0599]: no method named `use_guard` found for struct `DaemonArgs`
-+```
-+
-+### 2. Green Phase
-+Implemented the requested fields, CLI flags, and provisioning logic:
-+1. `crates/superstate-core/src/daemon.rs`: Added `guard_file_reads` to `DaemonConfig`, updated `impl Default`, and wired hook creation in `DaemonRunner::step()`.
-+2. `crates/superstate-cli/src/state_cli.rs`: Added `--no-guard` to `DaemonArgs` and `use_guard()` method, forwarded to `cmd_daemon`.
-+3. `crates/superstate-cli/src/main.rs`: Forwarded `args.use_guard()` to `cmd_daemon`.
-+4. `crates/superstate-cli/src/commands/daemon.rs`: Added `guard_file_reads` parameter to `cmd_daemon`, forwarded `--no-guard` when detached, and passed into `DaemonConfig`.
-+5. Updated auxiliary tests to initialize `guard_file_reads: false` on explicit `DaemonConfig` instantiations.
-+
-+Ran `cargo test --test test_daemon_guard --test test_cli_daemon_guard`:
-+```text
-+running 2 tests
-+test test_cli_no_guard_flag_default_false ... ok
-+test test_cli_no_guard_flag_parsing ... ok
-+
-+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-+
-+running 5 tests
-+test test_daemon_config_default_guard_file_reads_true ... ok
-+test test_daemon_deserialization_defaults_guard_file_reads_to_true ... ok
-+test test_daemon_runner_does_not_provision_when_disabled ... ok
-+test test_daemon_runner_preserves_existing_hooks_json ... ok
-+test test_daemon_runner_provisions_hooks_json_when_enabled ... ok
-+
-+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
-+```
-+
-+### 3. Static Analysis & Full Workspace Verification
-+- `cargo clippy --all-targets -- -D warnings`: Completed with exit code 0 and 0 warnings.
-+- `cargo test --all`: All unit, integration, and doc tests across all crates (`superstate-core`, `superstate-cli`, `superstate-mcp`, `superstate-worktree`, `superstate-syntax`, `superstate-rules`, `superstate-review`) passed cleanly.
-+
-+---
-+
-+## Changed Files Summary
-+
-+| File | Status | Description |
-+|---|---|---|
-+| `crates/superstate-core/src/daemon.rs` | Modified | Added `guard_file_reads` to `DaemonConfig` (default true) and hook provisioning in `step()` |
-+| `crates/superstate-core/tests/test_daemon_guard.rs` | Created | Added 5 integration tests for config defaults, serde deserialization, hook provisioning, and preservation |
-+| `crates/superstate-cli/src/state_cli.rs` | Modified | Added `--no-guard` to `DaemonArgs`, `use_guard()` method, and passed to `cmd_daemon` |
-+| `crates/superstate-cli/src/main.rs` | Modified | Forwarded `args.use_guard()` to `cmd_daemon` |
-+| `crates/superstate-cli/src/commands/daemon.rs` | Modified | Added `guard_file_reads` parameter, detached flag forwarding, and `DaemonConfig` wiring |
-+| `crates/superstate-cli/src/commands/handoff.rs` | Modified | Updated `cmd_daemon` invocation with `true` |
-+| `crates/superstate-cli/tests/test_cli_daemon_guard.rs` | Created | Added 2 tests for `--no-guard` CLI argument parsing and default |
-+| `crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs` | Modified | Updated test calls to `cmd_daemon` with `guard_file_reads: true` |
-+| `crates/superstate-core/tests/*.rs` | Modified | Updated explicit `DaemonConfig` initializers in core test suites |
-+
-+---
-+
-+## Commit Details
-+
-+- **Commit SHA:** `3cb98380d197cb35946dc49673822b318d184762` (`3cb9838`)
-+- **Message:** `feat(daemon): provision automated file read guard hooks in workspace`
-+- **GPG Verification:** Skipped (`--no-gpg-sign`) per repository guidance.
