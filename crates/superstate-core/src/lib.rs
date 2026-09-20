@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub mod command_guard;
 pub mod daemon;
 pub mod guard;
 pub mod handoff;
@@ -13,6 +14,7 @@ pub mod shunt;
 pub mod state_machine;
 pub mod verifier;
 
+pub use command_guard::{evaluate_command_guard, CommandGuardConfig, CommandGuardDecision};
 pub use daemon::{
     finalize_completed_execution, CompletionReport, DaemonConfig, DaemonError, DaemonRunner,
     DaemonStepOutcome, StepAdvancer,
