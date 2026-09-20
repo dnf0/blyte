@@ -8,6 +8,10 @@ pub enum SyntaxError {
     LanguageError(String),
     #[error("Failed to parse source code")]
     ParseFailure,
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Unsupported language for path: {0}")]
+    UnsupportedLanguage(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
