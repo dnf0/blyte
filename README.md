@@ -6,6 +6,8 @@ Superstate does not run your agent's tools and does not talk to the model. It
 decides which task the agent is given next, and whether the work it produces is
 allowed to advance.
 
+> Read **[The Superstate Manifesto](MANIFESTO.md)** for our core doctrine: why conversational LLM coding fails on real repositories, and the Five Invariants of autonomous software engineering.
+
 ## Where this sits
 
 Autonomous coding tends to be built in three layers. Superstate is the one above

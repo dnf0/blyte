@@ -2,6 +2,8 @@
 
 **Superstate** is a high-performance, deterministic execution state engine, polyglot AST code intelligence platform, daemon-less adversarial code reviewer, and Model Context Protocol (MCP) server written in Rust.
 
+> 📖 **Read [The Superstate Manifesto](../MANIFESTO.md)** to understand the architectural doctrine, the separation of Worker and Control planes, and the Five Invariants of autonomous execution.
+
 ## Features
 
 - ⚡ **Deterministic State Engine (`superstate-core`):** DFA state machine with atomic file-locking (`fd-lock`), checkpoint/rollback safety, and append-only epistemic ledger.
