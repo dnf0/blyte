@@ -182,6 +182,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 

@@ -45,6 +45,7 @@ fn test_cli_daemon_lifecycle() {
         false,
         true,
         true,
+        true,
         false,
     )
     .unwrap();
@@ -114,6 +115,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
         false,
         false,
         false,
+        true,
         true,
         true,
         false,

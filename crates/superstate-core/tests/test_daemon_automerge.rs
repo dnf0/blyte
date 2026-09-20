@@ -124,6 +124,7 @@ fn test_daemon_automerge_on_completion() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -222,6 +223,7 @@ fn test_daemon_completion_in_place_mode() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -286,6 +288,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -310,6 +313,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     })
     .expect("create second runner");
