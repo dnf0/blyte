@@ -1,12 +1,12 @@
 use clap::Parser;
-use superstate_cli::state_cli::{Commands, StateArgs, Subcommands};
+use superstate_cli::state_cli::{Commands, StateArgs};
 
 #[test]
 fn test_cli_no_guard_flag_parsing() {
     let args = StateArgs::try_parse_from(["state", "daemon", "--no-guard"])
         .expect("Failed to parse --no-guard flag");
     match args.command {
-        Subcommands::Daemon(daemon_args) => {
+        Commands::Daemon(daemon_args) => {
             assert!(
                 daemon_args.no_guard,
                 "Expected no_guard to be true when --no-guard is passed"
@@ -16,7 +16,7 @@ fn test_cli_no_guard_flag_parsing() {
                 "Expected use_guard() to return false when --no-guard is passed"
             );
         }
-        _ => panic!("Expected Subcommands::Daemon"),
+        _ => panic!("Expected Commands::Daemon"),
     }
 }
 
