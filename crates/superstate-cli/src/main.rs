@@ -166,6 +166,7 @@ fn main() {
                 args.use_auto_rollback(),
                 args.use_shunt(),
                 args.use_guard(),
+                args.use_command_guard(),
                 args.impact_slicing,
             ),
         },

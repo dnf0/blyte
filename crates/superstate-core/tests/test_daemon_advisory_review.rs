@@ -72,6 +72,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -127,6 +128,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -196,6 +198,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -255,6 +258,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix() 
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -315,6 +319,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -368,6 +373,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
         auto_rollback: false,
         shunt_driver_output: false,
         guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
