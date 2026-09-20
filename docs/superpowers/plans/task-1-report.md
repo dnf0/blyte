@@ -1,75 +1,88 @@
-# Task 1 Report: Command Specialization in `impact.rs`
+# Task 1 Report: `superstate-core` Guard Engine & Evaluation Logic
 
 **Status:** Completed (DONE)  
-**Commit SHA:** `1e6547e3e0d4b83da692cab152353e5dbf0a7660` (`1e6547e`)  
-**Branch:** `feat/daemon-test-impact-slicing`  
-**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`  
-**Date:** 2026-09-19  
+**Commit SHA:** `57263284f50d55c0ea57a48bd400a1ef6dae4c34` (`5726328`)  
+**Branch:** `feat/pre-tool-use-file-guard`  
+**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`  
+**Date:** 2026-09-20  
 
 ---
 
 ## Executive Summary
 
-Task 1 implemented command specialization in `crates/superstate-core/src/impact.rs` via `pub fn build_sliced_test_cmd(base_cmd: &str, impacted_files: &[PathBuf], repo_root: &Path) -> Option<String>`.
+Task 1 implemented the core evaluation engine for deterministic `PreToolUse` file read guards in `crates/superstate-core/src/guard.rs` and re-exported its types in `crates/superstate-core/src/lib.rs`.
 
-In the two-tier milestone-scoped test impact slicing architecture, `infer_impacted_tests` identifies which test files are affected by changes in a milestone. `build_sliced_test_cmd` inspects the base milestone verification command (`verify_cmd`), detects the underlying test runner harness (Pytest, Cargo, Go, Vitest/Jest/Node), and specializes the command invocation to target only the impacted test files. If the verification command is generic or unrecognized (e.g. `sh verify.sh`, `make test`, or ungated commands like `exit 0`), or if no files were impacted, it returns `None`, safely falling back to the standard verification workflow.
+The guard inspects incoming file read targets and bounded slice parameters against a configurable threshold budget (default 200 lines):
+1. Non-existent files and directories are allowed (`GuardDecision::Allow`), allowing native agent runtime error mechanisms to function normally.
+2. Binary files (null bytes in first 8KB) are denied (`GuardDecision::Deny`), preventing LLM prompt state corruption.
+3. Reads within the threshold budget ($\le 200$ lines total or bounded range $\le 200$ lines) are allowed.
+4. Large unbounded reads or slices exceeding the threshold are denied and shunted:
+   - For supported AST languages (Rust, Python, TypeScript, Go), tree-sitter extracts symbols and outputs a structured AST outline with line ranges and guidance to inspect specific symbols or re-read with bounded parameters.
+   - For unsupported languages or files without extracted symbols, a structured fallback preview of the first 30 lines is returned alongside bounded re-read instructions.
 
 ---
 
 ## TDD Execution
 
 ### 1. Red Phase
-Created unit tests in `crates/superstate-core/tests/test_impact_slicing.rs` validating:
-- `test_build_sliced_test_cmd_pytest`: Verifies `pytest tests/` with `tests/test_auth.py` and `tests/test_token.py` specializes to `Some("pytest tests/test_auth.py tests/test_token.py")`.
-- `test_build_sliced_test_cmd_pytest_container_prefix`: Verifies container-prefixed `./run-in-container pytest tests/` specializes to `Some("./run-in-container pytest tests/test_auth.py")`.
-- `test_build_sliced_test_cmd_cargo`: Verifies `cargo test` with `tests/test_lexer.rs` maps to `Some("cargo test --test test_lexer")`.
-- `test_build_sliced_test_cmd_unrecognized_returns_none`: Verifies generic scripts like `sh verify.sh` yield `None`.
-- `test_build_sliced_test_cmd_empty_impacted_files_returns_none`: Verifies empty `impacted_files` yields `None`.
-- `test_build_sliced_test_cmd_cargo_multiple_targets`: Verifies multiple integration test targets are formatted as `--test <target>`, sorted, and deduplicated.
-- `test_build_sliced_test_cmd_node_vitest_and_jest`: Verifies `npx vitest run`, `npx jest`, and `npm test` invocations.
-- `test_build_sliced_test_cmd_go_package`: Verifies Go test package directory slicing (`go test ./...` with `pkg/server/server_test.go` $\rightarrow$ `go test ./pkg/server`).
+Created comprehensive integration tests in `crates/superstate-core/tests/test_guard.rs` validating:
+- `test_config_default_threshold`: Verifies default threshold is 200 lines.
+- `test_serde_guard_decision`: Verifies JSON serialization and deserialization of `GuardDecision::Allow` (`{"decision":"allow"}`) and `GuardDecision::Deny` (`{"decision":"deny","reason":"..."}`).
+- `test_non_existent_file_allows`: Verifies non-existent files return `Allow`.
+- `test_directory_allows`: Verifies directory paths return `Allow`.
+- `test_small_file_allows`: Verifies files $\le 200$ lines return `Allow`.
+- `test_file_exactly_at_threshold_allows`: Verifies files at exactly 200 lines return `Allow`.
+- `test_bounded_slice_under_threshold_allows`: Verifies explicit slice requests $\le 200$ lines return `Allow`.
+- `test_large_file_unbounded_denies_with_ast_outline`: Verifies unbounded reads $> 200$ lines return `Deny` with an AST outline.
+- `test_large_file_bounded_slice_exceeding_threshold_denies`: Verifies bounded requests $> 200$ lines return `Deny` with an AST outline.
+- `test_binary_file_denies`: Verifies files containing null bytes in initial 8KB return `Deny` with binary file message.
+- `test_unsupported_language_falls_back_to_preview`: Verifies unsupported extensions return `Deny` with first 30 lines preview.
+- `test_empty_ast_outline_falls_back_to_preview`: Verifies files with no AST symbols (e.g. comment-only files) fall back to preview.
 
-Ran `cargo test -p superstate-core --test test_impact_slicing` to verify RED failure:
+Ran `cargo test -p superstate-core --test test_guard` to verify RED failure:
 ```text
-error[E0432]: unresolved import `superstate_core::impact::build_sliced_test_cmd`
- --> crates/superstate-core/tests/test_impact_slicing.rs:2:5
+error[E0432]: unresolved import `superstate_core::guard`
+ --> crates/superstate-core/tests/test_guard.rs:4:22
   |
-2 | use superstate_core::impact::build_sliced_test_cmd;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `build_sliced_test_cmd` in `impact`
-error: could not compile `superstate-core` (test "test_impact_slicing") due to 1 previous error
+4 | use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
+  |                      ^^^^^ could not find `guard` in `superstate_core`
+error: could not compile `superstate-core` (test "test_guard") due to 1 previous error
 ```
 
 ### 2. Green Phase
-Implemented `pub fn build_sliced_test_cmd` and `is_word_boundary_match` in `crates/superstate-core/src/impact.rs`:
-- Added word boundary validation to prevent substring false-positives (e.g. `run_pytest_suite.sh`).
-- Detected Pytest, supporting direct, container-prefixed (`./run-in-container`), `python -m pytest`, and `uv run pytest` prefixes.
-- Detected Cargo test, transforming integration tests under `tests/` directories into `--test <target>` flags, and unit test files into name filters.
-- Detected Go test, translating file paths into package directories (`./<dir>`).
-- Detected Node/Vitest/Jest, supporting `npm test --`, `pnpm test --`, `yarn test`, `npx vitest run`, `npx vitest`, and `npx jest`.
-- Relativized all file paths against `repo_root` with deterministic sorting and deduplication.
+1. Added `superstate-syntax = { path = "../superstate-syntax" }` to `crates/superstate-core/Cargo.toml`.
+2. Implemented `GuardDecision`, `FileReadGuardConfig`, and `evaluate_file_read_guard` in `crates/superstate-core/src/guard.rs`:
+   - Checks file existence and directory status.
+   - Detects binary content via 8KB null byte scanning.
+   - Computes line counts using `content.lines().count()`.
+   - Permits reads $\le$ `threshold_lines` or slices with `end_line.saturating_sub(start_line) <= threshold_lines`.
+   - Extracts AST symbols via `superstate_syntax::inspect::detect_language` and `superstate_syntax::symbols::extract_symbols`.
+   - Formats AST outlines via `superstate_syntax::inspect::format_outline`.
+   - Falls back to 30-line previews when unsupported or outline is empty.
+3. Re-exported `guard` module and items in `crates/superstate-core/src/lib.rs`.
 
-Ran `cargo test -p superstate-core --test test_impact_slicing`:
+Ran `cargo test -p superstate-core --test test_guard`:
 ```text
-running 8 tests
-test test_build_sliced_test_cmd_empty_impacted_files_returns_none ... ok
-test test_build_sliced_test_cmd_unrecognized_returns_none ... ok
-test test_build_sliced_test_cmd_cargo ... ok
-test test_build_sliced_test_cmd_cargo_multiple_targets ... ok
-test test_build_sliced_test_cmd_pytest ... ok
-test test_build_sliced_test_cmd_pytest_container_prefix ... ok
-test test_build_sliced_test_cmd_node_vitest_and_jest ... ok
-test test_build_sliced_test_cmd_go_package ... ok
+running 12 tests
+test test_config_default_threshold ... ok
+test test_serde_guard_decision ... ok
+test test_directory_allows ... ok
+test test_non_existent_file_allows ... ok
+test test_small_file_allows ... ok
+test test_binary_file_denies ... ok
+test test_large_file_bounded_slice_exceeding_threshold_denies ... ok
+test test_unsupported_language_falls_back_to_preview ... ok
+test test_file_exactly_at_threshold_allows ... ok
+test test_empty_ast_outline_falls_back_to_preview ... ok
+test test_large_file_unbounded_denies_with_ast_outline ... ok
+test test_bounded_slice_under_threshold_allows ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 ```
 
-Ran `cargo test -p superstate-core`: All 24 test suites passed.
-
-### 3. Static Analysis & Verification
-- `cargo clippy -p superstate-core --all-targets -- -D warnings`: Passed with 0 warnings.
+### 3. Static Analysis & Full Workspace Verification
 - `cargo clippy --all-targets -- -D warnings`: Passed across entire workspace with 0 warnings.
-- `cargo check --all`: Clean compilation across all crates.
-- `cargo fmt --all -- --check`: Checked and confirmed clean.
+- `cargo test --all`: All unit, integration, and doc tests across all crates passed.
 
 ---
 
@@ -77,13 +90,16 @@ Ran `cargo test -p superstate-core`: All 24 test suites passed.
 
 | File | Status | Description |
 |---|---|---|
-| `crates/superstate-core/tests/test_impact_slicing.rs` | Created | Added 8 unit tests for test runner command specialization |
-| `crates/superstate-core/src/impact.rs` | Modified | Implemented `build_sliced_test_cmd` and `is_word_boundary_match` helper |
+| `crates/superstate-core/Cargo.toml` | Modified | Added `superstate-syntax` dependency |
+| `crates/superstate-core/src/guard.rs` | Created | Implemented `evaluate_file_read_guard`, `FileReadGuardConfig`, and `GuardDecision` |
+| `crates/superstate-core/src/lib.rs` | Modified | Declared and re-exported `guard` module |
+| `crates/superstate-core/tests/test_guard.rs` | Created | Added 12 unit tests for guard evaluation and AST shunting |
+| `docs/superpowers/plans/task-1-brief.md` | Modified | Updated task brief for Task 1 |
 
 ---
 
 ## Commit Details
 
-- **Commit SHA:** `1e6547e3e0d4b83da692cab152353e5dbf0a7660` (`1e6547e`)
-- **Message:** `feat(core): implement test runner command specialization for impact slicing`
+- **Commit SHA:** `57263284f50d55c0ea57a48bd400a1ef6dae4c34` (`5726328`)
+- **Message:** `feat(core): implement file read guard engine and ast shunting`
 - **GPG Verification:** Skipped (`--no-gpg-sign`) per repository guidance.
