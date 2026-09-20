@@ -86,6 +86,8 @@ enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Inspect AST symbols, outlines, and code slices
+    Inspect(commands::inspect::InspectArgs),
 }
 
 /// Restore the default SIGPIPE behaviour.
@@ -168,6 +170,7 @@ fn main() {
                 .map(|_| ())
         }
         Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
+        Commands::Inspect(args) => commands::inspect::cmd_inspect(&args),
         Commands::Shunt {
             threshold_lines,
             logs_dir,
