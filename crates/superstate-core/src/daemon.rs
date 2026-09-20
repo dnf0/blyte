@@ -1,3 +1,4 @@
+use crate::impact::{build_sliced_test_cmd, infer_impacted_tests};
 use crate::models::{ExecutionState, ExecutionStatus, LedgerEntry};
 use crate::prompt::{format_retry_failure_section, render_turnkey_prompt, resolve_project_root};
 use crate::state_machine::{
@@ -12,6 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 use thiserror::Error;
 
 /// Closure callback hook for pluggable step advancement across workspace and worktree lifecycles.
@@ -27,9 +29,10 @@ const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
 /// Directories never counted as progress.
 ///
 /// `.agent-state` is written by the daemon itself on every attempt (prompts, logs, driver
-/// turns), so including it would make every attempt look like progress and the retry
-/// budget would never expire.
-const FINGERPRINT_SKIP_DIRS: [&str; 2] = [".git", ".agent-state"];
+/// turns), and test runners create `.pytest_cache` and `__pycache__` when executing gates,
+/// so including them would make every attempt look like progress and the retry budget would
+/// never expire.
+const FINGERPRINT_SKIP_DIRS: [&str; 4] = [".git", ".agent-state", ".pytest_cache", "__pycache__"];
 
 /// A verification command that cannot fail, so it certifies nothing.
 ///
@@ -189,6 +192,9 @@ pub struct DaemonConfig {
     /// Automatically enable tool output shunting during driver worker execution
     #[serde(default = "default_true")]
     pub shunt_driver_output: bool,
+    /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
+    #[serde(default)]
+    pub impact_slicing: bool,
 }
 
 impl Default for DaemonConfig {
@@ -203,6 +209,7 @@ impl Default for DaemonConfig {
             review_blocking: false,
             auto_rollback: true,
             shunt_driver_output: true,
+            impact_slicing: false,
         }
     }
 }
@@ -551,6 +558,64 @@ impl DaemonRunner {
         Ok(())
     }
 
+    /// Advances state under advisory_gate configuration when retries or attempts are exhausted.
+    fn execute_advisory_advancement(
+        &mut self,
+        state: &mut ExecutionState,
+        active_task_id: &str,
+        note: &str,
+    ) -> Result<DaemonStepOutcome, DaemonError> {
+        state
+            .notes
+            .push(LedgerEntry::new("superstate-daemon", note));
+        self.retry_counts.remove(active_task_id);
+        self.last_failure_output.remove(active_task_id);
+        self.milestone_start_commits.remove(active_task_id);
+
+        if let Some(ref mut advancer) = self.step_advancer {
+            save_state_atomic(&self.config.state_path, state)?;
+            advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
+            let updated_state = load_state(&self.config.state_path)?;
+            let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
+            if updated_state.status == ExecutionStatus::Completed {
+                finalize_completed_execution(&self.config.state_path, &updated_state)?;
+            }
+            return Ok(DaemonStepOutcome::Advanced {
+                completed_task_id: active_task_id.to_string(),
+                next_task_id,
+            });
+        }
+        match advance_step(state) {
+            Ok(()) => {
+                save_state_atomic(&self.config.state_path, state)?;
+                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
+                if state.status == ExecutionStatus::Completed {
+                    finalize_completed_execution(&self.config.state_path, state)?;
+                }
+                Ok(DaemonStepOutcome::Advanced {
+                    completed_task_id: active_task_id.to_string(),
+                    next_task_id,
+                })
+            }
+            Err(StateError::InvalidTransition(msg)) => {
+                state.status = ExecutionStatus::Blocked;
+                state.notes.push(LedgerEntry::new(
+                    "superstate-daemon",
+                    format!(
+                        "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
+                        active_task_id, msg
+                    ),
+                ));
+                save_state_atomic(&self.config.state_path, state)?;
+                Ok(DaemonStepOutcome::Blocked {
+                    task_id: active_task_id.to_string(),
+                    reason: msg,
+                })
+            }
+            Err(e) => Err(DaemonError::State(e)),
+        }
+    }
+
     /// Executes a single autonomous daemon step for the currently active task.
     ///
     /// # Process Lifecycle
@@ -746,6 +811,147 @@ impl DaemonRunner {
                     ),
                 ));
                 save_state_atomic(&self.config.state_path, &state)?;
+            }
+        }
+
+        // Stage 1: Milestone-Scoped Test Impact Slicing (Fast-Fail Pre-Filter)
+        // Check impacted test suite before running full verification gate to ensure fast feedback.
+        if self.config.impact_slicing && is_inside_git_repo(&working_dir) {
+            let start_commit = self.milestone_start_commits.get(&active_task.id);
+            let impacted = infer_impacted_tests(&working_dir, start_commit.map(|s| s.as_str()));
+            if !impacted.is_empty() {
+                if let Some(sliced_cmd) = build_sliced_test_cmd(verify_cmd, &impacted, &working_dir)
+                {
+                    let slice_start = Instant::now();
+                    let slice_res =
+                        run_verification_cmd(&sliced_cmd, &working_dir, self.config.timeout_secs)?;
+                    let slice_elapsed = slice_start.elapsed().as_secs();
+
+                    if !slice_res.passed {
+                        // Extract diagnostic failure excerpt from slice output
+                        let failure_output = if !slice_res.output.trim().is_empty() {
+                            slice_res.output.trim()
+                        } else if let Some(ref reason) = slice_res.failure_reason {
+                            reason.trim()
+                        } else {
+                            "Unknown slice test failure"
+                        };
+                        let bounded_diag = failure_output.chars().take(1000).collect::<String>();
+
+                        // Record fast-fail diagnostics into state notes
+                        state.notes.push(LedgerEntry::new(
+                            "superstate-daemon",
+                            format!(
+                                "[impact-fail] Task {}: Fast test slice failed in {}s: {}",
+                                active_task.id, slice_elapsed, bounded_diag
+                            ),
+                        ));
+                        save_state_atomic(&self.config.state_path, &state)?;
+
+                        let fingerprint = workspace_fingerprint(&working_dir);
+                        let made_progress = self
+                            .last_fingerprint
+                            .get(&active_task.id)
+                            .is_some_and(|prev| prev != &fingerprint);
+                        self.last_fingerprint
+                            .insert(active_task.id.clone(), fingerprint);
+
+                        // Update attempt counter and failure diagnostics for subsequent retry
+                        let attempts = self
+                            .total_attempts
+                            .entry(active_task.id.clone())
+                            .or_insert(0);
+                        *attempts += 1;
+                        let attempts_spent = *attempts;
+
+                        let current_retries = {
+                            let retries =
+                                self.retry_counts.entry(active_task.id.clone()).or_insert(0);
+                            if made_progress {
+                                *retries = 0;
+                                state.notes.push(LedgerEntry::new(
+                                    "superstate-daemon",
+                                    format!(
+                                        "[retry-extend] Task {} changed the working tree on attempt {}; retry budget renewed",
+                                        active_task.id, attempts_spent
+                                    ),
+                                ));
+                            } else {
+                                *retries += 1;
+                            }
+                            *retries
+                        };
+
+                        // Perform rollback to milestone baseline when auto_rollback is enabled
+                        if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
+                            self.perform_rollback(
+                                &active_task.id,
+                                attempts_spent,
+                                &working_dir,
+                                &mut state,
+                            )?;
+                        }
+
+                        self.last_failure_output
+                            .insert(active_task.id.clone(), bounded_diag.clone());
+
+                        let stalled = current_retries >= self.config.max_retries;
+                        let exhausted =
+                            attempts_spent >= self.config.max_retries * PROGRESS_ATTEMPT_MULTIPLIER;
+
+                        if (stalled || exhausted) && self.config.advisory_gate {
+                            let note = format!(
+                                "[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion",
+                                active_task.id
+                            );
+                            return self.execute_advisory_advancement(
+                                &mut state,
+                                &active_task.id,
+                                &note,
+                            );
+                        }
+
+                        if stalled || exhausted {
+                            state.status = ExecutionStatus::Blocked;
+                            let reason = if stalled {
+                                format!(
+                                    "Task '{}' blocked: fast test slice failed: exceeded maximum retries ({}) without changing the working tree: {}",
+                                    active_task.id, self.config.max_retries, bounded_diag
+                                )
+                            } else {
+                                format!(
+                                    "Task '{}' blocked: fast test slice failed: exceeded maximum attempts ({}): {}",
+                                    active_task.id, attempts_spent, bounded_diag
+                                )
+                            };
+                            state.errors.push(reason.clone());
+                            save_state_atomic(&self.config.state_path, &state)?;
+                            return Ok(DaemonStepOutcome::Blocked {
+                                task_id: active_task.id.clone(),
+                                reason,
+                            });
+                        }
+
+                        save_state_atomic(&self.config.state_path, &state)?;
+                        let retries_remaining =
+                            self.config.max_retries.saturating_sub(current_retries);
+                        return Ok(DaemonStepOutcome::Failed {
+                            task_id: active_task.id,
+                            reason: format!("Fast test slice failed: {}", bounded_diag),
+                            retries_remaining,
+                        });
+                    } else {
+                        // Record passing slice progress before executing full gate
+                        state.notes.push(LedgerEntry::new(
+                            "superstate-daemon",
+                            format!(
+                                "[impact-pass] Task {}: Fast slice passed ({} test files) in {}s, advancing to full gate",
+                                active_task.id, impacted.len(), slice_elapsed
+                            ),
+                        ));
+                        save_state_atomic(&self.config.state_path, &state)?;
+                    }
+                }
             }
         }
 
@@ -1094,41 +1300,12 @@ impl DaemonRunner {
                 // Advisory: the verification command failed and the budget is spent, but the
                 // work is submitted anyway, as superstate_mcp does. The sealed grader, not
                 // the daemon, decides whether it was good enough.
-                state.notes.push(LedgerEntry::new(
-                    "superstate-daemon",
-                    format!(
-                        "[advisory-gate] Task {} advancing with its verification command still \
-                         failing after {} attempts; completion here does NOT mean verified",
-                        active_task.id, attempts_spent
-                    ),
-                ));
-                self.retry_counts.remove(&active_task.id);
-                self.last_failure_output.remove(&active_task.id);
-                self.milestone_start_commits.remove(&active_task.id);
-
-                if let Some(ref mut advancer) = self.step_advancer {
-                    save_state_atomic(&self.config.state_path, &state)?;
-                    advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
-                    let updated_state = load_state(&self.config.state_path)?;
-                    let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
-                    if updated_state.status == ExecutionStatus::Completed {
-                        finalize_completed_execution(&self.config.state_path, &updated_state)?;
-                    }
-                    return Ok(DaemonStepOutcome::Advanced {
-                        completed_task_id: active_task.id,
-                        next_task_id,
-                    });
-                }
-                advance_step(&mut state)?;
-                save_state_atomic(&self.config.state_path, &state)?;
-                let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
-                if state.status == ExecutionStatus::Completed {
-                    finalize_completed_execution(&self.config.state_path, &state)?;
-                }
-                return Ok(DaemonStepOutcome::Advanced {
-                    completed_task_id: active_task.id,
-                    next_task_id,
-                });
+                let note = format!(
+                    "[advisory-gate] Task {} advancing with its verification command still \
+                     failing after {} attempts; completion here does NOT mean verified",
+                    active_task.id, attempts_spent
+                );
+                return self.execute_advisory_advancement(&mut state, &active_task.id, &note);
             }
 
             if stalled || exhausted {

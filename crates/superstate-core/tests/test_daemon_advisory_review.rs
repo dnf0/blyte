@@ -71,6 +71,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -124,6 +125,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -191,6 +193,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -248,6 +251,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix() 
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -306,6 +310,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -357,6 +362,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        impact_slicing: false,
     };
 
     let mut runner = DaemonRunner::new(config).unwrap();

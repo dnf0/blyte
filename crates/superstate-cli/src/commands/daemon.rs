@@ -115,6 +115,7 @@ pub fn cmd_daemon(
     review_blocking: bool,
     auto_rollback: bool,
     shunt_driver_output: bool,
+    impact_slicing: bool,
 ) -> Result<(), String> {
     let auto_rollback = if !auto_rollback {
         false
@@ -193,6 +194,9 @@ pub fn cmd_daemon(
         }
         if !shunt_driver_output {
             cmd.arg("--no-shunt");
+        }
+        if impact_slicing {
+            cmd.arg("--impact-slicing");
         }
         cmd.stdout(std::process::Stdio::from(log_out));
         cmd.stderr(std::process::Stdio::from(log_err));
@@ -273,6 +277,7 @@ pub fn cmd_daemon(
             review_blocking,
             auto_rollback,
             shunt_driver_output,
+            impact_slicing,
         };
 
         let mut runner = DaemonRunner::new(config)
