@@ -1,1241 +1,1148 @@
-diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
-index c58fb26..6ae8d11 100644
---- a/crates/superstate-core/src/daemon.rs
-+++ b/crates/superstate-core/src/daemon.rs
-@@ -1,3 +1,4 @@
-+use crate::impact::{build_sliced_test_cmd, infer_impacted_tests};
- use crate::models::{ExecutionState, ExecutionStatus, LedgerEntry};
- use crate::prompt::{format_retry_failure_section, render_turnkey_prompt, resolve_project_root};
- use crate::state_machine::{
-@@ -12,6 +13,7 @@ use std::hash::{Hash, Hasher};
- use std::io::Write;
- use std::path::{Path, PathBuf};
- use std::process::{Command, Stdio};
-+use std::time::Instant;
- use thiserror::Error;
- 
- /// Closure callback hook for pluggable step advancement across workspace and worktree lifecycles.
-@@ -753,6 +755,156 @@ impl DaemonRunner {
-             }
+diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
+index 268f8e3..266847b 100644
+--- a/crates/superstate-cli/src/commands/daemon.rs
++++ b/crates/superstate-cli/src/commands/daemon.rs
+@@ -116,6 +116,7 @@ pub fn cmd_daemon(
+     auto_rollback: bool,
+     shunt_driver_output: bool,
+     guard_file_reads: bool,
++    guard_commands: bool,
+     impact_slicing: bool,
+ ) -> Result<(), String> {
+     let auto_rollback = if !auto_rollback {
+@@ -196,8 +197,15 @@ pub fn cmd_daemon(
+         if !shunt_driver_output {
+             cmd.arg("--no-shunt");
          }
- 
-+        // Stage 1: Milestone-Scoped Test Impact Slicing (Fast-Fail Pre-Filter)
-+        // Check impacted test suite before running full verification gate to ensure fast feedback.
-+        if self.config.impact_slicing && is_inside_git_repo(&working_dir) {
-+            let start_commit = self.milestone_start_commits.get(&active_task.id);
-+            let impacted = infer_impacted_tests(&working_dir, start_commit.map(|s| s.as_str()));
-+            if !impacted.is_empty() {
-+                if let Some(sliced_cmd) = build_sliced_test_cmd(verify_cmd, &impacted, &working_dir) {
-+                    let slice_start = Instant::now();
-+                    let slice_res = run_verification_cmd(&sliced_cmd, &working_dir, self.config.timeout_secs)?;
-+                    let slice_elapsed = slice_start.elapsed().as_secs();
-+
-+                    if !slice_res.passed {
-+                        // Extract diagnostic failure excerpt from slice output
-+                        let failure_output = if !slice_res.output.trim().is_empty() {
-+                            slice_res.output.trim()
-+                        } else if let Some(ref reason) = slice_res.failure_reason {
-+                            reason.trim()
-+                        } else {
-+                            "Unknown slice test failure"
-+                        };
-+                        let bounded_diag = failure_output.chars().take(1000).collect::<String>();
-+
-+                        // Record fast-fail diagnostics into state notes
-+                        state.notes.push(LedgerEntry::new(
-+                            "superstate-daemon",
-+                            format!(
-+                                "[impact-fail] Task {}: Fast test slice failed in {}s: {}",
-+                                active_task.id, slice_elapsed, bounded_diag
-+                            ),
-+                        ));
-+                        save_state_atomic(&self.config.state_path, &state)?;
-+
-+                        // Update attempt counter and failure diagnostics for subsequent retry
-+                        let attempts = self
-+                            .total_attempts
-+                            .entry(active_task.id.clone())
-+                            .or_insert(0);
-+                        *attempts += 1;
-+                        let attempts_spent = *attempts;
-+
-+                        // Perform rollback to milestone baseline when auto_rollback is enabled
-+                        if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
-+                            self.perform_rollback(
-+                                &active_task.id,
-+                                attempts_spent,
-+                                &working_dir,
-+                                &mut state,
-+                            )?;
-+                        }
-+
-+                        self.last_failure_output
-+                            .insert(active_task.id.clone(), bounded_diag.clone());
-+
-+                        let retries_remaining = self
-+                            .config
-+                            .max_retries
-+                            .saturating_sub(attempts_spent);
-+
-+                        if retries_remaining == 0 {
-+                            if self.config.advisory_gate {
-+                                state.notes.push(LedgerEntry::new(
-+                                    "superstate-daemon",
-+                                    format!(
-+                                        "[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion",
-+                                        active_task.id
-+                                    ),
-+                                ));
-+                                self.retry_counts.remove(&active_task.id);
-+                                self.last_failure_output.remove(&active_task.id);
-+                                self.milestone_start_commits.remove(&active_task.id);
-+
-+                                if let Some(ref mut advancer) = self.step_advancer {
-+                                    save_state_atomic(&self.config.state_path, &state)?;
-+                                    advancer(&self.config.state_path).map_err(DaemonError::StepAdvancer)?;
-+                                    let updated_state = load_state(&self.config.state_path)?;
-+                                    let next_task_id = updated_state.active_task.as_ref().map(|t| t.id.clone());
-+                                    if updated_state.status == ExecutionStatus::Completed {
-+                                        finalize_completed_execution(&self.config.state_path, &updated_state)?;
-+                                    }
-+                                    return Ok(DaemonStepOutcome::Advanced {
-+                                        completed_task_id: active_task.id,
-+                                        next_task_id,
-+                                    });
-+                                }
-+                                match advance_step(&mut state) {
-+                                    Ok(()) => {
-+                                        save_state_atomic(&self.config.state_path, &state)?;
-+                                        let next_task_id = state.active_task.as_ref().map(|t| t.id.clone());
-+                                        if state.status == ExecutionStatus::Completed {
-+                                            finalize_completed_execution(&self.config.state_path, &state)?;
-+                                        }
-+                                        return Ok(DaemonStepOutcome::Advanced {
-+                                            completed_task_id: active_task.id,
-+                                            next_task_id,
-+                                        });
-+                                    }
-+                                    Err(StateError::InvalidTransition(msg)) => {
-+                                        state.status = ExecutionStatus::Blocked;
-+                                        state.notes.push(LedgerEntry::new(
-+                                            "superstate-daemon",
-+                                            format!(
-+                                                "[dag-blocked] Milestone {} completed, but remaining tasks cannot advance: {}",
-+                                                active_task.id, msg
-+                                            ),
-+                                        ));
-+                                        save_state_atomic(&self.config.state_path, &state)?;
-+                                        return Ok(DaemonStepOutcome::Blocked {
-+                                            task_id: active_task.id,
-+                                            reason: msg,
-+                                        });
-+                                    }
-+                                    Err(e) => return Err(DaemonError::State(e)),
-+                                }
-+                            } else {
-+                                state.status = ExecutionStatus::Blocked;
-+                                state.errors.push(format!(
-+                                    "Task '{}' blocked: fast test slice failed and max retries ({}) exhausted: {}",
-+                                    active_task.id, self.config.max_retries, bounded_diag
-+                                ));
-+                                save_state_atomic(&self.config.state_path, &state)?;
-+                                return Ok(DaemonStepOutcome::Blocked {
-+                                    task_id: active_task.id.clone(),
-+                                    reason: format!(
-+                                        "Fast test slice failed and max retries ({}) exhausted: {}",
-+                                        self.config.max_retries, bounded_diag
-+                                    ),
-+                                });
-+                            }
-+                        }
-+
-+                        return Ok(DaemonStepOutcome::Failed {
-+                            task_id: active_task.id,
-+                            reason: format!("Fast test slice failed: {}", bounded_diag),
-+                            retries_remaining,
-+                        });
-+                    } else {
-+                        // Record passing slice progress before executing full gate
-+                        state.notes.push(LedgerEntry::new(
-+                            "superstate-daemon",
-+                            format!(
-+                                "[impact-pass] Task {}: Fast slice passed ({} test files) in {}s, advancing to full gate",
-+                                active_task.id, impacted.len(), slice_elapsed
-+                            ),
-+                        ));
-+                        save_state_atomic(&self.config.state_path, &state)?;
-+                    }
-+                }
+-        if !guard_file_reads {
++        if !guard_file_reads && !guard_commands {
+             cmd.arg("--no-guard");
++        } else {
++            if !guard_file_reads {
++                cmd.arg("--no-file-guard");
 +            }
-+        }
-+
-         // Execute verification gate to evaluate milestone completion
-         let gate_res = run_verification_cmd(verify_cmd, &working_dir, self.config.timeout_secs)?;
++            if !guard_commands {
++                cmd.arg("--no-command-guard");
++            }
+         }
+         if impact_slicing {
+             cmd.arg("--impact-slicing");
+@@ -282,6 +290,7 @@ pub fn cmd_daemon(
+             auto_rollback,
+             shunt_driver_output,
+             guard_file_reads,
++            guard_commands,
+             impact_slicing,
+         };
  
-diff --git a/crates/superstate-core/tests/test_daemon_impact_slicing.rs b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-new file mode 100644
-index 0000000..e5d5411
---- /dev/null
-+++ b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-@@ -0,0 +1,647 @@
-+use std::fs;
-+use std::path::Path;
-+use std::process::Command;
-+use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
-+use superstate_core::models::{ExecutionState, ExecutionStatus, TaskSpec};
-+use superstate_core::state_machine::{load_state, save_state_atomic};
-+
-+/// Helper to configure a temporary git repository rooted on the main branch.
-+fn setup_temp_git_repo(path: &Path) -> String {
-+    let init_res = Command::new("git")
-+        .args(["init", "-b", "main"])
-+        .current_dir(path)
-+        .output();
-+    if let Ok(out) = init_res {
-+        if !out.status.success() {
-+            let _ = Command::new("git").arg("init").current_dir(path).output();
-+            let _ = Command::new("git")
-+                .args(["checkout", "-b", "main"])
-+                .current_dir(path)
-+                .output();
-+        }
+diff --git a/crates/superstate-cli/src/commands/handoff.rs b/crates/superstate-cli/src/commands/handoff.rs
+index 79bf0c7..f585d7b 100644
+--- a/crates/superstate-cli/src/commands/handoff.rs
++++ b/crates/superstate-cli/src/commands/handoff.rs
+@@ -181,6 +181,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
+             false,
+             true,
+             true,
++            true,
+             false,
+         )
+     } else if args.json {
+diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
+index ef14cbb..2a8e73c 100644
+--- a/crates/superstate-cli/src/main.rs
++++ b/crates/superstate-cli/src/main.rs
+@@ -166,6 +166,7 @@ fn main() {
+                 args.use_auto_rollback(),
+                 args.use_shunt(),
+                 args.use_guard(),
++                args.use_command_guard(),
+                 args.impact_slicing,
+             ),
+         },
+diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
+index 7b9ce09..8ddd93b 100644
+--- a/crates/superstate-cli/src/state_cli.rs
++++ b/crates/superstate-cli/src/state_cli.rs
+@@ -349,12 +349,26 @@ pub struct DaemonArgs {
+         help = "Disable automatic tool output shunting during driver execution"
+     )]
+     pub no_shunt: bool,
++    /// Disable all automated PreToolUse guards during driver execution
++    #[arg(
++        long,
++        help = "Disable all automated PreToolUse guards during driver execution"
++    )]
++    pub no_guard: bool,
+     /// Disable automatic file read guard during driver execution
+     #[arg(
+         long,
++        default_value_t = false,
+         help = "Disable automatic file read guard during driver execution"
+     )]
+-    pub no_guard: bool,
++    pub no_file_guard: bool,
++    /// Disable automated PreToolUse command & polling guard
++    #[arg(
++        long,
++        default_value_t = false,
++        help = "Disable automated PreToolUse command & polling guard"
++    )]
++    pub no_command_guard: bool,
+     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
+     #[arg(
+         long,
+@@ -385,7 +399,11 @@ impl DaemonArgs {
+     }
+ 
+     pub fn use_guard(&self) -> bool {
+-        !self.no_guard
++        !self.no_guard && !self.no_file_guard
 +    }
 +
-+    let _ = Command::new("git")
-+        .args(["config", "user.name", "Superstate Test"])
-+        .current_dir(path)
-+        .output();
-+    let _ = Command::new("git")
-+        .args(["config", "user.email", "test@superstate.local"])
-+        .current_dir(path)
-+        .output();
-+
-+    // Create .gitignore to prevent pycache from polluting git status/diff
-+    fs::write(path.join(".gitignore"), "__pycache__/\n*.pyc\n").expect("write .gitignore");
-+
-+    // Create an initial tracked file and commit
-+    fs::write(path.join("tracked.txt"), "initial content\n").expect("write tracked.txt");
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(path)
-+        .output();
-+    let _ = Command::new("git")
-+        .args(["commit", "-m", "initial commit"])
-+        .current_dir(path)
-+        .output();
-+
-+    let head_out = Command::new("git")
-+        .args(["rev-parse", "HEAD"])
-+        .current_dir(path)
-+        .output()
-+        .expect("git rev-parse HEAD");
-+    String::from_utf8_lossy(&head_out.stdout).trim().to_string()
++    pub fn use_command_guard(&self) -> bool {
++        !self.no_guard && !self.no_command_guard
+     }
+ }
+ 
+@@ -603,6 +621,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
+                 let auto_rollback = args.use_auto_rollback();
+                 let shunt_driver_output = args.use_shunt();
+                 let guard_file_reads = args.use_guard();
++                let guard_commands = args.use_command_guard();
+                 commands::daemon::cmd_daemon(
+                     &resolve(args.state),
+                     args.driver.as_deref(),
+@@ -614,6 +633,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
+                     auto_rollback,
+                     shunt_driver_output,
+                     guard_file_reads,
++                    guard_commands,
+                     args.impact_slicing,
+                 )
+             }
+diff --git a/crates/superstate-cli/tests/test_cli_daemon_guard.rs b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
+index efe5416..38956c3 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_guard.rs
++++ b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
+@@ -15,6 +15,10 @@ fn test_cli_no_guard_flag_parsing() {
+                 !daemon_args.use_guard(),
+                 "Expected use_guard() to return false when --no-guard is passed"
+             );
++            assert!(
++                !daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return false when --no-guard is passed"
++            );
+         }
+         _ => panic!("Expected Commands::Daemon"),
+     }
+@@ -33,6 +37,97 @@ fn test_cli_no_guard_flag_default_false() {
+                 daemon_args.use_guard(),
+                 "Expected use_guard() to default to true"
+             );
++            assert!(
++                daemon_args.use_command_guard(),
++                "Expected use_command_guard() to default to true"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
 +}
 +
 +#[test]
-+fn test_daemon_impact_slicing_fast_fail_skips_full_gate() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    let initial_commit = setup_temp_git_repo(repo_root);
-+    assert!(!initial_commit.is_empty());
++fn test_cli_no_command_guard_flag_parsing() {
++    let args = StateArgs::try_parse_from(["state", "daemon", "--no-command-guard"])
++        .expect("Failed to parse --no-command-guard flag");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(
++                daemon_args.no_command_guard,
++                "Expected no_command_guard to be true when --no-command-guard is passed"
++            );
++            assert!(
++                !daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return false when --no-command-guard is passed"
++            );
++            assert!(
++                daemon_args.use_guard(),
++                "Expected use_guard() to return true when only --no-command-guard is passed"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
 +
-+    // Create source and failing test files
-+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
-+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
-+    fs::write(
-+        repo_root.join("src/lib.py"),
-+        "def compute(a, b): return a + b\n",
-+    )
-+    .expect("write src/lib.py");
-+    fs::write(
-+        repo_root.join("tests/test_lib.py"),
-+        "def test_failing_slice(): assert False\n",
-+    )
-+    .expect("write tests/test_lib.py");
++#[test]
++fn test_cli_no_command_guard_default_false() {
++    let args = StateArgs::try_parse_from(["state", "daemon"]).expect("Failed to parse daemon args");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(
++                !daemon_args.no_command_guard,
++                "Expected no_command_guard to default to false"
++            );
++            assert!(
++                daemon_args.use_command_guard(),
++                "Expected use_command_guard() to default to true"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
 +
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(repo_root)
-+        .output();
++#[test]
++fn test_cli_no_file_guard_flag_parsing() {
++    let args = StateArgs::try_parse_from(["state", "daemon", "--no-file-guard"])
++        .expect("Failed to parse --no-file-guard flag");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(
++                daemon_args.no_file_guard,
++                "Expected no_file_guard to be true when --no-file-guard is passed"
++            );
++            assert!(
++                !daemon_args.use_guard(),
++                "Expected use_guard() to return false when --no-file-guard is passed"
++            );
++            assert!(
++                daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return true when only --no-file-guard is passed"
++            );
++        }
++        _ => panic!("Expected Commands::Daemon"),
++    }
++}
 +
-+    // Initialize execution state targeting in-place repository
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
++#[test]
++fn test_cli_no_guard_disables_both() {
++    let args = StateArgs::try_parse_from(["state", "daemon", "--no-guard"])
++        .expect("Failed to parse --no-guard flag");
++    match args.command {
++        Commands::Daemon(daemon_args) => {
++            assert!(
++                daemon_args.no_guard,
++                "Expected no_guard to be true when --no-guard is passed"
++            );
++            assert!(
++                !daemon_args.use_guard(),
++                "Expected use_guard() to return false when --no-guard is passed"
++            );
++            assert!(
++                !daemon_args.use_command_guard(),
++                "Expected use_command_guard() to return false when --no-guard is passed"
++            );
+         }
+         _ => panic!("Expected Commands::Daemon"),
+     }
+diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+index 7da21c0..2fd7828 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
++++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
+@@ -45,6 +45,7 @@ fn test_cli_daemon_lifecycle() {
+         false,
+         true,
+         true,
++        true,
+         false,
+     )
+     .unwrap();
+@@ -116,6 +117,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
+         false,
+         true,
+         true,
++        true,
+         false,
+     )
+     .unwrap();
+diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
+index 0f400e4..893a826 100644
+--- a/crates/superstate-core/src/daemon.rs
++++ b/crates/superstate-core/src/daemon.rs
+@@ -202,6 +202,9 @@ pub struct DaemonConfig {
+     /// Automatically guard file reads and shunt large files to symbol outlines
+     #[serde(default = "default_true")]
+     pub guard_file_reads: bool,
++    /// Automatically guard tool execution and poll commands with debounce
++    #[serde(default = "default_true")]
++    pub guard_commands: bool,
+     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
+     #[serde(default)]
+     pub impact_slicing: bool,
+@@ -220,6 +223,7 @@ impl Default for DaemonConfig {
+             auto_rollback: true,
+             shunt_driver_output: true,
+             guard_file_reads: true,
++            guard_commands: true,
+             impact_slicing: false,
+         }
+     }
+@@ -787,16 +791,28 @@ impl DaemonRunner {
+                 }
+             }
+ 
+-            // WHY: Intercept driver file read operations (> 200 lines) transparently via PreToolUse hooks
+-            // WHAT: Provision .agents/hooks.json in the workspace root if not already present
+-            // HOW: Serialize PreToolUse matcher invoking `superstate guard pre-tool-use`
+-            if self.config.guard_file_reads {
++            // WHY: Intercept driver file reads (> 200 lines) and rapid polling commands via PreToolUse hooks
++            // WHAT: Provision or merge hooks into .agents/hooks.json in the workspace root
++            // HOW: Serialize PreToolUse matchers for active guards, merging with existing hooks if present
++            if self.config.guard_file_reads || self.config.guard_commands {
+                 let agents_dir = working_dir.join(".agents");
+                 fs::create_dir_all(&agents_dir)?;
+                 let hooks_file = agents_dir.join("hooks.json");
+-                if !hooks_file.exists() {
+-                    let hooks_content = serde_json::json!({
+-                        "superstate-file-guard": {
++
++                let mut hooks_obj = if hooks_file.exists() {
++                    let existing_content = fs::read_to_string(&hooks_file).unwrap_or_default();
++                    match serde_json::from_str::<serde_json::Value>(&existing_content) {
++                        Ok(serde_json::Value::Object(map)) => map,
++                        _ => serde_json::Map::new(),
++                    }
++                } else {
++                    serde_json::Map::new()
++                };
++
++                if self.config.guard_file_reads && !hooks_obj.contains_key("superstate-file-guard") {
++                    hooks_obj.insert(
++                        "superstate-file-guard".to_string(),
++                        serde_json::json!({
+                             "PreToolUse": [
+                                 {
+                                     "matcher": "view_file|View|read_file",
+@@ -807,28 +823,48 @@ impl DaemonRunner {
+                                     ]
+                                 }
+                             ]
++                        }),
++                    );
++                }
++
++                if self.config.guard_commands && !hooks_obj.contains_key("superstate-command-guard") {
++                    hooks_obj.insert(
++                        "superstate-command-guard".to_string(),
++                        serde_json::json!({
++                            "PreToolUse": [
++                                {
++                                    "matcher": "run_command|manage_task",
++                                    "hooks": [
++                                        {
++                                            "command": "superstate guard pre-command --debounce-sec 30"
++                                        }
++                                    ]
++                                }
++                            ]
++                        }),
++                    );
++                }
++
++                let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(hooks_obj))?;
++                fs::write(&hooks_file, serialized)?;
++
++                // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
++                // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
++                // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
++                let git_info_dir = working_dir.join(".git").join("info");
++                if git_info_dir.exists() {
++                    let exclude_file = git_info_dir.join("exclude");
++                    let content = fs::read_to_string(&exclude_file).unwrap_or_default();
++                    let already_excluded = content
++                        .lines()
++                        .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
++                    if !already_excluded {
++                        let mut new_content = content;
++                        if !new_content.is_empty() && !new_content.ends_with('\n') {
++                            new_content.push('\n');
+                         }
+-                    });
+-                    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_content)?)?;
+-
+-                    // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
+-                    // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
+-                    // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
+-                    let git_info_dir = working_dir.join(".git").join("info");
+-                    if git_info_dir.exists() {
+-                        let exclude_file = git_info_dir.join("exclude");
+-                        let content = fs::read_to_string(&exclude_file).unwrap_or_default();
+-                        let already_excluded = content
+-                            .lines()
+-                            .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
+-                        if !already_excluded {
+-                            let mut new_content = content;
+-                            if !new_content.is_empty() && !new_content.ends_with('\n') {
+-                                new_content.push('\n');
+-                            }
+-                            new_content.push_str(".agents/\n");
+-                            fs::write(&exclude_file, new_content)?;
+-                        }
++                        new_content.push_str(".agents/\n");
++                        fs::write(&exclude_file, new_content)?;
+                     }
+                 }
+             }
+diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+index 0bae88d..a9cc1e0 100644
+--- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
++++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
+@@ -72,6 +72,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -127,6 +128,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -196,6 +198,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -255,6 +258,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -315,6 +319,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -368,6 +373,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
+index 997a5f6..87ca59b 100644
+--- a/crates/superstate-core/tests/test_daemon_automerge.rs
++++ b/crates/superstate-core/tests/test_daemon_automerge.rs
+@@ -124,6 +124,7 @@ fn test_daemon_automerge_on_completion() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -222,6 +223,7 @@ fn test_daemon_completion_in_place_mode() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -286,6 +288,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -310,6 +313,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     })
+     .expect("create second runner");
+diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+index 3edeeb0..397f683 100644
+--- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
++++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
+@@ -94,6 +94,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -178,6 +179,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -226,6 +228,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -305,6 +308,7 @@ EOF
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_dag_execution.rs b/crates/superstate-core/tests/test_daemon_dag_execution.rs
+index 38e143e..daff0f5 100644
+--- a/crates/superstate-core/tests/test_daemon_dag_execution.rs
++++ b/crates/superstate-core/tests/test_daemon_dag_execution.rs
+@@ -104,6 +104,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
+         auto_rollback: true,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -200,6 +201,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
+         auto_rollback: true,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -288,6 +290,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_guard.rs b/crates/superstate-core/tests/test_daemon_guard.rs
+index 17cfedb..897c57d 100644
+--- a/crates/superstate-core/tests/test_daemon_guard.rs
++++ b/crates/superstate-core/tests/test_daemon_guard.rs
+@@ -13,6 +13,15 @@ fn test_daemon_config_default_guard_file_reads() {
+     );
+ }
+ 
++#[test]
++fn test_daemon_config_default_guard_commands() {
++    let config = DaemonConfig::default();
++    assert!(
++        config.guard_commands,
++        "DaemonConfig::default().guard_commands must default to true"
++    );
++}
++
+ #[test]
+ fn test_daemon_config_deserialize_defaults_guard_file_reads_to_true() {
+     let json_str = r#"{
+@@ -31,6 +40,24 @@ fn test_daemon_config_deserialize_defaults_guard_file_reads_to_true() {
+     );
+ }
+ 
++#[test]
++fn test_daemon_config_deserialize_defaults_guard_commands_to_true() {
++    let json_str = r#"{
++        "state_path": ".agent-state/state.json",
++        "driver_cmd": null,
++        "max_retries": 3,
++        "timeout_secs": 120,
++        "advisory_gate": false,
++        "advisory_review": false,
++        "review_blocking": false
++    }"#;
++    let config: DaemonConfig = serde_json::from_str(json_str).expect("deserialize config");
++    assert!(
++        config.guard_commands,
++        "deserialized DaemonConfig without guard_commands field must default to true"
++    );
++}
++
+ #[test]
+ fn test_daemon_runner_provisions_hooks_json() {
+     let dir = tempdir().unwrap();
+@@ -63,6 +90,7 @@ fn test_daemon_runner_provisions_hooks_json() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: true,
++        guard_commands: true,
+         impact_slicing: false,
+     };
+ 
+@@ -73,23 +101,153 @@ fn test_daemon_runner_provisions_hooks_json() {
+     let hooks_file = dir.path().join(".agents/hooks.json");
+     assert!(
+         hooks_file.exists(),
+-        ".agents/hooks.json must be provisioned when guard_file_reads is true"
++        ".agents/hooks.json must be provisioned when guards are active"
+     );
+ 
+     let content = fs::read_to_string(&hooks_file).unwrap();
+     let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
+ 
+-    let hook_entry = &json["superstate-file-guard"]["PreToolUse"][0];
++    let file_hook_entry = &json["superstate-file-guard"]["PreToolUse"][0];
+     assert_eq!(
+-        hook_entry["matcher"].as_str(),
++        file_hook_entry["matcher"].as_str(),
+         Some("view_file|View|read_file"),
+         "matcher must match view_file|View|read_file"
+     );
+     assert_eq!(
+-        hook_entry["hooks"][0]["command"].as_str(),
++        file_hook_entry["hooks"][0]["command"].as_str(),
+         Some("superstate guard pre-tool-use --threshold-lines 200"),
+         "hook command must be superstate guard pre-tool-use --threshold-lines 200"
+     );
++
++    let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
++    assert_eq!(
++        cmd_hook_entry["matcher"].as_str(),
++        Some("run_command|manage_task"),
++        "matcher must match run_command|manage_task"
++    );
++    assert_eq!(
++        cmd_hook_entry["hooks"][0]["command"].as_str(),
++        Some("superstate guard pre-command --debounce-sec 30"),
++        "hook command must be superstate guard pre-command --debounce-sec 30"
++    );
++}
++
++#[test]
++fn test_daemon_provisions_command_guard_in_hooks_json() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("state.json");
 +
 +    let state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
 +        active_task: Some(TaskSpec {
-+            id: "task-impact-fail-1".to_string(),
-+            title: "Task with failing impacted test slice".to_string(),
-+            verification_cmd: Some(
-+                "pytest tests/ && touch full_gate_ran.txt && exit 0".to_string(),
-+            ),
-+            ..Default::default()
++            id: "task-cmd-guard".to_string(),
++            title: "Test Command Guard".to_string(),
++            depends_on: vec![],
++            files_modify: vec![],
++            verification_cmd: Some("test -f driver_evidence.txt".to_string()),
 +        }),
-+        pending_tasks: Vec::new(),
-+        active_worktree: None,
-+        active_branch: Some("main".to_string()),
-+        base_branch: Some("main".to_string()),
 +        no_worktree: true,
-+        goal: Some("Test fast-fail test impact slicing".to_string()),
++        goal: Some("Test automated command guard hook provisioning".to_string()),
 +        ..Default::default()
 +    };
-+    save_state_atomic(&state_path, &state).expect("save state");
++    save_state_atomic(&state_file, &state).unwrap();
++
++    let driver_cmd = "echo 'driver ran' > driver_evidence.txt";
 +
 +    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 3,
++        state_path: state_file,
++        driver_cmd: Some(driver_cmd.to_string()),
++        max_retries: 1,
 +        timeout_secs: 10,
 +        advisory_gate: false,
 +        advisory_review: false,
 +        review_blocking: false,
 +        auto_rollback: false,
 +        shunt_driver_output: false,
-+        impact_slicing: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let outcome = runner.step().expect("runner step");
-+
-+    // 1. Outcome must be Failed
-+    assert!(
-+        matches!(outcome, DaemonStepOutcome::Failed { .. }),
-+        "expected Failed outcome, got {:?}",
-+        outcome
-+    );
-+
-+    // 2. Full gate was skipped: full_gate_ran.txt must NOT exist
-+    assert!(
-+        !repo_root.join("full_gate_ran.txt").exists(),
-+        "full gate command should have been skipped on fast fail"
-+    );
-+
-+    // 3. State notes must contain [impact-fail]
-+    let updated_state = load_state(&state_path).expect("load state");
-+    let has_impact_fail_note = updated_state
-+        .notes
-+        .iter()
-+        .any(|n| n.note.contains("[impact-fail]"));
-+    assert!(
-+        has_impact_fail_note,
-+        "state notes should contain [impact-fail], got: {:?}",
-+        updated_state.notes
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_impact_slicing_passing_slice_executes_full_gate() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    let initial_commit = setup_temp_git_repo(repo_root);
-+    assert!(!initial_commit.is_empty());
-+
-+    // Create source and passing test files
-+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
-+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
-+    fs::write(
-+        repo_root.join("src/lib.py"),
-+        "def compute(a, b): return a + b\n",
-+    )
-+    .expect("write src/lib.py");
-+    fs::write(
-+        repo_root.join("tests/test_lib.py"),
-+        "def test_passing_slice(): assert True\n",
-+    )
-+    .expect("write tests/test_lib.py");
-+
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(repo_root)
-+        .output();
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
-+        active_task: Some(TaskSpec {
-+            id: "task-impact-pass-1".to_string(),
-+            title: "Task with passing impacted test slice".to_string(),
-+            verification_cmd: Some(
-+                "pytest tests/ && touch full_gate_ran.txt && exit 0".to_string(),
-+            ),
-+            ..Default::default()
-+        }),
-+        pending_tasks: Vec::new(),
-+        active_worktree: None,
-+        active_branch: Some("main".to_string()),
-+        base_branch: Some("main".to_string()),
-+        no_worktree: true,
-+        goal: Some("Test passing slice executes full gate".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+        impact_slicing: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let outcome = runner.step().expect("runner step");
-+
-+    // 1. Outcome must be Advanced
-+    assert!(
-+        outcome.is_advanced(),
-+        "expected Advanced outcome, got {:?}",
-+        outcome
-+    );
-+
-+    // 2. Full gate was executed: full_gate_ran.txt MUST exist
-+    assert!(
-+        repo_root.join("full_gate_ran.txt").exists(),
-+        "full gate command should have executed and touched full_gate_ran.txt"
-+    );
-+
-+    // 3. State notes must contain [impact-pass]
-+    let updated_state = load_state(&state_path).expect("load state");
-+    let has_impact_pass_note = updated_state
-+        .notes
-+        .iter()
-+        .any(|n| n.note.contains("[impact-pass]"));
-+    assert!(
-+        has_impact_pass_note,
-+        "state notes should contain [impact-pass], got: {:?}",
-+        updated_state.notes
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    let initial_commit = setup_temp_git_repo(repo_root);
-+    assert!(!initial_commit.is_empty());
-+
-+    // Modify a non-source or non-test file (no test candidates exist)
-+    fs::write(repo_root.join("docs.txt"), "documentation update\n").expect("write docs.txt");
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(repo_root)
-+        .output();
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
-+        active_task: Some(TaskSpec {
-+            id: "task-zero-impacted-1".to_string(),
-+            title: "Task with zero impacted test files".to_string(),
-+            verification_cmd: Some("touch full_gate_ran.txt && exit 0".to_string()),
-+            ..Default::default()
-+        }),
-+        pending_tasks: Vec::new(),
-+        active_worktree: None,
-+        active_branch: Some("main".to_string()),
-+        base_branch: Some("main".to_string()),
-+        no_worktree: true,
-+        goal: Some("Test fallback when zero tests are impacted".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+        impact_slicing: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let outcome = runner.step().expect("runner step");
-+
-+    // 1. Outcome must be Advanced
-+    assert!(
-+        outcome.is_advanced(),
-+        "expected Advanced outcome, got {:?}",
-+        outcome
-+    );
-+
-+    // 2. Full gate was executed: full_gate_ran.txt MUST exist
-+    assert!(
-+        repo_root.join("full_gate_ran.txt").exists(),
-+        "full gate command should have executed and touched full_gate_ran.txt"
-+    );
-+
-+    // 3. Neither impact-fail nor impact-pass should be recorded
-+    let updated_state = load_state(&state_path).expect("load state");
-+    let has_impact_note = updated_state
-+        .notes
-+        .iter()
-+        .any(|n| n.note.contains("[impact-pass]") || n.note.contains("[impact-fail]"));
-+    assert!(
-+        !has_impact_note,
-+        "state notes should not contain impact notes when no tests impacted, got: {:?}",
-+        updated_state.notes
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_impact_slicing_disabled_by_default() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    let initial_commit = setup_temp_git_repo(repo_root);
-+    assert!(!initial_commit.is_empty());
-+
-+    // Create failing test file that would fail if sliced
-+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
-+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
-+    fs::write(
-+        repo_root.join("src/lib.py"),
-+        "def compute(a, b): return a + b\n",
-+    )
-+    .expect("write src/lib.py");
-+    fs::write(
-+        repo_root.join("tests/test_lib.py"),
-+        "def test_failing_slice(): assert False\n",
-+    )
-+    .expect("write tests/test_lib.py");
-+
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(repo_root)
-+        .output();
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
-+        active_task: Some(TaskSpec {
-+            id: "task-disabled-impact-1".to_string(),
-+            title: "Task with impact slicing disabled".to_string(),
-+            verification_cmd: Some("touch full_gate_ran.txt && exit 0".to_string()),
-+            ..Default::default()
-+        }),
-+        pending_tasks: Vec::new(),
-+        active_worktree: None,
-+        active_branch: Some("main".to_string()),
-+        base_branch: Some("main".to_string()),
-+        no_worktree: true,
-+        goal: Some("Test impact slicing disabled by default".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    // impact_slicing is false
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
++        guard_file_reads: true,
++        guard_commands: true,
 +        impact_slicing: false,
 +    };
 +
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let outcome = runner.step().expect("runner step");
-+
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
 +    assert!(outcome.is_advanced());
-+    assert!(repo_root.join("full_gate_ran.txt").exists());
 +
-+    let updated_state = load_state(&state_path).expect("load state");
-+    let has_impact_note = updated_state
-+        .notes
-+        .iter()
-+        .any(|n| n.note.contains("[impact-pass]") || n.note.contains("[impact-fail]"));
-+    assert!(!has_impact_note);
-+}
-+
-+#[test]
-+fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    let initial_commit = setup_temp_git_repo(repo_root);
-+    assert!(!initial_commit.is_empty());
-+
-+    // Create source and failing test files
-+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
-+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
-+    fs::write(
-+        repo_root.join("src/lib.py"),
-+        "def compute(a, b): return a + b\n",
-+    )
-+    .expect("write src/lib.py");
-+    fs::write(
-+        repo_root.join("tests/test_lib.py"),
-+        "def test_failing_slice(): assert False\n",
-+    )
-+    .expect("write tests/test_lib.py");
-+
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(repo_root)
-+        .output();
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
-+        active_task: Some(TaskSpec {
-+            id: "task-rollback-1".to_string(),
-+            title: "Task with failing slice and auto-rollback".to_string(),
-+            verification_cmd: Some(
-+                "pytest tests/ && touch full_gate_ran.txt && exit 0".to_string(),
-+            ),
-+            ..Default::default()
-+        }),
-+        pending_tasks: Vec::new(),
-+        active_worktree: None,
-+        active_branch: Some("main".to_string()),
-+        base_branch: Some("main".to_string()),
-+        no_worktree: true,
-+        goal: Some("Test fast-fail with auto-rollback".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 3,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: true,
-+        shunt_driver_output: false,
-+        impact_slicing: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let outcome = runner.step().expect("runner step");
-+
-+    assert!(matches!(outcome, DaemonStepOutcome::Failed { .. }));
-+    assert!(!repo_root.join("full_gate_ran.txt").exists());
-+
-+    // Both [impact-fail] and [rollback] notes should be in state notes
-+    let updated_state = load_state(&state_path).expect("load state");
-+    assert!(updated_state.notes.iter().any(|n| n.note.contains("[impact-fail]")));
-+    assert!(updated_state.notes.iter().any(|n| n.note.contains("[rollback]")));
-+}
-+
-+#[test]
-+fn test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    let initial_commit = setup_temp_git_repo(repo_root);
-+    assert!(!initial_commit.is_empty());
-+
-+    // Create source and failing test files
-+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
-+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
-+    fs::write(
-+        repo_root.join("src/lib.py"),
-+        "def compute(a, b): return a + b\n",
-+    )
-+    .expect("write src/lib.py");
-+    fs::write(
-+        repo_root.join("tests/test_lib.py"),
-+        "def test_failing_slice(): assert False\n",
-+    )
-+    .expect("write tests/test_lib.py");
-+
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(repo_root)
-+        .output();
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
-+
-+    let state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
-+        active_task: Some(TaskSpec {
-+            id: "task-impact-exhaust-1".to_string(),
-+            title: "Task with failing slice exhausting retries".to_string(),
-+            verification_cmd: Some(
-+                "pytest tests/ && touch full_gate_ran.txt && exit 0".to_string(),
-+            ),
-+            ..Default::default()
-+        }),
-+        pending_tasks: Vec::new(),
-+        active_worktree: None,
-+        active_branch: Some("main".to_string()),
-+        base_branch: Some("main".to_string()),
-+        no_worktree: true,
-+        goal: Some("Test retry exhaustion and blocking on fast slice failure".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_path, &state).expect("save state");
-+
-+    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
-+        max_retries: 1,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+        impact_slicing: true,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let outcome = runner.step().expect("runner step");
-+
-+    // Must return Blocked outcome
++    let hooks_file = dir.path().join(".agents/hooks.json");
 +    assert!(
-+        matches!(outcome, DaemonStepOutcome::Blocked { .. }),
-+        "expected Blocked outcome when retries are exhausted, got {:?}",
-+        outcome
++        hooks_file.exists(),
++        ".agents/hooks.json must be provisioned when guard_commands is true"
 +    );
 +
-+    // State file must reflect Blocked status and contain error message
-+    let updated_state = load_state(&state_path).expect("load state");
++    let content = fs::read_to_string(&hooks_file).unwrap();
++    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
++
++    let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
 +    assert_eq!(
-+        updated_state.status,
-+        ExecutionStatus::Blocked,
-+        "state status should be Blocked"
++        cmd_hook_entry["matcher"].as_str(),
++        Some("run_command|manage_task"),
++        "matcher must match run_command|manage_task"
 +    );
-+    assert!(
-+        updated_state.errors.iter().any(|e| e.contains("blocked")),
-+        "state errors should contain blocked diagnostic, got: {:?}",
-+        updated_state.errors
++    assert_eq!(
++        cmd_hook_entry["hooks"][0]["command"].as_str(),
++        Some("superstate guard pre-command --debounce-sec 30"),
++        "hook command must be superstate guard pre-command --debounce-sec 30"
 +    );
 +}
 +
 +#[test]
-+fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
-+    let temp_dir = tempfile::tempdir().expect("create temp dir");
-+    let repo_root = temp_dir.path();
-+    let initial_commit = setup_temp_git_repo(repo_root);
-+    assert!(!initial_commit.is_empty());
-+
-+    // Create source and failing test files
-+    fs::create_dir_all(repo_root.join("src")).expect("create src dir");
-+    fs::create_dir_all(repo_root.join("tests")).expect("create tests dir");
-+    fs::write(
-+        repo_root.join("src/lib.py"),
-+        "def compute(a, b): return a + b\n",
-+    )
-+    .expect("write src/lib.py");
-+    fs::write(
-+        repo_root.join("tests/test_lib.py"),
-+        "def test_failing_slice(): assert False\n",
-+    )
-+    .expect("write tests/test_lib.py");
-+
-+    let _ = Command::new("git")
-+        .args(["add", "."])
-+        .current_dir(repo_root)
-+        .output();
-+
-+    let state_dir = repo_root.join(".agent-state");
-+    fs::create_dir_all(&state_dir).expect("create state dir");
-+    let state_path = state_dir.join("state.json");
++fn test_daemon_no_command_guard_disables_provisioning() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("state.json");
 +
 +    let state = ExecutionState {
-+        status: ExecutionStatus::InProgress,
-+        step: 1,
 +        active_task: Some(TaskSpec {
-+            id: "task-impact-advisory-1".to_string(),
-+            title: "Task with failing slice and advisory gate".to_string(),
-+            verification_cmd: Some(
-+                "pytest tests/ && touch full_gate_ran.txt && exit 0".to_string(),
-+            ),
-+            ..Default::default()
++            id: "task-no-cmd".to_string(),
++            title: "Test No Command Guard".to_string(),
++            depends_on: vec![],
++            files_modify: vec![],
++            verification_cmd: Some("test -f no_cmd_evidence.txt".to_string()),
 +        }),
-+        pending_tasks: Vec::new(),
-+        active_worktree: None,
-+        active_branch: Some("main".to_string()),
-+        base_branch: Some("main".to_string()),
 +        no_worktree: true,
-+        goal: Some("Test advisory advancement on fast slice failure exhaustion".to_string()),
++        goal: Some("Test disabling command guard provisioning".to_string()),
 +        ..Default::default()
 +    };
-+    save_state_atomic(&state_path, &state).expect("save state");
++    save_state_atomic(&state_file, &state).unwrap();
++
++    let driver_cmd = "echo 'ran' > no_cmd_evidence.txt";
 +
 +    let config = DaemonConfig {
-+        state_path: state_path.clone(),
-+        driver_cmd: None,
++        state_path: state_file,
++        driver_cmd: Some(driver_cmd.to_string()),
 +        max_retries: 1,
 +        timeout_secs: 10,
-+        advisory_gate: true,
++        advisory_gate: false,
 +        advisory_review: false,
 +        review_blocking: false,
 +        auto_rollback: false,
 +        shunt_driver_output: false,
-+        impact_slicing: true,
++        guard_file_reads: true,
++        guard_commands: false,
++        impact_slicing: false,
 +    };
 +
-+    let mut runner = DaemonRunner::new(config).expect("create runner");
-+    let outcome = runner.step().expect("runner step");
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++    assert!(outcome.is_advanced());
++
++    let hooks_file = dir.path().join(".agents/hooks.json");
++    assert!(hooks_file.exists());
++
++    let content = fs::read_to_string(&hooks_file).unwrap();
++    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
 +
 +    assert!(
-+        matches!(outcome, DaemonStepOutcome::Advanced { .. }),
-+        "expected Advanced outcome when advisory gate is enabled, got {:?}",
-+        outcome
++        !json["superstate-file-guard"].is_null(),
++        "superstate-file-guard must be present when guard_file_reads is true"
 +    );
-+
-+    let updated_state = load_state(&state_path).expect("load state");
 +    assert!(
-+        updated_state
-+            .notes
-+            .iter()
-+            .any(|n| n.note.contains("[impact-advisory]")),
-+        "state notes should contain [impact-advisory], got: {:?}",
-+        updated_state.notes
++        json["superstate-command-guard"].is_null(),
++        "superstate-command-guard must NOT be present when guard_commands is false"
++    );
+ }
+ 
+ #[test]
+@@ -124,6 +282,7 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -134,36 +293,83 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
+     let hooks_file = dir.path().join(".agents/hooks.json");
+     assert!(
+         !hooks_file.exists(),
+-        ".agents/hooks.json must not be provisioned when guard_file_reads is false"
++        ".agents/hooks.json must not be provisioned when both guard flags are false"
+     );
+ }
+ 
+ #[test]
+-fn test_daemon_runner_preserves_existing_hooks_json() {
++fn test_daemon_no_guard_disables_both() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("state.json");
++
++    let state = ExecutionState {
++        active_task: Some(TaskSpec {
++            id: "task-no-guards".to_string(),
++            title: "Test No Guards".to_string(),
++            depends_on: vec![],
++            files_modify: vec![],
++            verification_cmd: Some("test -f no_guards_evidence.txt".to_string()),
++        }),
++        no_worktree: true,
++        goal: Some("Test disabling both guards".to_string()),
++        ..Default::default()
++    };
++    save_state_atomic(&state_file, &state).unwrap();
++
++    let driver_cmd = "echo 'ran' > no_guards_evidence.txt";
++
++    let config = DaemonConfig {
++        state_path: state_file,
++        driver_cmd: Some(driver_cmd.to_string()),
++        max_retries: 1,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: false,
++        shunt_driver_output: false,
++        guard_file_reads: false,
++        guard_commands: false,
++        impact_slicing: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++    assert!(outcome.is_advanced());
++
++    let hooks_file = dir.path().join(".agents/hooks.json");
++    assert!(
++        !hooks_file.exists(),
++        ".agents/hooks.json must not be provisioned when guard_file_reads and guard_commands are false"
 +    );
 +}
 +
-+
-+
-diff --git a/docs/superpowers/plans/task-3-brief.md b/docs/superpowers/plans/task-3-brief.md
-index c0a6d58..3dd8a2c 100644
---- a/docs/superpowers/plans/task-3-brief.md
-+++ b/docs/superpowers/plans/task-3-brief.md
-@@ -1,52 +1,74 @@
--# Task 3 Brief: CLI Integration & Verification
--
--## Working Directory
--`/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-dag-execution`
--Branch: `feat/daemon-dag-execution`
--
--## Goal
--Verify and ensure seamless CLI integration for arbitrary DAG milestone execution via `superstate state init --milestones <JSON>` and `superstate state daemon`.
-+# Task 3 Brief: Two-Tier Gate Execution in `DaemonRunner::step()`
++#[test]
++fn test_daemon_merges_hooks_when_file_exists() {
+     let dir = tempdir().unwrap();
+     let state_file = dir.path().join("state.json");
  
- ## Global Constraints
- - Compile cleanly with `cargo check --all` and pass `cargo test --all`.
--- No new external crate dependencies.
--- Zero network I/O or direct API keys in Rust binary.
--- Use `--no-gpg-sign` for git commits.
--- Follow strict Test-Driven Development (TDD).
--
--## Requirements
--
--### 1. `crates/superstate-cli/src/commands/state.rs`
--- Verify that `cmd_init` correctly parses JSON milestones with `id` and `depends_on` (now supported by `MilestoneSpec` in `superstate-core`).
--- Ensure any CLI error reporting when `init_state_milestones` returns `StateError::InvalidTransition` (e.g. initial deadlock) is clean and informative.
-+- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
-+- Skip GPG verification on all commits (`--no-gpg-sign`).
-+- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
+     let agents_dir = dir.path().join(".agents");
+     fs::create_dir_all(&agents_dir).unwrap();
+     let hooks_file = agents_dir.join("hooks.json");
+-    let custom_json = r#"{"custom_hook": true}"#;
++    let custom_json = r#"{"custom_hook": {"PreToolUse": [{"matcher": "foo", "hooks": []}]}}"#;
+     fs::write(&hooks_file, custom_json).unwrap();
  
--### 2. Integration Tests: `crates/superstate-cli/tests/test_cli_dag_daemon.rs`
--Write tests covering:
--1. `test_cli_diamond_dag_daemon_execution`:
--   - Initialize git repo in a temp dir.
--   - Run `superstate state init --milestones` with a diamond DAG:
--     - `task-a`: creates `a.txt`, verify `test -f a.txt`, depends: `[]`
--     - `task-b`: creates `b.txt`, verify `test -f b.txt`, depends: `["task-a"]`
--     - `task-c`: creates `c.txt`, verify `test -f c.txt`, depends: `["task-a"]`
--     - `task-d`: creates `d.txt`, verify `test -f d.txt`, depends: `["task-b", "task-c"]`
--   - Use a mock driver script (checking `$SUPERSTATE_ACTIVE_TASK` to touch the corresponding file).
--   - Run `DaemonRunner` (or invoke `superstate state daemon`).
--   - Verify state file reaches `status: "completed"` and all 4 tasks are in `completed_tasks`.
--   - Verify git history has milestone checkpoint commits for all 4 tasks.
--2. `test_cli_deadlocked_dag_daemon_halts_blocked`:
--   - Initialize state with a task that depends on a non-existent milestone.
--   - Run daemon.
--   - Verify state file has `status: "blocked"` and contains a `[dag-blocked]` note in `notes`.
-+## Task Details
-+- **Task:** Task 3: Two-Tier Gate Execution in `DaemonRunner::step()`
-+- **Depends on:** Task 1, Task 2
-+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
+     let state = ExecutionState {
+         active_task: Some(TaskSpec {
+-            id: "task-3".to_string(),
+-            title: "Test Preserve Hooks".to_string(),
++            id: "task-merge".to_string(),
++            title: "Test Merge Hooks".to_string(),
+             depends_on: vec![],
+             files_modify: vec![],
+-            verification_cmd: Some("test -f preserve_evidence.txt".to_string()),
++            verification_cmd: Some("test -f merge_evidence.txt".to_string()),
+         }),
+         no_worktree: true,
+-        goal: Some("Test preserving existing hooks.json".to_string()),
++        goal: Some("Test merging into existing hooks.json".to_string()),
+         ..Default::default()
+     };
+     save_state_atomic(&state_file, &state).unwrap();
  
--### 3. Build & Install
--- Run `cargo install --path crates/superstate-cli --locked --force` so the local binary is updated.
--- Verify `superstate state --help` and `superstate state daemon --help` work cleanly.
-+**Files:**
-+- Modify: `crates/superstate-core/src/daemon.rs`
-+- Create: `crates/superstate-core/tests/test_daemon_impact_slicing.rs`
+-    let driver_cmd = "echo 'preserve ran' > preserve_evidence.txt";
++    let driver_cmd = "echo 'ran' > merge_evidence.txt";
  
--## Verification
--- `cargo test -p superstate-cli --test test_cli_dag_daemon`
--- `cargo test --all`
--- `cargo check --all`
-+**Interfaces:**
-+- Consumes: `build_sliced_test_cmd`, `infer_impacted_tests`, `DaemonConfig.impact_slicing`
-+- Produces: Fast-fail pre-filter before `run_verification_cmd(verify_cmd, ...)` in `DaemonRunner::step()`
+     let config = DaemonConfig {
+         state_path: state_file,
+@@ -176,6 +382,7 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: true,
++        guard_commands: true,
+         impact_slicing: false,
+     };
  
--## Completion
--- Commit with: `git commit --no-gpg-sign -m "feat(cli): verify and test diamond DAG daemon execution from CLI"`
--- Write detailed report to `docs/superpowers/plans/task-3-report.md`.
-+## Implementation Steps
-+Follow TDD strictly:
-+1. Create `crates/superstate-core/tests/test_daemon_impact_slicing.rs`:
-+   - `test_daemon_impact_slicing_fast_fail_skips_full_gate`:
-+     - Sets up a git repository with an initial commit.
-+     - Adds a source file `src/lib.py` and a failing test file `tests/test_lib.py` (which exits 1 when run).
-+     - Configures a milestone with `verify_cmd = "touch full_gate_ran.txt && exit 0"`.
-+     - Configures `DaemonConfig` with `impact_slicing: true`, `auto_rollback: false` (or true).
-+     - Runs `runner.step()`.
-+     - Verifies `DaemonStepOutcome::Failed` is returned.
-+     - Verifies `full_gate_ran.txt` was NOT created (proving the full gate was skipped on fast-fail).
-+     - Verifies `state.notes` contains an `[impact-fail]` entry.
-+   - `test_daemon_impact_slicing_passing_slice_executes_full_gate`:
-+     - Sets up a git repository with an initial commit.
-+     - Adds a source file `src/lib.py` and a passing test file `tests/test_lib.py`.
-+     - Configures a milestone with `verify_cmd = "touch full_gate_ran.txt && exit 0"`.
-+     - Configures `DaemonConfig` with `impact_slicing: true`.
-+     - Runs `runner.step()`.
-+     - Verifies `DaemonStepOutcome::Completed` or milestone advancement.
-+     - Verifies `full_gate_ran.txt` WAS created.
-+     - Verifies `state.notes` contains an `[impact-pass]` entry.
-+   - `test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate`:
-+     - Sets up a git repo where no test files match the diff.
-+     - Verifies daemon directly runs `verify_cmd` without error.
-+2. Run `cargo test -p superstate-core --test test_daemon_impact_slicing` to confirm failure (pre-filter not yet implemented).
-+3. Implement staged verification in `crates/superstate-core/src/daemon.rs`:
-+   - Import `use crate::impact::{build_sliced_test_cmd, infer_impacted_tests};`
-+   - In `DaemonRunner::step()` around line 755 (before `run_verification_cmd(verify_cmd, ...)`):
-+     - If `self.config.impact_slicing && is_inside_git_repo(&working_dir)`:
-+       - Query `start_commit = self.milestone_start_commits.get(&active_task.id)`.
-+       - Run `impacted = infer_impacted_tests(&working_dir, start_commit.map(|s| s.as_str()))`.
-+       - If `!impacted.is_empty()`:
-+         - Call `build_sliced_test_cmd(verify_cmd, &impacted, &working_dir)`.
-+         - If `Some(sliced_cmd)`:
-+           - Run `slice_res = run_verification_cmd(&sliced_cmd, &working_dir, self.config.timeout_secs)?`.
-+           - If `!slice_res.passed`:
-+             - Record `[impact-fail]` note in `state.notes`.
-+             - Save state atomically.
-+             - If `self.config.auto_rollback`, perform rollback.
-+             - Return `Ok(DaemonStepOutcome::Failed { task_id, error })`.
-+           - If `slice_res.passed`:
-+             - Record `[impact-pass]` note in `state.notes`.
-+             - Save state atomically.
-+             - Fall through to full `verify_cmd`.
-+4. Run `cargo test -p superstate-core --test test_daemon_impact_slicing` and verify PASS.
-+5. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
-+6. Commit changes:
-+   ```bash
-+   git add crates/superstate-core/src/daemon.rs crates/superstate-core/tests/test_daemon_impact_slicing.rs
-+   git commit --no-gpg-sign -m "feat(daemon): wire milestone test impact slicing into daemon verification loop"
-+   ```
-+7. Write implementer report to `docs/superpowers/plans/task-3-report.md`.
-+8. Report status: DONE / DONE_WITH_CONCERNS / BLOCKED.
-diff --git a/docs/superpowers/plans/task-3-fix-brief.md b/docs/superpowers/plans/task-3-fix-brief.md
-new file mode 100644
-index 0000000..47ba081
---- /dev/null
-+++ b/docs/superpowers/plans/task-3-fix-brief.md
-@@ -0,0 +1,60 @@
-+# Task 3 Fix Brief: Address Reviewer Findings in `crates/superstate-core/src/daemon.rs`
+@@ -184,9 +391,23 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
+     assert!(outcome.is_advanced());
+ 
+     let content = fs::read_to_string(&hooks_file).unwrap();
++    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
 +
-+## Global Constraints
-+- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
-+- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
-+- Skip GPG verification on all commits (`--no-gpg-sign`).
-+- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
-+
-+## Issues to Address
-+
-+### 1. Critical: Infinite Loop Hazard on Persistent Fast Slice Failures
-+In `crates/superstate-core/src/daemon.rs` around lines 785-820:
-+When `!slice_res.passed`:
-+Check if retries are exhausted:
-+```rust
-+let attempts_spent = self.attempts.get(&active_task.id).copied().unwrap_or(0);
-+let retries_remaining = self.config.max_retries.saturating_sub(attempts_spent);
-+
-+if retries_remaining == 0 {
-+    if self.config.advisory_gate {
-+        state.notes.push(LedgerEntry::new(
-+            "superstate-daemon",
-+            format!(
-+                "[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion",
-+                active_task.id
-+            ),
-+        ));
-+        // Allow fall-through or handle advisory advancement
-+    } else {
-+        state.status = ExecutionStatus::Blocked;
-+        state.errors.push(format!(
-+            "Task '{}' blocked: fast test slice failed and max retries ({}) exhausted: {}",
-+            active_task.id, self.config.max_retries, bounded_diag
-+        ));
-+        save_state_atomic(&self.config.state_path, &state)?;
-+        return Ok(DaemonStepOutcome::Blocked {
-+            task_id: active_task.id.clone(),
-+            reason: format!(
-+                "Fast test slice failed and max retries ({}) exhausted: {}",
-+                self.config.max_retries, bounded_diag
-+            ),
-+        });
-+    }
-+}
-+```
-+
-+### 2. Integration Test:
-+In `crates/superstate-core/tests/test_daemon_impact_slicing.rs`:
-+Add test `test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks`:
-+- Set `config.max_retries = 1`.
-+- Set up a failing test slice and run step twice (or run until retries exhaust).
-+- Assert that `step()` returns `DaemonStepOutcome::Blocked` and `state.status == ExecutionStatus::Blocked`.
-+
-+## Implementation Steps
-+1. Add the test in `test_daemon_impact_slicing.rs`.
-+2. Update `daemon.rs` to handle retry exhaustion and `Blocked` transition on fast-fail.
-+3. Run `cargo test -p superstate-core --test test_daemon_impact_slicing` and confirm all tests pass.
-+4. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
-+5. Commit using `git commit --no-gpg-sign -m "fix(daemon): handle retry exhaustion and blocked state on fast slice failures"`.
-+6. Write report to `docs/superpowers/plans/task-3-fix-report.md`.
-diff --git a/docs/superpowers/plans/task-3-fix-report.md b/docs/superpowers/plans/task-3-fix-report.md
-new file mode 100644
-index 0000000..16df8b2
---- /dev/null
-+++ b/docs/superpowers/plans/task-3-fix-report.md
-@@ -0,0 +1,53 @@
-+# Task 3 Fix Report: Handling Retry Exhaustion & Blocked State on Fast Slice Failures
-+
-+## 1. Overview & Status
-+- **Status:** DONE
-+- **Task:** Task 3 Fix: Handle retry exhaustion and `Blocked` transition on fast slice failures
-+- **Commit:** `921f109` (`fix(daemon): handle retry exhaustion and blocked state on fast slice failures`)
-+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
-+- **Branch:** `feat/daemon-test-impact-slicing`
-+
-+## 2. Reviewer Findings Addressed
-+- **Finding:** Infinite loop hazard in `DaemonRunner::run_to_completion()` on persistent fast test slice failures. In `crates/superstate-core/src/daemon.rs`, `!slice_res.passed` previously returned `Ok(DaemonStepOutcome::Failed { ... })` unconditionally even when `retries_remaining == 0`. Because `run_to_completion()` treats `DaemonStepOutcome::Failed` with a loop `continue;`, an agent failing fast slice tests indefinitely would loop forever without transitioning the execution state to `Blocked`.
-+
-+## 3. Changes Implemented
-+1. **Retry Exhaustion & Blocked State Handling (`crates/superstate-core/src/daemon.rs`)**:
-+   - In `DaemonRunner::run_step()` within the `!slice_res.passed` handler (lines 813–885):
-+     - Checked if `retries_remaining == 0` after incrementing attempt count.
-+     - When `retries_remaining == 0` and `self.config.advisory_gate` is enabled:
-+       - Recorded `[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion` in `state.notes`.
-+       - Cleaned up retry/diagnostic state tracking maps.
-+       - Advanced milestone step using step advancer or `advance_step(&mut state)` with DAG deadlock handling (`InvalidTransition` -> `Blocked`).
-+       - Returned `DaemonStepOutcome::Advanced`.
-+     - When `retries_remaining == 0` and `!self.config.advisory_gate` (standard behavior):
-+       - Set `state.status = ExecutionStatus::Blocked`.
-+       - Appended detailed error diagnostic to `state.errors`: `"Task '{}' blocked: fast test slice failed and max retries ({}) exhausted: {}"`.
-+       - Atomically saved state to disk via `save_state_atomic(&self.config.state_path, &state)`.
-+       - Returned `Ok(DaemonStepOutcome::Blocked { task_id, reason })`.
-+     - When `retries_remaining > 0`:
-+       - Returned `Ok(DaemonStepOutcome::Failed { task_id, reason, retries_remaining })` allowing subsequent retry.
-+
-+2. **Integration Test Suite Additions (`crates/superstate-core/tests/test_daemon_impact_slicing.rs`)**:
-+   - Added `test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks`:
-+     - Initialized repository with a failing test file and milestone verification command.
-+     - Configured `DaemonConfig` with `max_retries: 1` and `impact_slicing: true`.
-+     - Executed `runner.step()`.
-+     - Verified that outcome is `DaemonStepOutcome::Blocked`.
-+     - Verified that state on disk has `status: ExecutionStatus::Blocked` and `errors` contains `"blocked"`.
-+   - Added `test_daemon_impact_slicing_fast_fail_advisory_gate_advances`:
-+     - Initialized repository with failing test slice and `advisory_gate: true` with `max_retries: 1`.
-+     - Verified that runner advances (`DaemonStepOutcome::Advanced`) and records `[impact-advisory]` note in state.
-+
-+## 4. Verification & TDD Evidence
-+1. **RED Phase**:
-+   - Added `test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks` prior to modifying `daemon.rs`.
-+   - Ran `cargo test -p superstate-core --test test_daemon_impact_slicing test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks`.
-+   - Observed failure: `expected Blocked outcome when retries are exhausted, got Failed { task_id: "task-impact-exhaust-1", ..., retries_remaining: 0 }`.
-+2. **GREEN Phase**:
-+   - Updated `daemon.rs` with retry exhaustion check and `Blocked` state transition.
-+   - Re-ran `cargo test -p superstate-core --test test_daemon_impact_slicing test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks`.
-+   - Result: PASSED.
-+   - Ran full test suite in `test_daemon_impact_slicing`: all 7 integration tests passed in 2.04s.
-+3. **Workspace Full Verification & Clippy**:
-+   - Ran `cargo test --all`: All unit, integration, and doc tests across all workspace crates passed cleanly.
-+   - Ran `cargo clippy --all-targets -- -D warnings`: Completed with exit code 0 and 0 warnings.
-diff --git a/docs/superpowers/plans/task-3-report.md b/docs/superpowers/plans/task-3-report.md
-index 303b272..9d8ae66 100644
---- a/docs/superpowers/plans/task-3-report.md
-+++ b/docs/superpowers/plans/task-3-report.md
-@@ -1,115 +1,45 @@
--# Task 3 Report: CLI Integration & Verification
--
--**Status:** Completed  
--**Commit SHA:** `db9e028`  
--**Branch:** `feat/daemon-dag-execution`  
--**Repository:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-dag-execution`  
--**Date:** 2026-09-19  
--
-----
--
--## Executive Summary
--
--Task 3 completed the end-to-end CLI integration and verification for arbitrary DAG milestone execution via `superstate state init --milestones <JSON>` and `superstate state daemon` as specified in `docs/superpowers/plans/task-3-brief.md`.
--
--Building upon Task 1 (core topological DAG resolution and deadlock safety) and Task 2 (daemon runner milestone progression, git checkpointing, and scoped rollback), Task 3 verified that the unified CLI commands and step-advancement hook correctly execute complex non-linear milestone topologies (diamond DAGs) and gracefully handle deadlock scenarios across the CLI and daemon layers.
--
--Key achievements:
--1. **CLI Diamond DAG Daemon Execution (`test_cli_diamond_dag_daemon_execution`)**:
--   - Initialized a 4-milestone diamond DAG (`task-a -> [task-b, task-c] -> task-d`) via `superstate state init --milestones`.
--   - Executed autonomous daemon worker with a headless mock driver checking `$SUPERSTATE_ACTIVE_TASK`.
--   - Verified that all 4 milestones completed successfully in proper DAG dependency order (`task-a`, `task-b`, `task-c`, `task-d`).
--   - Verified that git history contains individual milestone checkpoint commits for each task:
--     - `chore(superstate): checkpoint completed milestone task-a: Task A`
--     - `chore(superstate): checkpoint completed milestone task-b: Task B`
--     - `chore(superstate): checkpoint completed milestone task-c: Task C`
--     - `chore(superstate): checkpoint completed milestone task-d: Task D`
--   - Verified that state reached `ExecutionStatus::Completed` and all four milestone artifacts (`a.txt`, `b.txt`, `c.txt`, `d.txt`) were created and preserved.
--
--2. **CLI Deadlocked DAG Daemon Halting (`test_cli_deadlocked_dag_daemon_halts_blocked`)**:
--   - Identified and resolved the gap where CLI's `step_advancer` hook (`cmd_next`) propagated `StateError::InvalidTransition` without saving state or setting `Blocked` status, which caused `advancer` to abort with an unhandled step advancer error.
--   - Updated `cmd_next` in `crates/superstate-cli/src/commands/state.rs` to catch `StateError::InvalidTransition(msg)` on DAG deadlock:
--     - Transitions `state.status = ExecutionStatus::Blocked`.
--     - Appends epistemic note `[dag-blocked] Milestone <id> completed, but remaining tasks cannot advance: <msg>`.
--     - Atomically saves state before returning `Ok(())`.
--   - Updated `crates/superstate-core/src/daemon.rs` around line 964 so the pluggable `step_advancer` branch inspects `updated_state.status`: if `Blocked`, returns `Ok(DaemonStepOutcome::Blocked { task_id, reason })`.
--   - Verified the CLI daemon cleanly halts with exit code 1, leaving the persisted state status as `ExecutionStatus::Blocked` with the required `[dag-blocked]` note in `notes`.
--
--3. **Clean Error Reporting on Initial Deadlock (`test_cli_init_initial_deadlock_error_reporting`)**:
--   - Handled `StateError::InvalidTransition` in `cmd_init` (`crates/superstate-cli/src/commands/state.rs`) to format clear operator messages without redundant error prefixing when initializing cyclic or unsatisfiable milestones.
--
--4. **Updated Binary Installation & Verification**:
--   - Successfully ran `cargo install --path crates/superstate-cli --locked --force`.
--   - Verified `superstate --version` reports `superstate 0.1.0`.
--   - Verified `superstate state daemon --help` renders all flags and options cleanly.
--
-----
--
--## TDD Execution
--
--### 1. Red Phase
--Created `crates/superstate-cli/tests/test_cli_dag_daemon.rs` with 3 integration tests:
--- `test_cli_diamond_dag_daemon_execution`: Verifies end-to-end execution of a 4-milestone diamond DAG, artifact generation, checkpoint commits in git log, and completed state file.
--- `test_cli_deadlocked_dag_daemon_halts_blocked`: Verifies that a DAG with a deadlocked dependency halts the daemon and persists `status: "blocked"` with a `[dag-blocked]` note in `state.json`.
--- `test_cli_init_initial_deadlock_error_reporting`: Verifies that cyclical initial milestones fail cleanly during `state init`.
--
--Captured RED failing output on unpatched code:
--```text
--$ cargo test -p superstate --test test_cli_dag_daemon
--running 3 tests
--test test_cli_init_initial_deadlock_error_reporting ... ok
--test test_cli_deadlocked_dag_daemon_halts_blocked ... FAILED
--test test_cli_diamond_dag_daemon_execution ... ok
--
--failures:
--
------ test_cli_deadlocked_dag_daemon_halts_blocked stdout ----
--thread 'test_cli_deadlocked_dag_daemon_halts_blocked' panicked at crates/superstate-cli/tests/test_cli_dag_daemon.rs:217:5:
--assertion `left == right` failed: state status must be Blocked
--  left: InProgress
-- right: Blocked
--
--failures:
--    test_cli_deadlocked_dag_daemon_halts_blocked
--
--test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
--```
--
--### 2. Green Phase
--Implemented fixes:
--1. `crates/superstate-cli/src/commands/state.rs`:
--   - Updated `cmd_next` to match on `advance_step(&mut state)`:
--     - On `StateError::InvalidTransition(msg)`: sets `state.status = ExecutionStatus::Blocked`, records `[dag-blocked]` note, saves state atomically, and returns `Ok(())`.
--   - Updated `cmd_init` to cleanly unpack `StateError::InvalidTransition(msg)`.
--2. `crates/superstate-core/src/daemon.rs`:
--   - In `run_step()`, checked `updated_state.status == ExecutionStatus::Blocked` when `self.step_advancer` completes, returning `Ok(DaemonStepOutcome::Blocked)`.
--
--Ran `cargo test -p superstate --test test_cli_dag_daemon`:
--```text
--$ cargo test -p superstate --test test_cli_dag_daemon
--running 3 tests
--test test_cli_init_initial_deadlock_error_reporting ... ok
--test test_cli_deadlocked_dag_daemon_halts_blocked ... ok
--test test_cli_diamond_dag_daemon_execution ... ok
--
--test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
--```
--
--### 3. Full Workspace Verification
--- `cargo test --all`: All unit, integration, and doc tests across all crates passed (0 failures).
--- `cargo check --all`: Completed cleanly with 0 errors.
--- `cargo clippy --all -- -D warnings`: Completed cleanly with 0 warnings.
--- `cargo install --path crates/superstate-cli --locked --force`: Binary successfully compiled and installed.
--- `superstate --version` and `superstate state daemon --help`: Verified working.
--
-----
--
--## File Changes Summary
--
--| File | Status | Description |
--|---|---|---|
--| `crates/superstate-cli/tests/test_cli_dag_daemon.rs` | Created | Integration tests covering diamond DAG daemon execution, deadlocked DAG halting, and initial deadlock error reporting |
--| `crates/superstate-cli/src/commands/state.rs` | Modified | Handled `StateError::InvalidTransition` in `cmd_next` (marking Blocked, logging `[dag-blocked]`, saving state) and polished error display in `cmd_init` |
--| `crates/superstate-core/src/daemon.rs` | Modified | Handled `ExecutionStatus::Blocked` in `run_step()` after `step_advancer` execution to emit `DaemonStepOutcome::Blocked` |
--| `docs/superpowers/plans/task-3.diff` | Created | Full git diff of crates modified in Task 3 |
--| `docs/superpowers/plans/task-3-report.md` | Created | Complete Task 3 verification and execution report |
-+# Task 3 Implementer Report: Two-Tier Gate Execution in `DaemonRunner::step()`
-+
-+## 1. Overview & Status
-+- **Status:** DONE
-+- **Task:** Task 3: Two-Tier Gate Execution in `DaemonRunner::step()`
-+- **Commit:** `a4efbae` (`feat(daemon): wire milestone test impact slicing into daemon verification loop`)
-+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-daemon-test-impact-slicing`
-+- **Branch:** `feat/daemon-test-impact-slicing`
-+
-+## 2. Changes Implemented
-+1. **Daemon Staged Verification Integration (`crates/superstate-core/src/daemon.rs`)**:
-+   - Imported `build_sliced_test_cmd` and `infer_impacted_tests` from `crate::impact`.
-+   - Wired Stage 1 milestone-scoped test impact slicing directly before full verification gate execution (`let gate_res = run_verification_cmd(...)`) in `DaemonRunner::run_step()`:
-+     - Checked if `self.config.impact_slicing` is enabled and the working directory is inside a git repository.
-+     - Extracted `start_commit` from `self.milestone_start_commits.get(&active_task.id)` to scope the diff to changes introduced since entering the milestone.
-+     - Detected impacted test files via `infer_impacted_tests(&working_dir, start_commit)`.
-+     - Built specialized sliced test runner command via `build_sliced_test_cmd(verify_cmd, &impacted, &working_dir)`.
-+     - Executed sliced command with timing:
-+       - **Fast-fail path**: On slice failure (`!slice_res.passed`), extracted bounded diagnostic output (up to 1,000 chars), logged `[impact-fail] Task {}: Fast test slice failed in {}s: {}` into `state.notes`, saved state atomically, incremented attempt counter, performed rollback if `self.config.auto_rollback` is active, stored failure output in `self.last_failure_output`, and returned `DaemonStepOutcome::Failed` without running full verification gate.
-+       - **Fast-pass path**: On slice pass (`slice_res.passed`), logged `[impact-pass] Task {}: Fast slice passed ({} test files) in {}s, advancing to full gate` into `state.notes`, saved state atomically, and fell through to full gate execution.
-+       - **Bypass / Fallback paths**: When `impact_slicing` is false, repo is non-git, no test files are impacted, or `build_sliced_test_cmd` returns `None`, seamlessly bypasses slice execution and proceeds to the full verification gate.
-+
-+2. **Integration Test Suite (`crates/superstate-core/tests/test_daemon_impact_slicing.rs`)**:
-+   - Created comprehensive integration test suite covering:
-+     - `test_daemon_impact_slicing_fast_fail_skips_full_gate`: Confirms failing slice logs `[impact-fail]`, returns `DaemonStepOutcome::Failed`, and completely skips the full verification gate (`full_gate_ran.txt` is not created).
-+     - `test_daemon_impact_slicing_passing_slice_executes_full_gate`: Confirms passing slice logs `[impact-pass]`, advances to full verification gate, creates `full_gate_ran.txt`, and advances the milestone.
-+     - `test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate`: Confirms that when no tests are impacted, full verification gate executes directly with no impact notes emitted.
-+     - `test_daemon_impact_slicing_disabled_by_default`: Confirms that when `impact_slicing: false`, daemon runs full verification gate directly.
-+     - `test_daemon_impact_slicing_fast_fail_with_auto_rollback`: Confirms that when `auto_rollback: true` is paired with fast-fail, both `[impact-fail]` and `[rollback]` are recorded, and workspace is cleaned back to milestone baseline.
-+
-+## 3. TDD Verification Evidence
-+1. **RED Phase**:
-+   - Ran `cargo test -p superstate-core --test test_daemon_impact_slicing` before implementation.
-+   - Result: Failed on `test_daemon_impact_slicing_fast_fail_skips_full_gate` and `test_daemon_impact_slicing_passing_slice_executes_full_gate` because impact slicing pre-filter was not yet present.
-+2. **GREEN Phase**:
-+   - Implemented staged verification in `DaemonRunner::step()`.
-+   - Ran `cargo test -p superstate-core --test test_daemon_impact_slicing`.
-+   - Result: All 5 integration tests passed in 1.90s.
-+3. **Static Analysis & Full Workspace Verification**:
-+   - Ran `cargo clippy --all-targets -- -D warnings`: Completed with exit code 0 and 0 warnings.
-+   - Ran `cargo test --all`: All unit tests, integration tests, and doc tests across all crates (`superstate-core`, `superstate-cli`, `superstate-mcp`, `superstate-worktree`, `superstate-syntax`, `superstate-rules`, `superstate-review`) passed cleanly.
-+
-+## 4. State Note Schemas
-+- Failure: `[impact-fail] Task {task_id}: Fast test slice failed in {secs}s: {diag}`
-+- Passing: `[impact-pass] Task {task_id}: Fast slice passed ({count} test files) in {secs}s, advancing to full gate`
++    assert!(
++        !json["custom_hook"].is_null(),
++        "existing user hook must be preserved"
++    );
+     assert_eq!(
+-        content, custom_json,
+-        "existing .agents/hooks.json must not be overwritten"
++        json["custom_hook"]["PreToolUse"][0]["matcher"].as_str(),
++        Some("foo")
++    );
++    assert!(
++        !json["superstate-file-guard"].is_null(),
++        "superstate-file-guard must be merged into existing hooks.json"
++    );
++    assert!(
++        !json["superstate-command-guard"].is_null(),
++        "superstate-command-guard must be merged into existing hooks.json"
+     );
+ }
+ 
+@@ -245,6 +466,7 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: true,
++        guard_commands: true,
+         impact_slicing: false,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_impact_slicing.rs b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
+index 4bbddb2..beaa6b3 100644
+--- a/crates/superstate-core/tests/test_daemon_impact_slicing.rs
++++ b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
+@@ -115,6 +115,7 @@ fn test_daemon_impact_slicing_fast_fail_skips_full_gate() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -209,6 +210,7 @@ fn test_daemon_impact_slicing_passing_slice_executes_full_gate() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -289,6 +291,7 @@ fn test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -382,6 +385,7 @@ fn test_daemon_impact_slicing_disabled_by_default() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -461,6 +465,7 @@ fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
+         auto_rollback: true,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -544,6 +549,7 @@ fn test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+@@ -633,6 +639,7 @@ fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: true,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_rollback.rs b/crates/superstate-core/tests/test_daemon_rollback.rs
+index e6cff5f..648a44a 100644
+--- a/crates/superstate-core/tests/test_daemon_rollback.rs
++++ b/crates/superstate-core/tests/test_daemon_rollback.rs
+@@ -100,6 +100,7 @@ fn test_daemon_rollback_on_verification_failure() {
+         auto_rollback: true,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -197,6 +198,7 @@ fn test_daemon_no_rollback_when_disabled() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
+index e796480..dca1b9c 100644
+--- a/crates/superstate-core/tests/test_daemon_runner.rs
++++ b/crates/superstate-core/tests/test_daemon_runner.rs
+@@ -39,6 +39,7 @@ fn test_daemon_run_step_success() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -80,6 +81,7 @@ fn test_daemon_run_step_verification_failure() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -129,6 +131,7 @@ fn test_daemon_run_to_completion() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -173,6 +176,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -228,6 +232,7 @@ fn test_daemon_step_advancer_invoked() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -279,6 +284,7 @@ fn test_daemon_step_advancer_error_propagation() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -334,6 +340,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -399,6 +406,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -452,6 +460,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -546,6 +555,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -607,6 +617,7 @@ fn test_progress_renews_the_retry_budget() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -654,6 +665,7 @@ fn test_stalled_worker_still_blocks() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -713,6 +725,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -762,6 +775,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -818,6 +832,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -872,6 +887,7 @@ fn test_real_gate_completes_immediately() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -913,6 +929,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+     let mut runner = DaemonRunner::new(config).unwrap();
+@@ -970,6 +987,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
+             auto_rollback: false,
+             shunt_driver_output: false,
+             guard_file_reads: false,
++            guard_commands: false,
+             impact_slicing: false,
+         })
+         .unwrap();
+diff --git a/crates/superstate-core/tests/test_daemon_shunt.rs b/crates/superstate-core/tests/test_daemon_shunt.rs
+index ef780fc..6d99175 100644
+--- a/crates/superstate-core/tests/test_daemon_shunt.rs
++++ b/crates/superstate-core/tests/test_daemon_shunt.rs
+@@ -64,6 +64,7 @@ fn test_daemon_runner_injects_shunt_wrapper() {
+         auto_rollback: false,
+         shunt_driver_output: true,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+@@ -129,6 +130,7 @@ fn test_daemon_runner_no_shunt_disables_injection() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 
+diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
+index 1ceb669..4a10613 100644
+--- a/crates/superstate-core/tests/test_driver_presets.rs
++++ b/crates/superstate-core/tests/test_driver_presets.rs
+@@ -182,6 +182,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
+         auto_rollback: false,
+         shunt_driver_output: false,
+         guard_file_reads: false,
++        guard_commands: false,
+         impact_slicing: false,
+     };
+ 

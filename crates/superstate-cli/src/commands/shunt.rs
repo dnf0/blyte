@@ -21,11 +21,16 @@ use superstate_core::shunt::{evaluate_and_distill, DistilledOutput, ShuntConfig}
 /// # Parameters
 /// - `cmd_args`: Command and argument vector to execute (first element is the program).
 /// - `threshold_lines`: Maximum combined line count before shunting distillation triggers.
+/// - `logs_dir`: Optional directory where raw unstripped logs are stored (defaults to `.agent-state/logs`).
 ///
 /// # Returns
 /// - `Ok(i32)` representing the child's exact integer exit status code.
 /// - `Err(String)` if argument list is empty, process spawning fails, or waiting fails.
-pub fn execute_shunt(cmd_args: &[String], threshold_lines: usize) -> Result<i32, String> {
+pub fn execute_shunt(
+    cmd_args: &[String],
+    threshold_lines: usize,
+    logs_dir: Option<PathBuf>,
+) -> Result<i32, String> {
     // Validate command arguments vector is non-empty before attempting invocation
     if cmd_args.is_empty() {
         return Err("No command specified to shunt".to_string());
@@ -95,7 +100,7 @@ pub fn execute_shunt(cmd_args: &[String], threshold_lines: usize) -> Result<i32,
     let config = ShuntConfig {
         threshold_lines,
         threshold_bytes: 4096,
-        logs_dir: PathBuf::from(".agent-state/logs"),
+        logs_dir: logs_dir.unwrap_or_else(|| PathBuf::from(".agent-state/logs")),
     };
 
     // Apply distillation engine evaluation over captured outputs

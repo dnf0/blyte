@@ -180,6 +180,8 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
             false,
             false,
             true,
+            true,
+            true,
             false,
         )
     } else if args.json {

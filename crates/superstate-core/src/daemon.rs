@@ -29,10 +29,17 @@ const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
 /// Directories never counted as progress.
 ///
 /// `.agent-state` is written by the daemon itself on every attempt (prompts, logs, driver
-/// turns), and test runners create `.pytest_cache` and `__pycache__` when executing gates,
+/// turns), `.agents` contains ephemeral hooks provisioned for the file read guard, and
+/// test runners create `.pytest_cache` and `__pycache__` when executing gates,
 /// so including them would make every attempt look like progress and the retry budget would
 /// never expire.
-const FINGERPRINT_SKIP_DIRS: [&str; 4] = [".git", ".agent-state", ".pytest_cache", "__pycache__"];
+const FINGERPRINT_SKIP_DIRS: [&str; 5] = [
+    ".git",
+    ".agent-state",
+    ".agents",
+    ".pytest_cache",
+    "__pycache__",
+];
 
 /// A verification command that cannot fail, so it certifies nothing.
 ///
@@ -94,7 +101,7 @@ const FINGERPRINT_MAX_FILES: usize = 20_000;
 /// a repository without a HEAD. A worker unpacking and editing a freshly cloned source
 /// tree therefore produced a byte-identical git fingerprint on every attempt and was
 /// blocked as stalled while it was in fact progressing.
-fn workspace_fingerprint(dir: &Path) -> String {
+pub fn workspace_fingerprint(dir: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     let mut entries: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -192,6 +199,12 @@ pub struct DaemonConfig {
     /// Automatically enable tool output shunting during driver worker execution
     #[serde(default = "default_true")]
     pub shunt_driver_output: bool,
+    /// Automatically guard file reads and shunt large files to symbol outlines
+    #[serde(default = "default_true")]
+    pub guard_file_reads: bool,
+    /// Automatically guard tool execution and poll commands with debounce
+    #[serde(default = "default_true")]
+    pub guard_commands: bool,
     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
     #[serde(default)]
     pub impact_slicing: bool,
@@ -209,6 +222,8 @@ impl Default for DaemonConfig {
             review_blocking: false,
             auto_rollback: true,
             shunt_driver_output: true,
+            guard_file_reads: true,
+            guard_commands: true,
             impact_slicing: false,
         }
     }
@@ -773,6 +788,84 @@ impl DaemonRunner {
                 paths.extend(std::env::split_paths(&current_paths));
                 if let Ok(new_path) = std::env::join_paths(paths) {
                     cmd.env("PATH", new_path);
+                }
+            }
+
+            // WHY: Intercept driver file reads (> 200 lines) and rapid polling commands via PreToolUse hooks
+            // WHAT: Provision or merge hooks into .agents/hooks.json in the workspace root
+            // HOW: Serialize PreToolUse matchers for active guards, merging with existing hooks if present
+            if self.config.guard_file_reads || self.config.guard_commands {
+                let agents_dir = working_dir.join(".agents");
+                fs::create_dir_all(&agents_dir)?;
+                let hooks_file = agents_dir.join("hooks.json");
+
+                let mut hooks_obj = if hooks_file.exists() {
+                    let existing_content = fs::read_to_string(&hooks_file).unwrap_or_default();
+                    match serde_json::from_str::<serde_json::Value>(&existing_content) {
+                        Ok(serde_json::Value::Object(map)) => map,
+                        _ => serde_json::Map::new(),
+                    }
+                } else {
+                    serde_json::Map::new()
+                };
+
+                if self.config.guard_file_reads && !hooks_obj.contains_key("superstate-file-guard") {
+                    hooks_obj.insert(
+                        "superstate-file-guard".to_string(),
+                        serde_json::json!({
+                            "PreToolUse": [
+                                {
+                                    "matcher": "view_file|View|read_file",
+                                    "hooks": [
+                                        {
+                                            "command": "superstate guard pre-tool-use --threshold-lines 200"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }),
+                    );
+                }
+
+                if self.config.guard_commands && !hooks_obj.contains_key("superstate-command-guard") {
+                    hooks_obj.insert(
+                        "superstate-command-guard".to_string(),
+                        serde_json::json!({
+                            "PreToolUse": [
+                                {
+                                    "matcher": "run_command|manage_task",
+                                    "hooks": [
+                                        {
+                                            "command": "superstate guard pre-command --debounce-sec 30"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }),
+                    );
+                }
+
+                let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(hooks_obj))?;
+                fs::write(&hooks_file, serialized)?;
+
+                // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
+                // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
+                // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
+                let git_info_dir = working_dir.join(".git").join("info");
+                if git_info_dir.exists() {
+                    let exclude_file = git_info_dir.join("exclude");
+                    let content = fs::read_to_string(&exclude_file).unwrap_or_default();
+                    let already_excluded = content
+                        .lines()
+                        .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
+                    if !already_excluded {
+                        let mut new_content = content;
+                        if !new_content.is_empty() && !new_content.ends_with('\n') {
+                            new_content.push('\n');
+                        }
+                        new_content.push_str(".agents/\n");
+                        fs::write(&exclude_file, new_content)?;
+                    }
                 }
             }
 

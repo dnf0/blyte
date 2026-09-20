@@ -63,6 +63,8 @@ fn test_daemon_runner_injects_shunt_wrapper() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: true,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -127,6 +129,8 @@ fn test_daemon_runner_no_shunt_disables_injection() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 

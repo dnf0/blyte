@@ -1,60 +1,38 @@
-# Task 3 Fix Brief: Address Reviewer Findings in `crates/superstate-core/src/daemon.rs`
+# Task 3 Fix Brief: Address Reviewer Findings
 
-## Global Constraints
-- Compile cleanly with `cargo check --all` and pass `cargo test --all`.
-- No compiler or clippy warnings (`cargo clippy --all-targets -- -D warnings`).
-- Skip GPG verification on all commits (`--no-gpg-sign`).
-- Zero prompt engineering: all behavior governed by git diffs, process exit codes (`$? == 0`), and state invariants.
+## Context & Commits
+- **Working Directory:** `/Users/danielfisher/repos/superstate/.worktrees/feat-pre-tool-use-file-guard`
+- **Base Commit:** `97e5839`
 
-## Issues to Address
+## Reviewer Findings to Address
 
-### 1. Critical: Infinite Loop Hazard on Persistent Fast Slice Failures
-In `crates/superstate-core/src/daemon.rs` around lines 785-820:
-When `!slice_res.passed`:
-Check if retries are exhausted:
+### 1. Fingerprint Directory Exclusion
+In `crates/superstate-core/src/daemon.rs`:
+Add `".agents"` to `FINGERPRINT_SKIP_DIRS`:
 ```rust
-let attempts_spent = self.attempts.get(&active_task.id).copied().unwrap_or(0);
-let retries_remaining = self.config.max_retries.saturating_sub(attempts_spent);
-
-if retries_remaining == 0 {
-    if self.config.advisory_gate {
-        state.notes.push(LedgerEntry::new(
-            "superstate-daemon",
-            format!(
-                "[impact-advisory] Task {}: Fast slice failed but advisory_gate is enabled; proceeding to milestone completion",
-                active_task.id
-            ),
-        ));
-        // Allow fall-through or handle advisory advancement
-    } else {
-        state.status = ExecutionStatus::Blocked;
-        state.errors.push(format!(
-            "Task '{}' blocked: fast test slice failed and max retries ({}) exhausted: {}",
-            active_task.id, self.config.max_retries, bounded_diag
-        ));
-        save_state_atomic(&self.config.state_path, &state)?;
-        return Ok(DaemonStepOutcome::Blocked {
-            task_id: active_task.id.clone(),
-            reason: format!(
-                "Fast test slice failed and max retries ({}) exhausted: {}",
-                self.config.max_retries, bounded_diag
-            ),
-        });
-    }
-}
+const FINGERPRINT_SKIP_DIRS: [&str; 5] = [
+    ".git",
+    ".agent-state",
+    ".agents",
+    ".pytest_cache",
+    "__pycache__",
+];
 ```
+This ensures that creating `.agents/hooks.json` does not cause false progress detection on turn 1.
 
-### 2. Integration Test:
-In `crates/superstate-core/tests/test_daemon_impact_slicing.rs`:
-Add test `test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks`:
-- Set `config.max_retries = 1`.
-- Set up a failing test slice and run step twice (or run until retries exhaust).
-- Assert that `step()` returns `DaemonStepOutcome::Blocked` and `state.status == ExecutionStatus::Blocked`.
+### 2. Git Exclude for Ephemeral Hooks
+When provisioning `.agents/hooks.json`, if `.git/info` exists, append `.agents/` to `.git/info/exclude` if not already present. This ensures ephemeral daemon hooks are not inadvertently committed into the repository during checkpoint commits.
 
-## Implementation Steps
-1. Add the test in `test_daemon_impact_slicing.rs`.
-2. Update `daemon.rs` to handle retry exhaustion and `Blocked` transition on fast-fail.
-3. Run `cargo test -p superstate-core --test test_daemon_impact_slicing` and confirm all tests pass.
-4. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
-5. Commit using `git commit --no-gpg-sign -m "fix(daemon): handle retry exhaustion and blocked state on fast slice failures"`.
-6. Write report to `docs/superpowers/plans/task-3-fix-report.md`.
+### 3. Enum Alias Standardization
+In `crates/superstate-cli/tests/test_cli_daemon_guard.rs`:
+Standardize the enum match on `Commands::Daemon` throughout the file.
+
+### 4. Regression Test
+Add a test in `crates/superstate-core/tests/test_daemon_guard.rs` asserting that adding `.agents/hooks.json` does NOT change `workspace_fingerprint` of the directory.
+
+## Steps
+1. Apply fixes in `daemon.rs` and `test_cli_daemon_guard.rs`.
+2. Add regression test in `test_daemon_guard.rs`.
+3. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
+4. Commit using `git commit --no-gpg-sign -m "fix(daemon): exclude .agents from tree fingerprint and git checkpointing"`.
+5. Write fix report to `docs/superpowers/plans/task-3-fix-report.md`.

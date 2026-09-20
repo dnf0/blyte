@@ -270,6 +270,11 @@ pub enum StateCommands {
     Logs(LogsArgs),
     /// Prepare standardized cross-agent handoff package
     Handoff(HandoffArgs),
+    /// Intercept and evaluate agent tool invocations before execution
+    Guard {
+        #[command(subcommand)]
+        cmd: crate::commands::guard::GuardCommands,
+    },
 }
 
 /// Type alias for `StateCommands` providing naming symmetry with standard CLI subcommand enums.
@@ -344,6 +349,26 @@ pub struct DaemonArgs {
         help = "Disable automatic tool output shunting during driver execution"
     )]
     pub no_shunt: bool,
+    /// Disable all automated PreToolUse guards during driver execution
+    #[arg(
+        long,
+        help = "Disable all automated PreToolUse guards during driver execution"
+    )]
+    pub no_guard: bool,
+    /// Disable automatic file read guard during driver execution
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable automatic file read guard during driver execution"
+    )]
+    pub no_file_guard: bool,
+    /// Disable automated PreToolUse command & polling guard
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable automated PreToolUse command & polling guard"
+    )]
+    pub no_command_guard: bool,
     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
     #[arg(
         long,
@@ -371,6 +396,14 @@ impl DaemonArgs {
 
     pub fn use_shunt(&self) -> bool {
         !self.no_shunt
+    }
+
+    pub fn use_guard(&self) -> bool {
+        !self.no_guard && !self.no_file_guard
+    }
+
+    pub fn use_command_guard(&self) -> bool {
+        !self.no_guard && !self.no_command_guard
     }
 }
 
@@ -587,6 +620,8 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             None => {
                 let auto_rollback = args.use_auto_rollback();
                 let shunt_driver_output = args.use_shunt();
+                let guard_file_reads = args.use_guard();
+                let guard_commands = args.use_command_guard();
                 commands::daemon::cmd_daemon(
                     &resolve(args.state),
                     args.driver.as_deref(),
@@ -597,6 +632,8 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     args.review_blocking,
                     auto_rollback,
                     shunt_driver_output,
+                    guard_file_reads,
+                    guard_commands,
                     args.impact_slicing,
                 )
             }
@@ -611,5 +648,6 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 .map(|_| ())
         }
         StateCommands::Handoff(args) => commands::handoff::cmd_handoff(&args),
+        StateCommands::Guard { cmd } => commands::guard::dispatch_guard(cmd),
     }
 }

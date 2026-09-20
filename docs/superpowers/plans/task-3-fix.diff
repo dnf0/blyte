@@ -1,0 +1,173 @@
+diff --git a/crates/superstate-cli/tests/test_cli_daemon_guard.rs b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
+index 3edbcc5..efe5416 100644
+--- a/crates/superstate-cli/tests/test_cli_daemon_guard.rs
++++ b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
+@@ -1,12 +1,12 @@
+ use clap::Parser;
+-use superstate_cli::state_cli::{Commands, StateArgs, Subcommands};
++use superstate_cli::state_cli::{Commands, StateArgs};
+ 
+ #[test]
+ fn test_cli_no_guard_flag_parsing() {
+     let args = StateArgs::try_parse_from(["state", "daemon", "--no-guard"])
+         .expect("Failed to parse --no-guard flag");
+     match args.command {
+-        Subcommands::Daemon(daemon_args) => {
++        Commands::Daemon(daemon_args) => {
+             assert!(
+                 daemon_args.no_guard,
+                 "Expected no_guard to be true when --no-guard is passed"
+@@ -16,7 +16,7 @@ fn test_cli_no_guard_flag_parsing() {
+                 "Expected use_guard() to return false when --no-guard is passed"
+             );
+         }
+-        _ => panic!("Expected Subcommands::Daemon"),
++        _ => panic!("Expected Commands::Daemon"),
+     }
+ }
+ 
+diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
+index 52cf50b..0f400e4 100644
+--- a/crates/superstate-core/src/daemon.rs
++++ b/crates/superstate-core/src/daemon.rs
+@@ -29,10 +29,17 @@ const PROGRESS_ATTEMPT_MULTIPLIER: usize = 10;
+ /// Directories never counted as progress.
+ ///
+ /// `.agent-state` is written by the daemon itself on every attempt (prompts, logs, driver
+-/// turns), and test runners create `.pytest_cache` and `__pycache__` when executing gates,
++/// turns), `.agents` contains ephemeral hooks provisioned for the file read guard, and
++/// test runners create `.pytest_cache` and `__pycache__` when executing gates,
+ /// so including them would make every attempt look like progress and the retry budget would
+ /// never expire.
+-const FINGERPRINT_SKIP_DIRS: [&str; 4] = [".git", ".agent-state", ".pytest_cache", "__pycache__"];
++const FINGERPRINT_SKIP_DIRS: [&str; 5] = [
++    ".git",
++    ".agent-state",
++    ".agents",
++    ".pytest_cache",
++    "__pycache__",
++];
+ 
+ /// A verification command that cannot fail, so it certifies nothing.
+ ///
+@@ -94,7 +101,7 @@ const FINGERPRINT_MAX_FILES: usize = 20_000;
+ /// a repository without a HEAD. A worker unpacking and editing a freshly cloned source
+ /// tree therefore produced a byte-identical git fingerprint on every attempt and was
+ /// blocked as stalled while it was in fact progressing.
+-fn workspace_fingerprint(dir: &Path) -> String {
++pub fn workspace_fingerprint(dir: &Path) -> String {
+     let mut hasher = DefaultHasher::new();
+     let mut entries: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = Vec::new();
+     let mut stack = vec![dir.to_path_buf()];
+@@ -803,6 +810,26 @@ impl DaemonRunner {
+                         }
+                     });
+                     fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_content)?)?;
++
++                    // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
++                    // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
++                    // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
++                    let git_info_dir = working_dir.join(".git").join("info");
++                    if git_info_dir.exists() {
++                        let exclude_file = git_info_dir.join("exclude");
++                        let content = fs::read_to_string(&exclude_file).unwrap_or_default();
++                        let already_excluded = content
++                            .lines()
++                            .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
++                        if !already_excluded {
++                            let mut new_content = content;
++                            if !new_content.is_empty() && !new_content.ends_with('\n') {
++                                new_content.push('\n');
++                            }
++                            new_content.push_str(".agents/\n");
++                            fs::write(&exclude_file, new_content)?;
++                        }
++                    }
+                 }
+             }
+ 
+diff --git a/crates/superstate-core/tests/test_daemon_guard.rs b/crates/superstate-core/tests/test_daemon_guard.rs
+index 19853eb..17cfedb 100644
+--- a/crates/superstate-core/tests/test_daemon_guard.rs
++++ b/crates/superstate-core/tests/test_daemon_guard.rs
+@@ -1,5 +1,5 @@
+ use std::fs;
+-use superstate_core::daemon::{DaemonConfig, DaemonRunner};
++use superstate_core::daemon::{workspace_fingerprint, DaemonConfig, DaemonRunner};
+ use superstate_core::models::{ExecutionState, TaskSpec};
+ use superstate_core::state_machine::save_state_atomic;
+ use tempfile::tempdir;
+@@ -189,3 +189,73 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
+         "existing .agents/hooks.json must not be overwritten"
+     );
+ }
++
++#[test]
++fn test_workspace_fingerprint_excludes_agents_dir() {
++    let dir = tempdir().unwrap();
++    let base_file = dir.path().join("file.txt");
++    fs::write(&base_file, "initial content").unwrap();
++
++    let initial_fp = workspace_fingerprint(dir.path());
++
++    let agents_dir = dir.path().join(".agents");
++    fs::create_dir_all(&agents_dir).unwrap();
++    let hooks_file = agents_dir.join("hooks.json");
++    fs::write(&hooks_file, r#"{"superstate-file-guard": {}}"#).unwrap();
++
++    let after_fp = workspace_fingerprint(dir.path());
++    assert_eq!(
++        initial_fp, after_fp,
++        "workspace_fingerprint must not change when .agents/hooks.json is added"
++    );
++}
++
++#[test]
++fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
++    let dir = tempdir().unwrap();
++    let state_file = dir.path().join("state.json");
++    let git_info_dir = dir.path().join(".git/info");
++    fs::create_dir_all(&git_info_dir).unwrap();
++    let exclude_file = git_info_dir.join("exclude");
++    fs::write(&exclude_file, "# git exclude\n*.tmp\n").unwrap();
++
++    let state = ExecutionState {
++        active_task: Some(TaskSpec {
++            id: "task-exclude".to_string(),
++            title: "Test Git Exclude".to_string(),
++            depends_on: vec![],
++            files_modify: vec![],
++            verification_cmd: Some("test -f exclude_evidence.txt".to_string()),
++        }),
++        no_worktree: true,
++        goal: Some("Test git exclude provisioning".to_string()),
++        ..Default::default()
++    };
++    save_state_atomic(&state_file, &state).unwrap();
++
++    let driver_cmd = "echo 'exclude ran' > exclude_evidence.txt";
++    let config = DaemonConfig {
++        state_path: state_file,
++        driver_cmd: Some(driver_cmd.to_string()),
++        max_retries: 1,
++        timeout_secs: 10,
++        advisory_gate: false,
++        advisory_review: false,
++        review_blocking: false,
++        auto_rollback: false,
++        shunt_driver_output: false,
++        guard_file_reads: true,
++        impact_slicing: false,
++    };
++
++    let mut runner = DaemonRunner::new(config).unwrap();
++    let outcome = runner.step().unwrap();
++    assert!(outcome.is_advanced());
++
++    let exclude_content = fs::read_to_string(&exclude_file).unwrap();
++    assert!(
++        exclude_content.lines().any(|line| line.trim() == ".agents/" || line.trim() == ".agents"),
++        ".git/info/exclude must contain .agents/ after provisioning"
++    );
++}
++

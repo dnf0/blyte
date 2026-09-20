@@ -79,9 +79,19 @@ enum Commands {
         /// Line count threshold before shunting triggers
         #[arg(long, default_value = "50")]
         threshold_lines: usize,
+        /// Directory where full unstripped command logs are stored
+        #[arg(long)]
+        logs_dir: Option<PathBuf>,
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
+    },
+    /// Inspect AST symbols, outlines, and code slices
+    Inspect(commands::inspect::InspectArgs),
+    /// Intercept and evaluate agent tool invocations before execution
+    Guard {
+        #[command(subcommand)]
+        cmd: commands::guard::GuardCommands,
     },
 }
 
@@ -155,6 +165,8 @@ fn main() {
                 args.review_blocking,
                 args.use_auto_rollback(),
                 args.use_shunt(),
+                args.use_guard(),
+                args.use_command_guard(),
                 args.impact_slicing,
             ),
         },
@@ -166,10 +178,13 @@ fn main() {
                 .map(|_| ())
         }
         Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
+        Commands::Inspect(args) => commands::inspect::cmd_inspect(&args),
+        Commands::Guard { cmd } => commands::guard::dispatch_guard(cmd),
         Commands::Shunt {
             threshold_lines,
+            logs_dir,
             cmd,
-        } => match commands::shunt::execute_shunt(&cmd, threshold_lines) {
+        } => match commands::shunt::execute_shunt(&cmd, threshold_lines, logs_dir) {
             Ok(code) => std::process::exit(code),
             Err(e) => {
                 eprintln!("Error: {}", e);

@@ -38,6 +38,8 @@ fn test_daemon_run_step_success() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -78,6 +80,8 @@ fn test_daemon_run_step_verification_failure() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -126,6 +130,8 @@ fn test_daemon_run_to_completion() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -169,6 +175,8 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -223,6 +231,8 @@ fn test_daemon_step_advancer_invoked() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -273,6 +283,8 @@ fn test_daemon_step_advancer_error_propagation() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -327,6 +339,8 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -391,6 +405,8 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -443,6 +459,8 @@ fn test_daemon_rich_retry_prompt_on_failure() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -536,6 +554,8 @@ fn test_daemon_auto_commit_on_pass_in_place() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
 
@@ -596,6 +616,8 @@ fn test_progress_renews_the_retry_budget() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -642,6 +664,8 @@ fn test_stalled_worker_still_blocks() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -700,6 +724,8 @@ fn test_progress_inside_an_untracked_directory_counts() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -748,6 +774,8 @@ fn test_daemon_own_state_writes_are_not_progress() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -803,6 +831,8 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -856,6 +886,8 @@ fn test_real_gate_completes_immediately() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -896,6 +928,8 @@ fn test_ungated_floor_terminates_without_a_driver() {
         review_blocking: false,
         auto_rollback: false,
         shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
         impact_slicing: false,
     };
     let mut runner = DaemonRunner::new(config).unwrap();
@@ -952,6 +986,8 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
             review_blocking: false,
             auto_rollback: false,
             shunt_driver_output: false,
+            guard_file_reads: false,
+            guard_commands: false,
             impact_slicing: false,
         })
         .unwrap();
