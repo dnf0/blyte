@@ -33,7 +33,7 @@
 - Consumes: Approved design specification (`docs/superpowers/specs/2026-09-20-superstate-manifesto-design.md`).
 - Produces: Complete, publication-ready `MANIFESTO.md` in the root of `superstate`.
 
-- [ ] **Step 1: Write the canonical `MANIFESTO.md` file**
+- [x] **Step 1: Write the canonical `MANIFESTO.md` file**
 
 Write the complete manifesto to `/Users/danielfisher/repos/superstate/MANIFESTO.md`:
 
@@ -173,7 +173,7 @@ Real software engineering is:
 **This is Superstate.**
 ```
 
-- [ ] **Step 2: Verify `MANIFESTO.md` renders cleanly**
+- [x] **Step 2: Verify `MANIFESTO.md` renders cleanly**
 
 Run command to verify file existence and line count:
 ```bash
@@ -181,7 +181,7 @@ wc -l /Users/danielfisher/repos/superstate/MANIFESTO.md
 ```
 Expected: ~140 lines, non-empty.
 
-- [ ] **Step 3: Commit `MANIFESTO.md`**
+- [x] **Step 3: Commit `MANIFESTO.md`**
 
 ```bash
 git -C /Users/danielfisher/repos/superstate add MANIFESTO.md
@@ -202,7 +202,7 @@ git -C /Users/danielfisher/repos/superstate commit --no-gpg-sign -m "docs: autho
 - Consumes: `MANIFESTO.md` in repository root.
 - Produces: Prominent callouts and navigation links to the Manifesto.
 
-- [ ] **Step 1: Update `README.md`**
+- [x] **Step 1: Update `README.md`**
 
 Add a prominent callout block immediately below the title and description in `README.md`:
 
@@ -210,7 +210,7 @@ Add a prominent callout block immediately below the title and description in `RE
 > Read **[The Superstate Manifesto](MANIFESTO.md)** for our core doctrine: why conversational LLM coding fails on real repositories, and the Five Invariants of autonomous software engineering.
 ```
 
-- [ ] **Step 2: Update `docs/index.md`**
+- [x] **Step 2: Update `docs/index.md`**
 
 Add the Manifesto link to the introduction in `docs/index.md`:
 
@@ -218,7 +218,7 @@ Add the Manifesto link to the introduction in `docs/index.md`:
 > 📖 **Read [The Superstate Manifesto](../MANIFESTO.md)** to understand the architectural doctrine, the separation of Worker and Control planes, and the Five Invariants of autonomous execution.
 ```
 
-- [ ] **Step 3: Commit documentation updates**
+- [x] **Step 3: Commit documentation updates**
 
 ```bash
 git -C /Users/danielfisher/repos/superstate add README.md docs/index.md
@@ -237,7 +237,7 @@ git -C /Users/danielfisher/repos/superstate commit --no-gpg-sign -m "docs: link 
 - Verify: `/Users/danielfisher/repos/superstate/docs/index.md`
 - Verify: `/Users/danielfisher/repos/superstate-eval/AGENTS.md` (no regressions)
 
-- [ ] **Step 1: Verify all links resolve**
+- [x] **Step 1: Verify all links resolve**
 
 Run link and file check:
 ```bash
@@ -246,7 +246,7 @@ git -C /Users/danielfisher/repos/superstate status --porcelain
 ```
 Expected: `MANIFESTO exists`, clean git status.
 
-- [ ] **Step 2: Verify superstate workspace cargo checks pass**
+- [x] **Step 2: Verify superstate workspace cargo checks pass**
 
 ```bash
 cargo check --manifest-path /Users/danielfisher/repos/superstate/Cargo.toml --all-targets
