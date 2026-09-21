@@ -25,7 +25,7 @@ pub enum GuardCommands {
 #[derive(Args, Debug, Clone)]
 pub struct PreToolUseArgs {
     /// Maximum lines permitted before shunting to symbol outline
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES)]
     pub threshold_lines: usize,
 }
 
@@ -43,7 +43,7 @@ pub struct PreCommandArgs {
     /// Line budget for a whole-file dump performed through the shell (`cat`, `less`, unbounded
     /// `head`/`tail`). Matches the file viewing tool's budget so the channel cannot be used to
     /// route around it.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES)]
     pub bulk_read_threshold_lines: usize,
 }
 

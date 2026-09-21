@@ -40,6 +40,7 @@ fn test_daemon_run_step_success() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -83,6 +84,7 @@ fn test_daemon_run_step_verification_failure() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -134,6 +136,7 @@ fn test_daemon_run_to_completion() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -180,6 +183,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -237,6 +241,7 @@ fn test_daemon_step_advancer_invoked() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -290,6 +295,7 @@ fn test_daemon_step_advancer_error_propagation() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -347,6 +353,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -414,6 +421,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -469,6 +477,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -565,6 +574,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -628,6 +638,7 @@ fn test_progress_renews_the_retry_budget() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -677,6 +688,7 @@ fn test_stalled_worker_still_blocks() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -738,6 +750,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -789,6 +802,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -847,6 +861,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -903,6 +918,7 @@ fn test_real_gate_completes_immediately() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -946,6 +962,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -1005,6 +1022,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
             rollback_policy: Default::default(),
             shunt_driver_output: false,
             guard_file_reads: false,
+            read_threshold_lines: 640,
             guard_commands: false,
             impact_slicing: false,
         })

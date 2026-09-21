@@ -125,6 +125,7 @@ fn test_daemon_automerge_on_completion() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -225,6 +226,7 @@ fn test_daemon_completion_in_place_mode() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -291,6 +293,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -317,6 +320,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     })

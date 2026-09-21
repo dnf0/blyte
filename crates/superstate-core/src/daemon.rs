@@ -258,12 +258,24 @@ pub struct DaemonConfig {
     /// Automatically guard file reads and shunt large files to symbol outlines
     #[serde(default = "default_true")]
     pub guard_file_reads: bool,
+    /// Line budget a single read may take before it is served as an AST outline.
+    ///
+    /// Deliberately a knob rather than a constant: the break-even point depends on how many
+    /// lines a task actually needs out of a file, which is a property of the workload. See
+    /// `guard::DEFAULT_READ_THRESHOLD_LINES` for how the default was measured, and
+    /// superstate-eval `scripts/read_budget.py` for recomputing it from a recorded trace.
+    #[serde(default = "default_read_threshold_lines")]
+    pub read_threshold_lines: usize,
     /// Automatically guard tool execution and poll commands with debounce
     #[serde(default = "default_true")]
     pub guard_commands: bool,
     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
     #[serde(default)]
     pub impact_slicing: bool,
+}
+
+fn default_read_threshold_lines() -> usize {
+    crate::guard::DEFAULT_READ_THRESHOLD_LINES
 }
 
 impl Default for DaemonConfig {
@@ -280,6 +292,7 @@ impl Default for DaemonConfig {
             rollback_policy: RollbackPolicy::default(),
             shunt_driver_output: true,
             guard_file_reads: true,
+            read_threshold_lines: default_read_threshold_lines(),
             guard_commands: true,
             impact_slicing: false,
         }
@@ -938,7 +951,11 @@ impl DaemonRunner {
                                     "matcher": "view_file|View|read_file",
                                     "hooks": [
                                         {
-                                            "command": format!("{} guard pre-tool-use --threshold-lines 200", hook_binary())
+                                            "command": format!(
+                                                "{} guard pre-tool-use --threshold-lines {}",
+                                                hook_binary(),
+                                                self.config.read_threshold_lines
+                                            )
                                         }
                                     ]
                                 }

@@ -117,9 +117,27 @@ pub fn cmd_daemon(
     rollback_policy: superstate_core::daemon::RollbackPolicy,
     shunt_driver_output: bool,
     guard_file_reads: bool,
+    read_threshold_lines: Option<usize>,
     guard_commands: bool,
     impact_slicing: bool,
 ) -> Result<(), String> {
+    // Precedence: explicit flag, then environment (so a sweep can vary it per run without a
+    // rebuild), then the measured default. A malformed env value is rejected rather than
+    // silently ignored -- a swept parameter that quietly reverts to its default produces a
+    // run that looks like a data point and is not one.
+    let read_threshold_lines = match read_threshold_lines {
+        Some(n) => n,
+        None => match std::env::var("SUPERSTATE_READ_THRESHOLD_LINES") {
+            Ok(val) => val.trim().parse::<usize>().map_err(|_| {
+                format!(
+                    "SUPERSTATE_READ_THRESHOLD_LINES must be a non-negative integer, got '{}'",
+                    val.trim()
+                )
+            })?,
+            Err(_) => superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES,
+        },
+    };
+
     let auto_rollback = if !auto_rollback {
         false
     } else if let Ok(val) = std::env::var("SUPERSTATE_DAEMON_AUTO_ROLLBACK") {
@@ -295,6 +313,7 @@ pub fn cmd_daemon(
             rollback_policy,
             shunt_driver_output,
             guard_file_reads,
+            read_threshold_lines,
             guard_commands,
             impact_slicing,
         };

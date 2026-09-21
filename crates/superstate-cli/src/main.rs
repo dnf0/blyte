@@ -179,6 +179,7 @@ fn main() {
                 },
                 args.use_shunt(),
                 args.use_guard(),
+                args.read_threshold_lines,
                 args.use_command_guard(),
                 args.impact_slicing,
             ),

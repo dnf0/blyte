@@ -95,6 +95,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -181,6 +182,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -231,6 +233,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -312,6 +315,7 @@ EOF
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };

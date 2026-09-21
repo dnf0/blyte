@@ -91,6 +91,7 @@ fn test_daemon_runner_provisions_hooks_json() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
+        read_threshold_lines: 640,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -116,12 +117,14 @@ fn test_daemon_runner_provisions_hooks_json() {
     );
     let cmd = file_hook_entry["hooks"][0]["command"].as_str();
     assert_eq!(
-        cmd.map(|c: &str| c.ends_with("guard pre-tool-use --threshold-lines 200")),
+        // 640 is deliberately NOT the default: this asserts the hook carries the CONFIGURED
+        // budget, so a sweep that varies `read_threshold_lines` actually reaches the guard.
+        cmd.map(|c: &str| c.ends_with("guard pre-tool-use --threshold-lines 640")),
         // The hook must invoke the RUNNING binary by absolute path. A bare name resolves
         // through PATH at hook time, so EXP-077 enforced its guards with the previous day's
         // build while the daemon ran the current one.
         Some(true),
-        "hook command must end with `guard pre-tool-use --threshold-lines 200`, got {cmd:?}"
+        "hook command must end with `guard pre-tool-use --threshold-lines 640`, got {cmd:?}"
     );
 
     let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
@@ -174,6 +177,7 @@ fn test_daemon_provisions_command_guard_in_hooks_json() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
+        read_threshold_lines: 640,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -240,6 +244,7 @@ fn test_daemon_no_command_guard_disables_provisioning() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -297,6 +302,7 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -345,6 +351,7 @@ fn test_daemon_no_guard_disables_both() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -399,6 +406,7 @@ fn test_daemon_merges_hooks_when_file_exists() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
+        read_threshold_lines: 640,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -484,6 +492,7 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
+        read_threshold_lines: 640,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -535,6 +544,7 @@ fn generated_hooks_invoke_the_running_binary_not_whatever_is_on_path() {
         max_retries: 1,
         timeout_secs: 5,
         guard_file_reads: true,
+        read_threshold_lines: 640,
         guard_commands: true,
         ..Default::default()
     })
@@ -552,4 +562,34 @@ fn generated_hooks_invoke_the_running_binary_not_whatever_is_on_path() {
             "hook must invoke an absolute path, not a bare name resolved through PATH: {hooks}"
         );
     }
+}
+
+#[test]
+fn test_daemon_config_default_read_threshold_lines() {
+    // The measured default (FINDINGS 13.18). At 200 the budget cost 2.2x a whole-file read on
+    // a 1,906-line file, and could not break even at any read count; unbounded was cheaper.
+    let config = DaemonConfig::default();
+    assert_eq!(
+        config.read_threshold_lines,
+        superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES,
+        "DaemonConfig::default().read_threshold_lines must come from the measured constant"
+    );
+    assert_eq!(
+        superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES,
+        800,
+        "the measured default is 800; changing it is an experiment, not a refactor"
+    );
+}
+
+#[test]
+fn test_daemon_config_deserialize_defaults_read_threshold_lines() {
+    // A config written before this field existed must not silently fall back to 0, which
+    // would shunt every read and cost roughly twice what no budget at all costs.
+    let json = r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
+    let config: DaemonConfig = serde_json::from_str(json).expect("valid DaemonConfig JSON");
+    assert_eq!(
+        config.read_threshold_lines,
+        superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES,
+        "deserialized DaemonConfig without read_threshold_lines must take the measured default"
+    );
 }

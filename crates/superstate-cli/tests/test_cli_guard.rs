@@ -155,7 +155,10 @@ fn test_large_file_unbounded_denies_with_ast_outline() {
     })
     .to_string();
 
-    let (code, _, json) = run_guard(&payload, &[]);
+    // Threshold pinned explicitly: this test covers the SHUNT MECHANISM, not the default
+    // budget. Leaving it implicit made three tests fail when the measured default moved from
+    // 200 to 800, which told us nothing about the guard.
+    let (code, _, json) = run_guard(&payload, &["--threshold-lines", "200"]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "deny");
     let reason = json["reason"].as_str().unwrap();
@@ -253,7 +256,10 @@ fn test_bounded_slice_exceeding_threshold_denies() {
     })
     .to_string();
 
-    let (code, _, json) = run_guard(&payload, &[]);
+    // Threshold pinned explicitly: this test covers the SHUNT MECHANISM, not the default
+    // budget. Leaving it implicit made three tests fail when the measured default moved from
+    // 200 to 800, which told us nothing about the guard.
+    let (code, _, json) = run_guard(&payload, &["--threshold-lines", "200"]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "deny");
 }
@@ -275,7 +281,7 @@ fn test_custom_threshold_lines_parameter() {
     })
     .to_string();
 
-    // Default threshold (200) allows 80 lines
+    // Default threshold (800) allows 80 lines
     let (code_default, _, json_default) = run_guard(&payload, &[]);
     assert_eq!(code_default, 0);
     assert_eq!(json_default["decision"], "allow");
@@ -305,7 +311,9 @@ fn test_flexible_payload_formats_and_tool_names() {
         }
     })
     .to_string();
-    let (code, _, json) = run_guard(&payload_claude, &[]);
+    // Pinned: this asserts the payload SHAPE is parsed, so it must not depend on the default
+    // budget. The three payload variants share one 250-line fixture.
+    let (code, _, json) = run_guard(&payload_claude, &["--threshold-lines", "200"]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "deny");
 
@@ -321,7 +329,7 @@ fn test_flexible_payload_formats_and_tool_names() {
         }
     })
     .to_string();
-    let (code, _, json) = run_guard(&payload_snake, &[]);
+    let (code, _, json) = run_guard(&payload_snake, &["--threshold-lines", "200"]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "allow");
 
@@ -335,7 +343,7 @@ fn test_flexible_payload_formats_and_tool_names() {
         }
     })
     .to_string();
-    let (code, _, json) = run_guard(&payload_top_level, &[]);
+    let (code, _, json) = run_guard(&payload_top_level, &["--threshold-lines", "200"]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "allow");
 }

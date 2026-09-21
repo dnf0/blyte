@@ -140,6 +140,24 @@ pub fn evaluate_file_read_guard(
     }
 }
 
+/// Default line budget before a read is served as an AST outline instead.
+///
+/// Chosen from measurement, not intuition. A tool call carries a fixed preamble of roughly
+/// 2,500-5,000 tokens (FINDINGS.md 13.17), so splitting a file pays that cost once per window
+/// to avoid fetching the lines it skips. At the previous value of 200 a 1,906-line file took 14
+/// calls costing 50,719 tokens where one whole-file read would have cost 23,466 -- 2.2x worse,
+/// and unable to break even even if the agent read nothing (13.18).
+///
+/// Replaying that trace across thresholds put the optimum at ~1,600 for this workload, with the
+/// cost curve sharply asymmetric: 100 lines costs 66,497 and unbounded costs 35,542, so being
+/// too low is roughly twice as expensive as having no budget at all. 800 takes most of the gain
+/// while staying well clear of that cliff and robust to codebases with smaller files.
+///
+/// The optimum is workload-specific -- it tracks how many lines a task actually needs from a
+/// file -- so this is a default, not a constant of nature. `scripts/read_budget.py` in
+/// superstate-eval recomputes it from any recorded trace.
+pub const DEFAULT_READ_THRESHOLD_LINES: usize = 800;
+
 /// Detects a shell command that dumps a whole file into the conversation.
 ///
 /// The file read guard only ever matched the agent's *file viewing tool*, so `cat internal/x.go`

@@ -101,6 +101,7 @@ fn test_daemon_preserves_work_when_a_failing_attempt_changed_the_tree() {
         rollback_policy: RollbackPolicy::OnStall,
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -193,6 +194,7 @@ fn test_daemon_rolls_back_when_an_attempt_changed_nothing() {
         rollback_policy: RollbackPolicy::OnStall,
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -284,6 +286,7 @@ fn test_daemon_no_rollback_when_disabled() {
         rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
         guard_commands: false,
         impact_slicing: false,
     };

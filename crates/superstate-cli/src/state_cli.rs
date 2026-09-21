@@ -352,6 +352,18 @@ pub struct DaemonArgs {
         help = "When to reset on failure: always (default), on-stall, on-regression"
     )]
     pub rollback_policy: Option<String>,
+    /// Line budget a read may take before the guard serves an AST outline instead.
+    ///
+    /// Varying this is a first-class experiment, not a tuning afterthought: the optimum
+    /// depends on how much of a file a task actually needs, and the cost curve is asymmetric
+    /// -- too low costs roughly twice as much as no budget at all. Also settable via
+    /// SUPERSTATE_READ_THRESHOLD_LINES so a run can sweep it without a rebuild.
+    #[arg(
+        long,
+        value_name = "LINES",
+        help = "Lines a read may take before shunting to an outline (default 800)"
+    )]
+    pub read_threshold_lines: Option<usize>,
     /// Disable automatic tool output shunting during driver execution
     #[arg(
         long,
@@ -657,6 +669,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     rollback_policy,
                     shunt_driver_output,
                     guard_file_reads,
+                    args.read_threshold_lines,
                     guard_commands,
                     args.impact_slicing,
                 )
