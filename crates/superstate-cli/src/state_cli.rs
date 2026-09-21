@@ -442,6 +442,15 @@ pub struct HandoffArgs {
     #[arg(long)]
     pub verify_cmd: Option<String>,
 
+    /// Decompose the goal into the autonomous TDD DAG instead of a single gated milestone.
+    ///
+    /// Milestone 1 requires the worker to author its own reproduction test and proves it
+    /// compiles and FAILS; milestone 2 proves that test and the repository's own suite PASS.
+    /// Conflicts with --verify-cmd: handing over a ready-made assertion is the scaffold
+    /// Manifesto Invariant V bans.
+    #[arg(long, conflicts_with = "verify_cmd")]
+    pub tdd: bool,
+
     /// Plan markdown file to parse milestones from
     #[arg(long)]
     pub plan: Option<PathBuf>,
@@ -483,6 +492,7 @@ impl Default for HandoffArgs {
         Self {
             goal: None,
             verify_cmd: None,
+            tdd: false,
             plan: None,
             from: None,
             to: None,
