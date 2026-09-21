@@ -189,6 +189,57 @@ fn extract_command_line(args: &serde_json::Map<String, serde_json::Value>) -> Op
     None
 }
 
+/// Resolves the workspace root the guards write their telemetry under.
+fn telemetry_root() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("SUPERSTATE_WORKTREE_PATH") {
+        if !v.trim().is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    if cwd.file_name().and_then(|n| n.to_str()) == Some(".agents") {
+        return cwd.parent().map(|p| p.to_path_buf());
+    }
+    Some(cwd)
+}
+
+/// Appends one line to `<root>/.agent-state/guard-activity.jsonl` for EVERY evaluated tool call.
+///
+/// Denials alone cannot answer the question that matters. EXP-075 had a turn admit 1,917,135
+/// tokens against a 133,550-token codebase -- fourteen times the source -- and nothing recorded
+/// says whether that was the same files read repeatedly or volume from another channel. A guard
+/// sees every read and every command, so it is the cheapest place to record what was touched,
+/// how large it was, and how often. This is the trace the daemon arm otherwise lacks (13.7).
+///
+/// Best effort: a guard that cannot write telemetry must still guard.
+fn record_activity(kind: &str, target: &str, lines: usize, decision: &str) {
+    let Some(root) = telemetry_root() else { return };
+    let dir = root.join(".agent-state");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"ts\":{},\"kind\":{},\"target\":{},\"lines\":{},\"decision\":{}}}\n",
+        stamp,
+        serde_json::Value::String(kind.to_string()),
+        serde_json::Value::String(target.to_string()),
+        lines,
+        serde_json::Value::String(decision.to_string()),
+    );
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("guard-activity.jsonl"))
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Appends one line to `<root>/.agent-state/guard-denials.jsonl` recording a blocked read.
 ///
 /// The guard previously left no trace at all when it denied, which is why it took until
@@ -361,10 +412,19 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
     // Evaluate proposed file read via superstate-core engine.
     let resolved = resolve_payload_path(&path_str);
     let decision = evaluate_file_read_guard(&resolved, start_line, end_line, &config);
-    if matches!(decision, GuardDecision::Deny { .. }) {
-        let lines = std::fs::read_to_string(&resolved)
-            .map(|c| c.lines().count())
-            .unwrap_or(0);
+    let lines = std::fs::read_to_string(&resolved)
+        .map(|c| c.lines().count())
+        .unwrap_or(0);
+    let denied = matches!(decision, GuardDecision::Deny { .. });
+    // Every read is recorded, not just the blocked ones: the question "was the same file read
+    // repeatedly?" cannot be answered from denials alone.
+    record_activity(
+        if start_line.is_some() || end_line.is_some() { "read_bounded" } else { "read_whole" },
+        &resolved.display().to_string(),
+        lines,
+        if denied { "deny" } else { "allow" },
+    );
+    if denied {
         record_denial(&resolved, lines);
     }
     emit_decision(&decision);
@@ -432,10 +492,17 @@ pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
                 threshold_lines: args.bulk_read_threshold_lines,
             };
             let decision = evaluate_file_read_guard(&resolved, None, None, &file_config);
-            if let GuardDecision::Deny { .. } = decision {
-                let lines = std::fs::read_to_string(&resolved)
-                    .map(|c| c.lines().count())
-                    .unwrap_or(0);
+            let lines = std::fs::read_to_string(&resolved)
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
+            let denied = matches!(decision, GuardDecision::Deny { .. });
+            record_activity(
+                "shell_read",
+                &resolved.display().to_string(),
+                lines,
+                if denied { "deny" } else { "allow" },
+            );
+            if denied {
                 record_denial(&resolved, lines);
                 emit_decision(&decision);
                 return Ok(());
@@ -444,6 +511,19 @@ pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
     }
 
     let decision = evaluate_command_guard(&tool_name, &tool_args, &config);
+    if let Some(cmd) = extract_command_line(&tool_args) {
+        let label: String = cmd.chars().take(160).collect();
+        record_activity(
+            "command",
+            &label,
+            0,
+            match decision {
+                CommandGuardDecision::Allow => "allow",
+                CommandGuardDecision::Throttle { .. } => "throttle",
+                CommandGuardDecision::Deny { .. } => "deny",
+            },
+        );
+    }
 
     // A throttled poll is delayed here, in the hook, and then allowed. Sleeping is the whole
     // mechanism: the agent's poll rate is capped at one per window, which is the token saving
