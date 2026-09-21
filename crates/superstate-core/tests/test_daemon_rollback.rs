@@ -1,6 +1,6 @@
 use std::fs;
 use std::process::Command;
-use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome};
+use superstate_core::daemon::{DaemonConfig, DaemonRunner, DaemonStepOutcome, RollbackPolicy};
 use superstate_core::models::{ExecutionState, ExecutionStatus, TaskSpec};
 use superstate_core::state_machine::{load_state, save_state_atomic};
 
@@ -98,6 +98,7 @@ fn test_daemon_preserves_work_when_a_failing_attempt_changed_the_tree() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: true,
+        rollback_policy: RollbackPolicy::OnStall,
         shunt_driver_output: false,
         guard_file_reads: false,
         guard_commands: false,
@@ -189,6 +190,7 @@ fn test_daemon_rolls_back_when_an_attempt_changed_nothing() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: true,
+        rollback_policy: RollbackPolicy::OnStall,
         shunt_driver_output: false,
         guard_file_reads: false,
         guard_commands: false,
@@ -279,6 +281,7 @@ fn test_daemon_no_rollback_when_disabled() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
         guard_commands: false,
@@ -325,4 +328,133 @@ fn test_daemon_deserialization_defaults_auto_rollback_to_true() {
         config.auto_rollback,
         "deserialized DaemonConfig without auto_rollback field must default to true"
     );
+}
+
+#[test]
+fn the_default_policy_resets_even_an_attempt_that_made_progress() {
+    // Manifesto Invariant III: "If an execution turn fails its verification gate, the control
+    // plane executes a scoped, deterministic hard rollback before the agent is allowed to
+    // retry ... not a corrupted workspace." That is the default, and it must stay the default
+    // unless a run deliberately selects otherwise.
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let repo_root = temp_dir.path();
+    setup_temp_git_repo(repo_root);
+
+    let state_dir = repo_root.join(".agent-state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let state_path = state_dir.join("state.json");
+    save_state_atomic(
+        &state_path,
+        &ExecutionState {
+            status: ExecutionStatus::InProgress,
+            step: 1,
+            active_task: Some(TaskSpec {
+                id: "task-default-1".to_string(),
+                title: "Default policy".to_string(),
+                verification_cmd: Some("test -f milestone_done.txt".to_string()),
+                ..Default::default()
+            }),
+            no_worktree: true,
+            active_branch: Some("main".to_string()),
+            base_branch: Some("main".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("save state");
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some("echo 'real work' > tracked.txt && echo new > feature.rs".to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+        auto_rollback: true,
+        // deliberately not overridden: this asserts what a run gets by default
+        ..Default::default()
+    };
+    assert_eq!(
+        config.rollback_policy,
+        RollbackPolicy::Always,
+        "the default policy must be the one the manifesto mandates"
+    );
+
+    let mut runner = DaemonRunner::new(config).expect("create runner");
+    let outcome = runner.run_step().expect("run_step");
+    assert!(matches!(outcome, DaemonStepOutcome::Failed { .. }));
+
+    assert_eq!(
+        fs::read_to_string(repo_root.join("tracked.txt")).expect("read"),
+        "initial content\n",
+        "under the default policy a failed attempt is reset even though it changed the tree"
+    );
+    assert!(!repo_root.join("feature.rs").exists());
+}
+
+#[test]
+fn on_regression_keeps_incomplete_work_but_resets_a_broken_suite() {
+    // A failing gate cannot separate "broken" from "incomplete"; a `&&` chain can. The first
+    // clause is the reproduction test: if it still passes while the chain failed, a later
+    // clause broke, which is a regression. If it fails, the work is merely unfinished.
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let repo_root = temp_dir.path();
+    setup_temp_git_repo(repo_root);
+
+    let state_dir = repo_root.join(".agent-state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+
+    for (label, driver, expect_reset) in [
+        // The driver writes `repro` but not `suite`: first clause passes, second fails -> the
+        // suite regressed, so the tree is reset.
+        ("regression", "echo work > tracked.txt && touch repro", true),
+        // Neither marker: the first clause fails, so the work is incomplete and is kept.
+        ("incomplete", "echo work > tracked.txt", false),
+    ] {
+        let state_path = state_dir.join(format!("{label}.json"));
+        save_state_atomic(
+            &state_path,
+            &ExecutionState {
+                status: ExecutionStatus::InProgress,
+                step: 1,
+                active_task: Some(TaskSpec {
+                    id: format!("task-{label}"),
+                    title: "Regression policy".to_string(),
+                    verification_cmd: Some("test -f repro && test -f suite".to_string()),
+                    ..Default::default()
+                }),
+                no_worktree: true,
+                active_branch: Some("main".to_string()),
+                base_branch: Some("main".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("save state");
+
+        let mut runner = DaemonRunner::new(DaemonConfig {
+            state_path: state_path.clone(),
+            driver_cmd: Some(driver.to_string()),
+            max_retries: 3,
+            timeout_secs: 10,
+            auto_rollback: true,
+            rollback_policy: RollbackPolicy::OnRegression,
+            ..Default::default()
+        })
+        .expect("create runner");
+        let outcome = runner.run_step().expect("run_step");
+        assert!(matches!(outcome, DaemonStepOutcome::Failed { .. }), "{label}");
+
+        let tracked = fs::read_to_string(repo_root.join("tracked.txt")).expect("read");
+        if expect_reset {
+            assert_eq!(tracked, "initial content\n", "{label}: a regression must reset");
+        } else {
+            assert_eq!(tracked.trim(), "work", "{label}: incomplete work must survive");
+        }
+        // Reset the fixture for the next case.
+        let _ = std::process::Command::new("git")
+            .args(["reset", "--hard", "HEAD"])
+            .current_dir(repo_root)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(repo_root)
+            .output();
+    }
 }

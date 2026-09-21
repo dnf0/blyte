@@ -192,9 +192,7 @@ fn test_cli_daemon_auto_rollback_execution() {
     .unwrap();
     superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
 
-    // Attempt 1 writes (progress: no rollback); later attempts no-op, so the tree stalls
-    // and the rollback escape valve fires. See FINDINGS.md 13.2.
-    let mock_driver = "sh -c \"if [ ! -f marker.txt ]; then echo corrupted > tracked.txt; echo junk > untracked.txt; touch marker.txt; fi\"";
+    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
 
     let output = Command::new(bin())
         .args([
@@ -268,9 +266,7 @@ fn test_cli_daemon_auto_rollback_enabled_by_default() {
     .unwrap();
     superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
 
-    // Attempt 1 writes (progress: no rollback); later attempts no-op, so the tree stalls
-    // and the rollback escape valve fires. See FINDINGS.md 13.2.
-    let mock_driver = "sh -c \"if [ ! -f marker.txt ]; then echo corrupted > tracked.txt; echo junk > untracked.txt; touch marker.txt; fi\"";
+    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
 
     let output = Command::new(bin())
         .args([
@@ -341,9 +337,7 @@ fn test_cli_daemon_auto_rollback_disabled_with_flag() {
     .unwrap();
     superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
 
-    // Attempt 1 writes (progress: no rollback); later attempts no-op, so the tree stalls
-    // and the rollback escape valve fires. See FINDINGS.md 13.2.
-    let mock_driver = "sh -c \"if [ ! -f marker.txt ]; then echo corrupted > tracked.txt; echo junk > untracked.txt; touch marker.txt; fi\"";
+    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
 
     let output = Command::new(bin())
         .args([
@@ -416,9 +410,7 @@ fn test_cli_daemon_auto_rollback_disabled_via_env_var() {
     .unwrap();
     superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
 
-    // Attempt 1 writes (progress: no rollback); later attempts no-op, so the tree stalls
-    // and the rollback escape valve fires. See FINDINGS.md 13.2.
-    let mock_driver = "sh -c \"if [ ! -f marker.txt ]; then echo corrupted > tracked.txt; echo junk > untracked.txt; touch marker.txt; fi\"";
+    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
 
     let output = Command::new(bin())
         .args([
@@ -489,9 +481,7 @@ fn test_cli_daemon_detached_forwarding() {
     .unwrap();
     superstate_core::state_machine::save_state_atomic(&state_path, &state).unwrap();
 
-    // Attempt 1 writes (progress: no rollback); later attempts no-op, so the tree stalls
-    // and the rollback escape valve fires. See FINDINGS.md 13.2.
-    let mock_driver = "sh -c \"if [ ! -f marker.txt ]; then echo corrupted > tracked.txt; echo junk > untracked.txt; touch marker.txt; fi\"";
+    let mock_driver = "sh -c \"echo corrupted > tracked.txt && echo junk > untracked.txt\"";
 
     // Spawn detached daemon with --auto-rollback
     let output = Command::new(bin())

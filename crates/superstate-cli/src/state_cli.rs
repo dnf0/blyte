@@ -343,6 +343,15 @@ pub struct DaemonArgs {
     /// Disable automatic git rollback on verification failure
     #[arg(long, help = "Disable automatic git rollback on verification failure")]
     pub no_auto_rollback: bool,
+    /// When a failed attempt's tree is reset: always (Manifesto Invariant III, the default),
+    /// on-stall (only when the attempt changed nothing), on-regression (only when it broke
+    /// something that previously passed).
+    #[arg(
+        long,
+        value_name = "POLICY",
+        help = "When to reset on failure: always (default), on-stall, on-regression"
+    )]
+    pub rollback_policy: Option<String>,
     /// Disable automatic tool output shunting during driver execution
     #[arg(
         long,
@@ -629,6 +638,10 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             }
             None => {
                 let auto_rollback = args.use_auto_rollback();
+                let rollback_policy = match args.rollback_policy.as_deref() {
+                    Some(v) => superstate_core::daemon::RollbackPolicy::parse(v)?,
+                    None => superstate_core::daemon::RollbackPolicy::default(),
+                };
                 let shunt_driver_output = args.use_shunt();
                 let guard_file_reads = args.use_guard();
                 let guard_commands = args.use_command_guard();
@@ -641,6 +654,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     args.advisory_review,
                     args.review_blocking,
                     auto_rollback,
+                    rollback_policy,
                     shunt_driver_output,
                     guard_file_reads,
                     guard_commands,

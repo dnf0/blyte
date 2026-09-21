@@ -176,6 +176,59 @@ fn default_true() -> bool {
     true
 }
 
+/// When a failed verification attempt has its working tree reset to the milestone baseline.
+///
+/// Manifesto Invariant III mandates `Always`: "If an execution turn fails its verification
+/// gate, the control plane executes a scoped, deterministic hard rollback before the agent is
+/// allowed to retry ... not a corrupted workspace." That remains the default, and it is the
+/// behaviour every arm gets unless a run deliberately selects otherwise.
+///
+/// The alternatives exist to be measured, not assumed. EXP-071 recorded a worker's committed
+/// feature being reset five times and rebuilt, 7 turns for the outcome vanilla reached in 1 --
+/// but under a single-milestone fixture regime that no longer exists, so that evidence does
+/// not transfer cleanly to the TDD DAG. EXP-059 measured the opposite at n=6. The question is
+/// open, so it is a switch rather than a patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RollbackPolicy {
+    /// Reset after every failed attempt. Manifesto Invariant III; the default.
+    #[default]
+    Always,
+    /// Reset only when the attempt changed nothing, leaving partial progress to iterate on.
+    OnStall,
+    /// Reset only when the attempt broke something that previously worked.
+    ///
+    /// A failing gate cannot by itself separate "broken" from "incomplete". A `&&` chain can:
+    /// re-running the first clause alone says whether the reproduction test still passes. If it
+    /// does and a later clause failed, the edit regressed the suite. If the first clause fails,
+    /// the work is merely unfinished. A gate with no such structure yields no regression signal,
+    /// and is treated as "no regression" rather than guessed at.
+    OnRegression,
+}
+
+impl RollbackPolicy {
+    /// Parses a CLI value, rejecting anything unrecognised rather than defaulting silently.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "always" => Ok(Self::Always),
+            "on-stall" => Ok(Self::OnStall),
+            "on-regression" => Ok(Self::OnRegression),
+            other => Err(format!(
+                "unknown rollback policy {other:?} (expected always, on-stall or on-regression)"
+            )),
+        }
+    }
+
+    /// Name used in ledger notes and telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::OnStall => "on-stall",
+            Self::OnRegression => "on-regression",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     pub state_path: PathBuf,
@@ -196,6 +249,9 @@ pub struct DaemonConfig {
     /// Automatically roll back working tree to milestone baseline on verification failure
     #[serde(default = "default_true")]
     pub auto_rollback: bool,
+    /// When a reset happens, given that rollback is enabled. Defaults to Invariant III.
+    #[serde(default)]
+    pub rollback_policy: RollbackPolicy,
     /// Automatically enable tool output shunting during driver worker execution
     #[serde(default = "default_true")]
     pub shunt_driver_output: bool,
@@ -221,6 +277,7 @@ impl Default for DaemonConfig {
             advisory_review: false,
             review_blocking: false,
             auto_rollback: true,
+            rollback_policy: RollbackPolicy::default(),
             shunt_driver_output: true,
             guard_file_reads: true,
             guard_commands: true,
@@ -516,6 +573,51 @@ impl DaemonRunner {
     }
 
     /// Rolls back the working tree to the milestone start commit upon verification failure.
+    /// Whether this failed attempt's working tree should be reset.
+    ///
+    /// `made_progress` is whether the attempt changed the workspace at all; `gate_cmd` is the
+    /// verification command that failed, needed only by `OnRegression`.
+    fn should_roll_back(
+        &self,
+        made_progress: bool,
+        gate_cmd: Option<&str>,
+        working_dir: &Path,
+    ) -> bool {
+        if !self.config.auto_rollback {
+            return false;
+        }
+        match self.config.rollback_policy {
+            RollbackPolicy::Always => true,
+            RollbackPolicy::OnStall => !made_progress,
+            RollbackPolicy::OnRegression => self.attempt_regressed(gate_cmd, working_dir),
+        }
+    }
+
+    /// Whether a failed gate indicates broken work rather than unfinished work.
+    ///
+    /// The signal is the gate's own `&&` structure. A TDD GREEN gate reads
+    /// `<reproduction test> && <full suite>`: if the first clause still passes while the whole
+    /// chain failed, a later clause broke, which is a regression. If the first clause fails the
+    /// work is simply incomplete. A gate with no chain yields no signal, and no signal is
+    /// reported as "no regression" -- inventing one would reset work on a guess.
+    fn attempt_regressed(&self, gate_cmd: Option<&str>, working_dir: &Path) -> bool {
+        let Some(cmd) = gate_cmd.map(str::trim).filter(|c| !c.is_empty()) else {
+            return false;
+        };
+        let Some((first, _rest)) = cmd.split_once("&&") else {
+            return false;
+        };
+        let first = first.trim().trim_start_matches("! ").trim();
+        if first.is_empty() {
+            return false;
+        }
+        match run_verification_cmd(first, working_dir, self.config.timeout_secs) {
+            // The leading clause still passes, so something further down the chain broke.
+            Ok(res) => res.passed,
+            Err(_) => false,
+        }
+    }
+
     fn perform_rollback(
         &mut self,
         task_id: &str,
@@ -990,8 +1092,7 @@ impl DaemonRunner {
                         //
                         // A stuck worker -- one that changed nothing and still failed -- keeps the
                         // escape valve: rolling back hands it a clean baseline to restart from.
-                        if self.config.auto_rollback
-                            && !made_progress
+                        if self.should_roll_back(made_progress, Some(verify_cmd), &working_dir)
                             && is_inside_git_repo(&working_dir)
                         {
                             self.perform_rollback(
@@ -1400,7 +1501,9 @@ impl DaemonRunner {
 
             // Roll back ONLY when the attempt changed nothing; see the rationale at the
             // impact-slice failure path above and FINDINGS.md 13.2.
-            if self.config.auto_rollback && !made_progress && is_inside_git_repo(&working_dir) {
+            if self.should_roll_back(made_progress, Some(verify_cmd), &working_dir)
+                && is_inside_git_repo(&working_dir)
+            {
                 self.perform_rollback(&active_task.id, attempts_spent, &working_dir, &mut state)?;
             }
 

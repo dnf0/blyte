@@ -114,6 +114,7 @@ pub fn cmd_daemon(
     advisory_review: bool,
     review_blocking: bool,
     auto_rollback: bool,
+    rollback_policy: superstate_core::daemon::RollbackPolicy,
     shunt_driver_output: bool,
     guard_file_reads: bool,
     guard_commands: bool,
@@ -190,6 +191,9 @@ pub fn cmd_daemon(
         }
         if review_blocking {
             cmd.arg("--review-blocking");
+        }
+        if rollback_policy != superstate_core::daemon::RollbackPolicy::default() {
+            cmd.arg("--rollback-policy").arg(rollback_policy.as_str());
         }
         if !auto_rollback {
             cmd.arg("--no-auto-rollback");
@@ -288,6 +292,7 @@ pub fn cmd_daemon(
             advisory_review,
             review_blocking,
             auto_rollback,
+            rollback_policy,
             shunt_driver_output,
             guard_file_reads,
             guard_commands,

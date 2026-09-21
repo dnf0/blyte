@@ -195,6 +195,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
             false,
             false,
             false,
+            superstate_core::daemon::RollbackPolicy::default(),
             true,
             true,
             true,
