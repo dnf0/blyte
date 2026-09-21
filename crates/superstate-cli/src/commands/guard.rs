@@ -8,7 +8,9 @@ use clap::{Args, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
 use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig, CommandGuardDecision};
-use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
+use superstate_core::guard::{
+    bulk_read_target, evaluate_file_read_guard, FileReadGuardConfig, GuardDecision,
+};
 
 /// Subcommands for the `superstate guard` namespace.
 #[derive(Subcommand, Debug, Clone)]
@@ -37,6 +39,12 @@ pub struct PreCommandArgs {
     /// Optional path to state file tracking execution history
     #[arg(long)]
     pub state_path: Option<PathBuf>,
+
+    /// Line budget for a whole-file dump performed through the shell (`cat`, `less`, unbounded
+    /// `head`/`tail`). Matches the file viewing tool's budget so the channel cannot be used to
+    /// route around it.
+    #[arg(long, default_value_t = 200)]
+    pub bulk_read_threshold_lines: usize,
 }
 
 /// Serializes and prints the guard decision JSON to standard output.
@@ -155,6 +163,26 @@ fn extract_line(args: &serde_json::Map<String, serde_json::Value>, keys: &[&str]
                 if let Ok(n) = s.parse::<usize>() {
                     return Some(n);
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Pulls the shell command string out of a tool payload, across the key spellings agents use.
+fn extract_command_line(args: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for key in [
+        "CommandLine",
+        "command_line",
+        "commandLine",
+        "command",
+        "cmd",
+        "script",
+    ] {
+        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
     }
@@ -393,6 +421,28 @@ pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
     };
 
     // Evaluate proposed command execution via superstate-core engine.
+    // Portal's `check-bash-read` equivalent: a shell command that dumps a whole file into the
+    // conversation is a file read, and must meet the same line budget as the viewing tool. The
+    // agent gets the AST outline back, so it still has a next action -- a guard that only
+    // refuses is the mistake that ended turns.
+    if let Some(cmd) = extract_command_line(&tool_args) {
+        if let Some(target) = bulk_read_target(&cmd) {
+            let resolved = resolve_payload_path(&target.to_string_lossy());
+            let file_config = FileReadGuardConfig {
+                threshold_lines: args.bulk_read_threshold_lines,
+            };
+            let decision = evaluate_file_read_guard(&resolved, None, None, &file_config);
+            if let GuardDecision::Deny { .. } = decision {
+                let lines = std::fs::read_to_string(&resolved)
+                    .map(|c| c.lines().count())
+                    .unwrap_or(0);
+                record_denial(&resolved, lines);
+                emit_decision(&decision);
+                return Ok(());
+            }
+        }
+    }
+
     let decision = evaluate_command_guard(&tool_name, &tool_args, &config);
 
     // A throttled poll is delayed here, in the hook, and then allowed. Sleeping is the whole
