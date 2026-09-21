@@ -6,7 +6,7 @@
 
 use clap::{Args, Subcommand};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig};
 use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
 
@@ -158,6 +158,50 @@ fn extract_line(args: &serde_json::Map<String, serde_json::Value>, keys: &[&str]
     None
 }
 
+/// Resolves a payload path to something that exists on disk.
+///
+/// The hook process does not run from the repository root: hooks are registered in
+/// `<workspace>/.agents/hooks.json` and the agent invokes them from there, so a relative path
+/// like `ark/schema/scope.ts` resolves to `<workspace>/.agents/ark/schema/scope.ts`, which does
+/// not exist. `evaluate_file_read_guard` then fails open, and the guard has never once been
+/// observed denying a read in any recorded run -- while EXP-075 measured a single turn
+/// admitting 1.92M tokens of new context, of which shunted command output accounted for under
+/// 2%. Unbounded file reads are the only remaining channel that large.
+///
+/// Candidates are tried in order and the first that exists wins. Everything still fails open:
+/// a path we cannot locate is allowed, exactly as before.
+fn resolve_payload_path(raw: &str) -> PathBuf {
+    let direct = PathBuf::from(raw);
+    if direct.is_absolute() || direct.exists() {
+        return direct;
+    }
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    // The daemon exports this for the worker it spawns; it is the authoritative root.
+    if let Ok(worktree) = std::env::var("SUPERSTATE_WORKTREE_PATH") {
+        if !worktree.trim().is_empty() {
+            roots.push(PathBuf::from(worktree));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        // Registered from `<workspace>/.agents`, so the workspace is the parent.
+        if cwd.file_name().and_then(|n| n.to_str()) == Some(".agents") {
+            if let Some(parent) = cwd.parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+        roots.push(cwd);
+    }
+
+    for root in roots {
+        let candidate = root.join(raw);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    direct
+}
+
 /// Executes the `pre-tool-use` hook logic.
 ///
 /// # Parameters
@@ -237,7 +281,8 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
     };
 
     // Evaluate proposed file read via superstate-core engine.
-    let decision = evaluate_file_read_guard(Path::new(&path_str), start_line, end_line, &config);
+    let resolved = resolve_payload_path(&path_str);
+    let decision = evaluate_file_read_guard(&resolved, start_line, end_line, &config);
     emit_decision(&decision);
 
     Ok(())

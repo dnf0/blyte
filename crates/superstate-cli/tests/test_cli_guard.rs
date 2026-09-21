@@ -339,3 +339,56 @@ fn test_flexible_payload_formats_and_tool_names() {
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "allow");
 }
+
+/// Hooks are registered in `<workspace>/.agents/hooks.json` and invoked from that directory,
+/// so a relative payload path resolved verbatim points at `<workspace>/.agents/<path>`, which
+/// does not exist -- and the guard fails open. That is why no run has ever recorded a denial,
+/// while EXP-075 measured a single turn admitting 1.92M tokens of new context with shunted
+/// command output accounting for under 2% of it.
+#[test]
+fn a_relative_path_resolves_against_the_workspace_root() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let big = workspace.path().join("src").join("big.rs");
+    std::fs::create_dir_all(big.parent().unwrap()).expect("mkdir");
+    std::fs::write(&big, "fn main() {}\n".repeat(500)).expect("write");
+
+    // The hook runs from <workspace>/.agents, exactly as the daemon provisions it.
+    let hook_cwd = workspace.path().join(".agents");
+    std::fs::create_dir_all(&hook_cwd).expect("mkdir .agents");
+
+    let run = |payload: &str| -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_superstate"))
+            .args(["guard", "pre-tool-use", "--threshold-lines", "200"])
+            .current_dir(&hook_cwd)
+            .env("SUPERSTATE_WORKTREE_PATH", workspace.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn guard");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(payload.as_bytes())
+            .expect("write payload");
+        let out = child.wait_with_output().expect("guard output");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let denied = run(r#"{"tool_name":"view_file","tool_input":{"path":"src/big.rs"}}"#);
+    assert!(
+        denied.contains("\"deny\""),
+        "a 500-line file read must be denied even when the path is relative to the workspace \
+         rather than to the hook's own directory: {denied}"
+    );
+
+    // Fail-open is still the rule for anything we cannot locate.
+    let allowed = run(r#"{"tool_name":"view_file","tool_input":{"path":"src/does_not_exist.rs"}}"#);
+    assert!(
+        allowed.contains("\"allow\""),
+        "an unlocatable path must still fail open: {allowed}"
+    );
+}
