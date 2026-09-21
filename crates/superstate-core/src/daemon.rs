@@ -432,6 +432,23 @@ pub fn is_pid_alive(pid: i32) -> bool {
     }
 }
 
+/// Absolute path of the running executable, for embedding in generated hook commands.
+///
+/// Hooks used to be written as bare `superstate guard ...`, which resolves through PATH at hook
+/// time -- so a run pinned to a freshly built binary still executed whatever `superstate`
+/// happened to be installed. EXP-077 ran the current build as the daemon and a build from the
+/// previous day as its guards: every fix under test was absent from the process actually
+/// enforcing them, and the run reported zero denials because that binary had no denial log.
+///
+/// Falls back to the bare name only when the current executable cannot be resolved, which keeps
+/// the hook working rather than silently disabling it.
+fn hook_binary() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "superstate".to_string())
+}
+
 /// Resolves a driver command string, expanding preset shorthands for known autonomous workers.
 ///
 /// Headless drivers like Claude Code (`claude`) and Google Antigravity (`agy`) require non-interactive
@@ -921,7 +938,7 @@ impl DaemonRunner {
                                     "matcher": "view_file|View|read_file",
                                     "hooks": [
                                         {
-                                            "command": "superstate guard pre-tool-use --threshold-lines 200"
+                                            "command": format!("{} guard pre-tool-use --threshold-lines 200", hook_binary())
                                         }
                                     ]
                                 }
@@ -940,7 +957,7 @@ impl DaemonRunner {
                                     "matcher": "run_command|manage_task",
                                     "hooks": [
                                         {
-                                            "command": "superstate guard pre-command --debounce-sec 30"
+                                            "command": format!("{} guard pre-command --debounce-sec 30", hook_binary())
                                         }
                                     ]
                                 }
