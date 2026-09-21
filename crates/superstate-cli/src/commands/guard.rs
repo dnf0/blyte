@@ -158,6 +158,53 @@ fn extract_line(args: &serde_json::Map<String, serde_json::Value>, keys: &[&str]
     None
 }
 
+/// Appends one line to `<root>/.agent-state/guard-denials.jsonl` recording a blocked read.
+///
+/// The guard previously left no trace at all when it denied, which is why it took until
+/// EXP-075 to establish that it had never fired: absence of denials in the artefacts was
+/// indistinguishable from absence of the guard. A denial is the mechanism working, so it
+/// should be countable -- `lines` is what was withheld from the prompt.
+///
+/// Best effort: a guard that cannot write its own telemetry must still guard.
+fn record_denial(resolved: &std::path::Path, lines: usize) {
+    let mut root = std::env::var("SUPERSTATE_WORKTREE_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    if root.is_none() {
+        if let Ok(cwd) = std::env::current_dir() {
+            root = if cwd.file_name().and_then(|n| n.to_str()) == Some(".agents") {
+                cwd.parent().map(|p| p.to_path_buf())
+            } else {
+                Some(cwd)
+            };
+        }
+    }
+    let Some(root) = root else { return };
+    let dir = root.join(".agent-state");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"ts\":{},\"path\":{},\"lines\":{}}}\n",
+        stamp,
+        serde_json::Value::String(resolved.display().to_string()),
+        lines
+    );
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("guard-denials.jsonl"))
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Resolves a payload path to something that exists on disk.
 ///
 /// The hook process does not run from the repository root: hooks are registered in
@@ -283,6 +330,12 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
     // Evaluate proposed file read via superstate-core engine.
     let resolved = resolve_payload_path(&path_str);
     let decision = evaluate_file_read_guard(&resolved, start_line, end_line, &config);
+    if matches!(decision, GuardDecision::Deny { .. }) {
+        let lines = std::fs::read_to_string(&resolved)
+            .map(|c| c.lines().count())
+            .unwrap_or(0);
+        record_denial(&resolved, lines);
+    }
     emit_decision(&decision);
 
     Ok(())
