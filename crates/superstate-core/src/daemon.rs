@@ -809,7 +809,8 @@ impl DaemonRunner {
                     serde_json::Map::new()
                 };
 
-                if self.config.guard_file_reads && !hooks_obj.contains_key("superstate-file-guard") {
+                if self.config.guard_file_reads && !hooks_obj.contains_key("superstate-file-guard")
+                {
                     hooks_obj.insert(
                         "superstate-file-guard".to_string(),
                         serde_json::json!({
@@ -827,7 +828,8 @@ impl DaemonRunner {
                     );
                 }
 
-                if self.config.guard_commands && !hooks_obj.contains_key("superstate-command-guard") {
+                if self.config.guard_commands && !hooks_obj.contains_key("superstate-command-guard")
+                {
                     hooks_obj.insert(
                         "superstate-command-guard".to_string(),
                         serde_json::json!({
@@ -845,7 +847,8 @@ impl DaemonRunner {
                     );
                 }
 
-                let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(hooks_obj))?;
+                let serialized =
+                    serde_json::to_string_pretty(&serde_json::Value::Object(hooks_obj))?;
                 fs::write(&hooks_file, serialized)?;
 
                 // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
@@ -975,8 +978,22 @@ impl DaemonRunner {
                             *retries
                         };
 
-                        // Perform rollback to milestone baseline when auto_rollback is enabled
-                        if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
+                        // Roll back ONLY when the attempt changed nothing.
+                        //
+                        // WHY: a failing attempt that moved the working tree is partial progress
+                        // the worker must be allowed to iterate on. Wiping it on every failure
+                        // forces a full rebuild each turn and renews the retry budget forever,
+                        // because `made_progress` is then measured against a tree we just reset.
+                        // Measured in EXP-071: 30 verification failures produced 30 rollbacks and
+                        // 28 budget renewals, and one worker's committed feature was reset five
+                        // times before being rebuilt. See FINDINGS.md 13.2.
+                        //
+                        // A stuck worker -- one that changed nothing and still failed -- keeps the
+                        // escape valve: rolling back hands it a clean baseline to restart from.
+                        if self.config.auto_rollback
+                            && !made_progress
+                            && is_inside_git_repo(&working_dir)
+                        {
                             self.perform_rollback(
                                 &active_task.id,
                                 attempts_spent,
@@ -1160,15 +1177,13 @@ impl DaemonRunner {
                                 .total_attempts
                                 .entry(active_task.id.clone())
                                 .or_insert(0) += 1;
-                            let current_attempt = attempts_so_far + 1;
-                            if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
-                                self.perform_rollback(
-                                    &active_task.id,
-                                    current_attempt,
-                                    &working_dir,
-                                    &mut state,
-                                )?;
-                            }
+                            // NO ROLLBACK HERE.
+                            //
+                            // WHY: the review's findings describe the diff that was just written.
+                            // Resetting the working tree deletes the very code the worker is being
+                            // asked to fix, leaving it findings that reference code no longer on
+                            // disk. Review failure means "revise this work", not "discard it".
+                            // See FINDINGS.md 13.2.
                             let reason = if self.config.review_blocking {
                                 format!("code-review: {} blocking issue(s) detected", count)
                             } else {
@@ -1383,7 +1398,9 @@ impl DaemonRunner {
                 ),
             ));
 
-            if self.config.auto_rollback && is_inside_git_repo(&working_dir) {
+            // Roll back ONLY when the attempt changed nothing; see the rationale at the
+            // impact-slice failure path above and FINDINGS.md 13.2.
+            if self.config.auto_rollback && !made_progress && is_inside_git_repo(&working_dir) {
                 self.perform_rollback(&active_task.id, attempts_spent, &working_dir, &mut state)?;
             }
 

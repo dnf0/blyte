@@ -49,7 +49,11 @@ fn setup_temp_git_repo(path: &std::path::Path) -> String {
 }
 
 #[test]
-fn test_daemon_rollback_on_verification_failure() {
+fn test_daemon_preserves_work_when_a_failing_attempt_changed_the_tree() {
+    // A failing attempt that moved the working tree is partial progress. Wiping it forces the
+    // worker to rebuild from scratch every turn, which is what EXP-071 measured: 30 verification
+    // failures produced 30 rollbacks, and one worker's committed feature was reset five times
+    // before being rebuilt identically. See FINDINGS.md 13.2.
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let repo_root = temp_dir.path();
     let initial_commit = setup_temp_git_repo(repo_root);
@@ -58,7 +62,6 @@ fn test_daemon_rollback_on_verification_failure() {
         "initial commit must not be empty"
     );
 
-    // Initialize execution state targeting in-place repository
     let state_dir = repo_root.join(".agent-state");
     fs::create_dir_all(&state_dir).expect("create state dir");
     let state_path = state_dir.join("state.json");
@@ -67,9 +70,8 @@ fn test_daemon_rollback_on_verification_failure() {
         status: ExecutionStatus::InProgress,
         step: 1,
         active_task: Some(TaskSpec {
-            id: "task-rollback-1".to_string(),
-            title: "Task with failing verification requiring rollback".to_string(),
-            // Verification command fails
+            id: "task-progress-1".to_string(),
+            title: "Failing attempt that still moved the tree".to_string(),
             verification_cmd: Some("test -f milestone_done.txt".to_string()),
             ..Default::default()
         }),
@@ -78,16 +80,14 @@ fn test_daemon_rollback_on_verification_failure() {
         active_branch: Some("main".to_string()),
         base_branch: Some("main".to_string()),
         no_worktree: true,
-        goal: Some("Test rollback behavior on verification failure".to_string()),
+        goal: Some("Test that progress survives a failed gate".to_string()),
         ..Default::default()
     };
     save_state_atomic(&state_path, &state).expect("save state");
 
-    // Driver command: modifies tracked.txt, creates untracked.txt and untracked_dir/nested.txt
-    let driver_script = "echo 'corrupted driver content' > tracked.txt && \
-                         echo 'untracked artifact' > untracked.txt && \
-                         mkdir -p untracked_dir && \
-                         echo 'nested' > untracked_dir/nested.txt";
+    // The worker does real work; the gate still fails because milestone_done.txt is absent.
+    let driver_script = "echo 'partial implementation' > tracked.txt && \
+                         echo 'new source file' > feature.rs";
 
     let config = DaemonConfig {
         state_path: state_path.clone(),
@@ -107,51 +107,134 @@ fn test_daemon_rollback_on_verification_failure() {
     let mut runner = DaemonRunner::new(config).expect("create runner");
     let outcome = runner.run_step().expect("run_step");
 
-    // 1. Outcome must be Failed (retries remaining)
     assert!(
         matches!(outcome, DaemonStepOutcome::Failed { .. }),
         "expected Failed outcome, got {:?}",
         outcome
     );
 
-    // 2. Tracked file must be restored to initial commit content
+    // The partial work must survive, even though auto_rollback is enabled.
+    let tracked_content =
+        fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
+    assert_eq!(
+        tracked_content.trim(),
+        "partial implementation",
+        "a failing attempt that changed the tree must keep its work"
+    );
+    assert!(
+        repo_root.join("feature.rs").exists(),
+        "newly created files must survive a failed gate when the attempt made progress"
+    );
+
+    let updated_state = load_state(&state_path).expect("load updated state");
+    assert!(
+        updated_state
+            .notes
+            .iter()
+            .all(|n| !n.note.contains("[rollback]")),
+        "no [rollback] note may be recorded for an attempt that moved the tree"
+    );
+}
+
+#[test]
+fn test_daemon_rolls_back_when_an_attempt_changed_nothing() {
+    // The escape valve: a worker that changed nothing and still failed is stuck, so returning it
+    // to the milestone baseline is the one case where discarding the tree helps.
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let repo_root = temp_dir.path();
+    let initial_commit = setup_temp_git_repo(repo_root);
+
+    let state_dir = repo_root.join(".agent-state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let state_path = state_dir.join("state.json");
+
+    let state = ExecutionState {
+        status: ExecutionStatus::InProgress,
+        step: 1,
+        active_task: Some(TaskSpec {
+            id: "task-stalled-1".to_string(),
+            title: "Worker that stops changing the tree".to_string(),
+            verification_cmd: Some("test -f milestone_done.txt".to_string()),
+            ..Default::default()
+        }),
+        pending_tasks: Vec::new(),
+        active_worktree: None,
+        active_branch: Some("main".to_string()),
+        base_branch: Some("main".to_string()),
+        no_worktree: true,
+        goal: Some("Test the stalled-worker escape valve".to_string()),
+        ..Default::default()
+    };
+    save_state_atomic(&state_path, &state).expect("save state");
+
+    // Attempt 1 writes files (progress, no rollback). Attempt 2 touches nothing at all, so the
+    // workspace fingerprint is unchanged and the attempt counts as a stall.
+    //
+    // NOTE: `workspace_fingerprint` hashes size and mtime, not content, so a worker that rewrites
+    // identical bytes still reads as progress. The driver must therefore genuinely no-op here.
+    let driver_script = "if [ ! -f marker.txt ]; then \
+                           echo 'corrupted driver content' > tracked.txt; \
+                           echo 'untracked artifact' > untracked.txt; \
+                           mkdir -p untracked_dir; \
+                           echo 'nested' > untracked_dir/nested.txt; \
+                           touch marker.txt; \
+                         fi";
+
+    let config = DaemonConfig {
+        state_path: state_path.clone(),
+        driver_cmd: Some(driver_script.to_string()),
+        max_retries: 3,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: true,
+        shunt_driver_output: false,
+        guard_file_reads: false,
+        guard_commands: false,
+        impact_slicing: false,
+    };
+
+    let mut runner = DaemonRunner::new(config).expect("create runner");
+
+    let first = runner.run_step().expect("run_step 1");
+    assert!(matches!(first, DaemonStepOutcome::Failed { .. }));
+    assert!(
+        repo_root.join("untracked.txt").exists(),
+        "attempt 1 made progress, so its work must survive"
+    );
+
+    let second = runner.run_step().expect("run_step 2");
+    assert!(matches!(second, DaemonStepOutcome::Failed { .. }));
+
+    // Attempt 2 changed nothing, so the tree returns to the milestone baseline.
     let tracked_content =
         fs::read_to_string(repo_root.join("tracked.txt")).expect("read tracked.txt");
     assert_eq!(
         tracked_content, "initial content\n",
-        "tracked file should be rolled back to initial commit content"
+        "a stalled attempt must restore the tracked file to the baseline commit"
     );
-
-    // 3. Untracked file and directory must be cleaned (-fd)
     assert!(
         !repo_root.join("untracked.txt").exists(),
-        "untracked.txt should be removed by git clean -fd"
+        "untracked.txt should be removed by git clean -fd on a stalled attempt"
     );
     assert!(
         !repo_root.join("untracked_dir").exists(),
-        "untracked_dir should be removed by git clean -fd"
+        "untracked_dir should be removed by git clean -fd on a stalled attempt"
     );
 
-    // 4. Epistemic note must be recorded
     let updated_state = load_state(&state_path).expect("load updated state");
     let rollback_note = updated_state
         .notes
         .iter()
-        .find(|n| n.note.contains("[rollback]"));
+        .find(|n| n.note.contains("[rollback]"))
+        .expect("state.notes must contain a [rollback] note for the stalled attempt");
     assert!(
-        rollback_note.is_some(),
-        "state.notes must contain a [rollback] note"
-    );
-    let note_content = &rollback_note.unwrap().note;
-    assert!(
-        note_content.contains("Task task-rollback-1: attempt 1 failed verification"),
-        "note should reference task id and attempt number: {}",
-        note_content
-    );
-    assert!(
-        note_content.contains(&format!("baseline commit {}", initial_commit)),
+        rollback_note
+            .note
+            .contains(&format!("baseline commit {}", initial_commit)),
         "note should reference baseline commit SHA: {}",
-        note_content
+        rollback_note.note
     );
 }
 

@@ -168,14 +168,20 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
         .expect("init state");
     save_state_atomic(&state_path, &state).expect("save state");
 
-    // Track attempts outside the git repo so git clean does not erase the counter
+    // Track attempts outside the git repo, so git clean cannot erase the counters and the
+    // markers themselves never register as workspace progress.
     let marker_dir = tempfile::tempdir().expect("marker dir");
-    let marker_file = marker_dir.path().join("attempt_marker");
-    let marker_file_str = marker_file.to_str().expect("valid path");
+    let marker_one = marker_dir.path().join("attempt_marker_1");
+    let marker_two = marker_dir.path().join("attempt_marker_2");
+    let m1 = marker_one.to_str().expect("valid path");
+    let m2 = marker_two.to_str().expect("valid path");
 
     // Driver: creates a.txt for task-1.
-    // For task-2 attempt 1 (marker does not exist): creates marker and bad.txt (fails verification).
-    // For task-2 attempt 2 (marker exists): creates b.txt (passes verification).
+    // task-2 attempt 1: writes bad.txt and fails verification. This CHANGES the tree, so it is
+    //   progress and must be preserved -- rollback no longer fires here (FINDINGS.md 13.2).
+    // task-2 attempt 2: touches nothing inside the repo, so the attempt stalls and the rollback
+    //   escape valve fires. This is the step that exercises rollback isolation.
+    // task-2 attempt 3: writes b.txt and passes verification.
     let driver_script = format!(
         r#"
         if [ "$SUPERSTATE_ACTIVE_TASK" = "task-1" ]; then
@@ -183,11 +189,13 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
         elif [ ! -f "{}" ]; then
             touch "{}"
             echo "corrupt" > bad.txt
+        elif [ ! -f "{}" ]; then
+            touch "{}"
         else
             echo "b_content" > b.txt
         fi
         "#,
-        marker_file_str, marker_file_str
+        m1, m1, m2, m2
     );
 
     let config = DaemonConfig {
@@ -212,12 +220,25 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
     assert!(outcome1.is_advanced());
     assert!(repo_root.join("a.txt").exists(), "a.txt created in task-1");
 
-    // Step 2: Task 2 Attempt 1 writes bad.txt and fails verification, triggering auto-rollback
+    // Step 2: Task 2 Attempt 1 writes bad.txt and fails verification. It changed the tree, so
+    // the work is kept and no rollback occurs.
     let outcome2 = runner.run_step().expect("step 2");
     assert!(
         outcome2.is_failed(),
-        "step 2 must fail verification and trigger rollback, got {:?}",
+        "step 2 must fail verification, got {:?}",
         outcome2
+    );
+    assert!(
+        repo_root.join("bad.txt").exists(),
+        "a failing attempt that moved the tree must keep its work"
+    );
+
+    // Step 3: Task 2 Attempt 2 changes nothing, so the attempt stalls and rollback fires.
+    let outcome3 = runner.run_step().expect("step 3");
+    assert!(
+        outcome3.is_failed(),
+        "step 3 must fail verification and trigger rollback, got {:?}",
+        outcome3
     );
 
     // Verify rollback isolation: a.txt is STILL present in repo, while bad.txt is removed
@@ -230,12 +251,12 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
         "bad.txt must be removed by rollback"
     );
 
-    // Step 3: Task 2 Attempt 2 writes b.txt and passes verification
-    let outcome3 = runner.run_step().expect("step 3");
+    // Step 4: Task 2 Attempt 3 writes b.txt and passes verification
+    let outcome4 = runner.run_step().expect("step 4");
     assert!(
-        outcome3.is_advanced(),
-        "step 3 must advance task-2, got {:?}",
-        outcome3
+        outcome4.is_advanced(),
+        "step 4 must advance task-2, got {:?}",
+        outcome4
     );
 
     // Final state verification
