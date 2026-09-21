@@ -54,6 +54,18 @@ pub enum CommandGuardDecision {
     Allow,
     /// Command is blocked by an active polling cooldown.
     Deny { reason: String },
+    /// Command is rate-limited: wait, then run it.
+    ///
+    /// Denying a status poll is what Invariant IV's "mandatory cooldown debouncing" was first
+    /// implemented as, and it removed the agent's only means of awaiting a background task. The
+    /// denial text even instructed it to "yield turn to await background task completion
+    /// notification" -- which, in headless print mode, ends the run, because nothing will ever
+    /// deliver that notification. Three consecutive yields exhaust max_retries and the task is
+    /// blocked: measured on vanilla (EXP-071), katex (EXP-074) and scc (EXP-076).
+    ///
+    /// Throttling saves the same tokens -- one poll per window rather than a loop -- without
+    /// ever handing the agent an instruction to stop.
+    Throttle { wait_sec: u64, reason: String },
 }
 
 /// Normalizes command line string by collapsing contiguous whitespace tokens.
@@ -135,9 +147,15 @@ fn classify_tool_invocation(
             return Some("process_inspection".to_string());
         }
 
-        // Exact duplicate command detection keyed by normalized command string
-        let normalized = normalize_command(trimmed);
-        return Some(format!("cmd:{}", normalized));
+        // A repeated command is NOT, by itself, a busy-wait poll.
+        //
+        // This used to key every identical shell command for debouncing, which meant a TDD
+        // worker re-running `go test ./...` after editing code hit the cooldown -- the command
+        // is identical, the repository state is not. Invariant IV blocks "runaway busy-wait
+        // polling loops"; Invariant V mandates exactly this re-run loop, so debouncing it made
+        // the two invariants contradict each other. The polling signatures above (procfs,
+        // process inspection, manage_task status/list) are what the guard is for.
+        return None;
     }
 
     // Unrelated tools are never debounced
@@ -195,9 +213,12 @@ pub fn evaluate_command_guard(
         let elapsed = now_sec.saturating_sub(last_sec);
         if elapsed < config.debounce_sec {
             let remaining = config.debounce_sec.saturating_sub(elapsed);
-            return CommandGuardDecision::Deny {
+            return CommandGuardDecision::Throttle {
+                wait_sec: remaining,
                 reason: format!(
-                    "[superstate-guard] Busy-wait polling blocked: command was executed {}s ago. Cooldown active ({}s remaining). Do not loop on status; yield turn to await background task completion notification.",
+                    "[superstate-guard] Polling throttled: this command ran {}s ago, so it was \
+                     delayed {}s rather than repeated immediately. Continue working; do not end \
+                     your turn to wait.",
                     elapsed, remaining
                 ),
             };

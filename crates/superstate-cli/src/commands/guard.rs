@@ -7,7 +7,7 @@
 use clap::{Args, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
-use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig};
+use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig, CommandGuardDecision};
 use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
 
 /// Subcommands for the `superstate guard` namespace.
@@ -43,6 +43,9 @@ pub struct PreCommandArgs {
 ///
 /// # Parameters
 /// - `decision`: The outcome to emit.
+/// Upper bound on how long a throttled poll may be delayed inside the hook.
+const MAX_THROTTLE_SEC: u64 = 30;
+
 fn emit_decision<T: serde::Serialize>(decision: &T) {
     // Decision is serialized to JSON string conforming to hook stdout protocol.
     if let Ok(json) = serde_json::to_string(decision) {
@@ -391,6 +394,22 @@ pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
 
     // Evaluate proposed command execution via superstate-core engine.
     let decision = evaluate_command_guard(&tool_name, &tool_args, &config);
+
+    // A throttled poll is delayed here, in the hook, and then allowed. Sleeping is the whole
+    // mechanism: the agent's poll rate is capped at one per window, which is the token saving
+    // Invariant IV asks for, while the agent still gets its answer and keeps working. Denying
+    // instead removed its only means of awaiting a background task and ended the run.
+    //
+    // The wait is bounded so a corrupt or stale history entry cannot stall a turn indefinitely.
+    if let CommandGuardDecision::Throttle { wait_sec, .. } = &decision {
+        let capped = (*wait_sec).min(MAX_THROTTLE_SEC);
+        if capped > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(capped));
+        }
+        emit_allow();
+        return Ok(());
+    }
+
     emit_decision(&decision);
 
     Ok(())
