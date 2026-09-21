@@ -6,9 +6,11 @@
 
 use clap::{Args, Subcommand};
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig};
-use superstate_core::guard::{evaluate_file_read_guard, FileReadGuardConfig, GuardDecision};
+use std::path::PathBuf;
+use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig, CommandGuardDecision};
+use superstate_core::guard::{
+    bulk_read_target, evaluate_file_read_guard, FileReadGuardConfig, GuardDecision,
+};
 
 /// Subcommands for the `superstate guard` namespace.
 #[derive(Subcommand, Debug, Clone)]
@@ -37,12 +39,21 @@ pub struct PreCommandArgs {
     /// Optional path to state file tracking execution history
     #[arg(long)]
     pub state_path: Option<PathBuf>,
+
+    /// Line budget for a whole-file dump performed through the shell (`cat`, `less`, unbounded
+    /// `head`/`tail`). Matches the file viewing tool's budget so the channel cannot be used to
+    /// route around it.
+    #[arg(long, default_value_t = 200)]
+    pub bulk_read_threshold_lines: usize,
 }
 
 /// Serializes and prints the guard decision JSON to standard output.
 ///
 /// # Parameters
 /// - `decision`: The outcome to emit.
+/// Upper bound on how long a throttled poll may be delayed inside the hook.
+const MAX_THROTTLE_SEC: u64 = 30;
+
 fn emit_decision<T: serde::Serialize>(decision: &T) {
     // Decision is serialized to JSON string conforming to hook stdout protocol.
     if let Ok(json) = serde_json::to_string(decision) {
@@ -158,6 +169,168 @@ fn extract_line(args: &serde_json::Map<String, serde_json::Value>, keys: &[&str]
     None
 }
 
+/// Pulls the shell command string out of a tool payload, across the key spellings agents use.
+fn extract_command_line(args: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for key in [
+        "CommandLine",
+        "command_line",
+        "commandLine",
+        "command",
+        "cmd",
+        "script",
+    ] {
+        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Resolves the workspace root the guards write their telemetry under.
+fn telemetry_root() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("SUPERSTATE_WORKTREE_PATH") {
+        if !v.trim().is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    if cwd.file_name().and_then(|n| n.to_str()) == Some(".agents") {
+        return cwd.parent().map(|p| p.to_path_buf());
+    }
+    Some(cwd)
+}
+
+/// Appends one line to `<root>/.agent-state/guard-activity.jsonl` for EVERY evaluated tool call.
+///
+/// Denials alone cannot answer the question that matters. EXP-075 had a turn admit 1,917,135
+/// tokens against a 133,550-token codebase -- fourteen times the source -- and nothing recorded
+/// says whether that was the same files read repeatedly or volume from another channel. A guard
+/// sees every read and every command, so it is the cheapest place to record what was touched,
+/// how large it was, and how often. This is the trace the daemon arm otherwise lacks (13.7).
+///
+/// Best effort: a guard that cannot write telemetry must still guard.
+fn record_activity(kind: &str, target: &str, lines: usize, decision: &str) {
+    let Some(root) = telemetry_root() else { return };
+    let dir = root.join(".agent-state");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"ts\":{},\"kind\":{},\"target\":{},\"lines\":{},\"decision\":{}}}\n",
+        stamp,
+        serde_json::Value::String(kind.to_string()),
+        serde_json::Value::String(target.to_string()),
+        lines,
+        serde_json::Value::String(decision.to_string()),
+    );
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("guard-activity.jsonl"))
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Appends one line to `<root>/.agent-state/guard-denials.jsonl` recording a blocked read.
+///
+/// The guard previously left no trace at all when it denied, which is why it took until
+/// EXP-075 to establish that it had never fired: absence of denials in the artefacts was
+/// indistinguishable from absence of the guard. A denial is the mechanism working, so it
+/// should be countable -- `lines` is what was withheld from the prompt.
+///
+/// Best effort: a guard that cannot write its own telemetry must still guard.
+fn record_denial(resolved: &std::path::Path, lines: usize) {
+    let mut root = std::env::var("SUPERSTATE_WORKTREE_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    if root.is_none() {
+        if let Ok(cwd) = std::env::current_dir() {
+            root = if cwd.file_name().and_then(|n| n.to_str()) == Some(".agents") {
+                cwd.parent().map(|p| p.to_path_buf())
+            } else {
+                Some(cwd)
+            };
+        }
+    }
+    let Some(root) = root else { return };
+    let dir = root.join(".agent-state");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"ts\":{},\"path\":{},\"lines\":{}}}\n",
+        stamp,
+        serde_json::Value::String(resolved.display().to_string()),
+        lines
+    );
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("guard-denials.jsonl"))
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Resolves a payload path to something that exists on disk.
+///
+/// The hook process does not run from the repository root: hooks are registered in
+/// `<workspace>/.agents/hooks.json` and the agent invokes them from there, so a relative path
+/// like `ark/schema/scope.ts` resolves to `<workspace>/.agents/ark/schema/scope.ts`, which does
+/// not exist. `evaluate_file_read_guard` then fails open, and the guard has never once been
+/// observed denying a read in any recorded run -- while EXP-075 measured a single turn
+/// admitting 1.92M tokens of new context, of which shunted command output accounted for under
+/// 2%. Unbounded file reads are the only remaining channel that large.
+///
+/// Candidates are tried in order and the first that exists wins. Everything still fails open:
+/// a path we cannot locate is allowed, exactly as before.
+fn resolve_payload_path(raw: &str) -> PathBuf {
+    let direct = PathBuf::from(raw);
+    if direct.is_absolute() || direct.exists() {
+        return direct;
+    }
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    // The daemon exports this for the worker it spawns; it is the authoritative root.
+    if let Ok(worktree) = std::env::var("SUPERSTATE_WORKTREE_PATH") {
+        if !worktree.trim().is_empty() {
+            roots.push(PathBuf::from(worktree));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        // Registered from `<workspace>/.agents`, so the workspace is the parent.
+        if cwd.file_name().and_then(|n| n.to_str()) == Some(".agents") {
+            if let Some(parent) = cwd.parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+        roots.push(cwd);
+    }
+
+    for root in roots {
+        let candidate = root.join(raw);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    direct
+}
+
 /// Executes the `pre-tool-use` hook logic.
 ///
 /// # Parameters
@@ -237,7 +410,23 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
     };
 
     // Evaluate proposed file read via superstate-core engine.
-    let decision = evaluate_file_read_guard(Path::new(&path_str), start_line, end_line, &config);
+    let resolved = resolve_payload_path(&path_str);
+    let decision = evaluate_file_read_guard(&resolved, start_line, end_line, &config);
+    let lines = std::fs::read_to_string(&resolved)
+        .map(|c| c.lines().count())
+        .unwrap_or(0);
+    let denied = matches!(decision, GuardDecision::Deny { .. });
+    // Every read is recorded, not just the blocked ones: the question "was the same file read
+    // repeatedly?" cannot be answered from denials alone.
+    record_activity(
+        if start_line.is_some() || end_line.is_some() { "read_bounded" } else { "read_whole" },
+        &resolved.display().to_string(),
+        lines,
+        if denied { "deny" } else { "allow" },
+    );
+    if denied {
+        record_denial(&resolved, lines);
+    }
     emit_decision(&decision);
 
     Ok(())
@@ -292,7 +481,65 @@ pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
     };
 
     // Evaluate proposed command execution via superstate-core engine.
+    // Portal's `check-bash-read` equivalent: a shell command that dumps a whole file into the
+    // conversation is a file read, and must meet the same line budget as the viewing tool. The
+    // agent gets the AST outline back, so it still has a next action -- a guard that only
+    // refuses is the mistake that ended turns.
+    if let Some(cmd) = extract_command_line(&tool_args) {
+        if let Some(target) = bulk_read_target(&cmd) {
+            let resolved = resolve_payload_path(&target.to_string_lossy());
+            let file_config = FileReadGuardConfig {
+                threshold_lines: args.bulk_read_threshold_lines,
+            };
+            let decision = evaluate_file_read_guard(&resolved, None, None, &file_config);
+            let lines = std::fs::read_to_string(&resolved)
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
+            let denied = matches!(decision, GuardDecision::Deny { .. });
+            record_activity(
+                "shell_read",
+                &resolved.display().to_string(),
+                lines,
+                if denied { "deny" } else { "allow" },
+            );
+            if denied {
+                record_denial(&resolved, lines);
+                emit_decision(&decision);
+                return Ok(());
+            }
+        }
+    }
+
     let decision = evaluate_command_guard(&tool_name, &tool_args, &config);
+    if let Some(cmd) = extract_command_line(&tool_args) {
+        let label: String = cmd.chars().take(160).collect();
+        record_activity(
+            "command",
+            &label,
+            0,
+            match decision {
+                CommandGuardDecision::Allow => "allow",
+                CommandGuardDecision::Throttle { .. } => "throttle",
+                CommandGuardDecision::Deny { .. } => "deny",
+            },
+        );
+    }
+
+    // A throttled poll is delayed here, in the hook, and then allowed. Sleeping is the whole
+    // mechanism: the agent's poll rate is capped at one per window, which is the token saving
+    // Invariant IV asks for, while the agent still gets its answer and keeps working. Denying
+    // instead removed its only means of awaiting a background task and ended the run.
+    //
+    // The wait is bounded so a corrupt or stale history entry cannot stall a turn indefinitely.
+    if let CommandGuardDecision::Throttle { wait_sec, .. } = &decision {
+        let capped = (*wait_sec).min(MAX_THROTTLE_SEC);
+        if capped > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(capped));
+        }
+        emit_allow();
+        return Ok(());
+    }
+
     emit_decision(&decision);
 
     Ok(())

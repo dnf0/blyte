@@ -88,6 +88,7 @@ fn test_daemon_runner_provisions_hooks_json() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
         guard_commands: true,
@@ -113,10 +114,14 @@ fn test_daemon_runner_provisions_hooks_json() {
         Some("view_file|View|read_file"),
         "matcher must match view_file|View|read_file"
     );
+    let cmd = file_hook_entry["hooks"][0]["command"].as_str();
     assert_eq!(
-        file_hook_entry["hooks"][0]["command"].as_str(),
-        Some("superstate guard pre-tool-use --threshold-lines 200"),
-        "hook command must be superstate guard pre-tool-use --threshold-lines 200"
+        cmd.map(|c: &str| c.ends_with("guard pre-tool-use --threshold-lines 200")),
+        // The hook must invoke the RUNNING binary by absolute path. A bare name resolves
+        // through PATH at hook time, so EXP-077 enforced its guards with the previous day's
+        // build while the daemon ran the current one.
+        Some(true),
+        "hook command must end with `guard pre-tool-use --threshold-lines 200`, got {cmd:?}"
     );
 
     let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
@@ -125,10 +130,14 @@ fn test_daemon_runner_provisions_hooks_json() {
         Some("run_command|manage_task"),
         "matcher must match run_command|manage_task"
     );
+    let cmd = cmd_hook_entry["hooks"][0]["command"].as_str();
     assert_eq!(
-        cmd_hook_entry["hooks"][0]["command"].as_str(),
-        Some("superstate guard pre-command --debounce-sec 30"),
-        "hook command must be superstate guard pre-command --debounce-sec 30"
+        cmd.map(|c: &str| c.ends_with("guard pre-command --debounce-sec 30")),
+        // The hook must invoke the RUNNING binary by absolute path. A bare name resolves
+        // through PATH at hook time, so EXP-077 enforced its guards with the previous day's
+        // build while the daemon ran the current one.
+        Some(true),
+        "hook command must end with `guard pre-command --debounce-sec 30`, got {cmd:?}"
     );
 }
 
@@ -162,6 +171,7 @@ fn test_daemon_provisions_command_guard_in_hooks_json() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
         guard_commands: true,
@@ -187,10 +197,13 @@ fn test_daemon_provisions_command_guard_in_hooks_json() {
         Some("run_command|manage_task"),
         "matcher must match run_command|manage_task"
     );
+    let cmd = cmd_hook_entry["hooks"][0]["command"].as_str();
     assert_eq!(
-        cmd_hook_entry["hooks"][0]["command"].as_str(),
-        Some("superstate guard pre-command --debounce-sec 30"),
-        "hook command must be superstate guard pre-command --debounce-sec 30"
+        cmd.map(|c: &str| c.ends_with("guard pre-command --debounce-sec 30")),
+        // Absolute path, not a bare name: PATH resolution at hook time is what made EXP-077
+        // enforce its guards with the previous day's build.
+        Some(true),
+        "hook command must end with `guard pre-command --debounce-sec 30`, got {cmd:?}"
     );
 }
 
@@ -224,6 +237,7 @@ fn test_daemon_no_command_guard_disables_provisioning() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
         guard_commands: false,
@@ -280,6 +294,7 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
         guard_commands: false,
@@ -327,6 +342,7 @@ fn test_daemon_no_guard_disables_both() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
         guard_commands: false,
@@ -380,6 +396,7 @@ fn test_daemon_merges_hooks_when_file_exists() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
         guard_commands: true,
@@ -464,6 +481,7 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: true,
         guard_commands: true,
@@ -481,3 +499,57 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
     );
 }
 
+
+#[test]
+fn generated_hooks_invoke_the_running_binary_not_whatever_is_on_path() {
+    // A bare `superstate guard ...` resolves through PATH at hook time, so a run pinned to a
+    // freshly built binary still executed whatever happened to be installed. EXP-077 ran the
+    // current build as the daemon and the previous day's build as its guards: every fix under
+    // test was absent from the process actually enforcing them, and the run reported zero
+    // denials because that binary had no denial log to write.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path();
+    std::fs::create_dir_all(repo.join(".agent-state")).expect("state dir");
+
+    let state_path = repo.join(".agent-state").join("state.json");
+    superstate_core::state_machine::save_state_atomic(
+        &state_path,
+        &superstate_core::models::ExecutionState {
+            status: superstate_core::models::ExecutionStatus::InProgress,
+            step: 1,
+            active_task: Some(superstate_core::models::TaskSpec {
+                id: "task-hooks".to_string(),
+                title: "Hook provisioning".to_string(),
+                verification_cmd: Some("true".to_string()),
+                ..Default::default()
+            }),
+            no_worktree: true,
+            ..Default::default()
+        },
+    )
+    .expect("save state");
+
+    let mut runner = superstate_core::daemon::DaemonRunner::new(superstate_core::daemon::DaemonConfig {
+        state_path,
+        driver_cmd: Some("true".to_string()),
+        max_retries: 1,
+        timeout_secs: 5,
+        guard_file_reads: true,
+        guard_commands: true,
+        ..Default::default()
+    })
+    .expect("runner");
+    let _ = runner.run_step();
+
+    let hooks = std::fs::read_to_string(repo.join(".agents").join("hooks.json"))
+        .expect("hooks.json must be provisioned");
+    for fragment in ["guard pre-tool-use", "guard pre-command"] {
+        let idx = hooks.find(fragment).unwrap_or_else(|| panic!("missing {fragment}: {hooks}"));
+        let line_start = hooks[..idx].rfind('"').expect("command string start");
+        let command = &hooks[line_start..idx];
+        assert!(
+            command.contains('/'),
+            "hook must invoke an absolute path, not a bare name resolved through PATH: {hooks}"
+        );
+    }
+}

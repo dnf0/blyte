@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Decision returned by the file read guard evaluation.
@@ -138,4 +138,65 @@ pub fn evaluate_file_read_guard(
             ),
         }
     }
+}
+
+/// Detects a shell command that dumps a whole file into the conversation.
+///
+/// The file read guard only ever matched the agent's *file viewing tool*, so `cat internal/x.go`
+/// walked straight past it -- and past the command guard, which classifies only polling, and past
+/// output shunting, which wraps `./run-in-container` and not host commands. Across recorded runs
+/// 29 of 152 logged commands were `cat` or `grep`, so this is not a corner case; it is a hole in
+/// the middle of the perimeter. Spotify's Portal covers the same gap with its `check-bash-read`
+/// hook, alongside the file-size hook we already had.
+///
+/// Returns the path being dumped, or None when the command is not a bulk read. Bounded reads are
+/// deliberately not matched: `head -50 x.go` and `sed -n '10,60p' x.go` are the behaviour the
+/// guard is trying to encourage, so intercepting them would punish compliance.
+pub fn bulk_read_target(command: &str) -> Option<PathBuf> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Consider each pipeline stage: `cat big.go | grep foo` dumps the file before grep sees it.
+    for stage in trimmed.split('|') {
+        let mut tokens = stage.split_whitespace();
+        let Some(program) = tokens.next() else { continue };
+        let program = program.rsplit('/').next().unwrap_or(program);
+        if !matches!(program, "cat" | "less" | "more" | "head" | "tail") {
+            continue;
+        }
+
+        let mut operands: Vec<&str> = Vec::new();
+        let mut bounded = false;
+        let mut skip_next = false;
+        for token in tokens {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if token == "-n" || token == "-c" {
+                // `head -n 50` bounds the read; the count is the next token.
+                bounded = true;
+                skip_next = true;
+                continue;
+            }
+            if token.starts_with('-') {
+                // `head -50` and any other flag.
+                if token.len() > 1 && token[1..].chars().all(|c| c.is_ascii_digit()) {
+                    bounded = true;
+                }
+                continue;
+            }
+            operands.push(token);
+        }
+
+        if bounded {
+            continue;
+        }
+        if let Some(first) = operands.first() {
+            return Some(PathBuf::from(first.trim_matches(['"', '\''])));
+        }
+    }
+    None
 }

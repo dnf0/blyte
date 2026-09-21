@@ -434,6 +434,19 @@ pub fn build_sliced_test_cmd(
 
     let trimmed = base_cmd.trim();
 
+    // Never slice a command containing a heredoc.
+    //
+    // Detection below is a substring search for a runner name, which happily matches one
+    // inside a heredoc BODY -- the script being fed to another process, not the command this
+    // shell runs. Rewriting around that match produces an unterminated heredoc that executes
+    // on the host instead of wherever the real command was routed. EXP-072: katex's gate
+    // contained `jest` inside `cat <<'GATEEOF' | ./run-in-container sh -s`, and the slice
+    // reported "No tests found ... In /workspace" four times, costing four attempts, $2.71
+    // and the task. Slicing a command we cannot parse is worse than not slicing it.
+    if trimmed.contains("<<") {
+        return None;
+    }
+
     // 1. Pytest detection (supports ./run-in-container pytest, python -m pytest, pytest)
     if let Some(prefix_idx) = trimmed.find("pytest") {
         if is_word_boundary_match(trimmed, prefix_idx, "pytest".len()) {

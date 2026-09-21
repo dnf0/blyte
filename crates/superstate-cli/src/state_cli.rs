@@ -343,6 +343,15 @@ pub struct DaemonArgs {
     /// Disable automatic git rollback on verification failure
     #[arg(long, help = "Disable automatic git rollback on verification failure")]
     pub no_auto_rollback: bool,
+    /// When a failed attempt's tree is reset: always (Manifesto Invariant III, the default),
+    /// on-stall (only when the attempt changed nothing), on-regression (only when it broke
+    /// something that previously passed).
+    #[arg(
+        long,
+        value_name = "POLICY",
+        help = "When to reset on failure: always (default), on-stall, on-regression"
+    )]
+    pub rollback_policy: Option<String>,
     /// Disable automatic tool output shunting during driver execution
     #[arg(
         long,
@@ -442,6 +451,15 @@ pub struct HandoffArgs {
     #[arg(long)]
     pub verify_cmd: Option<String>,
 
+    /// Decompose the goal into the autonomous TDD DAG instead of a single gated milestone.
+    ///
+    /// Milestone 1 requires the worker to author its own reproduction test and proves it
+    /// compiles and FAILS; milestone 2 proves that test and the repository's own suite PASS.
+    /// Conflicts with --verify-cmd: handing over a ready-made assertion is the scaffold
+    /// Manifesto Invariant V bans.
+    #[arg(long, conflicts_with = "verify_cmd")]
+    pub tdd: bool,
+
     /// Plan markdown file to parse milestones from
     #[arg(long)]
     pub plan: Option<PathBuf>,
@@ -483,6 +501,7 @@ impl Default for HandoffArgs {
         Self {
             goal: None,
             verify_cmd: None,
+            tdd: false,
             plan: None,
             from: None,
             to: None,
@@ -619,6 +638,10 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             }
             None => {
                 let auto_rollback = args.use_auto_rollback();
+                let rollback_policy = match args.rollback_policy.as_deref() {
+                    Some(v) => superstate_core::daemon::RollbackPolicy::parse(v)?,
+                    None => superstate_core::daemon::RollbackPolicy::default(),
+                };
                 let shunt_driver_output = args.use_shunt();
                 let guard_file_reads = args.use_guard();
                 let guard_commands = args.use_command_guard();
@@ -631,6 +654,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     args.advisory_review,
                     args.review_blocking,
                     auto_rollback,
+                    rollback_policy,
                     shunt_driver_output,
                     guard_file_reads,
                     guard_commands,
