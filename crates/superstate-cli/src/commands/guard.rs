@@ -212,7 +212,13 @@ fn telemetry_root() -> Option<PathBuf> {
 /// how large it was, and how often. This is the trace the daemon arm otherwise lacks (13.7).
 ///
 /// Best effort: a guard that cannot write telemetry must still guard.
-fn record_activity(kind: &str, target: &str, lines: usize, decision: &str) {
+fn record_activity(
+    kind: &str,
+    target: &str,
+    lines: usize,
+    decision: &str,
+    range: Option<(usize, usize)>,
+) {
     let Some(root) = telemetry_root() else { return };
     let dir = root.join(".agent-state");
     if std::fs::create_dir_all(&dir).is_err() {
@@ -222,13 +228,22 @@ fn record_activity(kind: &str, target: &str, lines: usize, decision: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // The requested window, not just the file. Without it "24 reads of formatters.go" cannot be
+    // separated into 24 different windows of a 1,559-line file -- correct behaviour under a
+    // 200-line budget -- and 24 fetches of the same lines, which a read cache would eliminate.
+    // EXP-079 recorded the former shape and could not answer which it was.
+    let window = match range {
+        Some((start, end)) => format!(",\"start\":{},\"end\":{}", start, end),
+        None => String::new(),
+    };
     let line = format!(
-        "{{\"ts\":{},\"kind\":{},\"target\":{},\"lines\":{},\"decision\":{}}}\n",
+        "{{\"ts\":{},\"kind\":{},\"target\":{},\"lines\":{},\"decision\":{}{}}}\n",
         stamp,
         serde_json::Value::String(kind.to_string()),
         serde_json::Value::String(target.to_string()),
         lines,
         serde_json::Value::String(decision.to_string()),
+        window,
     );
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -423,6 +438,12 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
         &resolved.display().to_string(),
         lines,
         if denied { "deny" } else { "allow" },
+        match (start_line, end_line) {
+            (Some(a), Some(b)) => Some((a, b)),
+            (Some(a), None) => Some((a, lines)),
+            (None, Some(b)) => Some((1, b)),
+            (None, None) => None,
+        },
     );
     if denied {
         record_denial(&resolved, lines);
@@ -501,6 +522,7 @@ pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
                 &resolved.display().to_string(),
                 lines,
                 if denied { "deny" } else { "allow" },
+                None,
             );
             if denied {
                 record_denial(&resolved, lines);
@@ -522,6 +544,7 @@ pub fn cmd_pre_command(args: PreCommandArgs) -> Result<(), String> {
                 CommandGuardDecision::Throttle { .. } => "throttle",
                 CommandGuardDecision::Deny { .. } => "deny",
             },
+            None,
         );
     }
 
