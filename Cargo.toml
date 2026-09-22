@@ -6,6 +6,7 @@ members = [
     "crates/superstate-rules",
     "crates/superstate-mcp",
     "crates/superstate-worktree",
+    "crates/superstate-provider",
     "crates/superstate-cli",
 ]
 resolver = "2"
