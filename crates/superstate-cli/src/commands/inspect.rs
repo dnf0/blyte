@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use superstate_syntax::inspect::{extract_symbols_from_file, find_symbol, format_outline};
 use superstate_syntax::symbols::SyntaxError;
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, PartialEq)]
 pub struct InspectArgs {
     /// Path to target source file to inspect
     pub path: PathBuf,
