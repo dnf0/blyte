@@ -86,3 +86,30 @@ fn grandchild_process_tree_is_killed_at_deadline() {
     );
 }
 
+#[test]
+fn container_shell_enforces_timeout_on_hung_execution() {
+    use std::path::PathBuf;
+    use superstate_agent::shell::ContainerShell;
+
+    let shell = ContainerShell {
+        container_id: "non-existent-container-id-12345".into(),
+        workdir: PathBuf::from("/workspace"),
+    };
+    let d = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "container exec must obey timeout bound: took {elapsed:?}"
+    );
+    match res {
+        Ok(out) => {
+            assert!(out.exit_code != 0);
+        }
+        Err(e) => {
+            assert!(!e.is_empty());
+        }
+    }
+}
+

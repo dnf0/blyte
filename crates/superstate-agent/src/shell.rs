@@ -185,19 +185,15 @@ pub struct ContainerShell {
 }
 
 impl Shell for ContainerShell {
-    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
-        let out = Command::new("docker")
-            .args(["exec", "-i", "-w"])
+    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        // Construct docker exec invocation targeting the running container and its workdir.
+        let mut cmd = Command::new("docker");
+        cmd.args(["exec", "-i", "-w"])
             .arg(&self.workdir)
             .arg(&self.container_id)
-            .args(["bash", "-lc", command])
-            .output()
-            .map_err(|e| format!("cannot exec in container {}: {e}", self.container_id))?;
-        Ok(Output {
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            exit_code: out.status.code().unwrap_or(-1),
-        })
+            .args(["bash", "-lc", command]);
+        // Delegate to exec_command to ensure process group isolation and timeout parity.
+        exec_command(cmd, timeout)
     }
 
     fn describe(&self) -> String {
