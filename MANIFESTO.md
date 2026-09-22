@@ -11,9 +11,11 @@ The prevailing paradigm of AI coding treats software engineering as an extended 
 
 On toy puzzles and single-file scripts, this illusion holds. On real software engineering repositories, it collapses:
 
-1. **The Confidence Trap (Done While Wrong):** An LLM has no mechanical friction. Its internal feeling of confidence is completely uncorrelated with code correctness. In empirical software engineering evaluations, an agent left to judge its own completion quits prematurely and incorrectly in over 80% of its losses—spending a fraction of its compute budget while abandoning broken code.
-2. **Cascading Edit Pollution:** When a conversational agent fails a test or breaks a build, it does not roll back. It apologizes and makes further edits on top of broken edits. Within three turns, the repository is littered with contradictory partial fixes, dangling syntax, and wrecked git trees.
-3. **Context Collapse:** Production software repositories are loud. Multi-thousand line compiler dumps, wall-of-text test logs, and runaway polling loops saturate the context window, triggering catastrophic forgetting, amnesia, and prompt truncation.
+1. **The Confidence Trap (Done While Wrong):** An LLM has no mechanical friction. Its internal feeling of confidence is completely uncorrelated with code correctness. On terminal-bench, an unmanaged agent's dominant failure mode is declaring done while wrong — **15 of 18 losses**, at **$0.069 median spend against the $0.187 it spends on tasks it solves**. It quits early and confidently. [FINDINGS 2]
+
+   **This is family-specific, and it inverts.** On the DataCurve set the same unmanaged judgement scored **43% against superstate's 23–27%**: where the gate is weak, replacing the agent's judgement with it makes things worse, not better. A control plane is a gain only when the gate is the better judge. [FINDINGS 7]
+2. **Cascading Edit Pollution:** When a conversational agent fails a test or breaks a build, it does not roll back. It apologizes and makes further edits on top of broken edits. Measured directly: retaining dirty working-tree state across retries scored **2/3 against 3/3** and cost **25.3% more input tokens per solve** (915k vs 683k). Failing turns are not hypothetical — one run recorded rollback firing on **all 30** verification failures. [FINDINGS 13.26, EXP-059, EXP-071]
+3. **Context Collapse:** Production software repositories are loud, and unpredictably so. Across 64 recorded command outputs, **one** exceeded a thousand lines — and it was **25,105 lines** (`go test ./...`, exit 1): 88% of that run's entire output volume and 26× the next largest. The same command produced 961 lines in a sibling run. This is a heavy tail, not a steady flood, which is precisely why it must be handled mechanically: no rule about *which* commands are noisy would have caught it. [FINDINGS 13.26]
 
 Prompt engineering cannot fix these failures, because the failure is architectural. You cannot instruct an untrusted worker to supervise itself.
 
@@ -27,6 +29,22 @@ Prompt engineering cannot fix these failures, because the failure is architectur
 > The control plane is a deterministic, unyielding supervisor.  
 >
 > **The worker proposes changes. The environment decides truth.**
+
+---
+
+### How claims in this document are evidenced
+
+Every empirical number here cites the `superstate-eval` entry that establishes it, so auditing
+this document is a lookup rather than a reconstruction. That convention exists because it was
+missing: three figures quoted as established did not survive re-measurement — a read cache's
+predicted 45–68% saving, a 1,600-line read optimum fitted to a single file, and a 13,288-token
+MCP overhead that re-measured at ~400 [FINDINGS 13.25, 13.20, 13.27]. All three shared one
+shape: derived once, under conditions nobody recorded, then repeated.
+
+**A number that cannot be re-derived is a claim, not a measurement.** State which it is.
+
+Design stances — the Core Axiom, the separation of planes — are not empirical and carry no
+citation. Do not confuse the two kinds of sentence.
 
 ---
 
@@ -57,13 +75,23 @@ When an attempt fails:
 - If an execution turn fails its verification gate, the control plane executes a scoped, deterministic hard rollback (`git reset --hard <checkpoint>`) before the agent is allowed to retry.
 - The agent begins every new turn from a clean, verified state—armed with the exact failure telemetry of the previous attempt, not a corrupted workspace.
 
+**Resetting is not free, and this invariant is a default rather than a law.** One run reset a worker's *committed* feature five times, rebuilding it each time [FINDINGS 13.2]. `always` is the default because the ablation favours it [EXP-059]; `on-stall` and `on-regression` exist so the question stays measurable rather than assumed. Where the evidence is split, say so and keep the switch.
+
 #### IV. Mechanical Perimeter Guards & AST Hygiene
 You cannot regulate an agent's context through system prompt guidelines alone. Under task pressure, an agent will take the shortest path to an answer, regardless of written rules.
 
 Context boundaries must be mechanically enforced at the execution perimeter:
 - **PreToolUse Lifecycle Interception:** Runaway busy-wait polling loops must be blocked with mandatory cooldown debouncing at the system call boundary.
-- **Deterministic AST Slicing:** Massive file reads must be intercepted and served with precise, Tree-sitter AST symbol outlines and line numbers—zero hallucinations, zero latency, and zero token waste.
-- **Tool Output Shunting:** Multi-thousand-line compiler dumps and noisy test logs must be mechanically distilled into head, tail, and diagnostic signals before reaching the prompt.
+- **Deterministic AST Slicing:** Oversized file reads are intercepted and served as Tree-sitter symbol outlines with line numbers—zero hallucinations, zero latency. The line budget is a *measured* parameter, currently 400, not a round number [FINDINGS 13.21].
+- **Tool Output Shunting:** The 25,105-line test log must be distilled to head, tail, and diagnostic signal before reaching the prompt. Note the channel this currently misses: **55–59% of a run's commands execute host-side**, outside the container bridge, and are never shunted [FINDINGS 13.21].
+
+##### The limit of the perimeter
+
+**A perimeter guard can shrink what a tool call returns. It cannot reduce how many calls the worker makes.** By the time a `PreToolUse` hook runs, the model has already emitted the request and the conversation has already been re-sent — the per-call cost is spent before the guard sees anything. The guard governs only the response, and therefore only what every *subsequent* turn must carry.
+
+This matters because cost scales with call count, not response size. The consequence is not theoretical: a read cache that refused reads whose lines the worker already held was built, measured, and **increased** input tokens by 37% and 55%. 89–91% of its refusals were immediately insisted on — a worker that has decided it needs those lines needs them, and a refusal it does not accept adds a round trip instead of saving one [FINDINGS 13.25].
+
+**So: interception is for bounding what enters context. Reducing how often the worker reaches for context is a worker-plane problem and cannot be solved here.** Any mechanism proposed under this invariant must say which of the two it is doing.
 
 #### V. Autonomous TDD as the Problem-Solving Engine
 Autonomous software engineering cannot rely on synthetic hand-authored scaffolds or answer-key leakage. Pre-seeding maintainer reproduction tests is cheating; it turns an open-ended engineering diagnosis into a narrow test-passing game.
@@ -72,6 +100,8 @@ The canonical execution engine for autonomous engineering is mechanical Test-Dri
 1. **Red (Milestone 1 — Reproduction):** The agent diagnoses the issue and authors an isolated reproduction test. The verification gate mechanically asserts that the test compiles and **fails** against the pristine repository. A checkpoint commit is frozen.
 2. **Green (Milestone 2 — Implementation):** The agent implements the minimal fix. The gate mechanically asserts that the reproduction test **and** the full repository test suite pass (exit `0`).
 3. **Commit & Handoff:** The state machine records completion, creates an atomic commit, and yields verified code.
+
+**Known gap: this presupposes a repository exists at turn 0.** Red asserts a test fails against the pristine repository — but a task whose *instruction* is to clone or scaffold the repository has nothing to derive a runner from, and the DAG cannot be built. Failing closed is correct (Invariant II forbids a gate that cannot fail), but such a task must be recorded **ungateable for this arm**, never scored as work the agent failed to do. It was mis-scored for seven consecutive runs [FINDINGS 13.20].
 
 ---
 
@@ -126,7 +156,8 @@ Real software engineering is:
 > **We value:**
 > - **Mechanical verification** over agent self-confidence.
 > - **Scoped git rollbacks** over conversational apologies.
-> - **Deterministic AST slicing** over token-bloated context dumps.
+> - **Deterministic AST slicing** over token-bloated context dumps — while remembering it
+>   bounds what a call returns, never how many calls are made.
 > - **Persistent environmental state** over ephemeral chat histories.
 > - **Autonomous Red/Green TDD** over synthetic prompt scaffolds.
 
