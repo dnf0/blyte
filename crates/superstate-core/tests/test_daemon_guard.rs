@@ -655,3 +655,25 @@ fn test_daemon_hook_carries_the_read_cache_ablation() {
         "an ablated run must provision the hook with the cache OFF, got {cmd:?}"
     );
 }
+
+#[test]
+fn test_read_cache_defaults_off_after_exp081() {
+    // EXP-081 measured +37% and +55% input tokens with the cache ON, because 89-91% of
+    // suppressions were immediately insisted on: a worker that has decided it needs lines
+    // 120-180 needs them, and a PreToolUse hook cannot prevent the call it refuses -- the
+    // per-call preamble is already spent by the time the hook runs.
+    //
+    // Guards the default, not the mechanism. Turning this back on is an experiment and needs
+    // evidence that the insist rate can be moved, which nothing so far provides.
+    assert!(
+        !DaemonConfig::default().read_cache,
+        "the read cache is a measured regression and must stay off by default (FINDINGS 13.25)"
+    );
+
+    let json = r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
+    let config: DaemonConfig = serde_json::from_str(json).expect("valid DaemonConfig JSON");
+    assert!(
+        !config.read_cache,
+        "a config written before this field existed must not silently enable the regression"
+    );
+}

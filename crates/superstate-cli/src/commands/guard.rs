@@ -29,12 +29,23 @@ pub struct PreToolUseArgs {
     #[arg(long, default_value_t = superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES)]
     pub threshold_lines: usize,
 
-    /// Serve a read whose lines are already in context with a pointer instead of the content.
+    /// Refuse a read whose lines are already in context, answering with a pointer.
     ///
-    /// Worth 45-68% of read cost against the line budget's 9-17% (FINDINGS 13.21), because a
-    /// tool call costs ~2,500 tokens before returning a byte. `--no-read-cache` ablates it, so
-    /// the mechanism can be measured rather than assumed.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    /// DEFAULT OFF: measured at +37% and +55% input tokens in EXP-081 (FINDINGS 13.25).
+    ///
+    /// It was built expecting to save 45-68% of read cost, and the premise was wrong. A
+    /// PreToolUse hook cannot prevent a tool call -- by the time it runs, the model has emitted
+    /// the request and the conversation has already been re-sent, so the per-call preamble is
+    /// spent before the guard sees anything. The guard can only change what the RESPONSE costs.
+    ///
+    /// Worse, 89-91% of suppressions were immediately insisted on: a worker that has decided it
+    /// needs lines 120-180 needs them, and being told it already has them does not change its
+    /// plan. So a suppression adds a round trip rather than saving one, about -1,900 tokens
+    /// each before compounding.
+    ///
+    /// Kept switchable because the insist rate is the thing to attack if anyone returns to
+    /// this. Nothing measured so far suggests a refusal a worker accepts is achievable here.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub read_cache: bool,
 }
 

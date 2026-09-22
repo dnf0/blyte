@@ -266,12 +266,12 @@ pub struct DaemonConfig {
     /// superstate-eval `scripts/read_budget.py` for recomputing it from a recorded trace.
     #[serde(default = "default_read_threshold_lines")]
     pub read_threshold_lines: usize,
-    /// Suppress a read whose lines the worker already holds, answering with a pointer.
+    /// Refuse a read whose lines the worker already holds, answering with a pointer.
     ///
-    /// Measured at 45-68% of read cost against the line budget's 9-17% (FINDINGS 13.21).
-    /// Kept as a switch rather than hardcoded because it changes what the worker SEES, not
-    /// merely what it costs, so it has to be ablatable in a paired run.
-    #[serde(default = "default_true")]
+    /// DEFAULT OFF: EXP-081 measured +37% and +55% input tokens with it on, because 89-91% of
+    /// suppressions were immediately insisted on and a perimeter hook cannot prevent the call
+    /// it refuses -- the preamble is already spent when the hook runs. See FINDINGS 13.25.
+    #[serde(default)]
     pub read_cache: bool,
     /// Automatically guard tool execution and poll commands with debounce
     #[serde(default = "default_true")]
@@ -300,7 +300,7 @@ impl Default for DaemonConfig {
             shunt_driver_output: true,
             guard_file_reads: true,
             read_threshold_lines: default_read_threshold_lines(),
-            read_cache: true,
+            read_cache: false,
             guard_commands: true,
             impact_slicing: false,
         }
