@@ -1,51 +1,148 @@
-# Task 2 Brief: Failing Regression Test for Grandchild Process Tree Termination
+# Task 2: CLI Argument Parser with Dual-Mode Support
 
-## Global Constraints
-- Target crate: `crates/superstate-agent`
-- Rust 2021 edition, zero compiler warnings
-- Clean execution on Unix platforms (macOS / Linux)
+## Goal
+Implement dual-mode CLI argument parsing for `superstate`:
+- Running `superstate` with no arguments defaults to interactive mode (`prompt == None`, `command == None`).
+- Running `superstate "<prompt>"` or `superstate "<prompt>" --gate "pytest"` parses single-shot task mode.
+- Running `superstate doctor`, `superstate review`, etc., parses subcommands cleanly.
+- Support execution flags: `--gate`, `--context`, `--model`, `--container`, `--max-turns`, `--max-gates`, `--rollback`.
 
-## Task Description
-Write a regression test in `crates/superstate-agent/tests/test_shell_timeout.rs` named `grandchild_process_tree_is_killed_at_deadline`.
+## Working Directory
+`/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-### Context:
-When an agent runs a command that forks grandchild processes (e.g. `sh -c '(sleep 30) & wait'`), killing only the parent PID leaves the grandchild alive. The grandchild inherits the write descriptors of stdout and stderr, causing reader threads to deadlock or wait until the grandchild exits.
+## Files
+- Create: `crates/superstate-cli/src/cli.rs` (defining `Cli` and `Commands`, derived with `clap::Parser` and `clap::Subcommand`, with `Debug, PartialEq`)
+- Modify: `crates/superstate-cli/src/lib.rs` (add `pub mod cli;`)
+- Modify: `crates/superstate-cli/src/main.rs` (use `superstate_cli::cli::{Cli, Commands}`)
+- Create: `crates/superstate-cli/tests/test_cli_dispatch.rs`
 
-### Steps:
-1. In `crates/superstate-agent/tests/test_shell_timeout.rs`, add:
-```rust
-#[test]
-fn grandchild_process_tree_is_killed_at_deadline() {
-    // If only the parent bash process is killed, background grandchildren
-    // (such as `find /` or subshells) stay alive, keep pipe handles open,
-    // and cause reader thread joins to hang.
-    let d = tempfile::tempdir().unwrap();
-    let started = Instant::now();
-    let out = LocalShell
-        .exec("sh -c '(sleep 30) & wait'", d.path(), Duration::from_secs(1))
-        .unwrap();
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(4),
-        "must not deadlock on grandchild pipe handles: took {elapsed:?}"
-    );
-    assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
-    assert!(
-        out.stderr.contains("killed by superstate"),
-        "kill notice missing from stderr: {:?}",
-        out.stderr
-    );
-}
-```
-2. Run the test:
-```bash
-cargo test -p superstate-agent --test test_shell_timeout grandchild_process_tree_is_killed_at_deadline -- --nocapture
-```
-Confirm whether it fails or hangs (demonstrating the bug). If it hangs, kill it after a few seconds or note the timeout.
-3. Commit the test:
-```bash
-git add crates/superstate-agent/tests/test_shell_timeout.rs
-git commit --no-gpg-sign -m "test(agent): add failing test for grandchild process tree termination"
-```
-4. Run `roborev status; roborev show HEAD`.
-5. Report back status: DONE (or DONE_WITH_CONCERNS) with the failure reproduction evidence.
+## Detailed Implementation Steps
+1. Create `crates/superstate-cli/src/cli.rs`:
+   Move the `Cli` struct and `Commands` enum from `main.rs` into `cli.rs`:
+   ```rust
+   use clap::{Parser, Subcommand};
+   use std::path::PathBuf;
+   use crate::commands;
+   use crate::state_cli::StateCommands;
+
+   #[derive(Parser, Debug, PartialEq)]
+   #[command(
+       name = "superstate",
+       version = "0.1.0",
+       about = "Superstate: Autonomous agent harness with deterministic state and verification gates"
+   )]
+   pub struct Cli {
+       /// Direct task prompt to run in single-shot / headless mode
+       #[arg(index = 1)]
+       pub prompt: Option<String>,
+
+       /// Verification gate command (e.g. 'pytest', 'cargo test')
+       #[arg(short, long)]
+       pub gate: Option<String>,
+
+       /// Context strategy: 'state-only' (SKILL.state O(1) prompt) or 'conversational' (append-all chat)
+       #[arg(long, default_value = "conversational")]
+       pub context: String,
+
+       /// Model identifier or provider selection
+       #[arg(short, long)]
+       pub model: Option<String>,
+
+       /// Run inside an isolated container workspace instead of local host
+       #[arg(long)]
+       pub container: Option<String>,
+
+       /// Maximum turn budget
+       #[arg(long, default_value = "25")]
+       pub max_turns: usize,
+
+       /// Maximum verification gate attempts before failing
+       #[arg(long, default_value = "5")]
+       pub max_gates: usize,
+
+       /// Enable automatic rollback to baseline git commit if gate fails
+       #[arg(long, default_value_t = true)]
+       pub rollback: bool,
+
+       #[command(subcommand)]
+       pub command: Option<Commands>,
+   }
+
+   #[derive(Subcommand, Debug, PartialEq)]
+   pub enum Commands {
+       Doctor,
+       Mcp,
+       Review {
+           commit_range: Option<String>,
+           #[arg(short, long, default_value = ".")]
+           repo: PathBuf,
+           #[arg(short, long)]
+           driver: Option<String>,
+           #[arg(long)]
+           state_path: Option<PathBuf>,
+           #[arg(long)]
+           record: bool,
+           #[arg(long)]
+           json: bool,
+           #[arg(long)]
+           fail_on_blocking: bool,
+       },
+       Init {
+           #[arg(short, long, default_value = ".")]
+           dest: PathBuf,
+           #[arg(short, long, default_value = "rust")]
+           language: String,
+           #[arg(short, long, default_value = "balanced")]
+           strictness: String,
+       },
+       State {
+           #[command(subcommand)]
+           cmd: StateCommands,
+       },
+       Worktree {
+           #[command(subcommand)]
+           cmd: commands::worktree::WorktreeCommands,
+       },
+       Daemon(crate::state_cli::DaemonArgs),
+       Cancel(crate::state_cli::CancelArgs),
+       Logs(crate::state_cli::LogsArgs),
+       Handoff(crate::state_cli::HandoffArgs),
+       Shunt {
+           #[arg(long, default_value = "50")]
+           threshold_lines: usize,
+           #[arg(long)]
+           logs_dir: Option<PathBuf>,
+           #[arg(trailing_var_arg = true, required = true)]
+           cmd: Vec<String>,
+       },
+       Inspect(commands::inspect::InspectArgs),
+       Guard {
+           #[command(subcommand)]
+           cmd: commands::guard::GuardCommands,
+       },
+   }
+   ```
+2. Update `crates/superstate-cli/src/lib.rs` to expose `pub mod cli;`.
+3. Update `crates/superstate-cli/src/main.rs` to use `superstate_cli::cli::{Cli, Commands}`.
+   In `main()`:
+   - If `cli.command` is `Some(cmd)`: match and execute existing subcommand logic.
+   - If `cli.command` is `None`:
+     - If `let Some(ref prompt) = cli.prompt`: for now, print `eprintln!("Running headless task: {prompt}");`
+     - Else: print `eprintln!("Launching interactive REPL...");`
+4. Add unit / integration tests in `crates/superstate-cli/tests/test_cli_dispatch.rs`:
+   - `test_parse_no_args_launches_interactive`:
+     Verifies parsing `["superstate"]` yields `prompt == None` and `command == None`.
+   - `test_parse_single_shot_prompt`:
+     Verifies parsing `["superstate", "fix issue", "--gate", "pytest", "--context", "state-only"]` yields `prompt == Some("fix issue")`, `gate == Some("pytest")`, `context == "state-only"`, `command == None`.
+   - `test_parse_subcommand`:
+     Verifies parsing `["superstate", "doctor"]` yields `command == Some(Commands::Doctor)` and `prompt == None`.
+5. Run tests:
+   `cargo test -p superstate --test test_cli_dispatch`
+6. Run `cargo check --workspace --all-targets` to ensure 0 warnings.
+7. Commit:
+   ```bash
+   git add crates/superstate-cli/src/cli.rs crates/superstate-cli/src/lib.rs crates/superstate-cli/src/main.rs crates/superstate-cli/tests/test_cli_dispatch.rs
+   git commit --no-gpg-sign -m "feat(cli): add dual-mode prompt and execution flags to CLI parser"
+   ```
+8. Run `roborev status; roborev show HEAD`.
+9. Write report to `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness/docs/superpowers/plans/task-2-report.md`.

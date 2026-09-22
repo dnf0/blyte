@@ -1,44 +1,618 @@
-b22b15b test(agent): add failing test for grandchild process tree termination
----
- .../superstate-agent/tests/test_shell_timeout.rs   | 24 ++++++++++++++++++++++
- 1 file changed, 24 insertions(+)
----
-diff --git a/crates/superstate-agent/tests/test_shell_timeout.rs b/crates/superstate-agent/tests/test_shell_timeout.rs
-index 2da9349..a1e7b67 100644
---- a/crates/superstate-agent/tests/test_shell_timeout.rs
-+++ b/crates/superstate-agent/tests/test_shell_timeout.rs
-@@ -55,10 +55,34 @@ fn a_command_producing_more_output_than_the_pipe_buffer_does_not_deadlock() {
-     assert!(started.elapsed() < Duration::from_secs(25), "must not have deadlocked");
- }
- 
- #[test]
- fn a_normal_command_is_unaffected() {
-     let d = tempfile::tempdir().unwrap();
-     let out = LocalShell.exec("echo hello", d.path(), Duration::from_secs(30)).unwrap();
-     assert_eq!(out.stdout.trim(), "hello");
-     assert_eq!(out.exit_code, 0);
- }
+diff --git a/crates/superstate-cli/src/cli.rs b/crates/superstate-cli/src/cli.rs
+new file mode 100644
+index 0000000..8376136
+--- /dev/null
++++ b/crates/superstate-cli/src/cli.rs
+@@ -0,0 +1,140 @@
++use clap::{Parser, Subcommand};
++use std::path::PathBuf;
++use crate::commands;
++use crate::state_cli::StateCommands;
 +
-+#[test]
-+fn grandchild_process_tree_is_killed_at_deadline() {
-+    // If only the parent bash process is killed, background grandchildren
-+    // (such as `find /` or subshells) stay alive, keep pipe handles open,
-+    // and cause reader thread joins to hang.
-+    let d = tempfile::tempdir().unwrap();
-+    let started = Instant::now();
-+    let out = LocalShell
-+        .exec("sh -c '(sleep 30) & wait'", d.path(), Duration::from_secs(1))
-+        .unwrap();
-+    let elapsed = started.elapsed();
-+    assert!(
-+        elapsed < Duration::from_secs(4),
-+        "must not deadlock on grandchild pipe handles: took {elapsed:?}"
-+    );
-+    assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
-+    assert!(
-+        out.stderr.contains("killed by superstate"),
-+        "kill notice missing from stderr: {:?}",
-+        out.stderr
-+    );
++#[derive(Parser, Debug, PartialEq)]
++#[command(
++    name = "superstate",
++    version = "0.1.0",
++    about = "Superstate: Autonomous agent harness with deterministic state and verification gates",
++    args_conflicts_with_subcommands = true
++)]
++pub struct Cli {
++    /// Direct task prompt to run in single-shot / headless mode
++    #[arg(index = 1)]
++    pub prompt: Option<String>,
++
++    /// Verification gate command (e.g. 'pytest', 'cargo test')
++    #[arg(short, long)]
++    pub gate: Option<String>,
++
++    /// Context strategy: 'state-only' (SKILL.state O(1) prompt) or 'conversational' (append-all chat)
++    #[arg(
++        long,
++        default_value = "conversational",
++        value_parser = ["state-only", "conversational"]
++    )]
++    pub context: String,
++
++    /// Model identifier or provider selection
++    #[arg(short, long)]
++    pub model: Option<String>,
++
++    /// Run inside an isolated container workspace instead of local host
++    #[arg(long)]
++    pub container: Option<String>,
++
++    /// Maximum turn budget
++    #[arg(long, default_value = "25")]
++    pub max_turns: usize,
++
++    /// Maximum verification gate attempts before failing
++    #[arg(long, default_value = "5")]
++    pub max_gates: usize,
++
++    /// Enable automatic rollback to baseline git commit if gate fails (disable with --rollback=false)
++    #[arg(
++        long,
++        default_value_t = true,
++        action = clap::ArgAction::Set,
++        num_args = 0..=1,
++        require_equals = true,
++        default_missing_value = "true",
++        value_parser = clap::builder::BoolishValueParser::new()
++    )]
++    pub rollback: bool,
++
++    #[command(subcommand)]
++    pub command: Option<Commands>,
 +}
 +
++#[derive(Subcommand, Debug, PartialEq)]
++pub enum Commands {
++    /// Run 5-step verification handshake and health check
++    Doctor,
++    /// Run stdio JSON-RPC MCP server
++    Mcp,
++    /// Adversarial code review over git diff
++    Review {
++        /// Git commit range (e.g. HEAD~1..HEAD). If omitted, inspects uncommitted diff in working tree
++        commit_range: Option<String>,
++        /// Repository root path
++        #[arg(short, long, default_value = ".")]
++        repo: PathBuf,
++        /// Reviewer driver command (e.g. "agy --model gemini-3.8-flash-low" or "claude")
++        #[arg(short, long)]
++        driver: Option<String>,
++        /// Path to .agent-state/state.json (auto-detected if omitted)
++        #[arg(long)]
++        state_path: Option<PathBuf>,
++        /// Record critical/high findings into the state epistemic ledger
++        #[arg(long)]
++        record: bool,
++        /// Output full ReviewReport JSON to stdout
++        #[arg(long)]
++        json: bool,
++        /// Exit with code 1 if blocking issues are present
++        #[arg(long)]
++        fail_on_blocking: bool,
++    },
++    /// Initialize agent guidance (AGENTS.md, Cursor rules)
++    Init {
++        /// Destination directory
++        #[arg(short, long, default_value = ".")]
++        dest: PathBuf,
++        /// Primary language
++        #[arg(short, long, default_value = "rust")]
++        language: String,
++        /// Strictness profile
++        #[arg(short, long, default_value = "balanced")]
++        strictness: String,
++    },
++    /// State machine operations
++    State {
++        #[command(subcommand)]
++        cmd: StateCommands,
++    },
++    /// Git worktree and COW cache operations
++    Worktree {
++        #[command(subcommand)]
++        cmd: commands::worktree::WorktreeCommands,
++    },
++    /// Run autonomous background daemon over milestones
++    Daemon(crate::state_cli::DaemonArgs),
++    /// Cancel a running background daemon process
++    Cancel(crate::state_cli::CancelArgs),
++    /// Inspect background daemon logs
++    Logs(crate::state_cli::LogsArgs),
++    /// Prepare standardized cross-agent handoff package
++    Handoff(crate::state_cli::HandoffArgs),
++    /// Execute a shell command through the output shunting distillation layer
++    Shunt {
++        /// Line count threshold before shunting triggers
++        #[arg(long, default_value = "50")]
++        threshold_lines: usize,
++        /// Directory where full unstripped command logs are stored
++        #[arg(long)]
++        logs_dir: Option<PathBuf>,
++        /// Command and arguments to execute
++        #[arg(trailing_var_arg = true, required = true)]
++        cmd: Vec<String>,
++    },
++    /// Inspect AST symbols, outlines, and code slices
++    Inspect(commands::inspect::InspectArgs),
++    /// Intercept and evaluate agent tool invocations before execution
++    Guard {
++        #[command(subcommand)]
++        cmd: commands::guard::GuardCommands,
++    },
++}
+diff --git a/crates/superstate-cli/src/commands/guard.rs b/crates/superstate-cli/src/commands/guard.rs
+index 98f9ada..7ee4104 100644
+--- a/crates/superstate-cli/src/commands/guard.rs
++++ b/crates/superstate-cli/src/commands/guard.rs
+@@ -16,7 +16,7 @@ use superstate_core::guard::{
+ use superstate_core::read_cache::{self, CacheVerdict, ReadRecord};
+ 
+ /// Subcommands for the `superstate guard` namespace.
+-#[derive(Subcommand, Debug, Clone)]
++#[derive(Subcommand, Debug, Clone, PartialEq)]
+ pub enum GuardCommands {
+     /// Evaluate file read operations against deterministic line boundaries
+     PreToolUse(PreToolUseArgs),
+@@ -25,7 +25,7 @@ pub enum GuardCommands {
+ }
+ 
+ /// Command-line arguments for `superstate guard pre-tool-use`.
+-#[derive(Args, Debug, Clone)]
++#[derive(Args, Debug, Clone, PartialEq)]
+ pub struct PreToolUseArgs {
+     /// Maximum lines permitted before shunting to symbol outline
+     #[arg(long, default_value_t = superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES)]
+@@ -52,7 +52,7 @@ pub struct PreToolUseArgs {
+ }
+ 
+ /// Command-line arguments for `superstate guard pre-command`.
+-#[derive(Args, Debug, Clone)]
++#[derive(Args, Debug, Clone, PartialEq)]
+ pub struct PreCommandArgs {
+     /// Cooldown window in seconds before allowing repeated polling queries
+     #[arg(long, default_value_t = 30)]
+diff --git a/crates/superstate-cli/src/commands/inspect.rs b/crates/superstate-cli/src/commands/inspect.rs
+index ad9b8e5..4051743 100644
+--- a/crates/superstate-cli/src/commands/inspect.rs
++++ b/crates/superstate-cli/src/commands/inspect.rs
+@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
+ use superstate_syntax::inspect::{extract_symbols_from_file, find_symbol, format_outline};
+ use superstate_syntax::symbols::SyntaxError;
+ 
+-#[derive(Args, Debug, Clone)]
++#[derive(Args, Debug, Clone, PartialEq)]
+ pub struct InspectArgs {
+     /// Path to target source file to inspect
+     pub path: PathBuf,
+diff --git a/crates/superstate-cli/src/commands/worktree.rs b/crates/superstate-cli/src/commands/worktree.rs
+index d4ac366..53bde3a 100644
+--- a/crates/superstate-cli/src/commands/worktree.rs
++++ b/crates/superstate-cli/src/commands/worktree.rs
+@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
+ use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
+ use superstate_worktree::types::WorktreeConfig;
+ 
+-#[derive(Subcommand, Debug, Clone)]
++#[derive(Subcommand, Debug, Clone, PartialEq)]
+ pub enum WorktreeCommands {
+     /// Create a new isolated worktree
+     Create {
+diff --git a/crates/superstate-cli/src/lib.rs b/crates/superstate-cli/src/lib.rs
+index 857635a..939b276 100644
+--- a/crates/superstate-cli/src/lib.rs
++++ b/crates/superstate-cli/src/lib.rs
+@@ -1,2 +1,3 @@
++pub mod cli;
+ pub mod commands;
+ pub mod state_cli;
+diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
+index 3fad91a..999405d 100644
+--- a/crates/superstate-cli/src/main.rs
++++ b/crates/superstate-cli/src/main.rs
+@@ -1,99 +1,7 @@
+-use superstate_cli::commands;
+-
+-use clap::{Parser, Subcommand};
++use clap::Parser;
+ use std::path::PathBuf;
+-use superstate_cli::state_cli::StateCommands;
+-
+-#[derive(Parser)]
+-#[command(
+-    name = "superstate",
+-    version = "0.1.0",
+-    about = "Superstate: Deterministic state engine, AST intelligence, zero-noise review & MCP server"
+-)]
+-struct Cli {
+-    #[command(subcommand)]
+-    command: Commands,
+-}
+-
+-#[derive(Subcommand)]
+-enum Commands {
+-    /// Run 5-step verification handshake and health check
+-    Doctor,
+-    /// Run stdio JSON-RPC MCP server
+-    Mcp,
+-    /// Adversarial code review over git diff
+-    Review {
+-        /// Git commit range (e.g. HEAD~1..HEAD). If omitted, inspects uncommitted diff in working tree
+-        commit_range: Option<String>,
+-        /// Repository root path
+-        #[arg(short, long, default_value = ".")]
+-        repo: PathBuf,
+-        /// Reviewer driver command (e.g. "agy --model gemini-3.8-flash-low" or "claude")
+-        #[arg(short, long)]
+-        driver: Option<String>,
+-        /// Path to .agent-state/state.json (auto-detected if omitted)
+-        #[arg(long)]
+-        state_path: Option<PathBuf>,
+-        /// Record critical/high findings into the state epistemic ledger
+-        #[arg(long)]
+-        record: bool,
+-        /// Output full ReviewReport JSON to stdout
+-        #[arg(long)]
+-        json: bool,
+-        /// Exit with code 1 if blocking issues are present
+-        #[arg(long)]
+-        fail_on_blocking: bool,
+-    },
+-    /// Initialize agent guidance (AGENTS.md, Cursor rules)
+-    Init {
+-        /// Destination directory
+-        #[arg(short, long, default_value = ".")]
+-        dest: PathBuf,
+-        /// Primary language
+-        #[arg(short, long, default_value = "rust")]
+-        language: String,
+-        /// Strictness profile
+-        #[arg(short, long, default_value = "balanced")]
+-        strictness: String,
+-    },
+-    /// State machine operations
+-    State {
+-        #[command(subcommand)]
+-        cmd: StateCommands,
+-    },
+-    /// Git worktree and COW cache operations
+-    Worktree {
+-        #[command(subcommand)]
+-        cmd: commands::worktree::WorktreeCommands,
+-    },
+-    /// Run autonomous background daemon over milestones
+-    Daemon(superstate_cli::state_cli::DaemonArgs),
+-    /// Cancel a running background daemon process
+-    Cancel(superstate_cli::state_cli::CancelArgs),
+-    /// Inspect background daemon logs
+-    Logs(superstate_cli::state_cli::LogsArgs),
+-    /// Prepare standardized cross-agent handoff package
+-    Handoff(superstate_cli::state_cli::HandoffArgs),
+-    /// Execute a shell command through the output shunting distillation layer
+-    Shunt {
+-        /// Line count threshold before shunting triggers
+-        #[arg(long, default_value = "50")]
+-        threshold_lines: usize,
+-        /// Directory where full unstripped command logs are stored
+-        #[arg(long)]
+-        logs_dir: Option<PathBuf>,
+-        /// Command and arguments to execute
+-        #[arg(trailing_var_arg = true, required = true)]
+-        cmd: Vec<String>,
+-    },
+-    /// Inspect AST symbols, outlines, and code slices
+-    Inspect(commands::inspect::InspectArgs),
+-    /// Intercept and evaluate agent tool invocations before execution
+-    Guard {
+-        #[command(subcommand)]
+-        cmd: commands::guard::GuardCommands,
+-    },
+-}
++use superstate_cli::cli::{Cli, Commands};
++use superstate_cli::commands;
+ 
+ /// Restore the default SIGPIPE behaviour.
+ ///
+@@ -114,9 +22,9 @@ fn main() {
+     let cli = Cli::parse();
+ 
+     let result = match cli.command {
+-        Commands::Doctor => commands::doctor::run_doctor(),
+-        Commands::Mcp => superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string()),
+-        Commands::Review {
++        Some(Commands::Doctor) => commands::doctor::run_doctor(),
++        Some(Commands::Mcp) => superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string()),
++        Some(Commands::Review {
+             commit_range,
+             repo,
+             driver,
+@@ -124,7 +32,7 @@ fn main() {
+             record,
+             json,
+             fail_on_blocking,
+-        } => commands::review::cmd_review(commands::review::ReviewArgs {
++        }) => commands::review::cmd_review(commands::review::ReviewArgs {
+             commit_range,
+             repo,
+             driver,
+@@ -133,14 +41,14 @@ fn main() {
+             json,
+             fail_on_blocking,
+         }),
+-        Commands::Init {
++        Some(Commands::Init {
+             dest,
+             language,
+             strictness,
+-        } => commands::init::cmd_init_rules(&dest, &language, &strictness),
+-        Commands::State { cmd } => superstate_cli::state_cli::dispatch(cmd),
+-        Commands::Worktree { cmd } => commands::worktree::dispatch_worktree(cmd),
+-        Commands::Daemon(args) => match args.command {
++        }) => commands::init::cmd_init_rules(&dest, &language, &strictness),
++        Some(Commands::State { cmd }) => superstate_cli::state_cli::dispatch(cmd),
++        Some(Commands::Worktree { cmd }) => commands::worktree::dispatch_worktree(cmd),
++        Some(Commands::Daemon(args)) => match args.command {
+             Some(superstate_cli::state_cli::DaemonSubcommands::List { repo, json }) => {
+                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                 let repo_root = repo.unwrap_or_else(|| {
+@@ -185,27 +93,35 @@ fn main() {
+                 args.impact_slicing,
+             ),
+         },
+-        Commands::Cancel(args) => {
++        Some(Commands::Cancel(args)) => {
+             commands::daemon::cmd_cancel(args.state.as_deref(), args.branch.as_deref(), args.all)
+         }
+-        Commands::Logs(args) => {
++        Some(Commands::Logs(args)) => {
+             commands::daemon::cmd_logs(args.state.as_deref(), args.branch.as_deref(), args.tail)
+                 .map(|_| ())
+         }
+-        Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
+-        Commands::Inspect(args) => commands::inspect::cmd_inspect(&args),
+-        Commands::Guard { cmd } => commands::guard::dispatch_guard(cmd),
+-        Commands::Shunt {
++        Some(Commands::Handoff(args)) => commands::handoff::cmd_handoff(&args),
++        Some(Commands::Inspect(args)) => commands::inspect::cmd_inspect(&args),
++        Some(Commands::Guard { cmd }) => commands::guard::dispatch_guard(cmd),
++        Some(Commands::Shunt {
+             threshold_lines,
+             logs_dir,
+             cmd,
+-        } => match commands::shunt::execute_shunt(&cmd, threshold_lines, logs_dir) {
++        }) => match commands::shunt::execute_shunt(&cmd, threshold_lines, logs_dir) {
+             Ok(code) => std::process::exit(code),
+             Err(e) => {
+                 eprintln!("Error: {}", e);
+                 std::process::exit(1);
+             }
+         },
++        None => {
++            if let Some(ref prompt) = cli.prompt {
++                eprintln!("Running headless task: {prompt}");
++            } else {
++                eprintln!("Launching interactive REPL...");
++            }
++            Ok(())
++        }
+     };
+ 
+     if let Err(e) = result {
+diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
+index 9596395..778e8e1 100644
+--- a/crates/superstate-cli/src/state_cli.rs
++++ b/crates/superstate-cli/src/state_cli.rs
+@@ -13,7 +13,7 @@ use crate::commands;
+ pub const DEFAULT_STATE: &str = ".agent-state/state.json";
+ 
+ /// Arguments for initializing state from a plan or direct goal.
+-#[derive(clap::Args, Clone, Debug)]
++#[derive(clap::Args, Clone, Debug, PartialEq)]
+ pub struct InitArgs {
+     /// Path to plan markdown (`--from-plan` is accepted for reference parity)
+     #[arg(short, long, alias = "from-plan")]
+@@ -42,7 +42,7 @@ pub struct InitArgs {
+ }
+ 
+ /// Arguments for listing branch-scoped states.
+-#[derive(clap::Args, Clone, Debug, Default)]
++#[derive(clap::Args, Clone, Debug, Default, PartialEq)]
+ pub struct ListArgs {
+     /// Emit machine-readable JSON
+     #[arg(long)]
+@@ -89,7 +89,7 @@ impl InitArgs {
+ }
+ 
+ /// Arguments for showing execution state in markdown or JSON format.
+-#[derive(clap::Args, Clone, Debug)]
++#[derive(clap::Args, Clone, Debug, PartialEq)]
+ pub struct ShowArgs {
+     #[arg(short, long, default_value = DEFAULT_STATE)]
+     pub state: PathBuf,
+@@ -111,7 +111,7 @@ impl Default for ShowArgs {
+     }
+ }
+ 
+-#[derive(Subcommand, Debug, Clone)]
++#[derive(Subcommand, Debug, Clone, PartialEq)]
+ pub enum StateCommands {
+     /// Initialize state from plan markdown or direct goal
+     Init(InitArgs),
+@@ -293,7 +293,7 @@ pub struct StateArgs {
+     pub command: StateCommands,
+ }
+ 
+-#[derive(Subcommand, Debug, Clone)]
++#[derive(Subcommand, Debug, Clone, PartialEq)]
+ pub enum DaemonSubcommands {
+     /// List active and managed daemon processes
+     List {
+@@ -306,7 +306,7 @@ pub enum DaemonSubcommands {
+     },
+ }
+ 
+-#[derive(clap::Args, Debug, Clone)]
++#[derive(clap::Args, Debug, Clone, PartialEq)]
+ pub struct DaemonArgs {
+     #[command(subcommand)]
+     pub command: Option<DaemonSubcommands>,
+@@ -443,7 +443,7 @@ impl DaemonArgs {
+     }
+ }
+ 
+-#[derive(clap::Args, Debug, Clone)]
++#[derive(clap::Args, Debug, Clone, PartialEq)]
+ pub struct CancelArgs {
+     #[arg(short, long)]
+     pub state: Option<PathBuf>,
+@@ -455,7 +455,7 @@ pub struct CancelArgs {
+     pub all: bool,
+ }
+ 
+-#[derive(clap::Args, Debug, Clone)]
++#[derive(clap::Args, Debug, Clone, PartialEq)]
+ pub struct LogsArgs {
+     #[arg(short, long)]
+     pub state: Option<PathBuf>,
+@@ -468,7 +468,7 @@ pub struct LogsArgs {
+ }
+ 
+ /// Arguments for preparing a cross-agent handoff package.
+-#[derive(clap::Args, Clone, Debug)]
++#[derive(clap::Args, Clone, Debug, PartialEq)]
+ pub struct HandoffArgs {
+     /// High-level goal statement
+     #[arg(long)]
+diff --git a/crates/superstate-cli/tests/test_cli_dispatch.rs b/crates/superstate-cli/tests/test_cli_dispatch.rs
+new file mode 100644
+index 0000000..ba2afaf
+--- /dev/null
++++ b/crates/superstate-cli/tests/test_cli_dispatch.rs
+@@ -0,0 +1,124 @@
++use clap::Parser;
++use superstate_cli::cli::{Cli, Commands};
++use superstate_cli::state_cli::{InitArgs, StateCommands};
++use std::path::PathBuf;
++
++#[test]
++fn test_parse_no_args_launches_interactive() {
++    let cli = Cli::try_parse_from(["superstate"]).expect("should parse");
++    assert_eq!(cli.prompt, None);
++    assert_eq!(cli.command, None);
++    assert_eq!(cli.context, "conversational");
++    assert_eq!(cli.max_turns, 25);
++    assert_eq!(cli.max_gates, 5);
++    assert!(cli.rollback);
++    assert_eq!(cli.model, None);
++    assert_eq!(cli.container, None);
++}
++
++#[test]
++fn test_parse_single_shot_prompt() {
++    let cli = Cli::try_parse_from([
++        "superstate",
++        "fix issue",
++        "--gate",
++        "pytest",
++        "--context",
++        "state-only",
++    ])
++    .expect("should parse");
++    assert_eq!(cli.prompt, Some("fix issue".to_string()));
++    assert_eq!(cli.gate, Some("pytest".to_string()));
++    assert_eq!(cli.context, "state-only");
++    assert_eq!(cli.command, None);
++}
++
++#[test]
++fn test_parse_custom_execution_flags() {
++    let cli = Cli::try_parse_from([
++        "superstate",
++        "solve bug",
++        "--model",
++        "gemini-2.5-pro",
++        "--container",
++        "docker-workspace",
++        "--max-turns",
++        "42",
++        "--max-gates",
++        "10",
++        "--rollback",
++    ])
++    .expect("should parse");
++    assert_eq!(cli.prompt.as_deref(), Some("solve bug"));
++    assert_eq!(cli.model.as_deref(), Some("gemini-2.5-pro"));
++    assert_eq!(cli.container.as_deref(), Some("docker-workspace"));
++    assert_eq!(cli.max_turns, 42);
++    assert_eq!(cli.max_gates, 10);
++    assert!(cli.rollback);
++}
++
++#[test]
++fn test_parse_rollback_disabled() {
++    let cli_eq = Cli::try_parse_from(["superstate", "task", "--rollback=false"]).expect("should parse");
++    assert!(!cli_eq.rollback);
++
++    let cli_preceding = Cli::try_parse_from(["superstate", "--rollback=false", "task"]).expect("should parse");
++    assert!(!cli_preceding.rollback);
++    assert_eq!(cli_preceding.prompt.as_deref(), Some("task"));
++
++    let cli_true = Cli::try_parse_from(["superstate", "--rollback=true", "task"]).expect("should parse");
++    assert!(cli_true.rollback);
++    assert_eq!(cli_true.prompt.as_deref(), Some("task"));
++
++    let cli_flag_preceding = Cli::try_parse_from(["superstate", "--rollback", "task"]).expect("should parse");
++    assert!(cli_flag_preceding.rollback);
++    assert_eq!(cli_flag_preceding.prompt.as_deref(), Some("task"));
++}
++
++#[test]
++fn test_context_validation() {
++    let cli = Cli::try_parse_from(["superstate", "task", "--context", "state-only"]).expect("should parse");
++    assert_eq!(cli.context, "state-only");
++
++    let invalid = Cli::try_parse_from(["superstate", "task", "--context", "invalid-strategy"]);
++    assert!(invalid.is_err(), "invalid context strategy must be rejected");
++}
++
++#[test]
++fn test_parse_subcommand_doctor() {
++    let cli = Cli::try_parse_from(["superstate", "doctor"]).expect("should parse");
++    assert_eq!(cli.prompt, None);
++    assert_eq!(cli.command, Some(Commands::Doctor));
++}
++
++#[test]
++fn test_parse_subcommand_mcp() {
++    let cli = Cli::try_parse_from(["superstate", "mcp"]).expect("should parse");
++    assert_eq!(cli.prompt, None);
++    assert_eq!(cli.command, Some(Commands::Mcp));
++}
++
++#[test]
++fn test_parse_subcommand_state_init() {
++    let cli = Cli::try_parse_from(["superstate", "state", "init", "--plan", "plan.md"]).expect("should parse");
++    assert_eq!(cli.prompt, None);
++    let expected = Commands::State {
++        cmd: StateCommands::Init(InitArgs {
++            plan: Some(PathBuf::from("plan.md")),
++            state: PathBuf::from(".agent-state/state.json"),
++            worktree: false,
++            no_worktree: false,
++            goal: None,
++            verify_cmd: None,
++            files: None,
++            milestones: None,
++        }),
++    };
++    assert_eq!(cli.command, Some(expected));
++}
++
++#[test]
++fn test_prompt_conflicts_with_subcommand() {
++    let result = Cli::try_parse_from(["superstate", "fix task", "doctor"]);
++    assert!(result.is_err(), "prompt should conflict with subcommand");
++}
