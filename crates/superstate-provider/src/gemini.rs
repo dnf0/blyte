@@ -9,6 +9,23 @@ use serde_json::{json, Value};
 use crate::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
 
 const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+
+/// Deadlines on the HTTP call itself.
+///
+/// The third instance of one bug in a single afternoon. A command with no deadline let
+/// `find /` run for fifteen minutes; stdin left inherited let a command wait forever on a
+/// terminal nobody was watching; and an HTTP client with no timeout blocked a run for
+/// seventeen minutes on a single request, with no child process to show for it and nothing in
+/// the log after "turn 2".
+///
+/// A harness is largely a collection of things that can wait forever. Every one of them needs
+/// a number, and the absence of one is not a neutral default -- it is the longest possible
+/// value.
+const CONNECT_TIMEOUT_SECS: u64 = 20;
+/// Generous: a thinking model on a long conversation legitimately takes minutes. Bounded all
+/// the same, because "legitimately slow" and "never coming back" are indistinguishable without
+/// a deadline.
+const READ_TIMEOUT_SECS: u64 = 300;
 const API_ROOT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 pub struct Gemini {
@@ -45,10 +62,15 @@ impl Gemini {
                 Message::Assistant(t) => contents.push(json!({
                     "role": "model", "parts": [{"text": t}]
                 })),
-                Message::ToolCall { name, arguments, .. } => contents.push(json!({
-                    "role": "model",
-                    "parts": [{"functionCall": {"name": name, "args": arguments}}]
-                })),
+                Message::ToolCall { name, arguments, signature, .. } => {
+                    let mut part = json!({"functionCall": {"name": name, "args": arguments}});
+                    // Echoed verbatim. Gemini 3.x binds the model's reasoning to the call and
+                    // rejects the turn outright if it is absent.
+                    if let Some(sig) = signature {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                    contents.push(json!({"role": "model", "parts": [part]}));
+                }
                 // Gemini carries no tool-call id: a functionResponse is matched to its call by
                 // NAME and position. Ids are kept in our own Message type anyway, because the
                 // loop needs them and other providers require them.
@@ -104,6 +126,8 @@ impl Gemini {
                 }
                 if let Some(fc) = part.get("functionCall") {
                     out.tool_calls.push(ToolCall {
+                        signature: part.get("thoughtSignature")
+                            .and_then(|s| s.as_str()).map(String::from),
                         // Synthesised: Gemini does not issue ids. Stable within a turn, which
                         // is all the loop needs to pair a result with its call.
                         id: format!("call_{i}"),
@@ -133,7 +157,12 @@ impl Gemini {
 impl Provider for Gemini {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = format!("{API_ROOT}/{}:generateContent", self.model);
-        let resp = ureq::post(&url)
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
+            .build();
+        let resp = agent
+            .post(&url)
             .set("x-goog-api-key", &self.api_key)
             .set("content-type", "application/json")
             .send_json(self.body(req));

@@ -9,5 +9,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 superstate-provider = { path = "../superstate-provider" }
 
+[dependencies.tempfile]
+workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

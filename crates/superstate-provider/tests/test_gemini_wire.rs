@@ -48,7 +48,8 @@ fn a_tool_call_round_trip_has_the_shape_gemini_expects() {
         messages: vec![
             Message::User("read it".into()),
             Message::ToolCall { id: "call_0".into(), name: "read_file".into(),
-                                arguments: json!({"path": "a.rs"}) },
+                                arguments: json!({"path": "a.rs"}),
+                                signature: Some("sig-abc".into()) },
             Message::ToolResult { id: "call_0".into(), name: "read_file".into(),
                                   content: "fn main(){}".into(), is_error: false },
         ],
@@ -58,6 +59,10 @@ fn a_tool_call_round_trip_has_the_shape_gemini_expects() {
     assert_eq!(b["contents"][1]["role"], "model");
     assert_eq!(b["contents"][1]["parts"][0]["functionCall"]["name"], "read_file");
     assert_eq!(b["contents"][1]["parts"][0]["functionCall"]["args"]["path"], "a.rs");
+    // Gemini 3.x rejects a replayed functionCall whose thoughtSignature is missing, with
+    // INVALID_ARGUMENT rather than a quiet degradation. Found by running the loop, not by
+    // reading the schema.
+    assert_eq!(b["contents"][1]["parts"][0]["thoughtSignature"], "sig-abc");
 
     assert_eq!(b["contents"][2]["role"], "user");
     let fr = &b["contents"][2]["parts"][0]["functionResponse"];
@@ -79,13 +84,16 @@ fn tools_are_omitted_entirely_when_there_are_none() {
 fn parses_text_and_tool_calls_from_one_response() {
     let v = json!({"candidates":[{"content":{"parts":[
         {"text":"I'll read it."},
-        {"functionCall":{"name":"read_file","args":{"path":"a.rs"}}}
+        {"functionCall":{"name":"read_file","args":{"path":"a.rs"}},
+         "thoughtSignature":"sig-xyz"}
     ]},"finishReason":"STOP"}]});
     let r = Gemini::parse(&v).unwrap();
     assert_eq!(r.text, "I'll read it.");
     assert_eq!(r.tool_calls.len(), 1);
     assert_eq!(r.tool_calls[0].name, "read_file");
     assert_eq!(r.tool_calls[0].arguments["path"], "a.rs");
+    assert_eq!(r.tool_calls[0].signature.as_deref(), Some("sig-xyz"),
+               "the signature must be captured or the next turn is rejected");
     assert_eq!(r.finish_reason.as_deref(), Some("STOP"));
 }
 

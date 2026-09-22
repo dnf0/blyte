@@ -67,22 +67,64 @@ pub trait Shell: Send + Sync {
 pub struct LocalShell;
 
 impl Shell for LocalShell {
-    fn exec(&self, command: &str, cwd: &Path, _timeout: Duration) -> Result<Output, String> {
-        // TODO(timeout): std::process has no built-in deadline. A wall-clock kill needs a
-        // watcher thread; until then the bound is documented in the tool description and not
-        // enforced. Recorded rather than silently ignored, because an unbounded command is the
-        // failure mode this harness exists to avoid.
-        let out = Command::new("bash")
+    fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        use std::io::Read;
+        use std::process::Stdio;
+
+        // The deadline is ENFORCED, not advisory. This was a documented TODO for about an
+        // hour, and the very first live run hit it: the model opened with
+        // `which pytest; which python3; find / -name pytest 2>/dev/null` and the `find /`
+        // scanned the entire filesystem for three and a half minutes before being killed by
+        // hand. An agent will do this; a harness that merely documents a bound will hang.
+        //
+        // stdin is null for the same class of reason. Inheriting it lets any command that
+        // reads input -- a bare `python3`, a `git commit` opening an editor, an `npm` prompt --
+        // block forever on a terminal nobody is watching.
+        let mut child = Command::new("bash")
             .arg("-lc")
             .arg(command)
             .current_dir(cwd)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("cannot run command: {e}"))?;
-        Ok(Output {
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            exit_code: out.status.code().unwrap_or(-1),
-        })
+
+        // Drained on threads: a command that fills the pipe buffer deadlocks against a parent
+        // that only reads after waiting, which turns a noisy command into a hang.
+        let mut so = child.stdout.take().ok_or("no stdout")?;
+        let mut se = child.stderr.take().ok_or("no stderr")?;
+        let t_out = std::thread::spawn(move || {
+            let mut b = String::new(); let _ = so.read_to_string(&mut b); b });
+        let t_err = std::thread::spawn(move || {
+            let mut b = String::new(); let _ = se.read_to_string(&mut b); b });
+
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
+                Some(s) => break Some(s),
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        };
+
+        let stdout = t_out.join().unwrap_or_default();
+        let stderr = t_err.join().unwrap_or_default();
+
+        match status {
+            Some(s) => Ok(Output { stdout, stderr, exit_code: s.code().unwrap_or(-1) }),
+            // Reported as a failure the model can act on, with the output captured so far --
+            // a killed command that returns nothing tells it only that something went wrong.
+            None => Ok(Output {
+                stdout,
+                stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
+                exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
+            }),
+        }
     }
 
     fn describe(&self) -> String {

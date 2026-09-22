@@ -30,8 +30,19 @@ pub const OUTPUT_LINE_BUDGET: usize = 400;
 /// truncated search reads as truncated rather than as a complete answer with few hits.
 pub const MAX_MATCHES: usize = 200;
 
-/// Hard ceiling on a single command. Long is fine -- unbounded is not.
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(900);
+/// Ceiling on a single MODEL-ISSUED command.
+///
+/// Deliberately much shorter than the gate's budget, because the two have different shapes. A
+/// verification suite legitimately runs for many minutes and gets its own longer deadline in
+/// `run::Runner`. A command the model types while exploring is almost always seconds, and when
+/// it is not it is usually wrong: the first live run opened with `find / -name pytest`, which
+/// at the previous 900s ceiling was entitled to fifteen minutes of walking the filesystem
+/// before anything intervened. Enforcing a bound is not enough on its own -- the bound has to
+/// be near the size of the work.
+///
+/// 300s still accommodates a genuine `npm install` or `cargo build`. Past that the command is
+/// killed, the model is told so, and it can re-issue something narrower.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutcome {

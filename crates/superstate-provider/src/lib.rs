@@ -60,7 +60,20 @@ pub enum Message {
     /// The model's own prior text.
     Assistant(String),
     /// The model asked to call a tool.
-    ToolCall { id: String, name: String, arguments: serde_json::Value },
+    ///
+    /// `signature` is an opaque provider token that must be handed back verbatim when the call
+    /// is replayed in history. Gemini 3.x rejects a `functionCall` whose `thoughtSignature` is
+    /// missing -- the model's reasoning is cryptographically bound to the call, and a turn that
+    /// drops it fails with INVALID_ARGUMENT rather than degrading quietly. Neutral here on
+    /// purpose: the loop carries it without needing to know what it means, and providers that
+    /// have no such concept leave it None.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     /// What the tool returned. `is_error` lets a provider mark failure where it supports it.
     ToolResult { id: String, name: String, content: String, is_error: bool },
 }
@@ -80,6 +93,8 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// See [`Message::ToolCall`]. Opaque; round-tripped verbatim.
+    pub signature: Option<String>,
 }
 
 /// Token accounting, normalised.
