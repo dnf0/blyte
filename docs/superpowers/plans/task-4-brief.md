@@ -1,101 +1,95 @@
-# Task 4 Brief: Wire `ContainerShell::exec` to `exec_command` with Timeout Parity
+# Task 4: Headless Single-Shot Solver Integration in crates/superstate-cli
 
-## Global Constraints
-- Target crate: `crates/superstate-agent`
-- Rust 2021 edition, zero compiler warnings
-- Clean execution on Unix platforms (macOS / Linux)
-- Full timeout and seam parity between `LocalShell` and `ContainerShell`
+## Goal
+Implement headless single-shot solver integration in `crates/superstate-cli/src/task_runner.rs`, wire execution into `crates/superstate-cli/src/main.rs` (so `superstate "<prompt>"` runs headless, and `superstate` launches REPL), expose `task_runner` in `crates/superstate-cli/src/lib.rs`, and write unit / integration tests in `crates/superstate-cli/tests/test_task_runner.rs`.
 
-## Task Description
-Wire `ContainerShell::exec` to `exec_command(cmd, timeout)` in `crates/superstate-agent/src/shell.rs`.
+## Working Directory
+`/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-### Current state of `ContainerShell::exec`:
-```rust
-impl Shell for ContainerShell {
-    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
-        let out = Command::new("docker")
-            .args(["exec", "-i", "-w"])
-            .arg(&self.workdir)
-            .arg(&self.container_id)
-            .args(["bash", "-lc", command])
-            .output()
-            .map_err(|e| format!("cannot exec in container {}: {e}", self.container_id))?;
-        Ok(Output {
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            exit_code: out.status.code().unwrap_or(-1),
-        })
-    }
-    // ...
-}
-```
+## Files
+- Create: `crates/superstate-cli/src/task_runner.rs`
+- Modify: `crates/superstate-cli/src/lib.rs` (add `pub mod task_runner;`)
+- Modify: `crates/superstate-cli/src/main.rs` (wire `task_runner::run_task` when `prompt` is provided, and `repl::run_repl` when no prompt/subcommand)
+- Modify: `crates/superstate-cli/src/repl.rs` (wire prompt submission in REPL loop to execute via `task_runner` when provider is available)
+- Create: `crates/superstate-cli/tests/test_task_runner.rs`
 
-### Steps:
-1. In `crates/superstate-agent/src/shell.rs`:
-Update `ContainerShell::exec`:
-```rust
-impl Shell for ContainerShell {
-    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        let mut cmd = Command::new("docker");
-        cmd.args(["exec", "-i", "-w"])
-            .arg(&self.workdir)
-            .arg(&self.container_id)
-            .args(["bash", "-lc", command]);
-        exec_command(cmd, timeout)
-    }
-
-    fn describe(&self) -> String {
-        format!(
-            "Commands run inside the project container at {}. Project dependencies are \
-             installed there, not on the host.",
-            self.workdir.display()
-        )
-    }
-}
-```
-
-2. Add a test in `crates/superstate-agent/tests/test_shell_timeout.rs`:
-```rust
-#[test]
-fn container_shell_enforces_timeout_on_hung_execution() {
-    use std::path::PathBuf;
-    use superstate_agent::shell::ContainerShell;
-
-    let shell = ContainerShell {
-        container_id: "non-existent-container-id-12345".into(),
-        workdir: PathBuf::from("/workspace"),
-    };
-    let d = tempfile::tempdir().unwrap();
-    let started = Instant::now();
-    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "container exec must obey timeout bound: took {elapsed:?}"
-    );
-    match res {
-        Ok(out) => {
-            assert!(out.exit_code != 0);
-        }
-        Err(e) => {
-            assert!(!e.is_empty());
-        }
-    }
-}
-```
-
-3. Verification:
-Run:
-```bash
-cargo check -p superstate-agent
-cargo test -p superstate-agent
-```
-All tests must pass with 0 warnings.
-
-4. Commit:
-```bash
-git add crates/superstate-agent/src/shell.rs crates/superstate-agent/tests/test_shell_timeout.rs
-git commit --no-gpg-sign -m "feat(agent): wire ContainerShell to exec_command with full timeout parity"
-```
-Run `roborev status; roborev show HEAD`.
-Report back status: DONE.
+## Detailed Implementation Steps
+1. Create `crates/superstate-cli/src/task_runner.rs`:
+   - `TaskConfig`:
+     ```rust
+     #[derive(Debug, Clone)]
+     pub struct TaskConfig {
+         pub prompt: String,
+         pub gate: Option<String>,
+         pub context_strategy: String,
+         pub model: Option<String>,
+         pub container: Option<String>,
+         pub max_turns: usize,
+         pub max_gates: usize,
+         pub rollback: bool,
+         pub root: std::path::PathBuf,
+     }
+     ```
+   - Implement `From<&crate::cli::Cli> for TaskConfig`.
+   - `run_task(config: TaskConfig) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String>`:
+     - Check `Gemini::from_env()`. If missing API key, return a clear error: `Provider error: no API key: set GEMINI_API_KEY (or GOOGLE_API_KEY)`.
+     - Select context strategy: `"state-only"` => `superstate_agent::context::StateOnly`, else `superstate_agent::context::Conversational`.
+     - Select shell: if `let Some(cid) = config.container`, `superstate_agent::shell::ContainerShell { container_id: cid, workdir: std::path::PathBuf::from("/workspace") }`, else `superstate_agent::shell::LocalShell`.
+     - Initialize `state = superstate_agent::state::State::new(&config.prompt, config.gate.as_deref().unwrap_or(""))`.
+     - Event logger: uses `crate::repl::format_event(&event)` to print progress as it happens.
+     - Build `Runner` and call `runner.run(&mut state)`.
+     - Return `(outcome, report)`.
+2. Update `crates/superstate-cli/src/main.rs`:
+   - When `cli.command` is `None`:
+     - If `let Some(ref prompt) = cli.prompt`:
+       - If prompt is not empty:
+         ```rust
+         let config = superstate_cli::task_runner::TaskConfig::from(&cli);
+         match superstate_cli::task_runner::run_task(config) {
+             Ok((superstate_agent::run::Outcome::Verified, report)) => {
+                 println!("Task verified in {} turns (usage: {:?})", report.outcome_turns, report.usage);
+                 std::process::exit(0);
+             }
+             Ok((outcome, report)) => {
+                 eprintln!("Task finished with outcome: {outcome:?} in {} turns", report.outcome_turns);
+                 std::process::exit(1);
+             }
+             Err(err) => {
+                 eprintln!("Error executing task: {err}");
+                 std::process::exit(1);
+             }
+         }
+         ```
+     - Else:
+       - Run interactive REPL:
+         ```rust
+         let repl_config = superstate_cli::repl::ReplConfig {
+             repo_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+             model: cli.model,
+             gate: cli.gate,
+             context_strategy: cli.context,
+             container: cli.container,
+             max_turns: cli.max_turns,
+             max_gates: cli.max_gates,
+             rollback: cli.rollback,
+         };
+         if let Err(e) = superstate_cli::repl::run_repl(repl_config) {
+             eprintln!("REPL error: {e}");
+             std::process::exit(1);
+         }
+         ```
+3. Update `crates/superstate-cli/src/repl.rs`:
+   - In `run_repl_stream`: when `ReplControl::SubmitPrompt(prompt)` is returned, invoke `task_runner::run_task` or print execution notice/result using the session configuration.
+4. Add tests in `crates/superstate-cli/tests/test_task_runner.rs`:
+   - `test_task_config_from_cli`: asserts mapping from `Cli` to `TaskConfig` preserves all flags and defaults.
+   - `test_run_task_missing_api_key_returns_clear_error`: unsets `GEMINI_API_KEY` and `GOOGLE_API_KEY`, runs `run_task`, and asserts error message explicitly mentions `GEMINI_API_KEY`.
+5. Verify:
+   `cargo test -p superstate --test test_task_runner`
+   `cargo check --workspace --all-targets`
+6. Commit:
+   ```bash
+   git add crates/superstate-cli/src/task_runner.rs crates/superstate-cli/src/lib.rs crates/superstate-cli/src/main.rs crates/superstate-cli/src/repl.rs crates/superstate-cli/tests/test_task_runner.rs
+   git commit --no-gpg-sign -m "feat(cli): integrate headless single-shot solver and wire REPL prompt dispatch"
+   ```
+7. Run `roborev status; roborev show HEAD`.
+8. Write report to `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness/docs/superpowers/plans/task-4-report.md`.
