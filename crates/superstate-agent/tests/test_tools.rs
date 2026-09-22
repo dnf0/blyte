@@ -1,6 +1,7 @@
 //! Tool behaviour, concentrating on the ways a tool can quietly do the wrong thing.
 
 use serde_json::json;
+use superstate_agent::fs::LocalFs;
 use superstate_agent::shell::LocalShell;
 use superstate_agent::tools::{distil, execute, specs, OUTPUT_LINE_BUDGET};
 
@@ -31,7 +32,7 @@ fn no_tool_offers_a_background_mode() {
 #[test]
 fn bash_blocks_until_the_command_finishes() {
     let d = ws();
-    let r = execute(d.path(), &LocalShell, "bash", &json!({"command": "sleep 1; echo done"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "bash", &json!({"command": "sleep 1; echo done"}));
     assert!(r.content.contains("done"), "must return the output, not a job handle: {r:?}");
     assert!(!r.is_error);
 }
@@ -40,7 +41,7 @@ fn bash_blocks_until_the_command_finishes() {
 fn bash_always_states_the_exit_code() {
     // A non-zero exit with quiet output otherwise reads as success.
     let d = ws();
-    let r = execute(d.path(), &LocalShell, "bash", &json!({"command": "exit 3"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "bash", &json!({"command": "exit 3"}));
     assert!(r.content.starts_with("exit 3"), "got {:?}", r.content);
     assert!(r.is_error, "a failing command must be marked an error");
 }
@@ -51,7 +52,7 @@ fn a_path_escaping_the_workspace_is_refused() {
     // Invariant IV exists because agents ignore rules like that under pressure.
     let d = ws();
     for bad in ["../../../etc/passwd", "/etc/passwd"] {
-        let r = execute(d.path(), &LocalShell, "read", &json!({"path": bad}));
+        let r = execute(d.path(), &LocalShell, &LocalFs, "read", &json!({"path": bad}));
         assert!(r.is_error && r.content.contains("escapes the workspace"),
                 "{bad} must be refused, got {r:?}");
     }
@@ -61,7 +62,7 @@ fn a_path_escaping_the_workspace_is_refused() {
 fn a_new_file_outside_the_workspace_is_refused_even_though_it_does_not_exist_yet() {
     // Canonicalising only existing paths would wave through exactly the dangerous case.
     let d = ws();
-    let r = execute(d.path(), &LocalShell, "write", &json!({"path": "../escaped.txt", "content": "x"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "write", &json!({"path": "../escaped.txt", "content": "x"}));
     assert!(r.is_error, "writing outside the workspace must fail: {r:?}");
 }
 
@@ -71,7 +72,7 @@ fn edit_refuses_an_ambiguous_match_instead_of_guessing() {
     // has no way to tell that it did.
     let d = ws();
     std::fs::write(d.path().join("a.rs"), "let x = 1;\nlet x = 1;\n").unwrap();
-    let r = execute(d.path(), &LocalShell, "edit", &json!({"path": "a.rs", "old": "let x = 1;", "new": "let x = 2;"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "edit", &json!({"path": "a.rs", "old": "let x = 1;", "new": "let x = 2;"}));
     assert!(r.is_error && r.content.contains("appears 2 times"), "got {r:?}");
     assert_eq!(std::fs::read_to_string(d.path().join("a.rs")).unwrap(), "let x = 1;\nlet x = 1;\n",
                "a refused edit must not modify the file");
@@ -81,7 +82,7 @@ fn edit_refuses_an_ambiguous_match_instead_of_guessing() {
 fn edit_says_to_read_first_when_the_target_is_absent() {
     let d = ws();
     std::fs::write(d.path().join("a.rs"), "fn main() {}\n").unwrap();
-    let r = execute(d.path(), &LocalShell, "edit", &json!({"path": "a.rs", "old": "nope", "new": "x"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "edit", &json!({"path": "a.rs", "old": "nope", "new": "x"}));
     assert!(r.is_error && r.content.contains("Read it first"), "got {r:?}");
 }
 
@@ -89,7 +90,7 @@ fn edit_says_to_read_first_when_the_target_is_absent() {
 fn read_numbers_lines_so_edits_can_be_precise() {
     let d = ws();
     std::fs::write(d.path().join("a.rs"), "one\ntwo\nthree\n").unwrap();
-    let r = execute(d.path(), &LocalShell, "read", &json!({"path": "a.rs", "start_line": 2, "end_line": 3}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "read", &json!({"path": "a.rs", "start_line": 2, "end_line": 3}));
     assert!(r.content.contains("2\ttwo"), "got {:?}", r.content);
     assert!(!r.content.contains("one"), "range must be respected");
 }
@@ -127,7 +128,7 @@ fn seeded() -> tempfile::TempDir {
 #[test]
 fn glob_finds_files_recursively() {
     let d = seeded();
-    let r = execute(d.path(), &LocalShell, "glob", &json!({"pattern": "src/**/*.rs"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "glob", &json!({"pattern": "src/**/*.rs"}));
     assert!(!r.is_error, "{r:?}");
     assert!(r.content.contains("src/main.rs"), "got {}", r.content);
     assert!(r.content.contains("src/deep/array.rs"), "** must recurse: {}", r.content);
@@ -138,7 +139,7 @@ fn glob_reports_no_match_rather_than_returning_empty() {
     // An empty string reads to a model as a tool that broke, and it retries. Saying so plainly
     // is the difference between one call and three.
     let d = seeded();
-    let r = execute(d.path(), &LocalShell, "glob", &json!({"pattern": "*.nope"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "glob", &json!({"pattern": "*.nope"}));
     assert!(!r.is_error);
     assert!(r.content.contains("no files match"), "got {}", r.content);
 }
@@ -146,7 +147,7 @@ fn glob_reports_no_match_rather_than_returning_empty() {
 #[test]
 fn grep_returns_path_line_and_text() {
     let d = seeded();
-    let r = execute(d.path(), &LocalShell, "grep", &json!({"pattern": "parse_array"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "grep", &json!({"pattern": "parse_array"}));
     assert!(!r.is_error, "{r:?}");
     assert!(r.content.contains("src/main.rs:1:"), "must carry path:line: {}", r.content);
 }
@@ -159,14 +160,14 @@ fn grep_honours_gitignore_so_node_modules_does_not_drown_the_result() {
     if !superstate_agent::tools::have(&LocalShell, d.path(), "rg") { return; }
     std::fs::write(d.path().join(".gitignore"), "node_modules/\n").unwrap();
     std::process::Command::new("git").args(["init", "-q"]).current_dir(d.path()).output().unwrap();
-    let r = execute(d.path(), &LocalShell, "grep", &json!({"pattern": "parse_array"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "grep", &json!({"pattern": "parse_array"}));
     assert!(!r.content.contains("node_modules"), "ignored paths must stay out: {}", r.content);
 }
 
 #[test]
 fn grep_can_be_restricted_by_glob() {
     let d = seeded();
-    let r = execute(d.path(), &LocalShell, "grep", &json!({"pattern": "parse_array", "glob": "*.md"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "grep", &json!({"pattern": "parse_array", "glob": "*.md"}));
     assert!(r.content.contains("notes.md"), "got {}", r.content);
     assert!(!r.content.contains("main.rs"), "glob must restrict: {}", r.content);
 }
@@ -176,7 +177,7 @@ fn grep_says_when_it_capped_rather_than_implying_completeness() {
     let d = ws();
     let many: String = (0..500).map(|i| format!("needle {i}\n")).collect();
     std::fs::write(d.path().join("big.txt"), many).unwrap();
-    let r = execute(d.path(), &LocalShell, "grep", &json!({"pattern": "needle"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "grep", &json!({"pattern": "needle"}));
     assert!(r.content.contains("capped at"), "a truncated search must not read as complete: {}",
             &r.content[r.content.len().saturating_sub(200)..]);
 }
@@ -186,14 +187,14 @@ fn grep_patterns_with_shell_metacharacters_are_passed_verbatim() {
     // `$`, quotes and spaces in a regex must reach the tool, not the shell.
     let d = ws();
     std::fs::write(d.path().join("a.rs"), "let x = \"a b\";\nprice $5\n").unwrap();
-    let r = execute(d.path(), &LocalShell, "grep", &json!({"pattern": r"price \$5"}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "grep", &json!({"pattern": r"price \$5"}));
     assert!(r.content.contains("a.rs:2:"), "got {}", r.content);
 }
 
 #[test]
 fn grep_outside_the_workspace_is_refused() {
     let d = ws();
-    let r = execute(d.path(), &LocalShell, "grep", &json!({"pattern": "x", "path": "../.."}));
+    let r = execute(d.path(), &LocalShell, &LocalFs, "grep", &json!({"pattern": "x", "path": "../.."}));
     assert!(r.is_error && r.content.contains("escapes the workspace"), "{r:?}");
 }
 
@@ -230,7 +231,7 @@ fn bash_goes_through_the_seam_not_the_host() {
     // containerised run would edit the wrong filesystem -- which is what happened before.
     let d = ws();
     let fake = FakeShell::default();
-    let r = execute(d.path(), &fake, "bash", &json!({"command": "npm test"}));
+    let r = execute(d.path(), &fake, &LocalFs, "bash", &json!({"command": "npm test"}));
     assert!(r.content.contains("ran elsewhere"), "output must come from the seam: {r:?}");
     assert_eq!(fake.seen.lock().unwrap().as_slice(), &["npm test".to_string()]);
 }
@@ -241,8 +242,8 @@ fn search_tools_also_go_through_the_seam() {
     // searched the host's files while running the container's tests.
     let d = ws();
     let fake = FakeShell::default();
-    execute(d.path(), &fake, "glob", &json!({"pattern": "**/*.rs"}));
-    execute(d.path(), &fake, "grep", &json!({"pattern": "needle"}));
+    execute(d.path(), &fake, &LocalFs, "glob", &json!({"pattern": "**/*.rs"}));
+    execute(d.path(), &fake, &LocalFs, "grep", &json!({"pattern": "needle"}));
     let seen = fake.seen.lock().unwrap();
     assert!(seen.len() >= 2, "both searches must reach the executor: {seen:?}");
     assert!(seen.iter().any(|c| c.contains("*.rs")));
@@ -282,4 +283,121 @@ fn posix_guaranteed_utilities_are_not_advertised() {
                 "{noise} is POSIX-guaranteed and should not be advertised");
     }
     assert!(ACCELERATORS.contains(&"rg"), "rg changes search strategy, so it is worth stating");
+}
+
+// ---- the filesystem seam ---------------------------------------------------------------
+
+/// An in-memory filesystem. If a tool touches the host instead, these tests fail.
+#[derive(Default)]
+struct FakeFs {
+    files: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+impl superstate_agent::fs::Fs for FakeFs {
+    fn read(&self, path: &std::path::Path) -> Result<String, String> {
+        self.files.lock().unwrap().get(&path.to_string_lossy().to_string())
+            .cloned().ok_or_else(|| format!("no such file: {}", path.display()))
+    }
+    fn write(&self, path: &std::path::Path, content: &str) -> Result<(), String> {
+        self.files.lock().unwrap()
+            .insert(path.to_string_lossy().to_string(), content.to_string());
+        Ok(())
+    }
+    fn canonicalize(&self, path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+        // No symlinks in the fake; lexical resolution is enough to exercise the escape check.
+        Ok(path.to_path_buf())
+    }
+}
+
+#[test]
+fn write_lands_on_the_seam_not_the_host_disk() {
+    // The defect this seam exists to prevent: the model edits one filesystem while its
+    // verification runs against another. If `write` reached std::fs, the host would have the
+    // file and the fake would not.
+    let d = ws();
+    let fake = FakeFs::default();
+    let r = execute(d.path(), &LocalShell, &fake, "write",
+                    &json!({"path": "src/new.rs", "content": "fn x() {}"}));
+    assert!(!r.is_error, "{r:?}");
+    assert!(!d.path().join("src/new.rs").exists(), "must NOT have touched the host disk");
+    assert_eq!(fake.files.lock().unwrap().values().next().unwrap(), "fn x() {}");
+}
+
+#[test]
+fn read_comes_from_the_seam() {
+    let d = ws();
+    let fake = FakeFs::default();
+    let p = d.path().join("only-in-the-seam.rs").to_string_lossy().to_string();
+    fake.files.lock().unwrap().insert(p, "fn seam() {}\n".into());
+    let r = execute(d.path(), &LocalShell, &fake, "read", &json!({"path": "only-in-the-seam.rs"}));
+    assert!(r.content.contains("fn seam()"), "read must consult the seam: {r:?}");
+}
+
+#[test]
+fn edit_reads_and_writes_through_the_same_seam() {
+    // A half-routed edit -- reading the container and writing the host, or vice versa -- would
+    // silently discard the change or corrupt the wrong file.
+    let d = ws();
+    let fake = FakeFs::default();
+    let p = d.path().join("a.rs").to_string_lossy().to_string();
+    fake.files.lock().unwrap().insert(p.clone(), "let x = 1;\n".into());
+    let r = execute(d.path(), &LocalShell, &fake, "edit",
+                    &json!({"path": "a.rs", "old": "let x = 1;", "new": "let x = 2;"}));
+    assert!(!r.is_error, "{r:?}");
+    assert_eq!(fake.files.lock().unwrap()[&p], "let x = 2;\n");
+    assert!(!d.path().join("a.rs").exists(), "the host must be untouched");
+}
+
+#[test]
+fn the_escape_check_is_evaluated_against_the_seam() {
+    // Canonicalising on the orchestrator's disk says nothing about where a path leads inside a
+    // container, so the check has to ask the filesystem the write will actually land on.
+    let d = ws();
+    let fake = FakeFs::default();
+    let r = execute(d.path(), &LocalShell, &fake, "write",
+                    &json!({"path": "../../escaped.rs", "content": "x"}));
+    assert!(r.is_error && r.content.contains("escapes the workspace"), "{r:?}");
+    assert!(fake.files.lock().unwrap().is_empty(), "a refused write must write nothing anywhere");
+}
+
+#[test]
+fn shell_and_fs_are_independently_composable() {
+    // The combination that motivated splitting them: commands run in a container while files
+    // are bind-mounted on the host. Both must be selectable without the tools noticing.
+    let d = ws();
+    let fake_shell = FakeShell::default();
+    std::fs::write(d.path().join("host.rs"), "on the host\n").unwrap();
+    let r = execute(d.path(), &fake_shell, &LocalFs, "read", &json!({"path": "host.rs"}));
+    assert!(r.content.contains("on the host"), "local fs with a remote shell must work: {r:?}");
+    let c = execute(d.path(), &fake_shell, &LocalFs, "bash", &json!({"command": "true"}));
+    assert!(c.content.contains("ran elsewhere"), "and the shell still goes elsewhere: {c:?}");
+}
+
+#[test]
+fn traversal_is_refused_even_when_canonicalize_does_not_normalise() {
+    // Regression for a real hole. `Path::starts_with` compares components, so
+    // `/ws/../../escaped.rs` lexically starts with `/ws`. Before lexical normalisation the
+    // entire escape guarantee rested on the Fs implementation's canonicalize resolving `..`,
+    // which is true of std::fs and `readlink -f` but is a property of those implementations
+    // rather than of the check. FakeFs canonicalises lexically -- as a weak or partially
+    // failing implementation would -- and the traversal got through.
+    let d = ws();
+    let fake = FakeFs::default();
+    for escape in ["../../escaped.rs", "sub/../../../escaped.rs", "./../escaped.rs"] {
+        let r = execute(d.path(), &LocalShell, &fake, "write",
+                        &json!({"path": escape, "content": "x"}));
+        assert!(r.is_error, "{escape} must be refused, got {r:?}");
+    }
+    assert!(fake.files.lock().unwrap().is_empty(), "no refused write may land");
+}
+
+#[test]
+fn legitimate_dot_segments_inside_the_workspace_still_work() {
+    // Normalisation must not become a blanket ban on `..`: `src/a/../b.rs` is an ordinary path
+    // that stays inside, and refusing it would make the tool surprising.
+    let d = ws();
+    std::fs::create_dir_all(d.path().join("src/a")).unwrap();
+    std::fs::write(d.path().join("src/b.rs"), "inside\n").unwrap();
+    let r = execute(d.path(), &LocalShell, &LocalFs, "read", &json!({"path": "src/a/../b.rs"}));
+    assert!(!r.is_error && r.content.contains("inside"), "{r:?}");
 }

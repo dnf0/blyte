@@ -15,6 +15,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use superstate_provider::ToolSpec;
 
+use crate::fs::Fs;
 use crate::shell::Shell;
 
 /// Output over this many lines is distilled to head and tail before entering context.
@@ -61,14 +62,46 @@ pub fn distil(text: &str, budget: usize) -> String {
     out
 }
 
+/// Resolve `.` and `..` textually, without touching the filesystem.
+///
+/// Belt to `canonicalize`'s braces, and not redundant. `Path::starts_with` compares COMPONENTS,
+/// so `/ws/../../escaped.rs` lexically starts with `/ws` and passes a naive containment check.
+/// That makes the whole escape guarantee rest on canonicalize normalising `..` -- true for
+/// `std::fs` and for `readlink -f`, but a property of the implementation rather than of the
+/// check. Normalising first means a weak or failing canonicalize cannot be walked past.
+///
+/// Leading `..` that would climb above the root are dropped rather than preserved: there is no
+/// legitimate path above the workspace, so collapsing them keeps the result inside where the
+/// caller can still reject it on its merits.
+fn lexically_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    // Nothing to pop: keep it so an escape remains visible to the check
+                    // rather than silently becoming the root itself.
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Reject a path that escapes the workspace.
 ///
 /// Checked against the CANONICAL path, so `../` and symlinks cannot walk out. The previous
 /// harness relied on a prompt rule -- "confine all inspections to the workspace" -- which is
 /// exactly the kind of instruction Invariant IV exists because agents ignore under pressure.
-fn resolve_in_workspace(root: &Path, raw: &str) -> Result<PathBuf, String> {
-    let joined = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) };
-    let root_c = root.canonicalize().map_err(|e| format!("workspace root unreadable: {e}"))?;
+fn resolve_in_workspace(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let joined = lexically_normalize(
+        &if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) },
+    );
+    let root_c = fs.canonicalize(root).map_err(|e| format!("workspace root unreadable: {e}"))?;
 
     // Canonicalise the NEAREST EXISTING ancestor, starting with the target itself. Walking
     // straight to `.parent()` was wrong for a directory target: `Path::new("/a/b/.").parent()`
@@ -78,7 +111,7 @@ fn resolve_in_workspace(root: &Path, raw: &str) -> Result<PathBuf, String> {
     // directory it will land in -- and neither is waved through unchecked.
     let mut probe = joined.as_path();
     let probe_c = loop {
-        if let Ok(c) = probe.canonicalize() {
+        if let Ok(c) = fs.canonicalize(probe) {
             break c;
         }
         match probe.parent() {
@@ -198,18 +231,23 @@ pub fn specs() -> Vec<ToolSpec> {
 /// is the point: the previous harness encoded that in a prompt instruction and the worker
 /// edited the host whenever the instruction went missing.
 ///
-/// File operations (`read`/`write`/`edit`) still go through the orchestrator's filesystem.
-/// That is correct for a bind-mounted workspace and WRONG for a shell that executes on another
-/// machine; a remote deployment needs an `Fs` seam alongside this one, exactly as DeepSeek
-/// separates `ctx.fs` from `ctx.shell`. Recorded here rather than discovered later.
-pub fn execute(root: &Path, shell: &dyn Shell, name: &str, args: &Value) -> ToolOutcome {
+/// `fs` decides WHERE files live. Kept separate from `shell` because the two can differ: a
+/// container with a bind-mounted workspace shares the orchestrator's files while running its
+/// own commands, and a remote sandbox shares neither. Pairing the wrong two would have the
+/// model editing one filesystem and verifying another.
+pub fn execute(
+    root: &Path,
+    shell: &dyn Shell,
+    fs: &dyn Fs,
+    name: &str,
+    args: &Value,
+) -> ToolOutcome {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
     match name {
         "read" => {
-            let path = match resolve_in_workspace(root, &s("path")) {
+            let path = match resolve_in_workspace(fs, root, &s("path")) {
                 Ok(p) => p, Err(e) => return ToolOutcome::err(e) };
-            let body = match std::fs::read_to_string(&path) {
-                Ok(b) => b, Err(e) => return ToolOutcome::err(format!("cannot read {}: {e}", s("path"))) };
+            let body = match fs.read(&path) { Ok(b) => b, Err(e) => return ToolOutcome::err(e) };
             let lines: Vec<&str> = body.lines().collect();
             let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
             let end = args.get("end_line").and_then(|v| v.as_u64())
@@ -225,19 +263,17 @@ pub fn execute(root: &Path, shell: &dyn Shell, name: &str, args: &Value) -> Tool
             ToolOutcome::ok(distil(&body, OUTPUT_LINE_BUDGET))
         }
         "write" => {
-            let path = match resolve_in_workspace(root, &s("path")) {
+            let path = match resolve_in_workspace(fs, root, &s("path")) {
                 Ok(p) => p, Err(e) => return ToolOutcome::err(e) };
-            if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
-            match std::fs::write(&path, s("content")) {
+            match fs.write(&path, &s("content")) {
                 Ok(_) => ToolOutcome::ok(format!("wrote {}", s("path"))),
-                Err(e) => ToolOutcome::err(format!("cannot write {}: {e}", s("path"))),
+                Err(e) => ToolOutcome::err(e),
             }
         }
         "edit" => {
-            let path = match resolve_in_workspace(root, &s("path")) {
+            let path = match resolve_in_workspace(fs, root, &s("path")) {
                 Ok(p) => p, Err(e) => return ToolOutcome::err(e) };
-            let body = match std::fs::read_to_string(&path) {
-                Ok(b) => b, Err(e) => return ToolOutcome::err(format!("cannot read {}: {e}", s("path"))) };
+            let body = match fs.read(&path) { Ok(b) => b, Err(e) => return ToolOutcome::err(e) };
             let (old, new) = (s("old"), s("new"));
             match body.matches(&old).count() {
                 0 => ToolOutcome::err(format!("`old` not found in {}. Read it first.", s("path"))),
@@ -245,9 +281,9 @@ pub fn execute(root: &Path, shell: &dyn Shell, name: &str, args: &Value) -> Tool
                 // silently edits the wrong place and the agent cannot tell.
                 n if n > 1 => ToolOutcome::err(format!(
                     "`old` appears {n} times in {}; include more context to make it unique", s("path"))),
-                _ => match std::fs::write(&path, body.replacen(&old, &new, 1)) {
+                _ => match fs.write(&path, &body.replacen(&old, &new, 1)) {
                     Ok(_) => ToolOutcome::ok(format!("edited {}", s("path"))),
-                    Err(e) => ToolOutcome::err(format!("cannot write {}: {e}", s("path"))),
+                    Err(e) => ToolOutcome::err(e),
                 },
             }
         }
@@ -283,7 +319,7 @@ pub fn execute(root: &Path, shell: &dyn Shell, name: &str, args: &Value) -> Tool
         "grep" => {
             let pattern = s("pattern");
             let sub = { let p = s("path"); if p.is_empty() { ".".to_string() } else { p } };
-            if let Err(e) = resolve_in_workspace(root, &sub) { return ToolOutcome::err(e); }
+            if let Err(e) = resolve_in_workspace(fs, root, &sub) { return ToolOutcome::err(e); }
             let globarg = { let g = s("glob"); if g.is_empty() { String::new() }
                             else { format!("--glob {}", shell_quote(&g)) } };
             // ripgrep when present -- it honours .gitignore, which keeps node_modules and
