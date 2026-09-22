@@ -72,8 +72,9 @@ pub enum ReplControl {
 pub fn format_event(event: &superstate_agent::run::Event<'_>) -> String {
     match event {
         superstate_agent::run::Event::Turn { n, text } => {
-            let preview = if text.len() > 80 {
-                format!("{}...", &text[..80])
+            let preview = if text.chars().count() > 80 {
+                let s: String = text.chars().take(80).collect();
+                format!("{s}...")
             } else {
                 text.to_string()
             };
