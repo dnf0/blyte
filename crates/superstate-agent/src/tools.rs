@@ -372,8 +372,18 @@ pub fn execute(
             let pattern = s("pattern");
             // Delegated to the shell rather than a glob crate so that `**`, brace expansion and
             // character classes behave exactly as the model expects from a terminal.
+            // When bash has globstar (Linux / bash 4+), use it. On platforms where bash lacks
+            // globstar (such as macOS /bin/bash 3.2), fall back to zsh which supports `**` natively.
             let cmd = format!(
-                "shopt -s globstar nullglob dotglob 2>/dev/null; printf '%s\\n' {pattern} | head -n {MAX_MATCHES}"
+                "if shopt -s globstar 2>/dev/null; then \
+                     shopt -s nullglob dotglob 2>/dev/null; \
+                     printf '%s\\n' {pattern}; \
+                 elif command -v zsh >/dev/null 2>&1; then \
+                     zsh -c 'setopt null_glob glob_dots 2>/dev/null; printf \"%s\\n\" {pattern}'; \
+                 else \
+                     shopt -s nullglob dotglob 2>/dev/null; \
+                     printf '%s\\n' {pattern}; \
+                 fi | head -n {MAX_MATCHES}"
             );
             match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
                 Ok(o) => {
@@ -401,27 +411,30 @@ pub fn execute(
             if let Err(e) = resolve_in_workspace(fs, root, &sub) {
                 return ToolOutcome::err(e);
             }
-            let globarg = {
-                let g = s("glob");
-                if g.is_empty() {
-                    String::new()
-                } else {
-                    format!("--glob {}", shell_quote(&g))
-                }
+            let glob_str = s("glob");
+            let globarg_rg = if glob_str.is_empty() {
+                String::new()
+            } else {
+                format!("--glob {}", shell_quote(&glob_str))
+            };
+            let globarg_grep = if glob_str.is_empty() {
+                String::new()
+            } else {
+                format!("--include={}", shell_quote(&glob_str))
             };
             // ripgrep when present -- it honours .gitignore, which keeps node_modules and
             // target/ out of the results and is most of why a repo search is usable at all.
             // grep -rn is the fallback so the tool never simply vanishes on a bare machine.
             let cmd = if have(shell, root, "rg") {
                 format!(
-                    "rg --line-number --no-heading --color never {globarg} -e {} {} | head -n {}",
+                    "rg --line-number --no-heading --color never {globarg_rg} -e {} {} | head -n {}",
                     shell_quote(&pattern),
                     shell_quote(&sub),
                     MAX_MATCHES + 1
                 )
             } else {
                 format!(
-                    "grep -rnI -e {} {} | head -n {}",
+                    "grep -rnI {globarg_grep} -e {} {} | head -n {}",
                     shell_quote(&pattern),
                     shell_quote(&sub),
                     MAX_MATCHES + 1
