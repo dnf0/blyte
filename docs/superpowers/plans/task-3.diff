@@ -1,1148 +1,191 @@
-diff --git a/crates/superstate-cli/src/commands/daemon.rs b/crates/superstate-cli/src/commands/daemon.rs
-index 268f8e3..266847b 100644
---- a/crates/superstate-cli/src/commands/daemon.rs
-+++ b/crates/superstate-cli/src/commands/daemon.rs
-@@ -116,6 +116,7 @@ pub fn cmd_daemon(
-     auto_rollback: bool,
-     shunt_driver_output: bool,
-     guard_file_reads: bool,
-+    guard_commands: bool,
-     impact_slicing: bool,
- ) -> Result<(), String> {
-     let auto_rollback = if !auto_rollback {
-@@ -196,8 +197,15 @@ pub fn cmd_daemon(
-         if !shunt_driver_output {
-             cmd.arg("--no-shunt");
+5d5809c fix(agent): kill process group on timeout to prevent orphan grandchild leaks
+---
+ crates/superstate-agent/src/shell.rs | 155 ++++++++++++++++++++++-------------
+ 1 file changed, 98 insertions(+), 57 deletions(-)
+---
+diff --git a/crates/superstate-agent/src/shell.rs b/crates/superstate-agent/src/shell.rs
+index 2608bb7..f94d842 100644
+--- a/crates/superstate-agent/src/shell.rs
++++ b/crates/superstate-agent/src/shell.rs
+@@ -55,83 +55,124 @@ pub trait Shell: Send + Sync {
+             .map(|b| format!("command -v {b} >/dev/null 2>&1 && echo {b}"))
+             .collect::<Vec<_>>()
+             .join("; ");
+         match self.exec(&probe, cwd, Duration::from_secs(30)) {
+             Ok(o) => o.stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+             Err(_) => Vec::new(),
          }
--        if !guard_file_reads {
-+        if !guard_file_reads && !guard_commands {
-             cmd.arg("--no-guard");
-+        } else {
-+            if !guard_file_reads {
-+                cmd.arg("--no-file-guard");
-+            }
-+            if !guard_commands {
-+                cmd.arg("--no-command-guard");
-+            }
-         }
-         if impact_slicing {
-             cmd.arg("--impact-slicing");
-@@ -282,6 +290,7 @@ pub fn cmd_daemon(
-             auto_rollback,
-             shunt_driver_output,
-             guard_file_reads,
-+            guard_commands,
-             impact_slicing,
-         };
- 
-diff --git a/crates/superstate-cli/src/commands/handoff.rs b/crates/superstate-cli/src/commands/handoff.rs
-index 79bf0c7..f585d7b 100644
---- a/crates/superstate-cli/src/commands/handoff.rs
-+++ b/crates/superstate-cli/src/commands/handoff.rs
-@@ -181,6 +181,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
-             false,
-             true,
-             true,
-+            true,
-             false,
-         )
-     } else if args.json {
-diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
-index ef14cbb..2a8e73c 100644
---- a/crates/superstate-cli/src/main.rs
-+++ b/crates/superstate-cli/src/main.rs
-@@ -166,6 +166,7 @@ fn main() {
-                 args.use_auto_rollback(),
-                 args.use_shunt(),
-                 args.use_guard(),
-+                args.use_command_guard(),
-                 args.impact_slicing,
-             ),
-         },
-diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
-index 7b9ce09..8ddd93b 100644
---- a/crates/superstate-cli/src/state_cli.rs
-+++ b/crates/superstate-cli/src/state_cli.rs
-@@ -349,12 +349,26 @@ pub struct DaemonArgs {
-         help = "Disable automatic tool output shunting during driver execution"
-     )]
-     pub no_shunt: bool,
-+    /// Disable all automated PreToolUse guards during driver execution
-+    #[arg(
-+        long,
-+        help = "Disable all automated PreToolUse guards during driver execution"
-+    )]
-+    pub no_guard: bool,
-     /// Disable automatic file read guard during driver execution
-     #[arg(
-         long,
-+        default_value_t = false,
-         help = "Disable automatic file read guard during driver execution"
-     )]
--    pub no_guard: bool,
-+    pub no_file_guard: bool,
-+    /// Disable automated PreToolUse command & polling guard
-+    #[arg(
-+        long,
-+        default_value_t = false,
-+        help = "Disable automated PreToolUse command & polling guard"
-+    )]
-+    pub no_command_guard: bool,
-     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
-     #[arg(
-         long,
-@@ -385,7 +399,11 @@ impl DaemonArgs {
-     }
- 
-     pub fn use_guard(&self) -> bool {
--        !self.no_guard
-+        !self.no_guard && !self.no_file_guard
-+    }
-+
-+    pub fn use_command_guard(&self) -> bool {
-+        !self.no_guard && !self.no_command_guard
      }
  }
  
-@@ -603,6 +621,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
-                 let auto_rollback = args.use_auto_rollback();
-                 let shunt_driver_output = args.use_shunt();
-                 let guard_file_reads = args.use_guard();
-+                let guard_commands = args.use_command_guard();
-                 commands::daemon::cmd_daemon(
-                     &resolve(args.state),
-                     args.driver.as_deref(),
-@@ -614,6 +633,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
-                     auto_rollback,
-                     shunt_driver_output,
-                     guard_file_reads,
-+                    guard_commands,
-                     args.impact_slicing,
-                 )
-             }
-diff --git a/crates/superstate-cli/tests/test_cli_daemon_guard.rs b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
-index efe5416..38956c3 100644
---- a/crates/superstate-cli/tests/test_cli_daemon_guard.rs
-+++ b/crates/superstate-cli/tests/test_cli_daemon_guard.rs
-@@ -15,6 +15,10 @@ fn test_cli_no_guard_flag_parsing() {
-                 !daemon_args.use_guard(),
-                 "Expected use_guard() to return false when --no-guard is passed"
-             );
-+            assert!(
-+                !daemon_args.use_command_guard(),
-+                "Expected use_command_guard() to return false when --no-guard is passed"
-+            );
-         }
-         _ => panic!("Expected Commands::Daemon"),
-     }
-@@ -33,6 +37,97 @@ fn test_cli_no_guard_flag_default_false() {
-                 daemon_args.use_guard(),
-                 "Expected use_guard() to default to true"
-             );
-+            assert!(
-+                daemon_args.use_command_guard(),
-+                "Expected use_command_guard() to default to true"
-+            );
-+        }
-+        _ => panic!("Expected Commands::Daemon"),
++/// Executes a command with timeout enforcement, pipe draining, and process group isolation.
++///
++/// # Arguments
++///
++/// * `cmd` - The prepared [`Command`] ready to be configured and spawned.
++/// * `timeout` - Maximum duration allowed before the process and its descendants are terminated.
++///
++/// # Returns
++///
++/// Returns an [`Output`] containing collected stdout, stderr, and the process exit code,
++/// or an error message if the process cannot be spawned or waited on. On timeout, returns
++/// exit code 124 with a notice appended to stderr.
++fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
++    use std::io::Read;
++    use std::process::Stdio;
++
++    // The deadline is ENFORCED, not advisory.
++    // stdin is null so commands that read input (e.g. bare python, git commit, prompts)
++    // do not block forever on an unattended terminal.
++    cmd.stdin(Stdio::null())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped());
++
++    // Place the spawned command in its own process group on Unix.
++    // Without this, background grandchildren (e.g., `(sleep 30) & wait`) stay alive
++    // when the immediate child is killed, keeping pipe handles open and causing
++    // the reader threads to hang indefinitely.
++    #[cfg(unix)]
++    {
++        use std::os::unix::process::CommandExt;
++        cmd.process_group(0);
 +    }
-+}
 +
-+#[test]
-+fn test_cli_no_command_guard_flag_parsing() {
-+    let args = StateArgs::try_parse_from(["state", "daemon", "--no-command-guard"])
-+        .expect("Failed to parse --no-command-guard flag");
-+    match args.command {
-+        Commands::Daemon(daemon_args) => {
-+            assert!(
-+                daemon_args.no_command_guard,
-+                "Expected no_command_guard to be true when --no-command-guard is passed"
-+            );
-+            assert!(
-+                !daemon_args.use_command_guard(),
-+                "Expected use_command_guard() to return false when --no-command-guard is passed"
-+            );
-+            assert!(
-+                daemon_args.use_guard(),
-+                "Expected use_guard() to return true when only --no-command-guard is passed"
-+            );
-+        }
-+        _ => panic!("Expected Commands::Daemon"),
-+    }
-+}
++    let mut child = cmd.spawn().map_err(|e| format!("cannot run command: {e}"))?;
 +
-+#[test]
-+fn test_cli_no_command_guard_default_false() {
-+    let args = StateArgs::try_parse_from(["state", "daemon"]).expect("Failed to parse daemon args");
-+    match args.command {
-+        Commands::Daemon(daemon_args) => {
-+            assert!(
-+                !daemon_args.no_command_guard,
-+                "Expected no_command_guard to default to false"
-+            );
-+            assert!(
-+                daemon_args.use_command_guard(),
-+                "Expected use_command_guard() to default to true"
-+            );
-+        }
-+        _ => panic!("Expected Commands::Daemon"),
-+    }
-+}
++    // Drained on background threads: a command that fills the pipe buffer deadlocks against
++    // a parent that only reads after waiting, which turns a noisy command into a hang.
++    let mut so = child.stdout.take().ok_or("no stdout")?;
++    let mut se = child.stderr.take().ok_or("no stderr")?;
++    let t_out = std::thread::spawn(move || {
++        let mut b = String::new();
++        let _ = so.read_to_string(&mut b);
++        b
++    });
++    let t_err = std::thread::spawn(move || {
++        let mut b = String::new();
++        let _ = se.read_to_string(&mut b);
++        b
++    });
 +
-+#[test]
-+fn test_cli_no_file_guard_flag_parsing() {
-+    let args = StateArgs::try_parse_from(["state", "daemon", "--no-file-guard"])
-+        .expect("Failed to parse --no-file-guard flag");
-+    match args.command {
-+        Commands::Daemon(daemon_args) => {
-+            assert!(
-+                daemon_args.no_file_guard,
-+                "Expected no_file_guard to be true when --no-file-guard is passed"
-+            );
-+            assert!(
-+                !daemon_args.use_guard(),
-+                "Expected use_guard() to return false when --no-file-guard is passed"
-+            );
-+            assert!(
-+                daemon_args.use_command_guard(),
-+                "Expected use_command_guard() to return true when only --no-file-guard is passed"
-+            );
-+        }
-+        _ => panic!("Expected Commands::Daemon"),
-+    }
-+}
-+
-+#[test]
-+fn test_cli_no_guard_disables_both() {
-+    let args = StateArgs::try_parse_from(["state", "daemon", "--no-guard"])
-+        .expect("Failed to parse --no-guard flag");
-+    match args.command {
-+        Commands::Daemon(daemon_args) => {
-+            assert!(
-+                daemon_args.no_guard,
-+                "Expected no_guard to be true when --no-guard is passed"
-+            );
-+            assert!(
-+                !daemon_args.use_guard(),
-+                "Expected use_guard() to return false when --no-guard is passed"
-+            );
-+            assert!(
-+                !daemon_args.use_command_guard(),
-+                "Expected use_command_guard() to return false when --no-guard is passed"
-+            );
-         }
-         _ => panic!("Expected Commands::Daemon"),
-     }
-diff --git a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-index 7da21c0..2fd7828 100644
---- a/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-+++ b/crates/superstate-cli/tests/test_cli_daemon_lifecycle.rs
-@@ -45,6 +45,7 @@ fn test_cli_daemon_lifecycle() {
-         false,
-         true,
-         true,
-+        true,
-         false,
-     )
-     .unwrap();
-@@ -116,6 +117,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
-         false,
-         true,
-         true,
-+        true,
-         false,
-     )
-     .unwrap();
-diff --git a/crates/superstate-core/src/daemon.rs b/crates/superstate-core/src/daemon.rs
-index 0f400e4..893a826 100644
---- a/crates/superstate-core/src/daemon.rs
-+++ b/crates/superstate-core/src/daemon.rs
-@@ -202,6 +202,9 @@ pub struct DaemonConfig {
-     /// Automatically guard file reads and shunt large files to symbol outlines
-     #[serde(default = "default_true")]
-     pub guard_file_reads: bool,
-+    /// Automatically guard tool execution and poll commands with debounce
-+    #[serde(default = "default_true")]
-+    pub guard_commands: bool,
-     /// Enable milestone-scoped test impact slicing for fast fail-fast feedback
-     #[serde(default)]
-     pub impact_slicing: bool,
-@@ -220,6 +223,7 @@ impl Default for DaemonConfig {
-             auto_rollback: true,
-             shunt_driver_output: true,
-             guard_file_reads: true,
-+            guard_commands: true,
-             impact_slicing: false,
-         }
-     }
-@@ -787,16 +791,28 @@ impl DaemonRunner {
-                 }
-             }
- 
--            // WHY: Intercept driver file read operations (> 200 lines) transparently via PreToolUse hooks
--            // WHAT: Provision .agents/hooks.json in the workspace root if not already present
--            // HOW: Serialize PreToolUse matcher invoking `superstate guard pre-tool-use`
--            if self.config.guard_file_reads {
-+            // WHY: Intercept driver file reads (> 200 lines) and rapid polling commands via PreToolUse hooks
-+            // WHAT: Provision or merge hooks into .agents/hooks.json in the workspace root
-+            // HOW: Serialize PreToolUse matchers for active guards, merging with existing hooks if present
-+            if self.config.guard_file_reads || self.config.guard_commands {
-                 let agents_dir = working_dir.join(".agents");
-                 fs::create_dir_all(&agents_dir)?;
-                 let hooks_file = agents_dir.join("hooks.json");
--                if !hooks_file.exists() {
--                    let hooks_content = serde_json::json!({
--                        "superstate-file-guard": {
-+
-+                let mut hooks_obj = if hooks_file.exists() {
-+                    let existing_content = fs::read_to_string(&hooks_file).unwrap_or_default();
-+                    match serde_json::from_str::<serde_json::Value>(&existing_content) {
-+                        Ok(serde_json::Value::Object(map)) => map,
-+                        _ => serde_json::Map::new(),
++    let deadline = std::time::Instant::now() + timeout;
++    let status = loop {
++        match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
++            Some(s) => break Some(s),
++            None if std::time::Instant::now() >= deadline => {
++                // On Unix, kill the entire process group with a negative PGID.
++                // This ensures all child and grandchild processes are terminated simultaneously,
++                // releasing standard stream pipe handles so reader threads unblock promptly.
++                #[cfg(unix)]
++                {
++                    let pgid = child.id() as i32;
++                    unsafe {
++                        libc::kill(-pgid, libc::SIGKILL);
 +                    }
-+                } else {
-+                    serde_json::Map::new()
-+                };
-+
-+                if self.config.guard_file_reads && !hooks_obj.contains_key("superstate-file-guard") {
-+                    hooks_obj.insert(
-+                        "superstate-file-guard".to_string(),
-+                        serde_json::json!({
-                             "PreToolUse": [
-                                 {
-                                     "matcher": "view_file|View|read_file",
-@@ -807,28 +823,48 @@ impl DaemonRunner {
-                                     ]
-                                 }
-                             ]
-+                        }),
-+                    );
 +                }
-+
-+                if self.config.guard_commands && !hooks_obj.contains_key("superstate-command-guard") {
-+                    hooks_obj.insert(
-+                        "superstate-command-guard".to_string(),
-+                        serde_json::json!({
-+                            "PreToolUse": [
-+                                {
-+                                    "matcher": "run_command|manage_task",
-+                                    "hooks": [
-+                                        {
-+                                            "command": "superstate guard pre-command --debounce-sec 30"
-+                                        }
-+                                    ]
-+                                }
-+                            ]
-+                        }),
-+                    );
++                #[cfg(not(unix))]
++                {
++                    let _ = child.kill();
 +                }
++                let _ = child.wait();
++                break None;
++            }
++            None => std::thread::sleep(Duration::from_millis(50)),
++        }
++    };
 +
-+                let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(hooks_obj))?;
-+                fs::write(&hooks_file, serialized)?;
++    let stdout = t_out.join().unwrap_or_default();
++    let stderr = t_err.join().unwrap_or_default();
 +
-+                // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
-+                // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
-+                // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
-+                let git_info_dir = working_dir.join(".git").join("info");
-+                if git_info_dir.exists() {
-+                    let exclude_file = git_info_dir.join("exclude");
-+                    let content = fs::read_to_string(&exclude_file).unwrap_or_default();
-+                    let already_excluded = content
-+                        .lines()
-+                        .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
-+                    if !already_excluded {
-+                        let mut new_content = content;
-+                        if !new_content.is_empty() && !new_content.ends_with('\n') {
-+                            new_content.push('\n');
-                         }
--                    });
--                    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_content)?)?;
++    match status {
++        Some(s) => Ok(Output {
++            stdout,
++            stderr,
++            exit_code: s.code().unwrap_or(-1),
++        }),
++        // Reported as a failure the model can act on, with the output captured so far --
++        // a killed command that returns nothing tells it only that something went wrong.
++        None => Ok(Output {
++            stdout,
++            stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
++            exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
++        }),
++    }
++}
++
+ /// Commands run on this machine, in the workspace directory.
+ #[derive(Debug, Default, Clone)]
+ pub struct LocalShell;
+ 
+ impl Shell for LocalShell {
+     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+-        use std::io::Read;
+-        use std::process::Stdio;
 -
--                    // WHY: Ephemeral daemon hooks must not be inadvertently committed into the repository during checkpointing
--                    // WHAT: Append `.agents/` to `.git/info/exclude` if `.git/info` exists and not already excluded
--                    // HOW: Inspect existing lines in `.git/info/exclude` and append `.agents/\n` idempotently
--                    let git_info_dir = working_dir.join(".git").join("info");
--                    if git_info_dir.exists() {
--                        let exclude_file = git_info_dir.join("exclude");
--                        let content = fs::read_to_string(&exclude_file).unwrap_or_default();
--                        let already_excluded = content
--                            .lines()
--                            .any(|line| line.trim() == ".agents" || line.trim() == ".agents/");
--                        if !already_excluded {
--                            let mut new_content = content;
--                            if !new_content.is_empty() && !new_content.ends_with('\n') {
--                                new_content.push('\n');
--                            }
--                            new_content.push_str(".agents/\n");
--                            fs::write(&exclude_file, new_content)?;
--                        }
-+                        new_content.push_str(".agents/\n");
-+                        fs::write(&exclude_file, new_content)?;
-                     }
-                 }
-             }
-diff --git a/crates/superstate-core/tests/test_daemon_advisory_review.rs b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-index 0bae88d..a9cc1e0 100644
---- a/crates/superstate-core/tests/test_daemon_advisory_review.rs
-+++ b/crates/superstate-core/tests/test_daemon_advisory_review.rs
-@@ -72,6 +72,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
+-        // The deadline is ENFORCED, not advisory. This was a documented TODO for about an
+-        // hour, and the very first live run hit it: the model opened with
+-        // `which pytest; which python3; find / -name pytest 2>/dev/null` and the `find /`
+-        // scanned the entire filesystem for three and a half minutes before being killed by
+-        // hand. An agent will do this; a harness that merely documents a bound will hang.
+-        //
+-        // stdin is null for the same class of reason. Inheriting it lets any command that
+-        // reads input -- a bare `python3`, a `git commit` opening an editor, an `npm` prompt --
+-        // block forever on a terminal nobody is watching.
+-        let mut child = Command::new("bash")
+-            .arg("-lc")
+-            .arg(command)
+-            .current_dir(cwd)
+-            .stdin(Stdio::null())
+-            .stdout(Stdio::piped())
+-            .stderr(Stdio::piped())
+-            .spawn()
+-            .map_err(|e| format!("cannot run command: {e}"))?;
+-
+-        // Drained on threads: a command that fills the pipe buffer deadlocks against a parent
+-        // that only reads after waiting, which turns a noisy command into a hang.
+-        let mut so = child.stdout.take().ok_or("no stdout")?;
+-        let mut se = child.stderr.take().ok_or("no stderr")?;
+-        let t_out = std::thread::spawn(move || {
+-            let mut b = String::new(); let _ = so.read_to_string(&mut b); b });
+-        let t_err = std::thread::spawn(move || {
+-            let mut b = String::new(); let _ = se.read_to_string(&mut b); b });
+-
+-        let deadline = std::time::Instant::now() + timeout;
+-        let status = loop {
+-            match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
+-                Some(s) => break Some(s),
+-                None if std::time::Instant::now() >= deadline => {
+-                    let _ = child.kill();
+-                    let _ = child.wait();
+-                    break None;
+-                }
+-                None => std::thread::sleep(Duration::from_millis(50)),
+-            }
+-        };
+-
+-        let stdout = t_out.join().unwrap_or_default();
+-        let stderr = t_err.join().unwrap_or_default();
+-
+-        match status {
+-            Some(s) => Ok(Output { stdout, stderr, exit_code: s.code().unwrap_or(-1) }),
+-            // Reported as a failure the model can act on, with the output captured so far --
+-            // a killed command that returns nothing tells it only that something went wrong.
+-            None => Ok(Output {
+-                stdout,
+-                stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
+-                exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
+-            }),
+-        }
++        let mut cmd = Command::new("bash");
++        cmd.arg("-lc").arg(command).current_dir(cwd);
++        exec_command(cmd, timeout)
+     }
  
-@@ -127,6 +128,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -196,6 +198,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -255,6 +258,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix()
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -315,6 +319,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -368,6 +373,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-diff --git a/crates/superstate-core/tests/test_daemon_automerge.rs b/crates/superstate-core/tests/test_daemon_automerge.rs
-index 997a5f6..87ca59b 100644
---- a/crates/superstate-core/tests/test_daemon_automerge.rs
-+++ b/crates/superstate-core/tests/test_daemon_automerge.rs
-@@ -124,6 +124,7 @@ fn test_daemon_automerge_on_completion() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -222,6 +223,7 @@ fn test_daemon_completion_in_place_mode() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -286,6 +288,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -310,6 +313,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     })
-     .expect("create second runner");
-diff --git a/crates/superstate-core/tests/test_daemon_blocking_review.rs b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-index 3edeeb0..397f683 100644
---- a/crates/superstate-core/tests/test_daemon_blocking_review.rs
-+++ b/crates/superstate-core/tests/test_daemon_blocking_review.rs
-@@ -94,6 +94,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -178,6 +179,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -226,6 +228,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -305,6 +308,7 @@ EOF
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-diff --git a/crates/superstate-core/tests/test_daemon_dag_execution.rs b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-index 38e143e..daff0f5 100644
---- a/crates/superstate-core/tests/test_daemon_dag_execution.rs
-+++ b/crates/superstate-core/tests/test_daemon_dag_execution.rs
-@@ -104,6 +104,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
-         auto_rollback: true,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -200,6 +201,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
-         auto_rollback: true,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -288,6 +290,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-diff --git a/crates/superstate-core/tests/test_daemon_guard.rs b/crates/superstate-core/tests/test_daemon_guard.rs
-index 17cfedb..897c57d 100644
---- a/crates/superstate-core/tests/test_daemon_guard.rs
-+++ b/crates/superstate-core/tests/test_daemon_guard.rs
-@@ -13,6 +13,15 @@ fn test_daemon_config_default_guard_file_reads() {
-     );
+     fn describe(&self) -> String {
+         "Commands run directly on this machine, in the workspace directory.".into()
+     }
  }
  
-+#[test]
-+fn test_daemon_config_default_guard_commands() {
-+    let config = DaemonConfig::default();
-+    assert!(
-+        config.guard_commands,
-+        "DaemonConfig::default().guard_commands must default to true"
-+    );
-+}
-+
- #[test]
- fn test_daemon_config_deserialize_defaults_guard_file_reads_to_true() {
-     let json_str = r#"{
-@@ -31,6 +40,24 @@ fn test_daemon_config_deserialize_defaults_guard_file_reads_to_true() {
-     );
- }
- 
-+#[test]
-+fn test_daemon_config_deserialize_defaults_guard_commands_to_true() {
-+    let json_str = r#"{
-+        "state_path": ".agent-state/state.json",
-+        "driver_cmd": null,
-+        "max_retries": 3,
-+        "timeout_secs": 120,
-+        "advisory_gate": false,
-+        "advisory_review": false,
-+        "review_blocking": false
-+    }"#;
-+    let config: DaemonConfig = serde_json::from_str(json_str).expect("deserialize config");
-+    assert!(
-+        config.guard_commands,
-+        "deserialized DaemonConfig without guard_commands field must default to true"
-+    );
-+}
-+
- #[test]
- fn test_daemon_runner_provisions_hooks_json() {
-     let dir = tempdir().unwrap();
-@@ -63,6 +90,7 @@ fn test_daemon_runner_provisions_hooks_json() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: true,
-+        guard_commands: true,
-         impact_slicing: false,
-     };
- 
-@@ -73,23 +101,153 @@ fn test_daemon_runner_provisions_hooks_json() {
-     let hooks_file = dir.path().join(".agents/hooks.json");
-     assert!(
-         hooks_file.exists(),
--        ".agents/hooks.json must be provisioned when guard_file_reads is true"
-+        ".agents/hooks.json must be provisioned when guards are active"
-     );
- 
-     let content = fs::read_to_string(&hooks_file).unwrap();
-     let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
- 
--    let hook_entry = &json["superstate-file-guard"]["PreToolUse"][0];
-+    let file_hook_entry = &json["superstate-file-guard"]["PreToolUse"][0];
-     assert_eq!(
--        hook_entry["matcher"].as_str(),
-+        file_hook_entry["matcher"].as_str(),
-         Some("view_file|View|read_file"),
-         "matcher must match view_file|View|read_file"
-     );
-     assert_eq!(
--        hook_entry["hooks"][0]["command"].as_str(),
-+        file_hook_entry["hooks"][0]["command"].as_str(),
-         Some("superstate guard pre-tool-use --threshold-lines 200"),
-         "hook command must be superstate guard pre-tool-use --threshold-lines 200"
-     );
-+
-+    let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
-+    assert_eq!(
-+        cmd_hook_entry["matcher"].as_str(),
-+        Some("run_command|manage_task"),
-+        "matcher must match run_command|manage_task"
-+    );
-+    assert_eq!(
-+        cmd_hook_entry["hooks"][0]["command"].as_str(),
-+        Some("superstate guard pre-command --debounce-sec 30"),
-+        "hook command must be superstate guard pre-command --debounce-sec 30"
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_provisions_command_guard_in_hooks_json() {
-+    let dir = tempdir().unwrap();
-+    let state_file = dir.path().join("state.json");
-+
-+    let state = ExecutionState {
-+        active_task: Some(TaskSpec {
-+            id: "task-cmd-guard".to_string(),
-+            title: "Test Command Guard".to_string(),
-+            depends_on: vec![],
-+            files_modify: vec![],
-+            verification_cmd: Some("test -f driver_evidence.txt".to_string()),
-+        }),
-+        no_worktree: true,
-+        goal: Some("Test automated command guard hook provisioning".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_file, &state).unwrap();
-+
-+    let driver_cmd = "echo 'driver ran' > driver_evidence.txt";
-+
-+    let config = DaemonConfig {
-+        state_path: state_file,
-+        driver_cmd: Some(driver_cmd.to_string()),
-+        max_retries: 1,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+        guard_file_reads: true,
-+        guard_commands: true,
-+        impact_slicing: false,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).unwrap();
-+    let outcome = runner.step().unwrap();
-+    assert!(outcome.is_advanced());
-+
-+    let hooks_file = dir.path().join(".agents/hooks.json");
-+    assert!(
-+        hooks_file.exists(),
-+        ".agents/hooks.json must be provisioned when guard_commands is true"
-+    );
-+
-+    let content = fs::read_to_string(&hooks_file).unwrap();
-+    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
-+
-+    let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
-+    assert_eq!(
-+        cmd_hook_entry["matcher"].as_str(),
-+        Some("run_command|manage_task"),
-+        "matcher must match run_command|manage_task"
-+    );
-+    assert_eq!(
-+        cmd_hook_entry["hooks"][0]["command"].as_str(),
-+        Some("superstate guard pre-command --debounce-sec 30"),
-+        "hook command must be superstate guard pre-command --debounce-sec 30"
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_no_command_guard_disables_provisioning() {
-+    let dir = tempdir().unwrap();
-+    let state_file = dir.path().join("state.json");
-+
-+    let state = ExecutionState {
-+        active_task: Some(TaskSpec {
-+            id: "task-no-cmd".to_string(),
-+            title: "Test No Command Guard".to_string(),
-+            depends_on: vec![],
-+            files_modify: vec![],
-+            verification_cmd: Some("test -f no_cmd_evidence.txt".to_string()),
-+        }),
-+        no_worktree: true,
-+        goal: Some("Test disabling command guard provisioning".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_file, &state).unwrap();
-+
-+    let driver_cmd = "echo 'ran' > no_cmd_evidence.txt";
-+
-+    let config = DaemonConfig {
-+        state_path: state_file,
-+        driver_cmd: Some(driver_cmd.to_string()),
-+        max_retries: 1,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+        guard_file_reads: true,
-+        guard_commands: false,
-+        impact_slicing: false,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).unwrap();
-+    let outcome = runner.step().unwrap();
-+    assert!(outcome.is_advanced());
-+
-+    let hooks_file = dir.path().join(".agents/hooks.json");
-+    assert!(hooks_file.exists());
-+
-+    let content = fs::read_to_string(&hooks_file).unwrap();
-+    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
-+
-+    assert!(
-+        !json["superstate-file-guard"].is_null(),
-+        "superstate-file-guard must be present when guard_file_reads is true"
-+    );
-+    assert!(
-+        json["superstate-command-guard"].is_null(),
-+        "superstate-command-guard must NOT be present when guard_commands is false"
-+    );
- }
- 
- #[test]
-@@ -124,6 +282,7 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -134,36 +293,83 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
-     let hooks_file = dir.path().join(".agents/hooks.json");
-     assert!(
-         !hooks_file.exists(),
--        ".agents/hooks.json must not be provisioned when guard_file_reads is false"
-+        ".agents/hooks.json must not be provisioned when both guard flags are false"
-     );
- }
- 
- #[test]
--fn test_daemon_runner_preserves_existing_hooks_json() {
-+fn test_daemon_no_guard_disables_both() {
-+    let dir = tempdir().unwrap();
-+    let state_file = dir.path().join("state.json");
-+
-+    let state = ExecutionState {
-+        active_task: Some(TaskSpec {
-+            id: "task-no-guards".to_string(),
-+            title: "Test No Guards".to_string(),
-+            depends_on: vec![],
-+            files_modify: vec![],
-+            verification_cmd: Some("test -f no_guards_evidence.txt".to_string()),
-+        }),
-+        no_worktree: true,
-+        goal: Some("Test disabling both guards".to_string()),
-+        ..Default::default()
-+    };
-+    save_state_atomic(&state_file, &state).unwrap();
-+
-+    let driver_cmd = "echo 'ran' > no_guards_evidence.txt";
-+
-+    let config = DaemonConfig {
-+        state_path: state_file,
-+        driver_cmd: Some(driver_cmd.to_string()),
-+        max_retries: 1,
-+        timeout_secs: 10,
-+        advisory_gate: false,
-+        advisory_review: false,
-+        review_blocking: false,
-+        auto_rollback: false,
-+        shunt_driver_output: false,
-+        guard_file_reads: false,
-+        guard_commands: false,
-+        impact_slicing: false,
-+    };
-+
-+    let mut runner = DaemonRunner::new(config).unwrap();
-+    let outcome = runner.step().unwrap();
-+    assert!(outcome.is_advanced());
-+
-+    let hooks_file = dir.path().join(".agents/hooks.json");
-+    assert!(
-+        !hooks_file.exists(),
-+        ".agents/hooks.json must not be provisioned when guard_file_reads and guard_commands are false"
-+    );
-+}
-+
-+#[test]
-+fn test_daemon_merges_hooks_when_file_exists() {
-     let dir = tempdir().unwrap();
-     let state_file = dir.path().join("state.json");
- 
-     let agents_dir = dir.path().join(".agents");
-     fs::create_dir_all(&agents_dir).unwrap();
-     let hooks_file = agents_dir.join("hooks.json");
--    let custom_json = r#"{"custom_hook": true}"#;
-+    let custom_json = r#"{"custom_hook": {"PreToolUse": [{"matcher": "foo", "hooks": []}]}}"#;
-     fs::write(&hooks_file, custom_json).unwrap();
- 
-     let state = ExecutionState {
-         active_task: Some(TaskSpec {
--            id: "task-3".to_string(),
--            title: "Test Preserve Hooks".to_string(),
-+            id: "task-merge".to_string(),
-+            title: "Test Merge Hooks".to_string(),
-             depends_on: vec![],
-             files_modify: vec![],
--            verification_cmd: Some("test -f preserve_evidence.txt".to_string()),
-+            verification_cmd: Some("test -f merge_evidence.txt".to_string()),
-         }),
-         no_worktree: true,
--        goal: Some("Test preserving existing hooks.json".to_string()),
-+        goal: Some("Test merging into existing hooks.json".to_string()),
-         ..Default::default()
-     };
-     save_state_atomic(&state_file, &state).unwrap();
- 
--    let driver_cmd = "echo 'preserve ran' > preserve_evidence.txt";
-+    let driver_cmd = "echo 'ran' > merge_evidence.txt";
- 
-     let config = DaemonConfig {
-         state_path: state_file,
-@@ -176,6 +382,7 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: true,
-+        guard_commands: true,
-         impact_slicing: false,
-     };
- 
-@@ -184,9 +391,23 @@ fn test_daemon_runner_preserves_existing_hooks_json() {
-     assert!(outcome.is_advanced());
- 
-     let content = fs::read_to_string(&hooks_file).unwrap();
-+    let json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON in hooks.json");
-+
-+    assert!(
-+        !json["custom_hook"].is_null(),
-+        "existing user hook must be preserved"
-+    );
-     assert_eq!(
--        content, custom_json,
--        "existing .agents/hooks.json must not be overwritten"
-+        json["custom_hook"]["PreToolUse"][0]["matcher"].as_str(),
-+        Some("foo")
-+    );
-+    assert!(
-+        !json["superstate-file-guard"].is_null(),
-+        "superstate-file-guard must be merged into existing hooks.json"
-+    );
-+    assert!(
-+        !json["superstate-command-guard"].is_null(),
-+        "superstate-command-guard must be merged into existing hooks.json"
-     );
- }
- 
-@@ -245,6 +466,7 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: true,
-+        guard_commands: true,
-         impact_slicing: false,
-     };
- 
-diff --git a/crates/superstate-core/tests/test_daemon_impact_slicing.rs b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-index 4bbddb2..beaa6b3 100644
---- a/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-+++ b/crates/superstate-core/tests/test_daemon_impact_slicing.rs
-@@ -115,6 +115,7 @@ fn test_daemon_impact_slicing_fast_fail_skips_full_gate() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: true,
-     };
- 
-@@ -209,6 +210,7 @@ fn test_daemon_impact_slicing_passing_slice_executes_full_gate() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: true,
-     };
- 
-@@ -289,6 +291,7 @@ fn test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: true,
-     };
- 
-@@ -382,6 +385,7 @@ fn test_daemon_impact_slicing_disabled_by_default() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -461,6 +465,7 @@ fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
-         auto_rollback: true,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: true,
-     };
- 
-@@ -544,6 +549,7 @@ fn test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: true,
-     };
- 
-@@ -633,6 +639,7 @@ fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: true,
-     };
- 
-diff --git a/crates/superstate-core/tests/test_daemon_rollback.rs b/crates/superstate-core/tests/test_daemon_rollback.rs
-index e6cff5f..648a44a 100644
---- a/crates/superstate-core/tests/test_daemon_rollback.rs
-+++ b/crates/superstate-core/tests/test_daemon_rollback.rs
-@@ -100,6 +100,7 @@ fn test_daemon_rollback_on_verification_failure() {
-         auto_rollback: true,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -197,6 +198,7 @@ fn test_daemon_no_rollback_when_disabled() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-diff --git a/crates/superstate-core/tests/test_daemon_runner.rs b/crates/superstate-core/tests/test_daemon_runner.rs
-index e796480..dca1b9c 100644
---- a/crates/superstate-core/tests/test_daemon_runner.rs
-+++ b/crates/superstate-core/tests/test_daemon_runner.rs
-@@ -39,6 +39,7 @@ fn test_daemon_run_step_success() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -80,6 +81,7 @@ fn test_daemon_run_step_verification_failure() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -129,6 +131,7 @@ fn test_daemon_run_to_completion() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -173,6 +176,7 @@ fn test_daemon_run_to_completion_branch_scoped_slug() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -228,6 +232,7 @@ fn test_daemon_step_advancer_invoked() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -279,6 +284,7 @@ fn test_daemon_step_advancer_error_propagation() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -334,6 +340,7 @@ fn test_daemon_driver_rescued_stderr_bounded_to_1000_chars() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -399,6 +406,7 @@ fn test_daemon_driver_rescue_on_nonzero_exit() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -452,6 +460,7 @@ fn test_daemon_rich_retry_prompt_on_failure() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -546,6 +555,7 @@ fn test_daemon_auto_commit_on_pass_in_place() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -607,6 +617,7 @@ fn test_progress_renews_the_retry_budget() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -654,6 +665,7 @@ fn test_stalled_worker_still_blocks() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -713,6 +725,7 @@ fn test_progress_inside_an_untracked_directory_counts() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -762,6 +775,7 @@ fn test_daemon_own_state_writes_are_not_progress() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -818,6 +832,7 @@ fn test_ungated_task_keeps_driving_past_the_first_pass() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -872,6 +887,7 @@ fn test_real_gate_completes_immediately() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -913,6 +929,7 @@ fn test_ungated_floor_terminates_without_a_driver() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
-     let mut runner = DaemonRunner::new(config).unwrap();
-@@ -970,6 +987,7 @@ fn test_advisory_gate_advances_despite_a_failing_gate() {
-             auto_rollback: false,
-             shunt_driver_output: false,
-             guard_file_reads: false,
-+            guard_commands: false,
-             impact_slicing: false,
-         })
-         .unwrap();
-diff --git a/crates/superstate-core/tests/test_daemon_shunt.rs b/crates/superstate-core/tests/test_daemon_shunt.rs
-index ef780fc..6d99175 100644
---- a/crates/superstate-core/tests/test_daemon_shunt.rs
-+++ b/crates/superstate-core/tests/test_daemon_shunt.rs
-@@ -64,6 +64,7 @@ fn test_daemon_runner_injects_shunt_wrapper() {
-         auto_rollback: false,
-         shunt_driver_output: true,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-@@ -129,6 +130,7 @@ fn test_daemon_runner_no_shunt_disables_injection() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
-diff --git a/crates/superstate-core/tests/test_driver_presets.rs b/crates/superstate-core/tests/test_driver_presets.rs
-index 1ceb669..4a10613 100644
---- a/crates/superstate-core/tests/test_driver_presets.rs
-+++ b/crates/superstate-core/tests/test_driver_presets.rs
-@@ -182,6 +182,7 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
-         auto_rollback: false,
-         shunt_driver_output: false,
-         guard_file_reads: false,
-+        guard_commands: false,
-         impact_slicing: false,
-     };
- 
+ /// Commands run inside an already-running container via `docker exec`.
+ ///
+ /// The case the previous harness handled with a prose instruction. Here the model still calls

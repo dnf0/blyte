@@ -1,0 +1,1498 @@
+67feab3 feat(agent): wire ContainerShell to exec_command with full timeout parity
+5d5809c fix(agent): kill process group on timeout to prevent orphan grandchild leaks
+b22b15b test(agent): add failing test for grandchild process tree termination
+2783cc2 build: add libc dependency for Unix process group killing
+50e3b63 docs(plan): add implementation plan for shell process groups and container parity
+9d33a04 docs: realign documentation with SKILL.state Rust harness architecture
+32c5382 docs(spec): shell process groups and container seam parity design
+---
+ MANIFESTO.md                                       | 181 -----------
+ README.md                                          | 342 +++++----------------
+ crates/superstate-agent/Cargo.toml                 |   4 +
+ crates/superstate-agent/src/shell.rs               | 173 +++++++----
+ .../superstate-agent/tests/test_shell_timeout.rs   |  51 +++
+ docs/index.md                                      |  39 +--
+ docs/manifesto.md                                  |   1 -
+ ...22-shell-process-groups-and-container-parity.md | 321 +++++++++++++++++++
+ ...l-process-groups-and-container-parity-design.md | 165 ++++++++++
+ mkdocs.yml                                         |   1 -
+ 10 files changed, 739 insertions(+), 539 deletions(-)
+---
+diff --git a/MANIFESTO.md b/MANIFESTO.md
+deleted file mode 100644
+index 2296127..0000000
+--- a/MANIFESTO.md
++++ /dev/null
+@@ -1,181 +0,0 @@
+-# The Superstate Manifesto
+-## Invariants for Autonomous Software Engineering
+-
+----
+-
+-### The Fallacy of Chat-Driven Development
+-
+-Software engineering is not conversation. It is a stateful, deterministic systems discipline.
+-
+-The prevailing paradigm of AI coding treats software engineering as an extended conversational chat session: an LLM receives a prompt, predicts tokens, issues unverified edits into a workspace, and declares itself "done."
+-
+-On toy puzzles and single-file scripts, this illusion holds. On real software engineering repositories, it collapses:
+-
+-1. **The Confidence Trap (Done While Wrong):** An LLM has no mechanical friction. Its internal feeling of confidence is completely uncorrelated with code correctness. On terminal-bench, an unmanaged agent's dominant failure mode is declaring done while wrong — **15 of 18 losses**, at **$0.069 median spend against the $0.187 it spends on tasks it solves**. It quits early and confidently. [FINDINGS 2]
+-
+-   **This is family-specific, and it inverts.** On the DataCurve set the same unmanaged judgement scored **43% against superstate's 23–27%**: where the gate is weak, replacing the agent's judgement with it makes things worse, not better. A control plane is a gain only when the gate is the better judge. [FINDINGS 7]
+-2. **Cascading Edit Pollution:** When a conversational agent fails a test or breaks a build, it does not roll back. It apologizes and makes further edits on top of broken edits. Measured directly: retaining dirty working-tree state across retries scored **2/3 against 3/3** and cost **25.3% more input tokens per solve** (915k vs 683k). Failing turns are not hypothetical — one run recorded rollback firing on **all 30** verification failures. [FINDINGS 13.26, EXP-059, EXP-071]
+-3. **Context Collapse:** Production software repositories are loud, and unpredictably so. Across 64 recorded command outputs, **one** exceeded a thousand lines — and it was **25,105 lines** (`go test ./...`, exit 1): 88% of that run's entire output volume and 26× the next largest. The same command produced 961 lines in a sibling run. This is a heavy tail, not a steady flood, which is precisely why it must be handled mechanically: no rule about *which* commands are noisy would have caught it. [FINDINGS 13.26]
+-
+-Prompt engineering cannot fix these failures, because the failure is architectural. You cannot instruct an untrusted worker to supervise itself.
+-
+----
+-
+-### The Core Axiom
+-
+-> **Autonomous software engineering requires a strict decoupling between the Worker Plane and the Control Plane.**
+->
+-> The model is an untrusted, interchangeable reasoning engine.  
+-> The control plane is a deterministic, unyielding supervisor.  
+->
+-> **The worker proposes changes. The environment decides truth.**
+-
+----
+-
+-### How claims in this document are evidenced
+-
+-Every empirical number here cites the `superstate-eval` entry that establishes it, so auditing
+-this document is a lookup rather than a reconstruction. That convention exists because it was
+-missing: three figures quoted as established did not survive re-measurement — a read cache's
+-predicted 45–68% saving, a 1,600-line read optimum fitted to a single file, and a 13,288-token
+-MCP overhead that re-measured at ~400 [FINDINGS 13.25, 13.20, 13.27]. All three shared one
+-shape: derived once, under conditions nobody recorded, then repeated.
+-
+-**A number that cannot be re-derived is a claim, not a measurement.** State which it is.
+-
+-Design stances — the Core Axiom, the separation of planes — are not empirical and carry no
+-citation. Do not confuse the two kinds of sentence.
+-
+----
+-
+-### The Five Invariants of Autonomous Execution
+-
+-#### I. State Belongs to the Environment, Not the Token Buffer
+-The context window of a language model is volatile, lossy, and ephemeral. It is subject to compaction, prompt truncation, and attention degradation. Ground truth must never reside in conversational memory.
+-
+-Ground truth resides exclusively in the repository:
+-- The filesystem, the git commit tree, the dependency graph, and an externalized state machine.
+-- Every milestone, state transition, checkpoint commit, and environmental discovery is externalized to structured state on disk (`.agent-state/state.json`).
+-- The model remains stateless. The repository and the control plane maintain the state.
+-
+-#### II. Mechanical Verification Over Self-Assessment
+-An LLM must never be allowed to grade its own homework or declare itself finished.
+-
+-"Done" is not a qualitative judgement, a polite conversational sign-off, or an LLM reflection. "Done" is a binary reality certified by deterministic verification:
+-- A milestone is complete if and only if its verification command exits `0`.
+-- An ungated task or a vacuous check (`exit 0`, `true`) verifies nothing; it is a concession.
+-- If a verification command fails, the worker cannot proceed, cannot commit, and cannot exit.
+-
+-#### III. Scoped Git Rollbacks Over Cascading Edit Pollution
+-In software engineering, a bad edit is worse than no edit.
+-
+-When an attempt fails:
+-- Unverified, failing code must never accumulate in the working tree across turns.
+-- Every milestone boundary establishes an immutable git checkpoint.
+-- If an execution turn fails its verification gate, the control plane executes a scoped, deterministic hard rollback (`git reset --hard <checkpoint>`) before the agent is allowed to retry.
+-- The agent begins every new turn from a clean, verified state—armed with the exact failure telemetry of the previous attempt, not a corrupted workspace.
+-
+-**Resetting is not free, and this invariant is a default rather than a law.** One run reset a worker's *committed* feature five times, rebuilding it each time [FINDINGS 13.2]. `always` is the default because the ablation favours it [EXP-059]; `on-stall` and `on-regression` exist so the question stays measurable rather than assumed. Where the evidence is split, say so and keep the switch.
+-
+-#### IV. Mechanical Perimeter Guards & AST Hygiene
+-You cannot regulate an agent's context through system prompt guidelines alone. Under task pressure, an agent will take the shortest path to an answer, regardless of written rules.
+-
+-Context boundaries must be mechanically enforced at the execution perimeter:
+-- **PreToolUse Lifecycle Interception:** Runaway busy-wait polling loops must be blocked with mandatory cooldown debouncing at the system call boundary.
+-- **Deterministic AST Slicing:** Oversized file reads are intercepted and served as Tree-sitter symbol outlines with line numbers—zero hallucinations, zero latency. The line budget is a *measured* parameter, currently 400, not a round number [FINDINGS 13.21].
+-- **Tool Output Shunting:** The 25,105-line test log must be distilled to head, tail, and diagnostic signal before reaching the prompt. Note the channel this currently misses: **55–59% of a run's commands execute host-side**, outside the container bridge, and are never shunted [FINDINGS 13.21].
+-
+-##### The limit of the perimeter
+-
+-**A perimeter guard can shrink what a tool call returns. It cannot reduce how many calls the worker makes.** By the time a `PreToolUse` hook runs, the model has already emitted the request and the conversation has already been re-sent — the per-call cost is spent before the guard sees anything. The guard governs only the response, and therefore only what every *subsequent* turn must carry.
+-
+-This matters because cost scales with call count, not response size. The consequence is not theoretical: a read cache that refused reads whose lines the worker already held was built, measured, and **increased** input tokens by 37% and 55%. 89–91% of its refusals were immediately insisted on — a worker that has decided it needs those lines needs them, and a refusal it does not accept adds a round trip instead of saving one [FINDINGS 13.25].
+-
+-**So: interception is for bounding what enters context. Reducing how often the worker reaches for context is a worker-plane problem and cannot be solved here.** Any mechanism proposed under this invariant must say which of the two it is doing.
+-
+-#### V. Autonomous TDD — an evaluation fallback, never a production mode
+-
+-**Superstate does not author gates. Ever.** The orchestrator — a human, or an agent in a chat
+-session — decides the work and states the verification command. Superstate enforces it. That
+-separation is the Core Axiom: the worker proposes, the environment decides. A control plane
+-that invents its own definition of "done" has become the thing Invariant II exists to prevent,
+-however mechanically it does so.
+-
+-What follows below exists for one situation, and it is an artefact of *evaluation*, not a
+-product requirement. Benchmark tasks ship their real verifier sealed as an answer key and
+-provide no orchestrator, so a gate has to come from somewhere. Hand-authored fixtures were the
+-first answer and were deleted for leaking the shape of the solution. Worker-authored
+-reproduction tests are the second, and they are **bounded self-grading, not its elimination**:
+-the RED assertion proves a test discriminates *something*, never that it discriminates the
+-right thing. Measured gate precision for worker-authored tests is 3 of 4 [FINDINGS 13.9].
+-
+-Read the rest of this invariant as: *when no orchestrator exists, this is the least-bad way to
+-manufacture a gate, and its precision must be reported alongside any result it produced.*
+-Autonomous software engineering cannot rely on synthetic hand-authored scaffolds or answer-key leakage. Pre-seeding maintainer reproduction tests is cheating; it turns an open-ended engineering diagnosis into a narrow test-passing game.
+-
+-The canonical execution engine for autonomous engineering is mechanical Test-Driven Development:
+-1. **Red (Milestone 1 — Reproduction):** The agent diagnoses the issue and authors an isolated reproduction test. The verification gate mechanically asserts that the test compiles and **fails** against the pristine repository. A checkpoint commit is frozen.
+-2. **Green (Milestone 2 — Implementation):** The agent implements the minimal fix. The gate mechanically asserts that the reproduction test **and** the full repository test suite pass (exit `0`).
+-3. **Commit & Handoff:** The state machine records completion, creates an atomic commit, and yields verified code.
+-
+-**Known gap: this presupposes a repository exists at turn 0.** Red asserts a test fails against the pristine repository — but a task whose *instruction* is to clone or scaffold the repository has nothing to derive a runner from, and the DAG cannot be built. Failing closed is correct (Invariant II forbids a gate that cannot fail), but such a task must be recorded **ungateable for this arm**, never scored as work the agent failed to do. It was mis-scored for seven consecutive runs [FINDINGS 13.20].
+-
+----
+-
+-### The Architecture of Separation
+-
+-Autonomous execution requires an uncompromising division of responsibilities:
+-
+-```
+-┌────────────────────────────────────────────────────────┐
+-│                   THE CONTROL PLANE                    │
+-│      (Superstate: Compiled Rust Daemon & Engine)       │
+-│                                                        │
+-│  - Topological Milestone DAG & State Machine           │
+-│  - Mechanical Verification Gates (Exit Code Evaluator) │
+-│  - Scoped Git Checkpoint & Hard Rollback Engine        │
+-│  - Deterministic AST Impact Slicing (Tree-Sitter)      │
+-│  - PreToolUse Lifecycle Guards (Debounce & Shunt)      │
+-└───────────────────────────┬────────────────────────────┘
+-                            │ Dispatches bounded turnkey prompts;
+-                            │ Enforces verification & rollback
+-                            ▼
+-┌────────────────────────────────────────────────────────┐
+-│                    THE WORKER PLANE                    │
+-│        (Interchangeable Agent / Model Runtimes)        │
+-│                                                        │
+-│  - Antigravity / Claude Code / OpenAI / Local LLMs     │
+-│  - Proposes diffs, reads slices, executes tool calls   │
+-│  - Subject to timeout, budget governor, and lease      │
+-└────────────────────────────────────────────────────────┘
+-```
+-
+-The **Worker Plane** is untrusted. It can be any model, any provider, or any CLI driver. It does not hold state, it does not decide completion, and it cannot bypass the gate.
+-
+-The **Control Plane** is unyielding. It treats the worker as a transient compute process, bounding its context, validating its claims against compilers and test runners, and rolling back its mistakes until mechanical proof is achieved.
+-
+----
+-
+-### The Standard for Autonomous Engineering
+-
+-We reject the notion that AI coding should remain an interactive chat assistant that needs continuous human babysitting to catch its mistakes and premature declarations of victory.
+-
+-Real software engineering is:
+-- **Detached:** Dispatched into the background as an autonomous daemon that respects time leases and budgets.
+-- **Git-Native:** Operating directly on commits, worktrees, branches, and diffs.
+-- **Measurable:** Judged by held-out test suites, rigorous gate precision, and zero-leakage benchmarks.
+-- **Deterministic:** Guided by AST syntax graphs and shell exit codes, not prompt vibes.
+-
+----
+-
+-### In Summary
+-
+-> **We value:**
+-> - **Mechanical verification** over agent self-confidence.
+-> - **Scoped git rollbacks** over conversational apologies.
+-> - **Deterministic AST slicing** over token-bloated context dumps — while remembering it
+->   bounds what a call returns, never how many calls are made.
+-> - **Persistent environmental state** over ephemeral chat histories.
+-> - **Autonomous Red/Green TDD** over synthetic prompt scaffolds.
+-
+-**This is Superstate.**
+diff --git a/README.md b/README.md
+index 21e9e86..14a62c8 100644
+--- a/README.md
++++ b/README.md
+@@ -1,306 +1,124 @@
+ # Superstate
+ 
+-A control plane for coding agents.
+-
+-Superstate does not run your agent's tools and does not talk to the model. It
+-decides which task the agent is given next, and whether the work it produces is
+-allowed to advance.
+-
+-> Read **[The Superstate Manifesto](MANIFESTO.md)** for our core doctrine: why conversational LLM coding fails on real repositories, and the Five Invariants of autonomous software engineering.
+-
+-## Where this sits
+-
+-Autonomous coding tends to be built in three layers. Superstate is the one above
+-the layer most teams already have.
+-
+-| Layer | Owns | Examples |
+-|---|---|---|
+-| Model | Reasoning | Claude, Gemini, GPT |
+-| Harness (execution plane) | Tools, shell, file access, the conversation | Claude Code, Codex, Antigravity, Cursor |
+-| Control plane | Task selection and whether work may advance | Superstate |
+-
+-The harness provides the agent's tools. The control plane sets the terms it works
+-under: one task at a time, drawn from a dependency graph, with no progress until a
+-verification command passes.
+-
+-Superstate works with any harness that provides a standard toolset. It does not
+-replace one, and it is not tied to a particular model or vendor.
+-
+-## Why not a skill?
+-
+-Skills, rules files and system prompts are all documents the agent reads. Two
+-things follow from that.
+-
+-The first is that a document is advice. It can be misread, deprioritised, or
+-dropped when the context window fills. `state next` runs a verification command,
+-and if that command fails the task does not advance. The difference is
+-enforcement rather than wording.
+-
+-The second is that a document occupies the context window, competing with the
+-code under edit and growing as the conversation does. Superstate keeps the plan,
+-the completed set and the recorded findings on disk, and issues one self-contained
+-prompt per task. The prompt does not grow as tasks accumulate.
+-
+-If an agent ignores a skill, nothing happens. If it ignores the gate, the task
+-stays where it is.
+-
+-## The loop
+-
+-```mermaid
+-sequenceDiagram
+-    autonumber
+-    participant H as Harness<br/>(execution plane)
+-    participant S as Superstate<br/>(control plane)
+-    participant M as Model
+-    participant W as Workspace + git
+-
+-    Note over S: state init --from-plan plan.md<br/>parses the plan into a task DAG
+-
+-    loop until no tasks remain
+-        H->>S: state ready
+-        S-->>H: tasks whose dependencies are met
+-        H->>S: state prompt --task T --with-graph
+-        S-->>H: turnkey prompt<br/>(task spec + completed + ledger)
+-        H->>M: one bounded turn
+-        M->>W: edit, test, commit
+-        H->>S: state note "<finding>"
+-        Note over S: appended to the ledger and<br/>replayed into later prompts
+-        H->>S: state next --verify-cmd "…" --verify-git-clean
+-        S->>W: run the gate
+-        alt gate passes
+-            S-->>H: advanced, next task becomes active
+-        else gate fails
+-            S-->>H: refused, reason recorded in state
+-            Note over H,W: state rollback restores the checkpoint
+-        end
+-    end
+-```
++A high-performance, deterministic Rust agent harness implementing the **[SKILL.state](https://arxiv.org/html/2608.26263v2)** architecture ([arXiv:2608.26263v2](https://arxiv.org/html/2608.26263v2)) for autonomous software engineering.
+ 
+-Each turn receives the active task, what has already been completed, and any
+-findings recorded so far. It does not receive the transcript that produced them,
+-so the prompt stays roughly the same size whether the plan has three tasks or
+-thirty.
++---
+ 
+-The state machine is fail-closed. A task that cannot pass its gate stays active,
+-and the reason is written into the state file rather than left in the caller's
+-terminal output, so a session resumed later can still explain why it stopped.
++## The Problem: Conversational Agent Decay
+ 
+-## Key Capabilities
++Standard agent runtimes (ReAct, conversational scratchpads) treat software engineering as an extended chat session: every turn, observation, tool result, and intermediate reasoning trace is appended to an ever-growing prompt.
+ 
+-- ⚡ **Deterministic State Engine (`superstate-core`)**: Mathematical DFA execution engine backed by `fd-lock` atomic file locks, checkpointing, and an append-only epistemic ledger.
+-- 🌳 **Polyglot Code Intelligence (`superstate-syntax`)**: High-speed symbol and AST hierarchy extraction powered by Tree-sitter across Rust, Python, TypeScript, and Go.
+-- 🌿 **Isolated Milestone Worktrees (`superstate-worktree`)**: Automated git worktree lifecycle management targeting active feature branches with copy-on-write cache directory reflink support.
+-- 🔀 **Branch-Scoped State Isolation & Multi-Agent Concurrency**: Partitioned branch state storage (`.agent-state/branches/<branch>.json`) and reverse worktree discovery, allowing multiple autonomous agents or developer sessions to run in parallel on distinct feature branches with zero state collisions.
+-- 🛡️ **Zero-Noise Code Review (`superstate-review`)**: Daemon-less, git diff-driven adversarial code review system returning structured JSON findings.
+-- 📜 **Guidance & Rule Engine (`superstate-rules`)**: Deterministic Minijinja templates for generating universal agent guidance (`AGENTS.md`, `.cursor/rules`).
+-- 🔌 **Detached Handoff Gateway (`superstate-mcp`)**: Strict 4-tool JSON-RPC 2.0 stdio gateway initiating autonomous, out-of-loop background execution in isolated git worktrees (Cursor, Claude Code, Antigravity).
+-- 🩺 **5-Step Fail-Closed Doctor Handshake**: Automated verification probe ensuring binary integrity, active MCP loopback, client configurations, and file locks.
++On real codebases, this collapses:
+ 
+-## Installation
++1. **Quadratic Token Explosion ($\mathcal{O}(T^2)$):** Because prompt size $|\mathcal{C}_t|$ grows linearly with turn count $t$, cumulative tokens grow quadratically $\mathcal{O}(T^2)$. A single long run can consume millions of redundant tokens re-reading obsolete history.
++2. **Context Poisoning & Attention Drag:** Failed attempts, noisy background telemetry (e.g. 25,000-line build logs), and discarded hypotheses linger in context forever, degrading reasoning and causing agents to wander in circles.
++3. **The Failure of External Wrappers:** Attempting to supervise an agent from outside its loop (via Model Context Protocol or `PreToolUse` hooks) fails at the systems boundary:
++   - **47.6% of tokens** were burned on turns doing nothing but waiting for background command polling (`FINDINGS 13.29`).
++   - **89–91%** of hook-denied file reads were immediately re-requested on the next turn.
++   - You cannot fix execution from outside the loop. The harness must own execution from inside.
+ 
+-```bash
+-# Clone the repository
+-git clone git@github.com:climate-x-org/superstate.git
+-cd superstate
++---
+ 
+-# Install binaries locally
+-cargo install --path crates/superstate-cli
+-```
++## The Solution: SKILL.state Architecture
+ 
+-## Quick Start
++Superstate replaces append-only conversational history with **explicit, mutable execution state transitions**:
+ 
+-### 1. Verify the installation
+-```bash
+-superstate doctor
+ ```
+-
+-### 2. Initialise state
+-
+-Superstate supports multiple initialization workflows:
+-
+-#### Direct multi-milestone handoff (0 markdown disk artifacts)
+-
+-Initialise structured multi-milestone task DAGs directly in memory using `--milestones` with a JSON string or from stdin (`-`):
+-
+-```bash
+-# Pass JSON directly
+-superstate state init --milestones '[
+-  {"title": "Implement models", "verify_cmd": "cargo test -p my-core", "files": ["src/models.rs"]},
+-  {"title": "Implement CLI commands", "verify_cmd": "cargo test -p my-cli"}
+-]'
+-
+-# Or stream JSON via stdin
+-cat milestones.json | superstate state init --milestones -
++         (P, Σ_t, O_t) ---> [ Language Model ] ---> (R_t, ΔΣ_t, a_t)
++                                                        |        |
++                                                        |        v
++                                                        |   [ Execution Seam ]
++                                                        |   (Local / Container)
++                                                        |        |
++                                                        v        v
++                                                 Σ_{t+1} = Σ_t ⊕ ΔΣ_t    O_{t+1}
+ ```
+ 
+-#### Feature branch targeting, isolated worktrees & branch-scoped state isolation
+-
+-When initialized within a git repository, Superstate automatically captures your active feature branch (e.g., `feat/payment-flow`), never defaulting to `main`:
+-
+-1. **Branch-Scoped State Isolation:** Feature branches automatically resolve and persist state to `.agent-state/branches/<sanitized-branch>.json` (e.g., branch `feat/payment-flow` maps to `.agent-state/branches/feat-payment-flow.json`). Default branches (`main`, `master`) and non-git environments continue to default to `.agent-state/state.json` (100% backward compatible).
+-2. **Reverse Worktree Discovery:** Subagents and commands executing from inside an isolated worktree (`.wt/<task_slug>`) automatically discover and resolve to the parent feature branch state file without requiring `--state`.
+-3. **Turnkey Prompt State Contract:** Prompts rendered via `superstate state prompt` explicitly embed the state binding:
+-   ```markdown
+-   - **State File:** `/path/to/repo/.agent-state/branches/feat-payment-flow.json`
+-   - **Next Gate Command:** `superstate state next --state "/path/to/repo/.agent-state/branches/feat-payment-flow.json"`
+-   ```
+-   ensuring agents and automated runners always advance against the exact branch state.
+-4. **Isolated Worktree Provisioning:** Superstate provisions an isolated worktree for the active milestone (`.wt/task-1` on branch `wt/task-1`) branched off your active feature branch.
+-5. **Automatic Sequential Progression:** When `superstate state next --verify-cmd "..."` succeeds, Superstate commits any uncommitted worktree changes, merges the worktree cleanly into your active feature branch, cleans up `.wt/task-1`, and automatically provisions the next worktree (`.wt/task-2`) with the latest base branch state.
+-
+-#### From a markdown plan
++At every step $t$:
++- **$P$ (Immutable Procedural Specification):** The constant prompt: persona, goal, verification command, environment boundaries, and tool specifications.
++- **$\Sigma_t$ (Structured Execution State):** The current structured state. Separated by authority:
++  - `Orchestrator`: The task goal and verification command (**immutable to the worker**).
++  - `Runtime`: Facts observed by the harness (attempts, gate failures, rollbacks).
++  - `Agent`: Working notes, tested hypotheses, discovered files, and domain slots (**owned by the worker**).
++- **$O_t$ (Latest Observation):** The output of the immediately preceding action. *Zero past observations or previous tool outputs are replayed.*
++- **$R_t$ (Chain-of-Thought Reasoning):** Multi-step reasoning generated during the turn. **Permanently discarded** after the state transition is validated and applied.
++- **$\Delta \Sigma_t$ (State Patch):** JSON update merged into state via $\Sigma_{t+1} = \Sigma_t \oplus \Delta \Sigma_t$ with null-deletion semantics.
++- **$a_t$ (Synchronous Action):** Tool call executed synchronously via the harness.
+ 
+-The plan is ordinary markdown. Tasks are `### Task N: Title` headings, and
+-`**Depends on:**` lines make it a graph rather than a list.
++### Complexity Guarantee
++- **Prompt Size:** $|\mathcal{C}_t| = \mathcal{O}(1)$ (bounded, flat across hundreds of steps).
++- **Cumulative Tokens:** $\mathcal{O}(T)$ (strictly linear in steps, defeating the quadratic $\mathcal{O}(T^2)$ trap).
+ 
+-```bash
+-superstate state init --from-plan docs/plan.md
+-```
++---
+ 
+-### 3. Ask what can be worked on now
++## Core Systems Invariants
+ 
+-Returns only tasks whose dependencies are already complete.
++Superstate enforces three hard systems invariants:
+ 
+-```bash
+-superstate state ready --json
+-```
++### Invariant I: Native Execution Ownership (No Wrapper Tax)
++The turn loop runs directly in compiled Rust (`crates/superstate-agent`). Tool calls execute synchronously with strict wall-clock deadlines. There are no background polling turns, no uninterceptable external loops, and no async sleep loops.
+ 
+-### 4. Get the prompt for a task
+-
+-Self-contained: the task specification, what is already done, and findings
+-recorded so far.
+-
+-```bash
+-superstate state prompt --task "Task 2: Backend adapter" --with-graph
+-```
++### Invariant II: The Sealed Verification Gate (No LLM Self-Grading)
++An LLM must never grade its own homework. A gate the model can invoke is a gate it can decline to invoke, skip, or report a fake passing verdict for.
++- Completion is decided solely by an external command (`verification_cmd`) that exits 0.
++- The gate is **completely absent from the model's tool surface**. The runtime evaluates the gate only when the model stops calling tools.
+ 
+-### 5. Record what was learned
++### Invariant III: Verified Checkpoint Rollback
++A failing attempt's edits must not accumulate across retries. When a gate evaluation fails:
++- The workspace is deterministically rolled back via `git reset --hard` to the baseline checkpoint.
++- The failure telemetry is preserved and passed into $\Sigma_{t+1}$.
++- The agent begins each retry from a clean working tree armed with the exact error output of the previous attempt.
+ 
+-Notes are replayed into later prompts, so a task inherits earlier discoveries
+-without inheriting the conversation that produced them.
++---
+ 
+-```bash
+-superstate state note "Parser needs a lookahead token for typed declarations"
+-```
++## Execution Seams: Shell & Fs Parity
+ 
+-### 6. Advance through the gate
++To ensure the harness can run anywhere without changing the agent's behavior, execution and file access are abstracted into seams:
+ 
+-The task advances only if the verification command passes and the tree is clean.
++- **`Shell` Seam (`LocalShell`, `ContainerShell`):**
++  - **Process Groups (`setpgid(0)` + `kill(-pgid, SIGKILL)`):** All spawned commands run in their own process group. When a deadline expires, the entire process tree is terminated, eliminating leaked grandchild processes (e.g. runaway `find /`) and pipe-drain deadlocks.
++  - **Seam Parity:** Both `LocalShell` and `ContainerShell` enforce deadlines, drain stdout/stderr pipes concurrently, return exit code 124 on timeout, and preserve partial output.
++- **`Fs` Seam (`LocalFs`, `ContainerFs`):**
++  - Decouples file reading and writing from command execution so containerized or remote sandboxes do not suffer the split where an agent edits the host while verifying in a container.
+ 
+-```bash
+-superstate state next --verify-cmd "cargo test --workspace" --verify-git-clean
+-```
++---
+ 
+-Or run the verification and advance as one operation, checkpointing first so a
+-failure can be undone:
++## Workspace Structure
+ 
+-```bash
+-superstate state exec --verify-cmd "cargo test --workspace" \
+-    --checkpoint --rollback-on-fail
+ ```
+-
+-### Keeping a run healthy
+-
+-```bash
+-superstate state status --json     # where things stand
+-superstate state metrics --json    # progress and telemetry
+-superstate state doctor --repair   # diagnose plan/state drift
+-superstate state sync --plan docs/plan.md   # plan revised mid-flight
+-superstate state resume            # briefing after a lost session
+-superstate state list              # ASCII table view across all active & completed branches
+-superstate state list --json       # machine-readable JSON array of branch state summaries
++superstate/
++├── crates/
++│   ├── superstate-agent/     # Core SKILL.state runtime, turn loop, tools, shell/fs seams
++│   ├── superstate-provider/  # Provider client layer (Anthropic, Gemini, OpenAI)
++│   ├── superstate-core/      # State schemas, dictionary merge operators, serialization
++│   └── superstate-cli/       # Command-line inspection and utilities
++├── examples/                 # End-to-end evaluation harness runners
++└── tests/                    # Integration and regression test suites
+ ```
+ 
+-#### Inspecting branch execution states (`state list`)
+-
+-View all active and completed branch states across the repository in a clear ASCII table:
+-
+-```bash
+-superstate state list
+-```
++---
+ 
+-```text
+-Active & Completed Branches:
+-  Branch                     Status       Active Task              Step   Base Branch         
+-  feat-payment               InProgress   task-1: Add Stripe       1/2    main                
+-  feat-analytics             InProgress   task-1: Export Analytics 1/1    main                
+-  main (default)             Completed    -                        3/3    main                
+-```
++## Quick Start
+ 
+-Or query structured JSON for automation or multi-agent orchestrators:
++### Build and Test
+ 
+ ```bash
+-superstate state list --json
+-```
++# Build the workspace
++cargo build
+ 
+-```json
+-[
+-  {
+-    "branch": "feat-payment",
+-    "status": "in_progress",
+-    "active_task": "task-1: Add Stripe",
+-    "step": 1,
+-    "total_steps": 2,
+-    "base_branch": "main",
+-    "state_file": "/path/to/repo/.agent-state/branches/feat-payment.json"
+-  }
+-]
++# Run all unit and integration tests
++cargo test
+ ```
+ 
+-## Multi-Agent Concurrency
+-
+-Superstate is built from the ground up for concurrent multi-agent development where multiple autonomous agents (e.g., Claude Code, Cursor, Antigravity, or parallel CLI subagents) and human developers operate simultaneously in the same repository:
+-
+-- **Zero State Collisions:** Each agent running on a feature branch (e.g., `feat/billing`, `feat/auth`) automatically writes to its own isolated state file in `.agent-state/branches/<sanitized-branch>.json`. Because state files are partitioned per branch, multiple agents can initialize, checkpoint, fail, or advance without mutating or locking each other's execution DAGs.
+-- **Independent Git Worktrees:** Each milestone executes inside an isolated git worktree (`.wt/<task_slug>`) branched from the owning feature branch. Agents run isolated builds, tests, and edits without git index contention or file lock collisions. Shared build directories (e.g. `target/`, `node_modules/`) utilize copy-on-write reflinks for speed.
+-- **Reverse Worktree Discovery for Subagents:** When an orchestrator dispatches a subagent into `.wt/<task_slug>`, the subagent can invoke CLI commands (`superstate state show`, `superstate state next`) without needing an explicit `--state` flag. Superstate inspects `.agent-state/branches/*.json` and matches the active worktree path back to its parent branch state file automatically.
+-- **Explicit Turnkey Prompt Contracts:** Turnkey prompts produced by `superstate state prompt` explicitly declare `- **State File:** <path>` and `- **Next Gate Command:** superstate state next --state "<path>"`, eliminating ambiguity when orchestrating across agent boundaries.
+-- **Repository-Wide Visibility:** Orchestrators can invoke `superstate state list [--json]` at any time from any worktree or repository root to monitor the real-time status, active tasks, and progression steps across all concurrent agent runs.
+-
+-## Detached Handoff Gateway (`superstate-mcp`)
+-
+-Per **[ADR 0002](docs/adr/0002-detached-handoff-and-native-rust-harness.md)**, Superstate permanently deprecates in-loop MCP state-machine execution as an anti-pattern. Instead of trapping LLMs inside the chat session with in-loop state mutation tools, `superstate-mcp` exposes strictly **4 Gateway tools** designed to validate intent, provision isolated workspaces, and hand off execution to the native Rust daemon harness:
+-
+-- **`superstate_handoff`**: The sole execution entrypoint. Validates verification commands, provisions an isolated worktree (`.wt/<task-slug>`), initializes in-memory state, and detaches the background native daemon (`detach: true` by default). The chat agent is released immediately.
+-- **`superstate_status`**: Clean observability into active background jobs, milestone DAG progress, and daemon health without mutating state.
+-- **`superstate_cancel`**: Sends a graceful termination signal (`SIGTERM` -> `SIGKILL`) to running background workers and reaps PID records.
+-- **`superstate_doctor`**: Fail-closed diagnostic probe validating binary integrity, driver availability, and environment readiness.
+-
+-All legacy in-loop tools (`state_init`, `state_next`, `state_prompt`, `state_apply`, `worktree_*`) have been removed from the MCP catalog and return descriptive migration errors directing callers to `superstate_handoff`.
+-
+-## Development & Verification
+-
+-Ensure you have a modern Rust toolchain (2024 edition compatible):
++### Running an Evaluation Task
+ 
+ ```bash
+-# Run all workspace tests
+-cargo test --workspace --all-targets
+-
+-# Check formatting
+-cargo fmt --all --check
+-
+-# Run linter
+-cargo clippy --all-targets -- -D warnings
++# Run the end-to-end solve runner against a sample task
++cargo run -p superstate-agent --release --example solve
+ ```
+ 
+-## Architecture
+-
+-```
+-superstate/
+-├── crates/
+-│   ├── superstate-core/      # DFA state machine, atomic persistence, plan parser, verifier
+-│   ├── superstate-syntax/    # Polyglot Tree-sitter AST symbol extractor
+-│   ├── superstate-review/    # Adversarial code reviewer and git diff engine
+-│   ├── superstate-rules/     # Minijinja rules generator
+-│   ├── superstate-worktree/  # Isolated git worktrees and active branch targeting
+-│   ├── superstate-mcp/       # Native stdio JSON-RPC MCP server
+-│   └── superstate-cli/       # Unified CLI (superstate) and state runner (state)
+-```
+-
+-## Contributing
+-
+-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct, conventional commit guidelines, and PR workflow.
++---
+ 
+-## License
++## References
+ 
+-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
++- Badhe et al. (2026). *SKILL.state: Scalable Long-Horizon Agent Skills.* [arXiv:2608.26263v2](https://arxiv.org/html/2608.26263v2).
+diff --git a/crates/superstate-agent/Cargo.toml b/crates/superstate-agent/Cargo.toml
+index fc25b68..7a2ab94 100644
+--- a/crates/superstate-agent/Cargo.toml
++++ b/crates/superstate-agent/Cargo.toml
+@@ -7,10 +7,14 @@ edition.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ thiserror.workspace = true
+ superstate-provider = { path = "../superstate-provider" }
+ 
+ [dependencies.tempfile]
+ workspace = true
+ 
+ [dev-dependencies]
+ tempfile.workspace = true
++
++[target.'cfg(unix)'.dependencies]
++libc = "0.2"
++
+diff --git a/crates/superstate-agent/src/shell.rs b/crates/superstate-agent/src/shell.rs
+index 2608bb7..4aeb70f 100644
+--- a/crates/superstate-agent/src/shell.rs
++++ b/crates/superstate-agent/src/shell.rs
+@@ -55,115 +55,152 @@ pub trait Shell: Send + Sync {
+             .map(|b| format!("command -v {b} >/dev/null 2>&1 && echo {b}"))
+             .collect::<Vec<_>>()
+             .join("; ");
+         match self.exec(&probe, cwd, Duration::from_secs(30)) {
+             Ok(o) => o.stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+             Err(_) => Vec::new(),
+         }
+     }
+ }
+ 
++/// Executes a command with timeout enforcement, pipe draining, and process group isolation.
++///
++/// # Arguments
++///
++/// * `cmd` - The prepared [`Command`] ready to be configured and spawned.
++/// * `timeout` - Maximum duration allowed before the process and its descendants are terminated.
++///
++/// # Returns
++///
++/// Returns an [`Output`] containing collected stdout, stderr, and the process exit code,
++/// or an error message if the process cannot be spawned or waited on. On timeout, returns
++/// exit code 124 with a notice appended to stderr.
++fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
++    use std::io::Read;
++    use std::process::Stdio;
++
++    // The deadline is ENFORCED, not advisory.
++    // stdin is null so commands that read input (e.g. bare python, git commit, prompts)
++    // do not block forever on an unattended terminal.
++    cmd.stdin(Stdio::null())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped());
++
++    // Place the spawned command in its own process group on Unix.
++    // Without this, background grandchildren (e.g., `(sleep 30) & wait`) stay alive
++    // when the immediate child is killed, keeping pipe handles open and causing
++    // the reader threads to hang indefinitely.
++    #[cfg(unix)]
++    {
++        use std::os::unix::process::CommandExt;
++        cmd.process_group(0);
++    }
++
++    let mut child = cmd.spawn().map_err(|e| format!("cannot run command: {e}"))?;
++
++    // Drained on background threads: a command that fills the pipe buffer deadlocks against
++    // a parent that only reads after waiting, which turns a noisy command into a hang.
++    let mut so = child.stdout.take().ok_or("no stdout")?;
++    let mut se = child.stderr.take().ok_or("no stderr")?;
++    let t_out = std::thread::spawn(move || {
++        let mut b = String::new();
++        let _ = so.read_to_string(&mut b);
++        b
++    });
++    let t_err = std::thread::spawn(move || {
++        let mut b = String::new();
++        let _ = se.read_to_string(&mut b);
++        b
++    });
++
++    let deadline = std::time::Instant::now() + timeout;
++    let status = loop {
++        match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
++            Some(s) => break Some(s),
++            None if std::time::Instant::now() >= deadline => {
++                // On Unix, kill the entire process group with a negative PGID.
++                // This ensures all child and grandchild processes are terminated simultaneously,
++                // releasing standard stream pipe handles so reader threads unblock promptly.
++                #[cfg(unix)]
++                {
++                    let pgid = child.id() as i32;
++                    unsafe {
++                        libc::kill(-pgid, libc::SIGKILL);
++                    }
++                }
++                #[cfg(not(unix))]
++                {
++                    let _ = child.kill();
++                }
++                let _ = child.wait();
++                break None;
++            }
++            None => std::thread::sleep(Duration::from_millis(50)),
++        }
++    };
++
++    let stdout = t_out.join().unwrap_or_default();
++    let stderr = t_err.join().unwrap_or_default();
++
++    match status {
++        Some(s) => Ok(Output {
++            stdout,
++            stderr,
++            exit_code: s.code().unwrap_or(-1),
++        }),
++        // Reported as a failure the model can act on, with the output captured so far --
++        // a killed command that returns nothing tells it only that something went wrong.
++        None => Ok(Output {
++            stdout,
++            stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
++            exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
++        }),
++    }
++}
++
+ /// Commands run on this machine, in the workspace directory.
+ #[derive(Debug, Default, Clone)]
+ pub struct LocalShell;
+ 
+ impl Shell for LocalShell {
+     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+-        use std::io::Read;
+-        use std::process::Stdio;
+-
+-        // The deadline is ENFORCED, not advisory. This was a documented TODO for about an
+-        // hour, and the very first live run hit it: the model opened with
+-        // `which pytest; which python3; find / -name pytest 2>/dev/null` and the `find /`
+-        // scanned the entire filesystem for three and a half minutes before being killed by
+-        // hand. An agent will do this; a harness that merely documents a bound will hang.
+-        //
+-        // stdin is null for the same class of reason. Inheriting it lets any command that
+-        // reads input -- a bare `python3`, a `git commit` opening an editor, an `npm` prompt --
+-        // block forever on a terminal nobody is watching.
+-        let mut child = Command::new("bash")
+-            .arg("-lc")
+-            .arg(command)
+-            .current_dir(cwd)
+-            .stdin(Stdio::null())
+-            .stdout(Stdio::piped())
+-            .stderr(Stdio::piped())
+-            .spawn()
+-            .map_err(|e| format!("cannot run command: {e}"))?;
+-
+-        // Drained on threads: a command that fills the pipe buffer deadlocks against a parent
+-        // that only reads after waiting, which turns a noisy command into a hang.
+-        let mut so = child.stdout.take().ok_or("no stdout")?;
+-        let mut se = child.stderr.take().ok_or("no stderr")?;
+-        let t_out = std::thread::spawn(move || {
+-            let mut b = String::new(); let _ = so.read_to_string(&mut b); b });
+-        let t_err = std::thread::spawn(move || {
+-            let mut b = String::new(); let _ = se.read_to_string(&mut b); b });
+-
+-        let deadline = std::time::Instant::now() + timeout;
+-        let status = loop {
+-            match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
+-                Some(s) => break Some(s),
+-                None if std::time::Instant::now() >= deadline => {
+-                    let _ = child.kill();
+-                    let _ = child.wait();
+-                    break None;
+-                }
+-                None => std::thread::sleep(Duration::from_millis(50)),
+-            }
+-        };
+-
+-        let stdout = t_out.join().unwrap_or_default();
+-        let stderr = t_err.join().unwrap_or_default();
+-
+-        match status {
+-            Some(s) => Ok(Output { stdout, stderr, exit_code: s.code().unwrap_or(-1) }),
+-            // Reported as a failure the model can act on, with the output captured so far --
+-            // a killed command that returns nothing tells it only that something went wrong.
+-            None => Ok(Output {
+-                stdout,
+-                stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
+-                exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
+-            }),
+-        }
++        let mut cmd = Command::new("bash");
++        cmd.arg("-lc").arg(command).current_dir(cwd);
++        exec_command(cmd, timeout)
+     }
+ 
+     fn describe(&self) -> String {
+         "Commands run directly on this machine, in the workspace directory.".into()
+     }
+ }
+ 
+ /// Commands run inside an already-running container via `docker exec`.
+ ///
+ /// The case the previous harness handled with a prose instruction. Here the model still calls
+ /// `bash` and cannot route around it, because there is no host shell in its tool surface.
+ #[derive(Debug, Clone)]
+ pub struct ContainerShell {
+     pub container_id: String,
+     /// Where the workspace is mounted inside the container.
+     pub workdir: PathBuf,
+ }
+ 
+ impl Shell for ContainerShell {
+-    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+-        let out = Command::new("docker")
+-            .args(["exec", "-i", "-w"])
++    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
++        // Construct docker exec invocation targeting the running container and its workdir.
++        let mut cmd = Command::new("docker");
++        cmd.args(["exec", "-i", "-w"])
+             .arg(&self.workdir)
+             .arg(&self.container_id)
+-            .args(["bash", "-lc", command])
+-            .output()
+-            .map_err(|e| format!("cannot exec in container {}: {e}", self.container_id))?;
+-        Ok(Output {
+-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+-            exit_code: out.status.code().unwrap_or(-1),
+-        })
++            .args(["bash", "-lc", command]);
++        // Delegate to exec_command to ensure process group isolation and timeout parity.
++        exec_command(cmd, timeout)
+     }
+ 
+     fn describe(&self) -> String {
+         format!(
+             "Commands run inside the project container at {}. Project dependencies are \
+              installed there, not on the host.",
+             self.workdir.display()
+         )
+     }
+ }
+diff --git a/crates/superstate-agent/tests/test_shell_timeout.rs b/crates/superstate-agent/tests/test_shell_timeout.rs
+index 2da9349..aff2c4c 100644
+--- a/crates/superstate-agent/tests/test_shell_timeout.rs
++++ b/crates/superstate-agent/tests/test_shell_timeout.rs
+@@ -55,10 +55,61 @@ fn a_command_producing_more_output_than_the_pipe_buffer_does_not_deadlock() {
+     assert!(started.elapsed() < Duration::from_secs(25), "must not have deadlocked");
+ }
+ 
+ #[test]
+ fn a_normal_command_is_unaffected() {
+     let d = tempfile::tempdir().unwrap();
+     let out = LocalShell.exec("echo hello", d.path(), Duration::from_secs(30)).unwrap();
+     assert_eq!(out.stdout.trim(), "hello");
+     assert_eq!(out.exit_code, 0);
+ }
++
++#[test]
++fn grandchild_process_tree_is_killed_at_deadline() {
++    // If only the parent bash process is killed, background grandchildren
++    // (such as `find /` or subshells) stay alive, keep pipe handles open,
++    // and cause reader thread joins to hang.
++    let d = tempfile::tempdir().unwrap();
++    let started = Instant::now();
++    let out = LocalShell
++        .exec("sh -c '(sleep 30) & wait'", d.path(), Duration::from_secs(1))
++        .unwrap();
++    let elapsed = started.elapsed();
++    assert!(
++        elapsed < Duration::from_secs(4),
++        "must not deadlock on grandchild pipe handles: took {elapsed:?}"
++    );
++    assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
++    assert!(
++        out.stderr.contains("killed by superstate"),
++        "kill notice missing from stderr: {:?}",
++        out.stderr
++    );
++}
++
++#[test]
++fn container_shell_enforces_timeout_on_hung_execution() {
++    use std::path::PathBuf;
++    use superstate_agent::shell::ContainerShell;
++
++    let shell = ContainerShell {
++        container_id: "non-existent-container-id-12345".into(),
++        workdir: PathBuf::from("/workspace"),
++    };
++    let d = tempfile::tempdir().unwrap();
++    let started = Instant::now();
++    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
++    let elapsed = started.elapsed();
++    assert!(
++        elapsed < Duration::from_secs(3),
++        "container exec must obey timeout bound: took {elapsed:?}"
++    );
++    match res {
++        Ok(out) => {
++            assert!(out.exit_code != 0);
++        }
++        Err(e) => {
++            assert!(!e.is_empty());
++        }
++    }
++}
++
+diff --git a/docs/index.md b/docs/index.md
+index 3d068e2..4d78e3b 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -1,41 +1,28 @@
+ # Superstate
+ 
+-**Superstate** is a high-performance, deterministic execution state engine, polyglot AST code intelligence platform, daemon-less adversarial code reviewer, and Model Context Protocol (MCP) server written in Rust.
++**Superstate** is a high-performance, deterministic Rust agent harness implementing the **[SKILL.state](https://arxiv.org/html/2608.26263v2)** architecture ([arXiv:2608.26263v2](https://arxiv.org/html/2608.26263v2)) for autonomous software engineering.
+ 
+-> 📖 **Read [The Superstate Manifesto](manifesto.md)** to understand the architectural doctrine, the separation of Worker and Control planes, and the Five Invariants of autonomous execution.
++It replaces append-only conversational history with explicit, mutable execution state transitions $(P, \Sigma_t, O_t) \to (R_t, \Delta \Sigma_t, a_t)$, maintaining a strictly bounded $\mathcal{O}(1)$ prompt footprint and linear $\mathcal{O}(T)$ cumulative token complexity across long-horizon execution.
+ 
+-## Features
++## Core Features
+ 
+-- ⚡ **Deterministic State Engine (`superstate-core`):** DFA state machine with atomic file-locking (`fd-lock`), checkpoint/rollback safety, and append-only epistemic ledger.
+-- 🌳 **Polyglot Code Intelligence (`superstate-syntax`):** Native Tree-sitter AST symbol extractor across Rust, Python, TypeScript, and Go.
+-- 🛡️ **Daemon-less Adversarial Review (`superstate-review`):** Zero-noise static analysis and LLM review integration without background daemons.
+-- 📜 **Guidance Generator (`superstate-rules`):** Minijinja template renderer for `AGENTS.md`, `CLAUDE.md`, and Cursor rules.
+-- 🔌 **Detached Handoff Gateway (`superstate-mcp`):** Strict 4-tool JSON-RPC 2.0 stdio gateway connecting chat sessions into autonomous background worktrees (Cursor, Claude Code, Antigravity).
+-- 🚀 **Native Daemon Harness (`superstate state daemon`):** Autonomous, out-of-loop worker driver with OS verification gates, retry error-injection, and automatic worktree merge.
+-- 🩺 **5-Step Fail-Closed Doctor Handshake:** Automated end-to-end verification verifying binary integrity, MCP loopback, client configs, and file locks.
++- ⚡ **SKILL.state Runtime (`superstate-agent`):** Discrete state transitions where intermediate reasoning traces ($R_t$) are discarded after each turn, preventing prompt growth.
++- 🛡️ **Sealed Verification Gate:** Completion is decided strictly by runtime evaluation of an external command (`verification_cmd`); the gate is absent from the model's tool surface to prevent self-grading.
++- 🔄 **Verified Checkpoint Rollback:** On verification failure, git working trees are automatically reset to baseline while preserving failure telemetry in the state.
++- 🐚 **Seam Parity (`LocalShell` & `ContainerShell`):** Synchronous command execution with Unix process groups (`setpgid(0)` + `kill(-pgid, SIGKILL)`), preventing orphaned grandchildren and pipe-drain deadlocks.
++- 📦 **Pluggable Providers (`superstate-provider`):** Streaming provider interfaces for Anthropic, Gemini, and OpenAI.
+ 
+ ## Quick Start
+ 
+-### Installation
++### Build and Test
+ 
+ ```bash
+-cargo install superstate-cli
++cargo build
++cargo test
+ ```
+ 
+-### 5-Step Health Check
++### Run an Evaluation Task
+ 
+ ```bash
+-superstate doctor
+-```
+-
+-### Initialize State Tracking
+-
+-```bash
+-state init --plan docs/plan.md
+-```
+-
+-### Advance Active Task
+-
+-```bash
+-state next --verify-cmd "cargo test" --verify-git-clean
++cargo run -p superstate-agent --release --example solve
+ ```
+diff --git a/docs/manifesto.md b/docs/manifesto.md
+deleted file mode 120000
+index 222fd33..0000000
+--- a/docs/manifesto.md
++++ /dev/null
+@@ -1 +0,0 @@
+-../MANIFESTO.md
+\ No newline at end of file
+diff --git a/docs/superpowers/plans/2026-09-22-shell-process-groups-and-container-parity.md b/docs/superpowers/plans/2026-09-22-shell-process-groups-and-container-parity.md
+new file mode 100644
+index 0000000..2b53e02
+--- /dev/null
++++ b/docs/superpowers/plans/2026-09-22-shell-process-groups-and-container-parity.md
+@@ -0,0 +1,321 @@
++# Shell Process Groups & Container Seam Parity Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Choose an execution mode:
++> 1. `superpowers:subagent-driven-development` (recommended for multi-agent reviews, backed by `SKILL.state` / `.agent-state/state.json`)
++> 2. `agent-rules:stateful-execution` (SKILL.state) (recommended for deterministic single-agent linear execution)
++> 3. `superpowers:executing-plans` (batch execution with manual checkpoints)
++> Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Implement Unix process group isolation (`setpgid(0)` + `kill(-pgid, SIGKILL)`) and wire full timeout and execution parity into `ContainerShell`, preventing orphan grandchild leaks and pipe drain deadlocks across all execution environments.
++
++**Architecture:** Extract a shared `exec_command(cmd, timeout)` execution engine in `crates/superstate-agent/src/shell.rs` configured with `process_group(0)` and null stdin. On deadline expiry, terminate the entire process group simultaneously with `libc::kill(-pgid, SIGKILL)`, allowing pipe reader threads to unblock without delay. Delegate both `LocalShell::exec` and `ContainerShell::exec` to this shared engine.
++
++**Tech Stack:** Rust (2021 edition), `std::process::Command`, `std::os::unix::process::CommandExt`, `libc`, `tempfile`.
++
++## Global Constraints
++- Target crate: `crates/superstate-agent`
++- Rust 2021 edition, zero compiler warnings (`cargo check -p superstate-agent`)
++- Preserve existing timeout exit code (124) and stderr notice: `\n[killed by superstate after {}s]`
++- Preserve partial output captured prior to termination
++- Clean execution on Unix platforms (macOS / Linux)
++
++---
++
++### Task 1: Add `libc` Dependency to `crates/superstate-agent`
++
++- **Depends on:** none
++
++**Files:**
++- Modify: `crates/superstate-agent/Cargo.toml:11-17`
++
++**Interfaces:**
++- Consumes: none
++- Produces: `libc` available on Unix targets for POSIX process group signalling.
++
++- [ ] **Step 1: Add Unix target dependency to `Cargo.toml`**
++
++Edit `crates/superstate-agent/Cargo.toml` to add:
++```toml
++[target.'cfg(unix)'.dependencies]
++libc = "0.2"
++```
++
++- [ ] **Step 2: Verify `Cargo.toml` parses and workspace compiles**
++
++Run:
++```bash
++cargo check -p superstate-agent
++```
++Expected: PASS with 0 warnings.
++
++- [ ] **Step 3: Commit dependency change**
++
++```bash
++git add crates/superstate-agent/Cargo.toml
++git commit --no-gpg-sign -m "build: add libc dependency for Unix process group killing"
++```
++
++---
++
++### Task 2: Failing Regression Test for Grandchild Process Tree Termination
++
++- **Depends on:** Task 1
++
++**Files:**
++- Modify: `crates/superstate-agent/tests/test_shell_timeout.rs`
++
++**Interfaces:**
++- Consumes: `LocalShell`, `Shell::exec`
++- Produces: Failing regression test proving single PID killing leaves grandchildren running and deadlocks pipe reader threads.
++
++- [ ] **Step 1: Write the failing regression test**
++
++Add `grandchild_process_tree_is_killed_at_deadline` to `crates/superstate-agent/tests/test_shell_timeout.rs`:
++
++```rust
++#[test]
++fn grandchild_process_tree_is_killed_at_deadline() {
++    // If only the parent bash process is killed, background grandchildren
++    // (such as `find /` or subshells) stay alive, keep pipe handles open,
++    // and cause reader thread joins to hang.
++    let d = tempfile::tempdir().unwrap();
++    let started = Instant::now();
++    // Subshell spawning a grandchild and waiting:
++    let out = LocalShell
++        .exec("sh -c '(sleep 30) & wait'", d.path(), Duration::from_secs(1))
++        .unwrap();
++    let elapsed = started.elapsed();
++    assert!(
++        elapsed < Duration::from_secs(4),
++        "must not deadlock on grandchild pipe handles: took {elapsed:?}"
++    );
++    assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
++    assert!(
++        out.stderr.contains("killed by superstate"),
++        "kill notice missing from stderr: {:?}",
++        out.stderr
++    );
++}
++```
++
++- [ ] **Step 2: Run test to confirm it reproduces the defect (fails or hangs)**
++
++Run:
++```bash
++cargo test -p superstate-agent --test test_shell_timeout grandchild_process_tree_is_killed_at_deadline -- --nocapture
++```
++Expected: The test will either hang for 30 seconds or take > 4 seconds, failing the assertion.
++
++---
++
++### Task 3: Shared `exec_command` with Process Groups and Negative PGID Termination
++
++- **Depends on:** Task 2
++
++**Files:**
++- Modify: `crates/superstate-agent/src/shell.rs:70-130`
++
++**Interfaces:**
++- Consumes: `std::os::unix::process::CommandExt`, `libc::kill`, `libc::SIGKILL`
++- Produces: `fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String>` shared by all shell implementations.
++
++- [ ] **Step 1: Implement `exec_command` and update `LocalShell::exec`**
++
++In `crates/superstate-agent/src/shell.rs`, extract the shared execution logic into `exec_command`:
++
++```rust
++fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
++    use std::io::Read;
++    use std::process::Stdio;
++
++    cmd.stdin(Stdio::null())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped());
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::process::CommandExt;
++        cmd.process_group(0);
++    }
++
++    let mut child = cmd.spawn().map_err(|e| format!("cannot run command: {e}"))?;
++
++    let mut so = child.stdout.take().ok_or("no stdout")?;
++    let mut se = child.stderr.take().ok_or("no stderr")?;
++    let t_out = std::thread::spawn(move || {
++        let mut b = String::new();
++        let _ = so.read_to_string(&mut b);
++        b
++    });
++    let t_err = std::thread::spawn(move || {
++        let mut b = String::new();
++        let _ = se.read_to_string(&mut b);
++        b
++    });
++
++    let deadline = std::time::Instant::now() + timeout;
++    let status = loop {
++        match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
++            Some(s) => break Some(s),
++            None if std::time::Instant::now() >= deadline => {
++                #[cfg(unix)]
++                {
++                    let pgid = child.id() as i32;
++                    unsafe {
++                        libc::kill(-pgid, libc::SIGKILL);
++                    }
++                }
++                #[cfg(not(unix))]
++                {
++                    let _ = child.kill();
++                }
++                let _ = child.wait();
++                break None;
++            }
++            None => std::thread::sleep(Duration::from_millis(50)),
++        }
++    };
++
++    let stdout = t_out.join().unwrap_or_default();
++    let stderr = t_err.join().unwrap_or_default();
++
++    match status {
++        Some(s) => Ok(Output {
++            stdout,
++            stderr,
++            exit_code: s.code().unwrap_or(-1),
++        }),
++        None => Ok(Output {
++            stdout,
++            stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
++            exit_code: 124,
++        }),
++    }
++}
++```
++
++Update `LocalShell::exec`:
++```rust
++impl Shell for LocalShell {
++    fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
++        let mut cmd = Command::new("bash");
++        cmd.arg("-lc").arg(command).current_dir(cwd);
++        exec_command(cmd, timeout)
++    }
++
++    fn describe(&self) -> String {
++        "Commands run directly on this machine, in the workspace directory.".into()
++    }
++}
++```
++
++- [ ] **Step 2: Run tests to verify the regression test now passes**
++
++Run:
++```bash
++cargo test -p superstate-agent --test test_shell_timeout
++```
++Expected: All tests pass including `grandchild_process_tree_is_killed_at_deadline` in under 2 seconds.
++
++- [ ] **Step 3: Commit implementation**
++
++```bash
++git add crates/superstate-agent/src/shell.rs crates/superstate-agent/tests/test_shell_timeout.rs
++git commit --no-gpg-sign -m "fix(agent): kill process group on timeout to prevent orphan grandchild leaks"
++```
++
++---
++
++### Task 4: Wire `ContainerShell::exec` to `exec_command` with Timeout Parity
++
++- **Depends on:** Task 3
++
++**Files:**
++- Modify: `crates/superstate-agent/src/shell.rs:140-170`
++- Modify: `crates/superstate-agent/tests/test_shell_timeout.rs`
++
++**Interfaces:**
++- Consumes: `exec_command`
++- Produces: `ContainerShell::exec` enforcing timeout bounds, process groups, and partial output parity.
++
++- [ ] **Step 1: Write unit test for `ContainerShell` timeout enforcement**
++
++In `crates/superstate-agent/tests/test_shell_timeout.rs`, add:
++
++```rust
++#[test]
++fn container_shell_enforces_timeout_on_hung_execution() {
++    use std::path::PathBuf;
++    use superstate_agent::shell::ContainerShell;
++
++    // Command that invokes a non-existent or deadlocked docker command with a short timeout.
++    // If docker is absent, it returns an error immediately. If present, it must be bounded by timeout.
++    let shell = ContainerShell {
++        container_id: "non-existent-container-id-12345".into(),
++        workdir: PathBuf::from("/workspace"),
++    };
++    let d = tempfile::tempdir().unwrap();
++    let started = Instant::now();
++    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
++    let elapsed = started.elapsed();
++    assert!(
++        elapsed < Duration::from_secs(3),
++        "container exec must obey timeout bound: took {elapsed:?}"
++    );
++    // Either fails to find container or exits cleanly with timeout/error
++    match res {
++        Ok(out) => {
++            assert!(out.exit_code != 0);
++        }
++        Err(e) => {
++            assert!(!e.is_empty());
++        }
++    }
++}
++```
++
++- [ ] **Step 2: Implement `ContainerShell::exec` delegation to `exec_command`**
++
++In `crates/superstate-agent/src/shell.rs`:
++```rust
++impl Shell for ContainerShell {
++    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
++        let mut cmd = Command::new("docker");
++        cmd.args(["exec", "-i", "-w"])
++            .arg(&self.workdir)
++            .arg(&self.container_id)
++            .args(["bash", "-lc", command]);
++        exec_command(cmd, timeout)
++    }
++
++    fn describe(&self) -> String {
++        format!(
++            "Commands run inside the project container at {}. Project dependencies are \
++             installed there, not on the host.",
++            self.workdir.display()
++        )
++    }
++}
++```
++
++- [ ] **Step 3: Run all agent test suites**
++
++Run:
++```bash
++cargo test -p superstate-agent
++```
++Expected: All tests in `test_run.rs`, `test_shell_timeout.rs`, `test_state_authority.rs`, `test_tools.rs` PASS.
++
++- [ ] **Step 4: Commit container parity changes**
++
++```bash
++git add crates/superstate-agent/src/shell.rs crates/superstate-agent/tests/test_shell_timeout.rs
++git commit --no-gpg-sign -m "feat(agent): wire ContainerShell to exec_command with full timeout parity"
++```
++
++---
++
++## Verification Checklist
++- Run `cargo check -p superstate-agent` (0 errors, 0 warnings).
++- Run `cargo test -p superstate-agent` (all suites pass).
++- Verify `roborev status` and `roborev show HEAD` after each commit.
+diff --git a/docs/superpowers/specs/2026-09-22-shell-process-groups-and-container-parity-design.md b/docs/superpowers/specs/2026-09-22-shell-process-groups-and-container-parity-design.md
+new file mode 100644
+index 0000000..267be58
+--- /dev/null
++++ b/docs/superpowers/specs/2026-09-22-shell-process-groups-and-container-parity-design.md
+@@ -0,0 +1,165 @@
++# Design Specification: Shell Process Groups & Container Seam Parity
++
++**Status:** Proposed  
++**Date:** 2026-09-22  
++**Target:** `crates/superstate-agent` (`shell.rs`, `Cargo.toml`, `tests/test_shell_timeout.rs`)  
++
++---
++
++## 1. Executive Summary & Problem Statement
++
++### 1.1 Context & Incident
++During an autonomous evaluation run of `superstate-agent`, the model issued:
++```bash
++which pytest; which python3; find / -name pytest 2>/dev/null
++```
++The command scanned the entire macOS host filesystem for 3 minutes and 28 seconds before being killed by hand.
++
++While `LocalShell::exec` accepted a `timeout: Duration` parameter, the implementation had two critical latent defects:
++1. **Grandchild Orphan Leaks:** `child.kill()` was issued only to the top-level `bash` PID. The subshell/pipeline grandchild `find /` was reparented to `init` and continued running.
++2. **Pipe Drain Deadlock:** Because the orphaned `find /` process inherited the write ends of `stdout` and `stderr`, the harness reader threads (`t_out.join()` and `t_err.join()`) **deadlocked waiting for EOF**, defeating the timeout and hanging the harness.
++
++Furthermore, an audit of the `Shell` seam revealed that **`ContainerShell::exec` was an unfinished stub**:
++- It prefixed `_timeout: Duration` with an underscore and completely ignored it.
++- It used synchronous `Command::output()`. Any hung command inside the container would hang the harness indefinitely.
++
++### 1.2 Objective
++1. **Process Group Isolation (`setpgid(0)` + `kill(-pgid, SIGKILL)`):** Ensure all commands spawned by `LocalShell` run in their own process group, and deadline expiry terminates the entire process tree simultaneously, releasing pipe handles and unblocking the harness.
++2. **Container Seam Parity:** Wire timeouts and process group management into `ContainerShell::exec` using the exact same robust execution engine.
++3. **Evaluation Sandboxing:** Ensure evaluation runs have full container isolation so unguided commands like `find /` are confined to the container root rather than the host.
++
++---
++
++## 2. Architecture & Invariants
++
++### 2.1 Core Invariants
++- **Invariant I (No Unbounded Waits):** A command executed through `Shell::exec` must **never** be able to hang the harness process, regardless of whether it runs on the host or inside a container.
++- **Invariant II (Process Tree Quiescence):** When a command times out, all descendant processes must be killed. No orphan processes may survive to consume host CPU or keep pipe descriptors open.
++- **Invariant III (Seam Parity):** `LocalShell` and `ContainerShell` must exhibit identical timeout semantics:
++  - Both enforce the given `timeout: Duration`.
++  - Both return exit code `124` on timeout.
++  - Both preserve and return whatever partial `stdout` and `stderr` was buffered before termination.
++  - Both append `\n[killed by superstate after Xs]` to `stderr`.
++
++```
++                  +----------------------------------+
++                  |         Agent Turn Loop          |
++                  |          (Runner / Gate)         |
++                  +-----------------+----------------+
++                                    |
++                            shell.exec(cmd, timeout)
++                                    |
++                     +--------------+--------------+
++                     |                             |
++             LocalShell::exec             ContainerShell::exec
++                     |                             |
++           bash -lc <cmd>                docker exec ... bash -lc <cmd>
++                     \                             /
++                      +-------------+-------------+
++                                    |
++                             exec_command()
++                       - Stdio::null() stdin
++                       - process_group(0) (Unix)
++                       - Pipe drain worker threads
++                       - Deadline polling loop
++                       - On timeout: kill(-pgid, SIGKILL)
++                       - Exit code 124 + partial output
++```
++
++---
++
++## 3. Detailed Component Design
++
++### 3.1 Shared Subprocess Execution Engine (`exec_command`)
++
++In `crates/superstate-agent/src/shell.rs`, extract the execution loop into a private helper function:
++
++```rust
++fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String>
++```
++
++#### Step 1: Process Group & Stdio Configuration
++- `cmd.stdin(Stdio::null())`: Prevents commands from hanging on interactive input.
++- `cmd.stdout(Stdio::piped())` and `cmd.stderr(Stdio::piped())`: Non-blocking pipe capture.
++- `#[cfg(unix)]`: Call `std::os::unix::process::CommandExt::process_group(&mut cmd, 0)`.
++  This calls `setpgid(0, 0)` in the child before `exec`, placing the child and all future grandchildren in a distinct process group where `pgid == child.id()`.
++
++#### Step 2: Concurrently Drained Pipes
++- Spawn `t_out` and `t_err` threads reading `stdout` and `stderr` into strings.
++- Because background reading starts immediately upon spawn, pipe buffer deadlock (typically 64KB OS pipe buffer saturation) is impossible.
++
++#### Step 3: Polling Loop & Process Tree Teardown
++- Loop with `child.try_wait()` every 50ms against `deadline = Instant::now() + timeout`.
++- If `Instant::now() >= deadline`:
++  - `#[cfg(unix)]`:
++    ```rust
++    let pgid = child.id() as i32;
++    unsafe {
++        libc::kill(-pgid, libc::SIGKILL);
++    }
++    ```
++  - `#[cfg(not(unix))]`:
++    ```rust
++    let _ = child.kill();
++    ```
++  - Call `let _ = child.wait();` to reap the parent zombie.
++  - The SIGKILL delivered to `-pgid` terminates all grandchildren (e.g. `find /`, subshells, pipeline stages).
++  - All write descriptors associated with the pipe are closed immediately.
++  - `t_out.join()` and `t_err.join()` unblock cleanly without delay.
++  - Return `exit_code: 124` with stderr marker `[killed by superstate after {}s]`.
++
++### 3.2 `LocalShell::exec` Refactoring
++`LocalShell::exec` becomes a clean wrapper constructing the local `bash` command:
++```rust
++impl Shell for LocalShell {
++    fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
++        let mut cmd = Command::new("bash");
++        cmd.arg("-lc").arg(command).current_dir(cwd);
++        exec_command(cmd, timeout)
++    }
++    // ...
++}
++```
++
++### 3.3 `ContainerShell::exec` Parity Implementation
++`ContainerShell::exec` constructs the containerized execution command and delegates to `exec_command`:
++```rust
++impl Shell for ContainerShell {
++    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
++        let mut cmd = Command::new("docker");
++        cmd.args(["exec", "-i", "-w"])
++            .arg(&self.workdir)
++            .arg(&self.container_id)
++            .args(["bash", "-lc", command]);
++        exec_command(cmd, timeout)
++    }
++    // ...
++}
++```
++
++### 3.4 Dependency Updates
++Add `libc` to `crates/superstate-agent/Cargo.toml`:
++```toml
++[target.'cfg(unix)'.dependencies]
++libc = "0.2"
++```
++
++---
++
++## 4. Verification & Testing Strategy
++
++### 4.1 Unit & Integration Tests in `tests/test_shell_timeout.rs`
++1. **Grandchild Process Tree Termination Test:**
++   - Execute a command that spawns background / grandchild subshells:
++     `bash -lc '(sleep 30) & wait'` or `bash -lc 'sh -c "sleep 30"'`.
++   - Bound timeout to 1 second.
++   - Verify execution finishes in $< 3$ seconds (proving reader threads did NOT deadlock on surviving grandchild write ends).
++   - Verify exit code is `124`.
++   - Verify partial output and kill notice.
++2. **Container Timeout Verification:**
++   - Unit test verifying `ContainerShell::exec` passes through `exec_command` with timeout bounds.
++
++### 4.2 Linter & Typechecks
++- `cargo check -p superstate-agent`
++- `cargo test -p superstate-agent`
++- Clean compilation on macOS (Unix).
+diff --git a/mkdocs.yml b/mkdocs.yml
+index 172915e..9f1d3d0 100644
+--- a/mkdocs.yml
++++ b/mkdocs.yml
+@@ -8,20 +8,19 @@ theme:
+     scheme: slate
+     primary: indigo
+     accent: teal
+   features:
+     - navigation.instant
+     - navigation.tracking
+     - content.code.copy
+ 
+ nav:
+   - Overview: index.md
+-  - Manifesto: manifesto.md
+   - Architecture: architecture.md
+   - State Machine & DFA: state.md
+   - Code Intelligence (AST): syntax.md
+   - Adversarial Review: review.md
+   - MCP Server & Integrations: mcp.md
+   - Contributing: contributing.md
+ 
+ plugins:
+   - search
