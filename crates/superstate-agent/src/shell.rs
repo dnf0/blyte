@@ -62,69 +62,110 @@ pub trait Shell: Send + Sync {
     }
 }
 
+/// Executes a command with timeout enforcement, pipe draining, and process group isolation.
+///
+/// # Arguments
+///
+/// * `cmd` - The prepared [`Command`] ready to be configured and spawned.
+/// * `timeout` - Maximum duration allowed before the process and its descendants are terminated.
+///
+/// # Returns
+///
+/// Returns an [`Output`] containing collected stdout, stderr, and the process exit code,
+/// or an error message if the process cannot be spawned or waited on. On timeout, returns
+/// exit code 124 with a notice appended to stderr.
+fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    // The deadline is ENFORCED, not advisory.
+    // stdin is null so commands that read input (e.g. bare python, git commit, prompts)
+    // do not block forever on an unattended terminal.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Place the spawned command in its own process group on Unix.
+    // Without this, background grandchildren (e.g., `(sleep 30) & wait`) stay alive
+    // when the immediate child is killed, keeping pipe handles open and causing
+    // the reader threads to hang indefinitely.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("cannot run command: {e}"))?;
+
+    // Drained on background threads: a command that fills the pipe buffer deadlocks against
+    // a parent that only reads after waiting, which turns a noisy command into a hang.
+    let mut so = child.stdout.take().ok_or("no stdout")?;
+    let mut se = child.stderr.take().ok_or("no stderr")?;
+    let t_out = std::thread::spawn(move || {
+        let mut b = String::new();
+        let _ = so.read_to_string(&mut b);
+        b
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut b = String::new();
+        let _ = se.read_to_string(&mut b);
+        b
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
+            Some(s) => break Some(s),
+            None if std::time::Instant::now() >= deadline => {
+                // On Unix, kill the entire process group with a negative PGID.
+                // This ensures all child and grandchild processes are terminated simultaneously,
+                // releasing standard stream pipe handles so reader threads unblock promptly.
+                #[cfg(unix)]
+                {
+                    let pgid = child.id() as i32;
+                    unsafe {
+                        libc::kill(-pgid, libc::SIGKILL);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+
+    let stdout = t_out.join().unwrap_or_default();
+    let stderr = t_err.join().unwrap_or_default();
+
+    match status {
+        Some(s) => Ok(Output {
+            stdout,
+            stderr,
+            exit_code: s.code().unwrap_or(-1),
+        }),
+        // Reported as a failure the model can act on, with the output captured so far --
+        // a killed command that returns nothing tells it only that something went wrong.
+        None => Ok(Output {
+            stdout,
+            stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
+            exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
+        }),
+    }
+}
+
 /// Commands run on this machine, in the workspace directory.
 #[derive(Debug, Default, Clone)]
 pub struct LocalShell;
 
 impl Shell for LocalShell {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        use std::io::Read;
-        use std::process::Stdio;
-
-        // The deadline is ENFORCED, not advisory. This was a documented TODO for about an
-        // hour, and the very first live run hit it: the model opened with
-        // `which pytest; which python3; find / -name pytest 2>/dev/null` and the `find /`
-        // scanned the entire filesystem for three and a half minutes before being killed by
-        // hand. An agent will do this; a harness that merely documents a bound will hang.
-        //
-        // stdin is null for the same class of reason. Inheriting it lets any command that
-        // reads input -- a bare `python3`, a `git commit` opening an editor, an `npm` prompt --
-        // block forever on a terminal nobody is watching.
-        let mut child = Command::new("bash")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("cannot run command: {e}"))?;
-
-        // Drained on threads: a command that fills the pipe buffer deadlocks against a parent
-        // that only reads after waiting, which turns a noisy command into a hang.
-        let mut so = child.stdout.take().ok_or("no stdout")?;
-        let mut se = child.stderr.take().ok_or("no stderr")?;
-        let t_out = std::thread::spawn(move || {
-            let mut b = String::new(); let _ = so.read_to_string(&mut b); b });
-        let t_err = std::thread::spawn(move || {
-            let mut b = String::new(); let _ = se.read_to_string(&mut b); b });
-
-        let deadline = std::time::Instant::now() + timeout;
-        let status = loop {
-            match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
-                Some(s) => break Some(s),
-                None if std::time::Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-                None => std::thread::sleep(Duration::from_millis(50)),
-            }
-        };
-
-        let stdout = t_out.join().unwrap_or_default();
-        let stderr = t_err.join().unwrap_or_default();
-
-        match status {
-            Some(s) => Ok(Output { stdout, stderr, exit_code: s.code().unwrap_or(-1) }),
-            // Reported as a failure the model can act on, with the output captured so far --
-            // a killed command that returns nothing tells it only that something went wrong.
-            None => Ok(Output {
-                stdout,
-                stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
-                exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
-            }),
-        }
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc").arg(command).current_dir(cwd);
+        exec_command(cmd, timeout)
     }
 
     fn describe(&self) -> String {
