@@ -96,6 +96,7 @@ fn test_daemon_blocking_review_fails_on_blocking_issues() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -183,6 +184,7 @@ fn test_daemon_blocking_review_clean_report_advances() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -234,6 +236,7 @@ fn test_daemon_advisory_review_without_blocking_advances_on_non_vacuous_gate() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -316,6 +319,7 @@ EOF
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };

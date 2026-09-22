@@ -118,6 +118,7 @@ pub fn cmd_daemon(
     shunt_driver_output: bool,
     guard_file_reads: bool,
     read_threshold_lines: Option<usize>,
+    read_cache: bool,
     guard_commands: bool,
     impact_slicing: bool,
 ) -> Result<(), String> {
@@ -314,6 +315,7 @@ pub fn cmd_daemon(
             shunt_driver_output,
             guard_file_reads,
             read_threshold_lines,
+            read_cache,
             guard_commands,
             impact_slicing,
         };

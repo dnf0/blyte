@@ -199,6 +199,7 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
             true,
             true,
             None, // read_threshold_lines: take the measured default / env override
+            true, // read_cache
             true,
             false,
         )

@@ -102,6 +102,7 @@ fn test_daemon_preserves_work_when_a_failing_attempt_changed_the_tree() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -195,6 +196,7 @@ fn test_daemon_rolls_back_when_an_attempt_changed_nothing() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -287,6 +289,7 @@ fn test_daemon_no_rollback_when_disabled() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };

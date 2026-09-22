@@ -10,6 +10,7 @@ pub mod models;
 pub mod patching;
 pub mod plan_parser;
 pub mod prompt;
+pub mod read_cache;
 pub mod shunt;
 pub mod state_machine;
 pub mod tdd;

@@ -74,6 +74,7 @@ fn test_daemon_advisory_review_clean_diff_advances() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -132,6 +133,7 @@ fn test_daemon_advisory_review_blocking_issues_vacuous_gate_fails() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -204,6 +206,7 @@ fn test_daemon_advisory_review_blocking_issues_non_vacuous_gate_advances() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -266,6 +269,7 @@ fn test_daemon_advisory_review_prioritizes_critical_over_low_and_includes_fix() 
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -329,6 +333,7 @@ fn test_daemon_advisory_review_aggregates_multiple_blocking_issues() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -385,6 +390,7 @@ fn test_daemon_advisory_review_works_in_git_subdirectory() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };

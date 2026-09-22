@@ -47,6 +47,7 @@ fn test_cli_daemon_lifecycle() {
         true,
         true,
         None, // read_threshold_lines
+        true, // read_cache
         true,
         false,
     )
@@ -121,6 +122,7 @@ fn test_cli_daemon_completion_cleans_legacy_pid() {
         true,
         true,
         None, // read_threshold_lines
+        true, // read_cache
         true,
         false,
     )

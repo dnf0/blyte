@@ -117,6 +117,7 @@ fn test_daemon_impact_slicing_fast_fail_skips_full_gate() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: true,
     };
@@ -214,6 +215,7 @@ fn test_daemon_impact_slicing_passing_slice_executes_full_gate() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: true,
     };
@@ -297,6 +299,7 @@ fn test_daemon_impact_slicing_zero_impacted_falls_back_to_full_gate() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: true,
     };
@@ -393,6 +396,7 @@ fn test_daemon_impact_slicing_disabled_by_default() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -475,6 +479,7 @@ fn test_daemon_impact_slicing_fast_fail_with_auto_rollback() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: true,
     };
@@ -561,6 +566,7 @@ fn test_daemon_impact_slicing_fast_fail_exhausts_retries_and_blocks() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: true,
     };
@@ -653,6 +659,7 @@ fn test_daemon_impact_slicing_fast_fail_advisory_gate_advances() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: true,
     };

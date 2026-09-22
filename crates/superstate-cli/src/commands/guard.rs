@@ -8,6 +8,7 @@ use clap::{Args, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
 use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig, CommandGuardDecision};
+use superstate_core::read_cache::{self, CacheVerdict, ReadRecord};
 use superstate_core::guard::{
     bulk_read_target, evaluate_file_read_guard, FileReadGuardConfig, GuardDecision,
 };
@@ -27,6 +28,14 @@ pub struct PreToolUseArgs {
     /// Maximum lines permitted before shunting to symbol outline
     #[arg(long, default_value_t = superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES)]
     pub threshold_lines: usize,
+
+    /// Serve a read whose lines are already in context with a pointer instead of the content.
+    ///
+    /// Worth 45-68% of read cost against the line budget's 9-17% (FINDINGS 13.21), because a
+    /// tool call costs ~2,500 tokens before returning a byte. `--no-read-cache` ablates it, so
+    /// the mechanism can be measured rather than assumed.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub read_cache: bool,
 }
 
 /// Command-line arguments for `superstate guard pre-command`.
@@ -263,6 +272,40 @@ fn record_activity(
 /// should be countable -- `lines` is what was withheld from the prompt.
 ///
 /// Best effort: a guard that cannot write its own telemetry must still guard.
+/// Path of the append-only read-cache log, alongside the activity trace.
+fn read_cache_path() -> Option<PathBuf> {
+    telemetry_root().map(|r| r.join(".agent-state").join("read-cache.jsonl"))
+}
+
+/// Every record written so far. A malformed line is skipped rather than fatal: a corrupt
+/// cache must degrade to "serve the read", never to "block the worker".
+fn load_read_cache() -> Vec<ReadRecord> {
+    let Some(path) = read_cache_path() else {
+        return Vec::new();
+    };
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<ReadRecord>(l).ok())
+        .collect()
+}
+
+fn append_read_cache(record: &ReadRecord) {
+    let Some(path) = read_cache_path() else { return };
+    if let Some(dir) = path.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+    }
+    if let Ok(line) = serde_json::to_string(record) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 fn record_denial(resolved: &std::path::Path, lines: usize) {
     let mut root = std::env::var("SUPERSTATE_WORKTREE_PATH")
         .ok()
@@ -426,18 +469,87 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
 
     // Evaluate proposed file read via superstate-core engine.
     let resolved = resolve_payload_path(&path_str);
-    let decision = evaluate_file_read_guard(&resolved, start_line, end_line, &config);
-    let lines = std::fs::read_to_string(&resolved)
-        .map(|c| c.lines().count())
-        .unwrap_or(0);
+    let body = std::fs::read_to_string(&resolved).ok();
+    let lines = body.as_ref().map(|c| c.lines().count()).unwrap_or(0);
+
+    // The read cache runs BEFORE the line budget. The budget decides how much of a file to
+    // serve; the cache decides whether to make the call at all, and a call the worker does
+    // not make costs nothing to bound. Checking it second would pay the preamble anyway.
+    //
+    // Only files we could actually read are eligible: an unreadable path must fall through to
+    // the ordinary fail-open path so the runtime error reaches the worker.
+    let mut cached_decision: Option<GuardDecision> = None;
+    let mut cache_hit = false;
+    let mut pending: Option<(usize, usize, u64)> = None;
+    if args.read_cache {
+        if let Some(content) = body.as_ref() {
+            let hash = read_cache::content_hash(content);
+            // A whole-file read is the window 1..=len, so it participates on the same terms.
+            let (req_start, req_end) = match (start_line, end_line) {
+                (Some(a), Some(b)) => (a, b),
+                (Some(a), None) => (a, lines),
+                (None, Some(b)) => (1, b),
+                (None, None) => (1, lines),
+            };
+            let records = load_read_cache();
+            match read_cache::evaluate(&records, &resolved, req_start, req_end, hash) {
+                CacheVerdict::AlreadyHeld { .. } => {
+                    cache_hit = true;
+                    append_read_cache(&ReadRecord {
+                        path: resolved.to_string_lossy().to_string(),
+                        start: req_start,
+                        end: req_end,
+                        hash,
+                        suppressed: true,
+                    });
+                    cached_decision = Some(GuardDecision::Deny {
+                        reason: read_cache::suppression_reason(&resolved, req_start, req_end),
+                    });
+                }
+                // Insisted or Miss: fall through to the budget. Whether the worker actually
+                // RECEIVES these lines is not known yet, so nothing is recorded here.
+                CacheVerdict::Insisted | CacheVerdict::Miss => {
+                    pending = Some((req_start, req_end, hash));
+                }
+            }
+        }
+    }
+
+    let decision = cached_decision
+        .unwrap_or_else(|| evaluate_file_read_guard(&resolved, start_line, end_line, &config));
     let denied = matches!(decision, GuardDecision::Deny { .. });
+
+    // Record a window as held ONLY when the worker is actually given it.
+    //
+    // Recording at request time instead was wrong in a way that would have starved the
+    // worker: a whole-file read over the line budget is denied and served as an AST outline,
+    // so the worker never receives those lines -- but the cache would have believed it had
+    // them and suppressed every later read of any window inside the file. Caught by
+    // test_flexible_payload_formats_and_tool_names, whose second read went from allow to deny.
+    if let Some((req_start, req_end, hash)) = pending {
+        if !denied {
+            append_read_cache(&ReadRecord {
+                path: resolved.to_string_lossy().to_string(),
+                start: req_start,
+                end: req_end,
+                hash,
+                suppressed: false,
+            });
+        }
+    }
     // Every read is recorded, not just the blocked ones: the question "was the same file read
     // repeatedly?" cannot be answered from denials alone.
     record_activity(
         if start_line.is_some() || end_line.is_some() { "read_bounded" } else { "read_whole" },
         &resolved.display().to_string(),
         lines,
-        if denied { "deny" } else { "allow" },
+        if cache_hit {
+            "cached"
+        } else if denied {
+            "deny"
+        } else {
+            "allow"
+        },
         match (start_line, end_line) {
             (Some(a), Some(b)) => Some((a, b)),
             (Some(a), None) => Some((a, lines)),
@@ -445,7 +557,9 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
             (None, None) => None,
         },
     );
-    if denied {
+    // A cache hit is not a budget denial: record_denial tracks lines the BUDGET withheld,
+    // and conflating the two would make the cache look like a shunt in every report.
+    if denied && !cache_hit {
         record_denial(&resolved, lines);
     }
     emit_decision(&decision);

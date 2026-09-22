@@ -106,6 +106,7 @@ fn test_daemon_executes_sequential_milestones_with_checkpoints() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -205,6 +206,7 @@ fn test_daemon_rollback_isolation_preserves_earlier_milestone_commits() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -296,6 +298,7 @@ fn test_daemon_deadlock_halts_with_blocked_outcome() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };

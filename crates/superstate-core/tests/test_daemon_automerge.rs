@@ -126,6 +126,7 @@ fn test_daemon_automerge_on_completion() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -227,6 +228,7 @@ fn test_daemon_completion_in_place_mode() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -294,6 +296,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -321,6 +324,7 @@ fn test_daemon_run_to_completion_avoids_duplicate_finalization() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     })

@@ -364,6 +364,15 @@ pub struct DaemonArgs {
         help = "Lines a read may take before shunting to an outline (default 800)"
     )]
     pub read_threshold_lines: Option<usize>,
+    /// Disable the read cache: serve every read even when its lines are already in context
+    ///
+    /// The ablation arm. This mechanism changes what the worker SEES, not only what it costs,
+    /// so a paired run needs to be able to turn it off.
+    #[arg(
+        long,
+        help = "Disable suppressing reads whose lines are already in the worker's context"
+    )]
+    pub no_read_cache: bool,
     /// Disable automatic tool output shunting during driver execution
     #[arg(
         long,
@@ -425,6 +434,12 @@ impl DaemonArgs {
 
     pub fn use_command_guard(&self) -> bool {
         !self.no_guard && !self.no_command_guard
+    }
+
+    pub fn use_read_cache(&self) -> bool {
+        // Turning the file guard off entirely turns off its cache too: there is no hook to
+        // carry it. Reporting otherwise would overstate what a run had enabled.
+        self.use_guard() && !self.no_read_cache
     }
 }
 
@@ -657,6 +672,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                 let shunt_driver_output = args.use_shunt();
                 let guard_file_reads = args.use_guard();
                 let guard_commands = args.use_command_guard();
+                let read_cache = args.use_read_cache();
                 commands::daemon::cmd_daemon(
                     &resolve(args.state),
                     args.driver.as_deref(),
@@ -670,6 +686,7 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     shunt_driver_output,
                     guard_file_reads,
                     args.read_threshold_lines,
+                    read_cache,
                     guard_commands,
                     args.impact_slicing,
                 )

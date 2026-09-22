@@ -92,6 +92,7 @@ fn test_daemon_runner_provisions_hooks_json() {
         shunt_driver_output: false,
         guard_file_reads: true,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -119,12 +120,12 @@ fn test_daemon_runner_provisions_hooks_json() {
     assert_eq!(
         // 640 is deliberately NOT the default: this asserts the hook carries the CONFIGURED
         // budget, so a sweep that varies `read_threshold_lines` actually reaches the guard.
-        cmd.map(|c: &str| c.ends_with("guard pre-tool-use --threshold-lines 640")),
+        cmd.map(|c: &str| c.ends_with("guard pre-tool-use --threshold-lines 640 --read-cache true")),
         // The hook must invoke the RUNNING binary by absolute path. A bare name resolves
         // through PATH at hook time, so EXP-077 enforced its guards with the previous day's
         // build while the daemon ran the current one.
         Some(true),
-        "hook command must end with `guard pre-tool-use --threshold-lines 640`, got {cmd:?}"
+        "hook command must carry BOTH the configured budget and the cache switch, got {cmd:?}"
     );
 
     let cmd_hook_entry = &json["superstate-command-guard"]["PreToolUse"][0];
@@ -178,6 +179,7 @@ fn test_daemon_provisions_command_guard_in_hooks_json() {
         shunt_driver_output: false,
         guard_file_reads: true,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -245,6 +247,7 @@ fn test_daemon_no_command_guard_disables_provisioning() {
         shunt_driver_output: false,
         guard_file_reads: true,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -303,6 +306,7 @@ fn test_daemon_runner_no_guard_does_not_provision_hooks_json() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -352,6 +356,7 @@ fn test_daemon_no_guard_disables_both() {
         shunt_driver_output: false,
         guard_file_reads: false,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };
@@ -407,6 +412,7 @@ fn test_daemon_merges_hooks_when_file_exists() {
         shunt_driver_output: false,
         guard_file_reads: true,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -493,6 +499,7 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
         shunt_driver_output: false,
         guard_file_reads: true,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: true,
         impact_slicing: false,
     };
@@ -545,6 +552,7 @@ fn generated_hooks_invoke_the_running_binary_not_whatever_is_on_path() {
         timeout_secs: 5,
         guard_file_reads: true,
         read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: true,
         ..Default::default()
     })
@@ -592,5 +600,58 @@ fn test_daemon_config_deserialize_defaults_read_threshold_lines() {
         config.read_threshold_lines,
         superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES,
         "deserialized DaemonConfig without read_threshold_lines must take the measured default"
+    );
+}
+
+#[test]
+fn test_daemon_hook_carries_the_read_cache_ablation() {
+    // The switch exists so a paired run can measure the mechanism. If `read_cache: false`
+    // did not reach the provisioned hook, the ablation arm would silently run the treatment
+    // -- the exact shape of the six arm-parity defects in this project's history.
+    let dir = tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    let state = ExecutionState {
+        active_task: Some(TaskSpec {
+            id: "task-1".to_string(),
+            title: "Ablation".to_string(),
+            depends_on: vec![],
+            files_modify: vec![],
+            verification_cmd: Some("test -f driver_evidence.txt".to_string()),
+        }),
+        no_worktree: true,
+        goal: Some("Ablate the read cache".to_string()),
+        ..Default::default()
+    };
+    save_state_atomic(&state_file, &state).unwrap();
+
+    let config = DaemonConfig {
+        state_path: state_file,
+        driver_cmd: Some("echo 'driver ran' > driver_evidence.txt".to_string()),
+        max_retries: 1,
+        timeout_secs: 10,
+        advisory_gate: false,
+        advisory_review: false,
+        review_blocking: false,
+        auto_rollback: false,
+        rollback_policy: Default::default(),
+        shunt_driver_output: false,
+        guard_file_reads: true,
+        read_threshold_lines: 640,
+        read_cache: false,
+        guard_commands: false,
+        impact_slicing: false,
+    };
+    let mut runner = DaemonRunner::new(config).unwrap();
+    let _ = runner.step();
+
+    let hooks = fs::read_to_string(dir.path().join(".agents/hooks.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+    let cmd = json["superstate-file-guard"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        cmd.ends_with("--read-cache false"),
+        "an ablated run must provision the hook with the cache OFF, got {cmd:?}"
     );
 }
