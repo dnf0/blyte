@@ -123,8 +123,12 @@ fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
                 #[cfg(unix)]
                 {
                     let pgid = child.id() as i32;
-                    unsafe {
-                        libc::kill(-pgid, libc::SIGKILL);
+                    if pgid > 0 {
+                        unsafe {
+                            libc::kill(-pgid, libc::SIGKILL);
+                        }
+                    } else {
+                        let _ = child.kill();
                     }
                 }
                 #[cfg(not(unix))]
