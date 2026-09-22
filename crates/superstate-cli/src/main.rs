@@ -23,7 +23,9 @@ fn main() {
 
     let result = match cli.command {
         Some(Commands::Doctor) => commands::doctor::run_doctor(),
-        Some(Commands::Mcp) => superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string()),
+        Some(Commands::Mcp) => {
+            superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string())
+        }
         Some(Commands::Review {
             commit_range,
             repo,
@@ -116,9 +118,44 @@ fn main() {
         },
         None => {
             if let Some(ref prompt) = cli.prompt {
-                eprintln!("Running headless task: {prompt}");
-            } else {
-                eprintln!("Launching interactive REPL...");
+                if !prompt.trim().is_empty() {
+                    let config = superstate_cli::task_runner::TaskConfig::from(&cli);
+                    match superstate_cli::task_runner::run_task(config) {
+                        Ok((superstate_agent::run::Outcome::Verified, report)) => {
+                            println!(
+                                "Task verified in {} turns (usage: {:?})",
+                                report.outcome_turns, report.usage
+                            );
+                            std::process::exit(0);
+                        }
+                        Ok((outcome, report)) => {
+                            eprintln!(
+                                "Task finished with outcome: {outcome:?} in {} turns",
+                                report.outcome_turns
+                            );
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("Error executing task: {err}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+
+            let repl_config = superstate_cli::repl::ReplConfig {
+                repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                model: cli.model,
+                gate: cli.gate,
+                context_strategy: cli.context,
+                container: cli.container,
+                max_turns: cli.max_turns,
+                max_gates: cli.max_gates,
+                rollback: cli.rollback,
+            };
+            if let Err(e) = superstate_cli::repl::run_repl(repl_config) {
+                eprintln!("REPL error: {e}");
+                std::process::exit(1);
             }
             Ok(())
         }

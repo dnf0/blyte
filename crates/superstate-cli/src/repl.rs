@@ -35,6 +35,10 @@ pub struct ReplSession {
     pub gate: Option<String>,
     pub model: String,
     pub context_strategy: String,
+    pub container: Option<String>,
+    pub max_turns: usize,
+    pub max_gates: usize,
+    pub rollback: bool,
     pub state: superstate_agent::state::State,
     pub history: Vec<superstate_provider::Message>,
 }
@@ -54,6 +58,10 @@ impl ReplSession {
                 .clone()
                 .unwrap_or_else(|| "claude-3-5-sonnet".to_string()),
             context_strategy: config.context_strategy.clone(),
+            container: config.container.clone(),
+            max_turns: config.max_turns,
+            max_gates: config.max_gates,
+            rollback: config.rollback,
             state,
             history: Vec::new(),
         }
@@ -392,6 +400,43 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     .history
                     .push(superstate_provider::Message::User(prompt.clone()));
                 session.state.runtime.attempts += 1;
+
+                // Build task configuration from current session parameters
+                let task_config = crate::task_runner::TaskConfig {
+                    prompt: prompt.clone(),
+                    gate: session.gate.clone(),
+                    context_strategy: session.context_strategy.clone(),
+                    model: Some(session.model.clone()),
+                    container: session.container.clone(),
+                    max_turns: session.max_turns,
+                    max_gates: session.max_gates,
+                    rollback: session.rollback,
+                    root: session.repo_root.clone(),
+                };
+
+                // Invoke solver task runner and output results to REPL stream
+                match crate::task_runner::run_task(task_config) {
+                    Ok((superstate_agent::run::Outcome::Verified, report)) => {
+                        writeln!(
+                            writer,
+                            "Task verified in {} turns (usage: {:?})",
+                            report.outcome_turns, report.usage
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    Ok((outcome, report)) => {
+                        writeln!(
+                            writer,
+                            "Task finished with outcome: {:?} in {} turns",
+                            outcome, report.outcome_turns
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    Err(err) => {
+                        writeln!(writer, "Task execution error: {}", err)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
             }
         }
     }
