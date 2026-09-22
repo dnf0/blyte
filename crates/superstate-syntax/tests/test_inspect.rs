@@ -1,8 +1,7 @@
 use std::fs;
 use std::path::Path;
 use superstate_syntax::inspect::{
-    detect_language, extract_symbol_source, extract_symbols_from_file, find_symbol,
-    format_outline,
+    detect_language, extract_symbol_source, extract_symbols_from_file, find_symbol, format_outline,
 };
 use superstate_syntax::symbols::{SupportedLanguage, SymbolInfo, SymbolKind, SyntaxError};
 use tempfile::tempdir;
@@ -107,7 +106,8 @@ fn test_extract_symbols_from_file_unsupported_language() {
 #[test]
 fn test_extract_symbol_source_slicing() {
     let code = "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    Worker {\n        id: 1,\n    };\n}\n";
-    let symbols = superstate_syntax::symbols::extract_symbols(code, SupportedLanguage::Rust).unwrap();
+    let symbols =
+        superstate_syntax::symbols::extract_symbols(code, SupportedLanguage::Rust).unwrap();
 
     let worker_sym = find_symbol(&symbols, "Worker").unwrap();
     let worker_src = extract_symbol_source(code, worker_sym);
@@ -208,6 +208,9 @@ fn test_find_symbol_case_insensitive() {
     assert!(find_symbol(&symbols, "processdata").is_some());
     assert!(find_symbol(&symbols, "PROCESSDATA").is_some());
     assert!(find_symbol(&symbols, "ProcessData").is_some());
-    assert_eq!(find_symbol(&symbols, "config").unwrap().kind, SymbolKind::Struct);
+    assert_eq!(
+        find_symbol(&symbols, "config").unwrap().kind,
+        SymbolKind::Struct
+    );
     assert!(find_symbol(&symbols, "unknown").is_none());
 }

@@ -5,10 +5,10 @@
 //! without explicit range bounds, the guard blocks the read and returns an AST symbol
 //! outline or structural preview, guiding the agent to request bounded slices.
 
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
-use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Decision returned by the file read guard evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,11 +126,7 @@ pub fn evaluate_file_read_guard(
         }
     } else {
         // Fall back to a structural preview of first 30 lines for unsupported languages or symbol-less files.
-        let preview = content
-            .lines()
-            .take(30)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let preview = content.lines().take(30).collect::<Vec<_>>().join("\n");
         GuardDecision::Deny {
             reason: format!(
                 "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nFile preview (first 30 lines):\n{}\n...\nRe-read using bounded StartLine and EndLine (<= {} lines).",
@@ -138,4 +134,99 @@ pub fn evaluate_file_read_guard(
             ),
         }
     }
+}
+
+/// Default line budget before a read is served as an AST outline instead.
+///
+/// Chosen from measurement, and corrected by it. A tool call carries a fixed preamble of
+/// roughly 2,500-5,000 tokens (FINDINGS.md 13.17), so splitting a file pays that cost once per
+/// window to avoid fetching the lines it skips. Too low and the preamble dominates; too high
+/// and whole files arrive that nobody wanted.
+///
+/// This value has been wrong twice, in both directions, and the history is the point:
+///
+/// * 200 was set by intuition. Replaying a real trace, a 1,906-line file took 14 calls costing
+///   50,719 tokens where one whole-file read would have cost 23,466 -- 2.2x worse (13.18).
+/// * 1,600 replaced it briefly on that same replay, then 800 as a hedge. Both came from ONE
+///   trace of `superstate-core`, whose only file above 1,600 lines is `daemon.rs` itself, so
+///   that "optimum" marked where the budget stops binding rather than a cost minimum (13.20).
+/// * 400 comes from two independent real-task traces -- a Go repository and a TypeScript one --
+///   replayed at 17 thresholds. Both minimise at exactly 400, inside a shallow basin of roughly
+///   300-450. At 800 katex cost 151,562 against 133,861, which is worse than the 200 it had
+///   replaced (13.21).
+///
+/// Treat the basin, not the integer, as the finding: anything in 300-450 is defensible. The
+/// cost model assumes wanted lines repack optimally into windows, which flatters HIGH
+/// thresholds, so the true optimum sits at or below 400 rather than above it.
+///
+/// Keep this in proportion. Tuning this number is worth 9-17% of read cost; serving a read
+/// whose window is already held, without a tool call at all, is worth 45-68% (13.21). The
+/// budget is second-order and should not be mistaken for the main mechanism.
+///
+/// The optimum is workload-specific -- it tracks how many lines a task actually needs from a
+/// file -- so this is a default, not a constant of nature. `scripts/read_budget.py` in
+/// superstate-eval recomputes it from any recorded trace.
+pub const DEFAULT_READ_THRESHOLD_LINES: usize = 400;
+
+/// Detects a shell command that dumps a whole file into the conversation.
+///
+/// The file read guard only ever matched the agent's *file viewing tool*, so `cat internal/x.go`
+/// walked straight past it -- and past the command guard, which classifies only polling, and past
+/// output shunting, which wraps `./run-in-container` and not host commands. Across recorded runs
+/// 29 of 152 logged commands were `cat` or `grep`, so this is not a corner case; it is a hole in
+/// the middle of the perimeter. Spotify's Portal covers the same gap with its `check-bash-read`
+/// hook, alongside the file-size hook we already had.
+///
+/// Returns the path being dumped, or None when the command is not a bulk read. Bounded reads are
+/// deliberately not matched: `head -50 x.go` and `sed -n '10,60p' x.go` are the behaviour the
+/// guard is trying to encourage, so intercepting them would punish compliance.
+pub fn bulk_read_target(command: &str) -> Option<PathBuf> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Consider each pipeline stage: `cat big.go | grep foo` dumps the file before grep sees it.
+    for stage in trimmed.split('|') {
+        let mut tokens = stage.split_whitespace();
+        let Some(program) = tokens.next() else {
+            continue;
+        };
+        let program = program.rsplit('/').next().unwrap_or(program);
+        if !matches!(program, "cat" | "less" | "more" | "head" | "tail") {
+            continue;
+        }
+
+        let mut operands: Vec<&str> = Vec::new();
+        let mut bounded = false;
+        let mut skip_next = false;
+        for token in tokens {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if token == "-n" || token == "-c" {
+                // `head -n 50` bounds the read; the count is the next token.
+                bounded = true;
+                skip_next = true;
+                continue;
+            }
+            if let Some(rest) = token.strip_prefix('-') {
+                // `head -50` and any other flag.
+                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                    bounded = true;
+                }
+                continue;
+            }
+            operands.push(token);
+        }
+
+        if bounded {
+            continue;
+        }
+        if let Some(first) = operands.first() {
+            return Some(PathBuf::from(first.trim_matches(['"', '\''])));
+        }
+    }
+    None
 }

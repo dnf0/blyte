@@ -34,10 +34,8 @@ fn run_command_guard(stdin_data: &str, extra_args: &[&str]) -> (i32, String, ser
 fn test_empty_stdin_allows() {
     let dir = tempdir().unwrap();
     let state_file = dir.path().join("guard_history.json");
-    let (code, stdout, json) = run_command_guard(
-        "",
-        &["--state-path", state_file.to_str().unwrap()],
-    );
+    let (code, stdout, json) =
+        run_command_guard("", &["--state-path", state_file.to_str().unwrap()]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "allow");
     assert!(stdout.ends_with('\n'), "stdout must end with newline");
@@ -70,10 +68,8 @@ fn test_non_polling_tool_call_allows() {
     })
     .to_string();
 
-    let (code, _, json) = run_command_guard(
-        &payload,
-        &["--state-path", state_file.to_str().unwrap()],
-    );
+    let (code, _, json) =
+        run_command_guard(&payload, &["--state-path", state_file.to_str().unwrap()]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "allow");
 }
@@ -93,16 +89,14 @@ fn test_run_command_first_invocation_allows() {
     })
     .to_string();
 
-    let (code, _, json) = run_command_guard(
-        &payload,
-        &["--state-path", state_file.to_str().unwrap()],
-    );
+    let (code, _, json) =
+        run_command_guard(&payload, &["--state-path", state_file.to_str().unwrap()]);
     assert_eq!(code, 0);
     assert_eq!(json["decision"], "allow");
 }
 
 #[test]
-fn test_run_command_second_invocation_within_cooldown_denies() {
+fn test_run_command_second_polling_invocation_is_throttled_then_allowed() {
     let dir = tempdir().unwrap();
     let state_file = dir.path().join("guard_history.json");
     let state_path = state_file.to_str().unwrap();
@@ -118,24 +112,26 @@ fn test_run_command_second_invocation_within_cooldown_denies() {
     .to_string();
 
     // First invocation is allowed
-    let (code1, _, json1) = run_command_guard(&payload, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
     // Second immediate invocation must be denied
-    let (code2, _, json2) = run_command_guard(&payload, &["--state-path", state_path]);
-    assert_eq!(code2, 0);
-    assert_eq!(json2["decision"], "deny");
-    let reason = json2["reason"].as_str().expect("reason should be present");
-    assert!(
-        reason.contains("[superstate-guard] Busy-wait polling blocked"),
-        "reason should explain busy-wait block: {}",
-        reason
+    let (code2, _, json2) = run_command_guard(
+        &payload,
+        &["--state-path", state_path, "--debounce-sec", "1"],
     );
+    assert_eq!(code2, 0);
+    // Throttled, not denied. The hook sleeps out the remaining cooldown and then allows: the
+    // agent's poll rate is capped exactly as before, but it never receives a refusal it can
+    // only respond to by ending its turn. Denying here killed runs in EXP-071/074/076.
+    assert_eq!(json2["decision"], "allow");
     assert!(
-        reason.contains("Cooldown active"),
-        "reason should mention cooldown: {}",
-        reason
+        json2.get("reason").is_none(),
+        "a throttled allow carries no refusal text: {json2}"
     );
 }
 
@@ -165,12 +161,18 @@ fn test_run_command_distinct_command_allows() {
     })
     .to_string();
 
-    let (code1, _, json1) = run_command_guard(&payload1, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload1,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
     // Distinct command allowed immediately
-    let (code2, _, json2) = run_command_guard(&payload2, &["--state-path", state_path]);
+    let (code2, _, json2) = run_command_guard(
+        &payload2,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code2, 0);
     assert_eq!(json2["decision"], "allow");
 }
@@ -201,14 +203,23 @@ fn test_run_command_exact_duplicate_whitespace_normalization() {
     })
     .to_string();
 
-    let (code1, _, json1) = run_command_guard(&payload1, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload1,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
     // Normalized duplicate command denied
-    let (code2, _, json2) = run_command_guard(&payload2, &["--state-path", state_path]);
+    let (code2, _, json2) = run_command_guard(
+        &payload2,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code2, 0);
-    assert_eq!(json2["decision"], "deny");
+    // Throttled, not denied. The hook sleeps out the remaining cooldown and then allows: the
+    // agent's poll rate is capped exactly as before, but it never receives a refusal it can
+    // only respond to by ending its turn. Denying here killed runs in EXP-071/074/076.
+    assert_eq!(json2["decision"], "allow");
 }
 
 #[test]
@@ -227,12 +238,7 @@ fn test_debounce_sec_customization() {
     })
     .to_string();
 
-    let args = [
-        "--state-path",
-        state_path,
-        "--debounce-sec",
-        "1",
-    ];
+    let args = ["--state-path", state_path, "--debounce-sec", "1"];
 
     // First invocation allows
     let (code1, _, json1) = run_command_guard(&payload, &args);
@@ -242,7 +248,10 @@ fn test_debounce_sec_customization() {
     // Immediate second invocation denies
     let (code2, _, json2) = run_command_guard(&payload, &args);
     assert_eq!(code2, 0);
-    assert_eq!(json2["decision"], "deny");
+    // Throttled, not denied. The hook sleeps out the remaining cooldown and then allows: the
+    // agent's poll rate is capped exactly as before, but it never receives a refusal it can
+    // only respond to by ending its turn. Denying here killed runs in EXP-071/074/076.
+    assert_eq!(json2["decision"], "allow");
 
     // Sleep past the 1-second debounce window
     sleep(Duration::from_millis(1100));
@@ -270,13 +279,22 @@ fn test_manage_task_status_blocks_within_cooldown() {
     })
     .to_string();
 
-    let (code1, _, json1) = run_command_guard(&payload, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
-    let (code2, _, json2) = run_command_guard(&payload, &["--state-path", state_path]);
+    let (code2, _, json2) = run_command_guard(
+        &payload,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code2, 0);
-    assert_eq!(json2["decision"], "deny");
+    // Throttled, not denied. The hook sleeps out the remaining cooldown and then allows: the
+    // agent's poll rate is capped exactly as before, but it never receives a refusal it can
+    // only respond to by ending its turn. Denying here killed runs in EXP-071/074/076.
+    assert_eq!(json2["decision"], "allow");
 }
 
 #[test]
@@ -306,14 +324,23 @@ fn test_manage_task_list_shares_cooldown_with_status() {
     })
     .to_string();
 
-    let (code1, _, json1) = run_command_guard(&payload_status, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload_status,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
     // "list" shares cooldown category with "status"
-    let (code2, _, json2) = run_command_guard(&payload_list, &["--state-path", state_path]);
+    let (code2, _, json2) = run_command_guard(
+        &payload_list,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code2, 0);
-    assert_eq!(json2["decision"], "deny");
+    // Throttled, not denied. The hook sleeps out the remaining cooldown and then allows: the
+    // agent's poll rate is capped exactly as before, but it never receives a refusal it can
+    // only respond to by ending its turn. Denying here killed runs in EXP-071/074/076.
+    assert_eq!(json2["decision"], "allow");
 }
 
 #[test]
@@ -333,12 +360,18 @@ fn test_manage_task_non_polling_action_allows() {
     })
     .to_string();
 
-    let (code1, _, json1) = run_command_guard(&payload_kill, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload_kill,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
     // Second kill is still allowed (non-polling action)
-    let (code2, _, json2) = run_command_guard(&payload_kill, &["--state-path", state_path]);
+    let (code2, _, json2) = run_command_guard(
+        &payload_kill,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code2, 0);
     assert_eq!(json2["decision"], "allow");
 }
@@ -369,14 +402,23 @@ fn test_procfs_polling_blocks_within_cooldown() {
     })
     .to_string();
 
-    let (code1, _, json1) = run_command_guard(&payload1, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload1,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
     // Second procfs poll within cooldown denies even with different PID
-    let (code2, _, json2) = run_command_guard(&payload2, &["--state-path", state_path]);
+    let (code2, _, json2) = run_command_guard(
+        &payload2,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code2, 0);
-    assert_eq!(json2["decision"], "deny");
+    // Throttled, not denied. The hook sleeps out the remaining cooldown and then allows: the
+    // agent's poll rate is capped exactly as before, but it never receives a refusal it can
+    // only respond to by ending its turn. Denying here killed runs in EXP-071/074/076.
+    assert_eq!(json2["decision"], "allow");
 }
 
 #[test]
@@ -394,7 +436,10 @@ fn test_flexible_payload_formats() {
     })
     .to_string();
 
-    let (code1, _, json1) = run_command_guard(&payload_claude, &["--state-path", state_path]);
+    let (code1, _, json1) = run_command_guard(
+        &payload_claude,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code1, 0);
     assert_eq!(json1["decision"], "allow");
 
@@ -410,7 +455,13 @@ fn test_flexible_payload_formats() {
     .to_string();
 
     // "top" is in process inspection group, same as "ps -ef"
-    let (code2, _, json2) = run_command_guard(&payload_snake, &["--state-path", state_path]);
+    let (code2, _, json2) = run_command_guard(
+        &payload_snake,
+        &["--state-path", state_path, "--debounce-sec", "1"],
+    );
     assert_eq!(code2, 0);
-    assert_eq!(json2["decision"], "deny");
+    // Throttled, not denied. The hook sleeps out the remaining cooldown and then allows: the
+    // agent's poll rate is capped exactly as before, but it never receives a refusal it can
+    // only respond to by ending its turn. Denying here killed runs in EXP-071/074/076.
+    assert_eq!(json2["decision"], "allow");
 }

@@ -54,12 +54,7 @@ fn test_cli_inspect_lines_valid() {
     fs::write(&file_path, content).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_superstate"))
-        .args([
-            "inspect",
-            file_path.to_str().unwrap(),
-            "--lines",
-            "2:4",
-        ])
+        .args(["inspect", file_path.to_str().unwrap(), "--lines", "2:4"])
         .output()
         .expect("failed to run superstate inspect");
 
@@ -81,55 +76,44 @@ fn test_cli_inspect_lines_invalid_syntax() {
 
     // Not numbers
     let output = Command::new(env!("CARGO_BIN_EXE_superstate"))
-        .args([
-            "inspect",
-            file_path.to_str().unwrap(),
-            "--lines",
-            "foo:bar",
-        ])
+        .args(["inspect", file_path.to_str().unwrap(), "--lines", "foo:bar"])
         .output()
         .expect("failed to run superstate inspect");
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Error: invalid line range 'foo:bar'. Expected format 'start:end' (e.g. 10:50)"));
+    assert!(stderr
+        .contains("Error: invalid line range 'foo:bar'. Expected format 'start:end' (e.g. 10:50)"));
 
     // 0-indexed (start is 0)
     let output_zero = Command::new(env!("CARGO_BIN_EXE_superstate"))
-        .args([
-            "inspect",
-            file_path.to_str().unwrap(),
-            "--lines",
-            "0:5",
-        ])
+        .args(["inspect", file_path.to_str().unwrap(), "--lines", "0:5"])
         .output()
         .expect("failed to run superstate inspect");
 
     assert_eq!(output_zero.status.code(), Some(1));
     let stderr_zero = String::from_utf8_lossy(&output_zero.stderr);
-    assert!(stderr_zero.contains("Error: invalid line range '0:5'. Expected format 'start:end' (e.g. 10:50)"));
+    assert!(stderr_zero
+        .contains("Error: invalid line range '0:5'. Expected format 'start:end' (e.g. 10:50)"));
 
     // start > end
     let output_reversed = Command::new(env!("CARGO_BIN_EXE_superstate"))
-        .args([
-            "inspect",
-            file_path.to_str().unwrap(),
-            "--lines",
-            "10:5",
-        ])
+        .args(["inspect", file_path.to_str().unwrap(), "--lines", "10:5"])
         .output()
         .expect("failed to run superstate inspect");
 
     assert_eq!(output_reversed.status.code(), Some(1));
     let stderr_reversed = String::from_utf8_lossy(&output_reversed.stderr);
-    assert!(stderr_reversed.contains("Error: invalid line range '10:5'. Expected format 'start:end' (e.g. 10:50)"));
+    assert!(stderr_reversed
+        .contains("Error: invalid line range '10:5'. Expected format 'start:end' (e.g. 10:50)"));
 }
 
 #[test]
 fn test_cli_inspect_outline_default_text() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("worker.rs");
-    let code = "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
+    let code =
+        "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
     fs::write(&file_path, code).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_superstate"))
@@ -148,7 +132,8 @@ fn test_cli_inspect_outline_default_text() {
 fn test_cli_inspect_outline_json() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("worker.rs");
-    let code = "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
+    let code =
+        "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
     fs::write(&file_path, code).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_superstate"))
@@ -175,7 +160,8 @@ fn test_cli_inspect_outline_json() {
 fn test_cli_inspect_symbol_found_text() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("worker.rs");
-    let code = "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
+    let code =
+        "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
     fs::write(&file_path, code).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_superstate"))
@@ -204,7 +190,8 @@ fn test_cli_inspect_symbol_found_text() {
 fn test_cli_inspect_symbol_found_json() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("worker.rs");
-    let code = "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
+    let code =
+        "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
     fs::write(&file_path, code).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_superstate"))
@@ -232,7 +219,8 @@ fn test_cli_inspect_symbol_found_json() {
 fn test_cli_inspect_symbol_not_found() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("worker.rs");
-    let code = "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
+    let code =
+        "pub struct Worker {\n    id: u64,\n}\n\npub fn execute() {\n    println!(\"work\");\n}\n";
     fs::write(&file_path, code).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_superstate"))

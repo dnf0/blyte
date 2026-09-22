@@ -180,8 +180,11 @@ fn test_daemon_runner_exports_superstate_worktree_path() {
         advisory_review: false,
         review_blocking: false,
         auto_rollback: false,
+        rollback_policy: Default::default(),
         shunt_driver_output: false,
         guard_file_reads: false,
+        read_threshold_lines: 640,
+        read_cache: true,
         guard_commands: false,
         impact_slicing: false,
     };

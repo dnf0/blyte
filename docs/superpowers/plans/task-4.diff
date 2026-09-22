@@ -1,0 +1,93 @@
+67feab3 feat(agent): wire ContainerShell to exec_command with full timeout parity
+---
+ crates/superstate-agent/src/shell.rs               | 18 ++++++---------
+ .../superstate-agent/tests/test_shell_timeout.rs   | 27 ++++++++++++++++++++++
+ 2 files changed, 34 insertions(+), 11 deletions(-)
+---
+diff --git a/crates/superstate-agent/src/shell.rs b/crates/superstate-agent/src/shell.rs
+index f94d842..4aeb70f 100644
+--- a/crates/superstate-agent/src/shell.rs
++++ b/crates/superstate-agent/src/shell.rs
+@@ -178,33 +178,29 @@ impl Shell for LocalShell {
+ /// The case the previous harness handled with a prose instruction. Here the model still calls
+ /// `bash` and cannot route around it, because there is no host shell in its tool surface.
+ #[derive(Debug, Clone)]
+ pub struct ContainerShell {
+     pub container_id: String,
+     /// Where the workspace is mounted inside the container.
+     pub workdir: PathBuf,
+ }
+ 
+ impl Shell for ContainerShell {
+-    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+-        let out = Command::new("docker")
+-            .args(["exec", "-i", "-w"])
++    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
++        // Construct docker exec invocation targeting the running container and its workdir.
++        let mut cmd = Command::new("docker");
++        cmd.args(["exec", "-i", "-w"])
+             .arg(&self.workdir)
+             .arg(&self.container_id)
+-            .args(["bash", "-lc", command])
+-            .output()
+-            .map_err(|e| format!("cannot exec in container {}: {e}", self.container_id))?;
+-        Ok(Output {
+-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+-            exit_code: out.status.code().unwrap_or(-1),
+-        })
++            .args(["bash", "-lc", command]);
++        // Delegate to exec_command to ensure process group isolation and timeout parity.
++        exec_command(cmd, timeout)
+     }
+ 
+     fn describe(&self) -> String {
+         format!(
+             "Commands run inside the project container at {}. Project dependencies are \
+              installed there, not on the host.",
+             self.workdir.display()
+         )
+     }
+ }
+diff --git a/crates/superstate-agent/tests/test_shell_timeout.rs b/crates/superstate-agent/tests/test_shell_timeout.rs
+index a1e7b67..aff2c4c 100644
+--- a/crates/superstate-agent/tests/test_shell_timeout.rs
++++ b/crates/superstate-agent/tests/test_shell_timeout.rs
+@@ -79,10 +79,37 @@ fn grandchild_process_tree_is_killed_at_deadline() {
+         "must not deadlock on grandchild pipe handles: took {elapsed:?}"
+     );
+     assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
+     assert!(
+         out.stderr.contains("killed by superstate"),
+         "kill notice missing from stderr: {:?}",
+         out.stderr
+     );
+ }
+ 
++#[test]
++fn container_shell_enforces_timeout_on_hung_execution() {
++    use std::path::PathBuf;
++    use superstate_agent::shell::ContainerShell;
++
++    let shell = ContainerShell {
++        container_id: "non-existent-container-id-12345".into(),
++        workdir: PathBuf::from("/workspace"),
++    };
++    let d = tempfile::tempdir().unwrap();
++    let started = Instant::now();
++    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
++    let elapsed = started.elapsed();
++    assert!(
++        elapsed < Duration::from_secs(3),
++        "container exec must obey timeout bound: took {elapsed:?}"
++    );
++    match res {
++        Ok(out) => {
++            assert!(out.exit_code != 0);
++        }
++        Err(e) => {
++            assert!(!e.is_empty());
++        }
++    }
++}
++

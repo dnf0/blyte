@@ -114,11 +114,31 @@ pub fn cmd_daemon(
     advisory_review: bool,
     review_blocking: bool,
     auto_rollback: bool,
+    rollback_policy: superstate_core::daemon::RollbackPolicy,
     shunt_driver_output: bool,
     guard_file_reads: bool,
+    read_threshold_lines: Option<usize>,
+    read_cache: bool,
     guard_commands: bool,
     impact_slicing: bool,
 ) -> Result<(), String> {
+    // Precedence: explicit flag, then environment (so a sweep can vary it per run without a
+    // rebuild), then the measured default. A malformed env value is rejected rather than
+    // silently ignored -- a swept parameter that quietly reverts to its default produces a
+    // run that looks like a data point and is not one.
+    let read_threshold_lines = match read_threshold_lines {
+        Some(n) => n,
+        None => match std::env::var("SUPERSTATE_READ_THRESHOLD_LINES") {
+            Ok(val) => val.trim().parse::<usize>().map_err(|_| {
+                format!(
+                    "SUPERSTATE_READ_THRESHOLD_LINES must be a non-negative integer, got '{}'",
+                    val.trim()
+                )
+            })?,
+            Err(_) => superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES,
+        },
+    };
+
     let auto_rollback = if !auto_rollback {
         false
     } else if let Ok(val) = std::env::var("SUPERSTATE_DAEMON_AUTO_ROLLBACK") {
@@ -191,6 +211,9 @@ pub fn cmd_daemon(
         if review_blocking {
             cmd.arg("--review-blocking");
         }
+        if rollback_policy != superstate_core::daemon::RollbackPolicy::default() {
+            cmd.arg("--rollback-policy").arg(rollback_policy.as_str());
+        }
         if !auto_rollback {
             cmd.arg("--no-auto-rollback");
         }
@@ -209,6 +232,23 @@ pub fn cmd_daemon(
         }
         if impact_slicing {
             cmd.arg("--impact-slicing");
+        }
+        // Forwarded ALWAYS, not only when non-default.
+        //
+        // This block re-builds the child's argv by hand, so any flag not written here is
+        // silently dropped the moment the daemon detaches -- which is how the eval always
+        // runs it. Both of these were added and both were lost: EXP-081's ablation arm
+        // provisioned `--read-cache true` on BOTH sides and would have measured nothing, and
+        // a `--read-threshold-lines` sweep would have quietly run at the default throughout.
+        // A swept parameter that reverts without saying so produces a run that looks like a
+        // data point and is not one.
+        //
+        // See `test_detach_argv_round_trips`, which parses this argv back and compares the
+        // resulting config field by field, so the next addition cannot be forgotten silently.
+        cmd.arg("--read-threshold-lines")
+            .arg(read_threshold_lines.to_string());
+        if !read_cache {
+            cmd.arg("--no-read-cache");
         }
         cmd.stdout(std::process::Stdio::from(log_out));
         cmd.stderr(std::process::Stdio::from(log_err));
@@ -288,8 +328,11 @@ pub fn cmd_daemon(
             advisory_review,
             review_blocking,
             auto_rollback,
+            rollback_policy,
             shunt_driver_output,
             guard_file_reads,
+            read_threshold_lines,
+            read_cache,
             guard_commands,
             impact_slicing,
         };

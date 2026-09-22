@@ -343,6 +343,36 @@ pub struct DaemonArgs {
     /// Disable automatic git rollback on verification failure
     #[arg(long, help = "Disable automatic git rollback on verification failure")]
     pub no_auto_rollback: bool,
+    /// When a failed attempt's tree is reset: always (Manifesto Invariant III, the default),
+    /// on-stall (only when the attempt changed nothing), on-regression (only when it broke
+    /// something that previously passed).
+    #[arg(
+        long,
+        value_name = "POLICY",
+        help = "When to reset on failure: always (default), on-stall, on-regression"
+    )]
+    pub rollback_policy: Option<String>,
+    /// Line budget a read may take before the guard serves an AST outline instead.
+    ///
+    /// Varying this is a first-class experiment, not a tuning afterthought: the optimum
+    /// depends on how much of a file a task actually needs, and the cost curve is asymmetric
+    /// -- too low costs roughly twice as much as no budget at all. Also settable via
+    /// SUPERSTATE_READ_THRESHOLD_LINES so a run can sweep it without a rebuild.
+    #[arg(
+        long,
+        value_name = "LINES",
+        help = "Lines a read may take before shunting to an outline (default 800)"
+    )]
+    pub read_threshold_lines: Option<usize>,
+    /// Disable the read cache: serve every read even when its lines are already in context
+    ///
+    /// The ablation arm. This mechanism changes what the worker SEES, not only what it costs,
+    /// so a paired run needs to be able to turn it off.
+    #[arg(
+        long,
+        help = "Disable suppressing reads whose lines are already in the worker's context"
+    )]
+    pub no_read_cache: bool,
     /// Disable automatic tool output shunting during driver execution
     #[arg(
         long,
@@ -405,6 +435,12 @@ impl DaemonArgs {
     pub fn use_command_guard(&self) -> bool {
         !self.no_guard && !self.no_command_guard
     }
+
+    pub fn use_read_cache(&self) -> bool {
+        // Turning the file guard off entirely turns off its cache too: there is no hook to
+        // carry it. Reporting otherwise would overstate what a run had enabled.
+        self.use_guard() && !self.no_read_cache
+    }
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -441,6 +477,15 @@ pub struct HandoffArgs {
     /// Verification invariant command
     #[arg(long)]
     pub verify_cmd: Option<String>,
+
+    /// Decompose the goal into the autonomous TDD DAG instead of a single gated milestone.
+    ///
+    /// Milestone 1 requires the worker to author its own reproduction test and proves it
+    /// compiles and FAILS; milestone 2 proves that test and the repository's own suite PASS.
+    /// Conflicts with --verify-cmd: handing over a ready-made assertion is the scaffold
+    /// Manifesto Invariant V bans.
+    #[arg(long, conflicts_with = "verify_cmd")]
+    pub tdd: bool,
 
     /// Plan markdown file to parse milestones from
     #[arg(long)]
@@ -483,6 +528,7 @@ impl Default for HandoffArgs {
         Self {
             goal: None,
             verify_cmd: None,
+            tdd: false,
             plan: None,
             from: None,
             to: None,
@@ -619,9 +665,14 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
             }
             None => {
                 let auto_rollback = args.use_auto_rollback();
+                let rollback_policy = match args.rollback_policy.as_deref() {
+                    Some(v) => superstate_core::daemon::RollbackPolicy::parse(v)?,
+                    None => superstate_core::daemon::RollbackPolicy::default(),
+                };
                 let shunt_driver_output = args.use_shunt();
                 let guard_file_reads = args.use_guard();
                 let guard_commands = args.use_command_guard();
+                let read_cache = args.use_read_cache();
                 commands::daemon::cmd_daemon(
                     &resolve(args.state),
                     args.driver.as_deref(),
@@ -631,8 +682,11 @@ pub fn dispatch(cmd: StateCommands) -> Result<(), String> {
                     args.advisory_review,
                     args.review_blocking,
                     auto_rollback,
+                    rollback_policy,
                     shunt_driver_output,
                     guard_file_reads,
+                    args.read_threshold_lines,
+                    read_cache,
                     guard_commands,
                     args.impact_slicing,
                 )

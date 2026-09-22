@@ -21,7 +21,10 @@ fn test_serde_guard_decision() {
         reason: "file too large".to_string(),
     };
     let deny_json = serde_json::to_string(&deny).unwrap();
-    assert_eq!(deny_json, r#"{"decision":"deny","reason":"file too large"}"#);
+    assert_eq!(
+        deny_json,
+        r#"{"decision":"deny","reason":"file too large"}"#
+    );
     let deserialized_deny: GuardDecision = serde_json::from_str(&deny_json).unwrap();
     assert_eq!(deserialized_deny, deny);
 }
@@ -233,7 +236,9 @@ fn test_unsupported_language_falls_back_to_preview() {
     match decision {
         GuardDecision::Deny { reason } => {
             assert!(
-                reason.contains("[superstate-guard] Full file read blocked (250 lines exceeds 200-line budget)"),
+                reason.contains(
+                    "[superstate-guard] Full file read blocked (250 lines exceeds 200-line budget)"
+                ),
                 "header mismatch: {}",
                 reason
             );
@@ -263,7 +268,9 @@ fn test_unsupported_language_falls_back_to_preview() {
                 reason
             );
         }
-        GuardDecision::Allow => panic!("Expected Deny for unsupported language exceeding threshold"),
+        GuardDecision::Allow => {
+            panic!("Expected Deny for unsupported language exceeding threshold")
+        }
     }
 }
 
@@ -296,5 +303,40 @@ fn test_empty_ast_outline_falls_back_to_preview() {
             );
         }
         GuardDecision::Allow => panic!("Expected Deny for comments-only large file"),
+    }
+}
+
+#[test]
+fn bulk_read_target_catches_whole_file_dumps_but_not_bounded_reads() {
+    use superstate_core::guard::bulk_read_target;
+
+    // A whole-file dump is a file read wearing a shell command's clothes. The file guard only
+    // matched the viewing tool, so this channel bypassed the entire perimeter -- 29 of 152
+    // commands recorded across runs were `cat` or `grep`.
+    for cmd in [
+        "cat internal/scanner.go",
+        "cat internal/scanner.go | grep pool",
+        "less internal/scanner.go",
+        "/bin/cat internal/scanner.go",
+        "tail internal/scanner.go",
+    ] {
+        assert_eq!(
+            bulk_read_target(cmd).as_deref(),
+            Some(std::path::Path::new("internal/scanner.go")),
+            "should intercept: {cmd}"
+        );
+    }
+
+    // Bounded reads are the behaviour the guard exists to encourage. Intercepting them would
+    // punish an agent for complying.
+    for cmd in [
+        "head -50 internal/scanner.go",
+        "head -n 50 internal/scanner.go",
+        "tail -n 20 internal/scanner.go",
+        "go test ./...",
+        "grep -rn pool internal/",
+        "git status",
+    ] {
+        assert_eq!(bulk_read_target(cmd), None, "should pass through: {cmd}");
     }
 }

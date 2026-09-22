@@ -11,3 +11,11 @@ Cargo.lock
 
 # Graphify knowledge graph outputs
 graphify-out/
+
+# Secrets. Never commit. Holds GEMINI_API_KEY.
+# `*.env` is needed as well as `.env`: the first two patterns miss `secrets.env`,
+# which is exactly the gap test_no_secrets_committed.py caught.
+.env
+.env.*
+*.env
+!.env.example

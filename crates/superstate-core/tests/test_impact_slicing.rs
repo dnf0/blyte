@@ -147,3 +147,41 @@ fn test_build_sliced_test_cmd_stops_at_shell_chaining_operators() {
         Some("cargo test --features all --test test_lexer".to_string())
     );
 }
+
+#[test]
+fn a_heredoc_command_is_never_sliced() {
+    // The runner name lives in the heredoc BODY, not in the command this shell runs.
+    // Rewriting around it yields an unterminated heredoc that executes on the host.
+    // EXP-072 measured the cost: four spurious "No tests found ... In /workspace" failures
+    // on katex, $2.71, and the task lost.
+    let repo = tempfile::tempdir().expect("tempdir");
+    let impacted = vec![std::path::PathBuf::from("src/x.test.js")];
+    for gate in [
+        "cat <<'GATEEOF' | ./run-in-container sh -s\nnpx jest\nGATEEOF",
+        "cat <<'EOF' | ./run-in-container sh -s\npython -m pytest tests/\nEOF",
+    ] {
+        assert_eq!(
+            superstate_core::impact::build_sliced_test_cmd(gate, &impacted, repo.path()),
+            None,
+            "sliced a heredoc command: {gate}"
+        );
+    }
+}
+
+#[test]
+fn a_plain_command_is_still_sliced() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(repo.path().join("tests")).expect("mkdir");
+    let impacted = vec![repo.path().join("tests/test_x.py")];
+    let sliced = superstate_core::impact::build_sliced_test_cmd(
+        "./run-in-container python -m pytest tests/",
+        &impacted,
+        repo.path(),
+    );
+    let sliced = sliced.expect("a plain pytest command must still slice");
+    assert!(sliced.contains("tests/test_x.py"), "{sliced}");
+    assert!(
+        sliced.starts_with("./run-in-container "),
+        "slicing must preserve the container bridge: {sliced}"
+    );
+}

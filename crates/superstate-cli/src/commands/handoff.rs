@@ -14,8 +14,9 @@ use superstate_core::ledger::{append_ledger_note, read_ledger};
 use superstate_core::models::LedgerEntry;
 use superstate_core::plan_parser::init_state_from_plan;
 use superstate_core::state_machine::{
-    init_state_direct, load_state, sanitize_branch_slug, save_state_atomic,
+    init_state_direct, init_state_milestones, load_state, sanitize_branch_slug, save_state_atomic,
 };
+use superstate_core::tdd::tdd_milestones;
 use superstate_worktree::manager::{ensure_git_baseline, ensure_git_exclude, WorktreeManager};
 
 use crate::commands::daemon::cmd_daemon;
@@ -64,6 +65,22 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
         if st.base_branch.is_none() {
             st.base_branch = base_branch.clone();
         }
+        st.no_worktree = no_worktree;
+        st
+    } else if args.tdd {
+        // Autonomous TDD decomposition. The DAG is derived here, inside the binary, from the
+        // repository's own layout -- never supplied by a caller. Manifesto Invariant V: a
+        // hand-authored gate turns open-ended diagnosis into a narrow test-passing game, so
+        // the worker must author the reproduction test itself and the control plane only
+        // certifies that it is RED and later GREEN.
+        let goal = args.goal.as_deref().ok_or_else(|| {
+            "--tdd requires --goal <text> describing the issue to reproduce".to_string()
+        })?;
+        let milestones = tdd_milestones(&repo_root).map_err(|e| e.to_string())?;
+        let mut st =
+            init_state_milestones(Some(goal), milestones, base_branch.as_deref(), no_worktree)
+                .map_err(|e| format!("Failed to initialize TDD state: {}", e))?;
+        st.base_branch = base_branch.clone();
         st.no_worktree = no_worktree;
         st
     } else if let Some(ref goal) = args.goal {
@@ -179,8 +196,11 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
             false,
             false,
             false,
+            superstate_core::daemon::RollbackPolicy::default(),
             true,
             true,
+            None, // read_threshold_lines: take the measured default / env override
+            true, // read_cache
             true,
             false,
         )

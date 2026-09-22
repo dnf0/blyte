@@ -78,27 +78,38 @@ fn test_manage_task_status_blocks_within_cooldown() {
     assert_eq!(decision1, CommandGuardDecision::Allow);
     assert!(state_file.exists());
 
-    // Immediate second call: denied with expected reason format
+    // Immediate second call: throttled, never denied.
+    //
+    // This assertion used to require the reason to contain "yield turn to await background task
+    // completion notification". In headless print mode yielding the turn ENDS the run, because
+    // nothing will deliver that notification -- three consecutive yields exhaust max_retries and
+    // the task is blocked. That instruction killed vanilla runs in EXP-071, katex in EXP-074 and
+    // scc in EXP-076. The guard must rate-limit the poll, never tell the agent to stop.
     let decision2 = evaluate_command_guard("manage_task", &args, &config);
     match decision2 {
-        CommandGuardDecision::Deny { reason } => {
+        CommandGuardDecision::Throttle { wait_sec, reason } => {
             assert!(
-                reason.contains("[superstate-guard] Busy-wait polling blocked:"),
+                wait_sec > 0 && wait_sec <= 30,
+                "unexpected wait: {}",
+                wait_sec
+            );
+            assert!(
+                reason.contains("[superstate-guard] Polling throttled:"),
                 "unexpected reason: {}",
                 reason
             );
-            assert!(
-                reason.contains("Cooldown active"),
-                "reason missing cooldown: {}",
-                reason
-            );
-            assert!(
-                reason.contains("Do not loop on status; yield turn to await background task completion notification."),
-                "reason missing guidance: {}",
-                reason
-            );
+            for forbidden in ["yield turn", "yield your turn", "stop calling tools"] {
+                assert!(
+                    !reason.to_lowercase().contains(forbidden),
+                    "the guard must never instruct the agent to end its turn: {}",
+                    reason
+                );
+            }
         }
-        CommandGuardDecision::Allow => panic!("Expected Deny on immediate status poll"),
+        other => panic!(
+            "expected Throttle on an immediate status poll, got {:?}",
+            other
+        ),
     }
 }
 
@@ -127,7 +138,7 @@ fn test_manage_task_list_shares_cooldown_with_status() {
     );
 
     let decision2 = evaluate_command_guard("manage_task", &args_status, &config);
-    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
+    assert!(matches!(decision2, CommandGuardDecision::Throttle { .. }));
 }
 
 #[test]
@@ -190,7 +201,7 @@ fn test_run_command_procfs_polling_blocks() {
     );
 
     let decision2 = evaluate_command_guard("run_command", &args2, &config);
-    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
+    assert!(matches!(decision2, CommandGuardDecision::Throttle { .. }));
 
     // Wildcard procfs query should also match pattern
     let mut args3 = serde_json::Map::new();
@@ -199,7 +210,7 @@ fn test_run_command_procfs_polling_blocks() {
         serde_json::Value::String("ls /proc/*/stat".to_string()),
     );
     let decision3 = evaluate_command_guard("run_command", &args3, &config);
-    assert!(matches!(decision3, CommandGuardDecision::Deny { .. }));
+    assert!(matches!(decision3, CommandGuardDecision::Throttle { .. }));
 }
 
 #[test]
@@ -227,7 +238,7 @@ fn test_run_command_process_inspection_blocks() {
         serde_json::Value::String("pgrep -f worker".to_string()),
     );
     let decision2 = evaluate_command_guard("run_command", &args2, &config);
-    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
+    assert!(matches!(decision2, CommandGuardDecision::Throttle { .. }));
 
     // Non-matching words like 'stop_server' or 'laptop' should not trigger process inspection regex false-positives
     // Create new clean state
@@ -246,61 +257,49 @@ fn test_run_command_process_inspection_blocks() {
 }
 
 #[test]
-fn test_run_command_exact_duplicate_blocks() {
+fn test_repeating_a_command_is_not_treated_as_polling() {
+    // Re-running the same build or test command is the TDD loop, not a busy-wait poll: the
+    // command is identical but the repository state is not. Debouncing it made Invariant IV
+    // (block runaway polling) contradict Invariant V (re-run the reproduction test until it
+    // passes), and a worker re-running `go test ./...` after an edit hit the cooldown.
     let dir = tempdir().unwrap();
-    let state_file = dir.path().join("guard_history.json");
     let config = CommandGuardConfig {
         debounce_sec: 30,
-        state_path: Some(state_file),
+        state_path: Some(dir.path().join("guard_history.json")),
     };
 
     let mut args = serde_json::Map::new();
     args.insert(
         "CommandLine".to_string(),
-        serde_json::Value::String("cargo test --test foo".to_string()),
+        serde_json::Value::String("./run-in-container go test ./...".to_string()),
     );
 
-    let decision1 = evaluate_command_guard("run_command", &args, &config);
-    assert_eq!(decision1, CommandGuardDecision::Allow);
+    for attempt in 1..=3 {
+        assert_eq!(
+            evaluate_command_guard("run_command", &args, &config),
+            CommandGuardDecision::Allow,
+            "attempt {attempt}: re-running a test command must never be throttled"
+        );
+    }
 
-    // Exact duplicate within cooldown blocks
-    let decision2 = evaluate_command_guard("run_command", &args, &config);
-    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
-
-    // Different command is allowed!
-    let mut args_diff = serde_json::Map::new();
-    args_diff.insert(
+    // Genuine polling signatures are still caught.
+    let mut poll = serde_json::Map::new();
+    poll.insert(
         "CommandLine".to_string(),
-        serde_json::Value::String("cargo check".to_string()),
+        serde_json::Value::String("ps aux | grep build".to_string()),
     );
-    let decision3 = evaluate_command_guard("run_command", &args_diff, &config);
-    assert_eq!(decision3, CommandGuardDecision::Allow);
-}
-
-#[test]
-fn test_run_command_exact_duplicate_whitespace_normalization() {
-    let dir = tempdir().unwrap();
-    let state_file = dir.path().join("guard_history.json");
-    let config = CommandGuardConfig {
-        debounce_sec: 30,
-        state_path: Some(state_file),
-    };
-
-    let mut args1 = serde_json::Map::new();
-    args1.insert(
-        "CommandLine".to_string(),
-        serde_json::Value::String("npm   run   build".to_string()),
+    assert_eq!(
+        evaluate_command_guard("run_command", &poll, &config),
+        CommandGuardDecision::Allow,
+        "first process inspection is allowed"
     );
-    let decision1 = evaluate_command_guard("run_command", &args1, &config);
-    assert_eq!(decision1, CommandGuardDecision::Allow);
-
-    let mut args2 = serde_json::Map::new();
-    args2.insert(
-        "CommandLine".to_string(),
-        serde_json::Value::String("  npm run build  ".to_string()),
+    assert!(
+        matches!(
+            evaluate_command_guard("run_command", &poll, &config),
+            CommandGuardDecision::Throttle { .. }
+        ),
+        "a repeated process inspection is the loop the guard exists for"
     );
-    let decision2 = evaluate_command_guard("run_command", &args2, &config);
-    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
 }
 
 #[test]
@@ -362,10 +361,12 @@ fn test_prunes_entries_older_than_twice_debounce() {
         state_path: Some(state_file.clone()),
     };
 
+    // A polling command, because history is only keyed for polling now -- `cargo build` is a
+    // plain repeat and is no longer tracked at all.
     let mut args = serde_json::Map::new();
     args.insert(
         "CommandLine".to_string(),
-        serde_json::Value::String("cargo build".to_string()),
+        serde_json::Value::String("ps aux | grep cargo".to_string()),
     );
 
     let decision = evaluate_command_guard("run_command", &args, &config);
@@ -375,7 +376,7 @@ fn test_prunes_entries_older_than_twice_debounce() {
     let updated: BTreeMap<String, u64> = serde_json::from_str(&content).unwrap();
     assert!(updated.contains_key("recent_cmd"));
     assert!(!updated.contains_key("stale_cmd"));
-    assert!(updated.contains_key("cmd:cargo build"));
+    assert!(updated.contains_key("process_inspection"));
 }
 
 #[test]
@@ -403,7 +404,10 @@ fn test_fail_open_on_corrupted_state_file() {
 
     let content = fs::read_to_string(&state_file).unwrap();
     let parsed: Result<BTreeMap<String, u64>, _> = serde_json::from_str(&content);
-    assert!(parsed.is_ok(), "State file should be overwritten with valid JSON");
+    assert!(
+        parsed.is_ok(),
+        "State file should be overwritten with valid JSON"
+    );
 }
 
 #[test]
@@ -455,5 +459,5 @@ fn test_case_insensitivity_of_tool_and_arg_keys() {
         serde_json::Value::String("ps   aux".to_string()),
     );
     let decision2 = evaluate_command_guard("run_command", &args2, &config);
-    assert!(matches!(decision2, CommandGuardDecision::Deny { .. }));
+    assert!(matches!(decision2, CommandGuardDecision::Throttle { .. }));
 }

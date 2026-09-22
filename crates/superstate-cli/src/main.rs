@@ -164,8 +164,23 @@ fn main() {
                 args.advisory_review,
                 args.review_blocking,
                 args.use_auto_rollback(),
+                match args.rollback_policy.as_deref() {
+                    // An unrecognised policy must abort rather than silently defaulting: a run
+                    // that thinks it measured on-stall and actually measured always is worse
+                    // than a run that did not start.
+                    Some(v) => match superstate_core::daemon::RollbackPolicy::parse(v) {
+                        Ok(policy) => policy,
+                        Err(err) => {
+                            eprintln!("{err}");
+                            std::process::exit(2);
+                        }
+                    },
+                    None => superstate_core::daemon::RollbackPolicy::default(),
+                },
                 args.use_shunt(),
                 args.use_guard(),
+                args.read_threshold_lines,
+                args.use_read_cache(),
                 args.use_command_guard(),
                 args.impact_slicing,
             ),
