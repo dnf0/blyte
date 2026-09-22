@@ -142,21 +142,35 @@ pub fn evaluate_file_read_guard(
 
 /// Default line budget before a read is served as an AST outline instead.
 ///
-/// Chosen from measurement, not intuition. A tool call carries a fixed preamble of roughly
-/// 2,500-5,000 tokens (FINDINGS.md 13.17), so splitting a file pays that cost once per window
-/// to avoid fetching the lines it skips. At the previous value of 200 a 1,906-line file took 14
-/// calls costing 50,719 tokens where one whole-file read would have cost 23,466 -- 2.2x worse,
-/// and unable to break even even if the agent read nothing (13.18).
+/// Chosen from measurement, and corrected by it. A tool call carries a fixed preamble of
+/// roughly 2,500-5,000 tokens (FINDINGS.md 13.17), so splitting a file pays that cost once per
+/// window to avoid fetching the lines it skips. Too low and the preamble dominates; too high
+/// and whole files arrive that nobody wanted.
 ///
-/// Replaying that trace across thresholds put the optimum at ~1,600 for this workload, with the
-/// cost curve sharply asymmetric: 100 lines costs 66,497 and unbounded costs 35,542, so being
-/// too low is roughly twice as expensive as having no budget at all. 800 takes most of the gain
-/// while staying well clear of that cliff and robust to codebases with smaller files.
+/// This value has been wrong twice, in both directions, and the history is the point:
+///
+/// * 200 was set by intuition. Replaying a real trace, a 1,906-line file took 14 calls costing
+///   50,719 tokens where one whole-file read would have cost 23,466 -- 2.2x worse (13.18).
+/// * 1,600 replaced it briefly on that same replay, then 800 as a hedge. Both came from ONE
+///   trace of `superstate-core`, whose only file above 1,600 lines is `daemon.rs` itself, so
+///   that "optimum" marked where the budget stops binding rather than a cost minimum (13.20).
+/// * 400 comes from two independent real-task traces -- a Go repository and a TypeScript one --
+///   replayed at 17 thresholds. Both minimise at exactly 400, inside a shallow basin of roughly
+///   300-450. At 800 katex cost 151,562 against 133,861, which is worse than the 200 it had
+///   replaced (13.21).
+///
+/// Treat the basin, not the integer, as the finding: anything in 300-450 is defensible. The
+/// cost model assumes wanted lines repack optimally into windows, which flatters HIGH
+/// thresholds, so the true optimum sits at or below 400 rather than above it.
+///
+/// Keep this in proportion. Tuning this number is worth 9-17% of read cost; serving a read
+/// whose window is already held, without a tool call at all, is worth 45-68% (13.21). The
+/// budget is second-order and should not be mistaken for the main mechanism.
 ///
 /// The optimum is workload-specific -- it tracks how many lines a task actually needs from a
 /// file -- so this is a default, not a constant of nature. `scripts/read_budget.py` in
 /// superstate-eval recomputes it from any recorded trace.
-pub const DEFAULT_READ_THRESHOLD_LINES: usize = 800;
+pub const DEFAULT_READ_THRESHOLD_LINES: usize = 400;
 
 /// Detects a shell command that dumps a whole file into the conversation.
 ///

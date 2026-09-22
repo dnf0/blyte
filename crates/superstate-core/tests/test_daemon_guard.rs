@@ -566,8 +566,9 @@ fn generated_hooks_invoke_the_running_binary_not_whatever_is_on_path() {
 
 #[test]
 fn test_daemon_config_default_read_threshold_lines() {
-    // The measured default (FINDINGS 13.18). At 200 the budget cost 2.2x a whole-file read on
-    // a 1,906-line file, and could not break even at any read count; unbounded was cheaper.
+    // The measured default (FINDINGS 13.21). Two independent real-task traces, a Go repo and
+    // a TypeScript one, replayed at 17 thresholds, both minimise at exactly 400. The earlier
+    // 800 came from a single-file replay and was worse than the 200 it replaced on katex.
     let config = DaemonConfig::default();
     assert_eq!(
         config.read_threshold_lines,
@@ -576,8 +577,8 @@ fn test_daemon_config_default_read_threshold_lines() {
     );
     assert_eq!(
         superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES,
-        800,
-        "the measured default is 800; changing it is an experiment, not a refactor"
+        400,
+        "the measured default is 400; changing it is an experiment, not a refactor"
     );
 }
 
