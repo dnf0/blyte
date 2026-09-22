@@ -9,9 +9,9 @@
 //! This module derives, from the repository alone, two milestones:
 //!
 //!   1. RED   -- the worker authors its own reproduction test. The gate proves the test
-//!               *compiles* and *fails* against the pristine code.
+//!      *compiles* and *fails* against the pristine code.
 //!   2. GREEN -- the worker implements the fix. The gate proves the reproduction test and
-//!               the repository's own suite both pass.
+//!      the repository's own suite both pass.
 //!
 //! The compile proof in RED is what stops the milestone being vacuous. Without it a worker
 //! could satisfy "the test fails" with a syntax error, which certifies nothing.
@@ -71,7 +71,7 @@ fn any_entry(dir: &Path, pred: impl Fn(&str) -> bool) -> bool {
     };
     read_dir
         .flatten()
-        .any(|e| e.file_name().to_str().map(|n| pred(n)).unwrap_or(false))
+        .any(|e| e.file_name().to_str().map(&pred).unwrap_or(false))
 }
 
 /// The bridge script an evaluation workspace uses to reach its sandbox container.

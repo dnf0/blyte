@@ -71,6 +71,7 @@ pub enum CommandGuardDecision {
 /// Normalizes command line string by collapsing contiguous whitespace tokens.
 ///
 /// Ensures minor whitespace variations (e.g. extra spaces) do not bypass duplicate detection.
+#[allow(dead_code)]
 fn normalize_command(cmd: &str) -> String {
     cmd.split_whitespace().collect::<Vec<_>>().join(" ")
 }

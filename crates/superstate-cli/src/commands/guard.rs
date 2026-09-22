@@ -69,13 +69,13 @@ pub struct PreCommandArgs {
     pub bulk_read_threshold_lines: usize,
 }
 
+/// Upper bound on how long a throttled poll may be delayed inside the hook.
+const MAX_THROTTLE_SEC: u64 = 30;
+
 /// Serializes and prints the guard decision JSON to standard output.
 ///
 /// # Parameters
 /// - `decision`: The outcome to emit.
-/// Upper bound on how long a throttled poll may be delayed inside the hook.
-const MAX_THROTTLE_SEC: u64 = 30;
-
 fn emit_decision<T: serde::Serialize>(decision: &T) {
     // Decision is serialized to JSON string conforming to hook stdout protocol.
     if let Ok(json) = serde_json::to_string(decision) {

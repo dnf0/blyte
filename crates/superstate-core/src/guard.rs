@@ -211,9 +211,9 @@ pub fn bulk_read_target(command: &str) -> Option<PathBuf> {
                 skip_next = true;
                 continue;
             }
-            if token.starts_with('-') {
+            if let Some(rest) = token.strip_prefix('-') {
                 // `head -50` and any other flag.
-                if token.len() > 1 && token[1..].chars().all(|c| c.is_ascii_digit()) {
+                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
                     bounded = true;
                 }
                 continue;
