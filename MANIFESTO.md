@@ -93,7 +93,24 @@ This matters because cost scales with call count, not response size. The consequ
 
 **So: interception is for bounding what enters context. Reducing how often the worker reaches for context is a worker-plane problem and cannot be solved here.** Any mechanism proposed under this invariant must say which of the two it is doing.
 
-#### V. Autonomous TDD as the Problem-Solving Engine
+#### V. Autonomous TDD — an evaluation fallback, never a production mode
+
+**Superstate does not author gates. Ever.** The orchestrator — a human, or an agent in a chat
+session — decides the work and states the verification command. Superstate enforces it. That
+separation is the Core Axiom: the worker proposes, the environment decides. A control plane
+that invents its own definition of "done" has become the thing Invariant II exists to prevent,
+however mechanically it does so.
+
+What follows below exists for one situation, and it is an artefact of *evaluation*, not a
+product requirement. Benchmark tasks ship their real verifier sealed as an answer key and
+provide no orchestrator, so a gate has to come from somewhere. Hand-authored fixtures were the
+first answer and were deleted for leaking the shape of the solution. Worker-authored
+reproduction tests are the second, and they are **bounded self-grading, not its elimination**:
+the RED assertion proves a test discriminates *something*, never that it discriminates the
+right thing. Measured gate precision for worker-authored tests is 3 of 4 [FINDINGS 13.9].
+
+Read the rest of this invariant as: *when no orchestrator exists, this is the least-bad way to
+manufacture a gate, and its precision must be reported alongside any result it produced.*
 Autonomous software engineering cannot rely on synthetic hand-authored scaffolds or answer-key leakage. Pre-seeding maintainer reproduction tests is cheating; it turns an open-ended engineering diagnosis into a narrow test-passing game.
 
 The canonical execution engine for autonomous engineering is mechanical Test-Driven Development:
