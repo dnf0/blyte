@@ -109,3 +109,96 @@ fn distil_keeps_the_tail_because_test_runners_summarise_at_the_end() {
 fn distil_leaves_short_output_untouched() {
     assert_eq!(distil("a\nb\nc", OUTPUT_LINE_BUDGET), "a\nb\nc");
 }
+
+// ---- discovery tools -------------------------------------------------------------------
+
+fn seeded() -> tempfile::TempDir {
+    let d = ws();
+    std::fs::create_dir_all(d.path().join("src/deep")).unwrap();
+    std::fs::create_dir_all(d.path().join("node_modules/junk")).unwrap();
+    std::fs::write(d.path().join("src/main.rs"), "fn main() { parse_array(); }\n").unwrap();
+    std::fs::write(d.path().join("src/deep/array.rs"), "fn parse_array() {}\n// multicolumn\n").unwrap();
+    std::fs::write(d.path().join("src/notes.md"), "parse_array is the entry point\n").unwrap();
+    std::fs::write(d.path().join("node_modules/junk/array.rs"), "fn parse_array() {}\n").unwrap();
+    d
+}
+
+#[test]
+fn glob_finds_files_recursively() {
+    let d = seeded();
+    let r = execute(d.path(), "glob", &json!({"pattern": "src/**/*.rs"}));
+    assert!(!r.is_error, "{r:?}");
+    assert!(r.content.contains("src/main.rs"), "got {}", r.content);
+    assert!(r.content.contains("src/deep/array.rs"), "** must recurse: {}", r.content);
+}
+
+#[test]
+fn glob_reports_no_match_rather_than_returning_empty() {
+    // An empty string reads to a model as a tool that broke, and it retries. Saying so plainly
+    // is the difference between one call and three.
+    let d = seeded();
+    let r = execute(d.path(), "glob", &json!({"pattern": "*.nope"}));
+    assert!(!r.is_error);
+    assert!(r.content.contains("no files match"), "got {}", r.content);
+}
+
+#[test]
+fn grep_returns_path_line_and_text() {
+    let d = seeded();
+    let r = execute(d.path(), "grep", &json!({"pattern": "parse_array"}));
+    assert!(!r.is_error, "{r:?}");
+    assert!(r.content.contains("src/main.rs:1:"), "must carry path:line: {}", r.content);
+}
+
+#[test]
+fn grep_honours_gitignore_so_node_modules_does_not_drown_the_result() {
+    // The single reason a repo-wide search is usable. Requires ripgrep; skipped without it
+    // rather than asserted falsely, since the grep fallback has no such behaviour.
+    if !superstate_agent::tools::have("rg") { return; }
+    let d = seeded();
+    std::fs::write(d.path().join(".gitignore"), "node_modules/\n").unwrap();
+    std::process::Command::new("git").args(["init", "-q"]).current_dir(d.path()).output().unwrap();
+    let r = execute(d.path(), "grep", &json!({"pattern": "parse_array"}));
+    assert!(!r.content.contains("node_modules"), "ignored paths must stay out: {}", r.content);
+}
+
+#[test]
+fn grep_can_be_restricted_by_glob() {
+    let d = seeded();
+    let r = execute(d.path(), "grep", &json!({"pattern": "parse_array", "glob": "*.md"}));
+    assert!(r.content.contains("notes.md"), "got {}", r.content);
+    assert!(!r.content.contains("main.rs"), "glob must restrict: {}", r.content);
+}
+
+#[test]
+fn grep_says_when_it_capped_rather_than_implying_completeness() {
+    let d = ws();
+    let many: String = (0..500).map(|i| format!("needle {i}\n")).collect();
+    std::fs::write(d.path().join("big.txt"), many).unwrap();
+    let r = execute(d.path(), "grep", &json!({"pattern": "needle"}));
+    assert!(r.content.contains("capped at"), "a truncated search must not read as complete: {}",
+            &r.content[r.content.len().saturating_sub(200)..]);
+}
+
+#[test]
+fn grep_patterns_with_shell_metacharacters_are_passed_verbatim() {
+    // `$`, quotes and spaces in a regex must reach the tool, not the shell.
+    let d = ws();
+    std::fs::write(d.path().join("a.rs"), "let x = \"a b\";\nprice $5\n").unwrap();
+    let r = execute(d.path(), "grep", &json!({"pattern": r"price \$5"}));
+    assert!(r.content.contains("a.rs:2:"), "got {}", r.content);
+}
+
+#[test]
+fn grep_outside_the_workspace_is_refused() {
+    let d = ws();
+    let r = execute(d.path(), "grep", &json!({"pattern": "x", "path": "../.."}));
+    assert!(r.is_error && r.content.contains("escapes the workspace"), "{r:?}");
+}
+
+#[test]
+fn the_environment_probe_finds_the_tools_that_are_actually_here() {
+    let bins = superstate_agent::tools::available_binaries();
+    assert!(bins.contains(&"git"), "git is present on any dev machine: {bins:?}");
+    assert!(!bins.contains(&"definitely-not-a-real-binary"));
+}

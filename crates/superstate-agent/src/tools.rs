@@ -24,6 +24,10 @@ use superstate_provider::ToolSpec;
 /// tail, so the bound exists for the rare case; it must not clip the common one.
 pub const OUTPUT_LINE_BUDGET: usize = 400;
 
+/// Most matches a single search returns. The count of what was cut is always reported, so a
+/// truncated search reads as truncated rather than as a complete answer with few hits.
+pub const MAX_MATCHES: usize = 200;
+
 /// Hard ceiling on a single command. Long is fine -- unbounded is not.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(900);
 
@@ -64,14 +68,48 @@ pub fn distil(text: &str, budget: usize) -> String {
 fn resolve_in_workspace(root: &Path, raw: &str) -> Result<PathBuf, String> {
     let joined = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) };
     let root_c = root.canonicalize().map_err(|e| format!("workspace root unreadable: {e}"))?;
-    // Canonicalise the existing ancestor, so a path that does not exist yet (a file about to be
-    // written) is still checked rather than waved through.
-    let probe = joined.parent().unwrap_or(&joined);
-    let probe_c = probe.canonicalize().unwrap_or_else(|_| probe.to_path_buf());
+
+    // Canonicalise the NEAREST EXISTING ancestor, starting with the target itself. Walking
+    // straight to `.parent()` was wrong for a directory target: `Path::new("/a/b/.").parent()`
+    // is `/a`, not `/a/b`, so searching the workspace root as `.` resolved to its parent and was
+    // refused. Starting at the target and climbing only when it does not exist keeps both cases
+    // right -- an existing directory checks itself, a file about to be created checks the
+    // directory it will land in -- and neither is waved through unchecked.
+    let mut probe = joined.as_path();
+    let probe_c = loop {
+        if let Ok(c) = probe.canonicalize() {
+            break c;
+        }
+        match probe.parent() {
+            Some(p) => probe = p,
+            // Nothing in the chain exists: fall back to a lexical check rather than allowing it.
+            None => break joined.clone(),
+        }
+    };
     if !probe_c.starts_with(&root_c) {
         return Err(format!("path escapes the workspace: {raw}"));
     }
     Ok(joined)
+}
+
+/// Single-quote for `bash -lc`, so a pattern containing spaces, `$` or `"` is passed verbatim.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Whether a binary is on PATH. Used to choose ripgrep over grep, and to tell the model in the
+/// system prompt what its environment actually has -- the previous harness left the worker to
+/// discover that by trial, and when container guidance was missing it edited the host instead.
+pub fn have(bin: &str) -> bool {
+    Command::new("bash").arg("-lc").arg(format!("command -v {bin} >/dev/null"))
+        .output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// The CLI tools present in this environment, for the system prompt.
+pub fn available_binaries() -> Vec<&'static str> {
+    ["rg", "fd", "jq", "git", "sed", "awk", "find", "xargs", "curl", "make",
+     "cargo", "go", "npm", "yarn", "pnpm", "python3", "pytest", "node"]
+        .into_iter().filter(|b| have(b)).collect()
 }
 
 pub fn specs() -> Vec<ToolSpec> {
@@ -109,6 +147,27 @@ pub fn specs() -> Vec<ToolSpec> {
                 COMMAND_TIMEOUT.as_secs(), OUTPUT_LINE_BUDGET),
             parameters: json!({"type":"object","properties":{
                 "command":{"type":"string"}},"required":["command"]}),
+        },
+        ToolSpec {
+            name: "glob".into(),
+            description: "Find files by glob pattern, e.g. `src/**/*.rs`. Fast, and the right \
+                          first move when you do not know where something lives."
+                .into(),
+            parameters: json!({"type":"object","properties":{
+                "pattern":{"type":"string","description":"glob, relative to the workspace"}},
+                "required":["pattern"]}),
+        },
+        ToolSpec {
+            name: "grep".into(),
+            description: format!(
+                "Search file contents by regular expression, returning `path:line:text`. \
+                 Respects .gitignore. Use `glob` to find files by name and `grep` to find them \
+                 by content. Capped at {MAX_MATCHES} matches, and the total is always reported."),
+            parameters: json!({"type":"object","properties":{
+                "pattern":{"type":"string","description":"regular expression"},
+                "path":{"type":"string","description":"subtree to search; defaults to the workspace"},
+                "glob":{"type":"string","description":"restrict to files matching this glob, e.g. `*.ts`"}},
+                "required":["pattern"]}),
         },
         ToolSpec {
             name: "note".into(),
@@ -187,6 +246,60 @@ pub fn execute(root: &Path, name: &str, args: &Value) -> ToolOutcome {
                     ToolOutcome { content: format!("exit {code}\n{body}"), is_error: code != 0 }
                 }
                 Err(e) => ToolOutcome::err(format!("cannot run command: {e}")),
+            }
+        }
+        "glob" => {
+            let pattern = s("pattern");
+            // Delegated to the shell rather than a glob crate so that `**`, brace expansion and
+            // character classes behave exactly as the model expects from a terminal.
+            let cmd = format!(
+                "shopt -s globstar nullglob dotglob 2>/dev/null; printf '%s\\n' {pattern} | head -n {MAX_MATCHES}"
+            );
+            match Command::new("bash").arg("-lc").arg(&cmd).current_dir(root).output() {
+                Ok(o) => {
+                    let body = String::from_utf8_lossy(&o.stdout);
+                    let hits: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+                    if hits.is_empty() {
+                        ToolOutcome::ok(format!("no files match {pattern}"))
+                    } else {
+                        ToolOutcome::ok(format!("{} file(s):\n{}", hits.len(), hits.join("\n")))
+                    }
+                }
+                Err(e) => ToolOutcome::err(format!("glob failed: {e}")),
+            }
+        }
+        "grep" => {
+            let pattern = s("pattern");
+            let sub = { let p = s("path"); if p.is_empty() { ".".to_string() } else { p } };
+            if let Err(e) = resolve_in_workspace(root, &sub) { return ToolOutcome::err(e); }
+            let globarg = { let g = s("glob"); if g.is_empty() { String::new() }
+                            else { format!("--glob {}", shell_quote(&g)) } };
+            // ripgrep when present -- it honours .gitignore, which keeps node_modules and
+            // target/ out of the results and is most of why a repo search is usable at all.
+            // grep -rn is the fallback so the tool never simply vanishes on a bare machine.
+            let cmd = if have("rg") {
+                format!("rg --line-number --no-heading --color never {globarg} -e {} {} | head -n {}",
+                        shell_quote(&pattern), shell_quote(&sub), MAX_MATCHES + 1)
+            } else {
+                format!("grep -rnI -e {} {} | head -n {}",
+                        shell_quote(&pattern), shell_quote(&sub), MAX_MATCHES + 1)
+            };
+            match Command::new("bash").arg("-lc").arg(&cmd).current_dir(root).output() {
+                Ok(o) => {
+                    let body = String::from_utf8_lossy(&o.stdout);
+                    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+                    if lines.is_empty() {
+                        return ToolOutcome::ok(format!("no matches for {pattern}"));
+                    }
+                    if lines.len() > MAX_MATCHES {
+                        ToolOutcome::ok(format!(
+                            "{}\n\n[capped at {MAX_MATCHES} matches; narrow the pattern or pass `glob` \
+                             to see the rest]", lines[..MAX_MATCHES].join("\n")))
+                    } else {
+                        ToolOutcome::ok(format!("{} match(es):\n{}", lines.len(), lines.join("\n")))
+                    }
+                }
+                Err(e) => ToolOutcome::err(format!("grep failed: {e}")),
             }
         }
         other => ToolOutcome::err(format!("unknown tool: {other}")),
