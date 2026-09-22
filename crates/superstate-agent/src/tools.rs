@@ -10,11 +10,12 @@
 //! Blocking makes the failure unrepresentable rather than merely discouraged.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use superstate_provider::ToolSpec;
+
+use crate::shell::Shell;
 
 /// Output over this many lines is distilled to head and tail before entering context.
 ///
@@ -97,19 +98,28 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Whether a binary is on PATH. Used to choose ripgrep over grep, and to tell the model in the
-/// system prompt what its environment actually has -- the previous harness left the worker to
-/// discover that by trial, and when container guidance was missing it edited the host instead.
-pub fn have(bin: &str) -> bool {
-    Command::new("bash").arg("-lc").arg(format!("command -v {bin} >/dev/null"))
-        .output().map(|o| o.status.success()).unwrap_or(false)
+/// Whether a binary exists **where commands actually run**.
+pub fn have(shell: &dyn Shell, root: &Path, bin: &str) -> bool {
+    shell.exec(&format!("command -v {bin} >/dev/null"), root, COMMAND_TIMEOUT)
+        .map(|o| o.exit_code == 0).unwrap_or(false)
 }
 
-/// The CLI tools present in this environment, for the system prompt.
-pub fn available_binaries() -> Vec<&'static str> {
-    ["rg", "fd", "jq", "git", "sed", "awk", "find", "xargs", "curl", "make",
-     "cargo", "go", "npm", "yarn", "pnpm", "python3", "pytest", "node"]
-        .into_iter().filter(|b| have(b)).collect()
+/// Optional accelerators worth telling the model about, because their presence changes strategy.
+///
+/// POSIX-guaranteed utilities (`sed`, `awk`, `find`, `xargs`, `grep`) are deliberately absent:
+/// they are present everywhere, so listing them is noise in every prompt for no decision.
+pub const ACCELERATORS: &[&str] = &["rg", "fd", "jq", "ast-grep"];
+
+/// Language toolchains. Reported against what the REPOSITORY declares, not as a bare list --
+/// "this is a Node project and `npm` is not reachable" is actionable; "npm: absent" is not.
+pub const TOOLCHAINS: &[&str] =
+    &["git", "cargo", "go", "npm", "yarn", "pnpm", "python3", "pytest", "node", "make"];
+
+/// What is reachable in the execution environment, probed through the seam.
+pub fn available_binaries(shell: &dyn Shell, root: &Path) -> Vec<String> {
+    let mut all: Vec<&'static str> = ACCELERATORS.to_vec();
+    all.extend_from_slice(TOOLCHAINS);
+    shell.available_binaries(root, &all)
 }
 
 pub fn specs() -> Vec<ToolSpec> {
@@ -183,7 +193,16 @@ pub fn specs() -> Vec<ToolSpec> {
 }
 
 /// Execute one tool call. `note` is handled by the loop, which owns the state.
-pub fn execute(root: &Path, name: &str, args: &Value) -> ToolOutcome {
+///
+/// `shell` decides WHERE commands land -- host, container, remote. The tools never know, which
+/// is the point: the previous harness encoded that in a prompt instruction and the worker
+/// edited the host whenever the instruction went missing.
+///
+/// File operations (`read`/`write`/`edit`) still go through the orchestrator's filesystem.
+/// That is correct for a bind-mounted workspace and WRONG for a shell that executes on another
+/// machine; a remote deployment needs an `Fs` seam alongside this one, exactly as DeepSeek
+/// separates `ctx.fs` from `ctx.shell`. Recorded here rather than discovered later.
+pub fn execute(root: &Path, shell: &dyn Shell, name: &str, args: &Value) -> ToolOutcome {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
     match name {
         "read" => {
@@ -232,22 +251,15 @@ pub fn execute(root: &Path, name: &str, args: &Value) -> ToolOutcome {
                 },
             }
         }
-        "bash" => {
-            let out = Command::new("bash").arg("-lc").arg(s("command"))
-                .current_dir(root).output();
-            match out {
-                Ok(o) => {
-                    let merged = format!("{}{}", String::from_utf8_lossy(&o.stdout),
-                                         String::from_utf8_lossy(&o.stderr));
-                    let code = o.status.code().unwrap_or(-1);
-                    let body = distil(merged.trim_end(), OUTPUT_LINE_BUDGET);
-                    // Exit code always stated: a non-zero exit with quiet output otherwise
-                    // reads as success.
-                    ToolOutcome { content: format!("exit {code}\n{body}"), is_error: code != 0 }
-                }
-                Err(e) => ToolOutcome::err(format!("cannot run command: {e}")),
+        "bash" => match shell.exec(&s("command"), root, COMMAND_TIMEOUT) {
+            Ok(o) => {
+                let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
+                // Exit code always stated: a non-zero exit with quiet output reads as success.
+                ToolOutcome { content: format!("exit {}\n{body}", o.exit_code),
+                              is_error: o.exit_code != 0 }
             }
-        }
+            Err(e) => ToolOutcome::err(e),
+        },
         "glob" => {
             let pattern = s("pattern");
             // Delegated to the shell rather than a glob crate so that `**`, brace expansion and
@@ -255,9 +267,9 @@ pub fn execute(root: &Path, name: &str, args: &Value) -> ToolOutcome {
             let cmd = format!(
                 "shopt -s globstar nullglob dotglob 2>/dev/null; printf '%s\\n' {pattern} | head -n {MAX_MATCHES}"
             );
-            match Command::new("bash").arg("-lc").arg(&cmd).current_dir(root).output() {
+            match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
                 Ok(o) => {
-                    let body = String::from_utf8_lossy(&o.stdout);
+                    let body = o.stdout.clone();
                     let hits: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
                     if hits.is_empty() {
                         ToolOutcome::ok(format!("no files match {pattern}"))
@@ -277,16 +289,16 @@ pub fn execute(root: &Path, name: &str, args: &Value) -> ToolOutcome {
             // ripgrep when present -- it honours .gitignore, which keeps node_modules and
             // target/ out of the results and is most of why a repo search is usable at all.
             // grep -rn is the fallback so the tool never simply vanishes on a bare machine.
-            let cmd = if have("rg") {
+            let cmd = if have(shell, root, "rg") {
                 format!("rg --line-number --no-heading --color never {globarg} -e {} {} | head -n {}",
                         shell_quote(&pattern), shell_quote(&sub), MAX_MATCHES + 1)
             } else {
                 format!("grep -rnI -e {} {} | head -n {}",
                         shell_quote(&pattern), shell_quote(&sub), MAX_MATCHES + 1)
             };
-            match Command::new("bash").arg("-lc").arg(&cmd).current_dir(root).output() {
+            match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
                 Ok(o) => {
-                    let body = String::from_utf8_lossy(&o.stdout);
+                    let body = o.stdout.clone();
                     let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
                     if lines.is_empty() {
                         return ToolOutcome::ok(format!("no matches for {pattern}"));

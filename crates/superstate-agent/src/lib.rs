@@ -11,5 +11,6 @@
 //!
 //! None of those are fixable from outside. All of them are design decisions from inside.
 
+pub mod shell;
 pub mod state;
 pub mod tools;
