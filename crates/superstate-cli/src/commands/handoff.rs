@@ -77,8 +77,9 @@ pub fn cmd_handoff(args: &HandoffArgs) -> Result<(), String> {
             "--tdd requires --goal <text> describing the issue to reproduce".to_string()
         })?;
         let milestones = tdd_milestones(&repo_root).map_err(|e| e.to_string())?;
-        let mut st = init_state_milestones(Some(goal), milestones, base_branch.as_deref(), no_worktree)
-            .map_err(|e| format!("Failed to initialize TDD state: {}", e))?;
+        let mut st =
+            init_state_milestones(Some(goal), milestones, base_branch.as_deref(), no_worktree)
+                .map_err(|e| format!("Failed to initialize TDD state: {}", e))?;
         st.base_branch = base_branch.clone();
         st.no_worktree = no_worktree;
         st

@@ -56,7 +56,12 @@ pub trait Shell: Send + Sync {
             .collect::<Vec<_>>()
             .join("; ");
         match self.exec(&probe, cwd, Duration::from_secs(30)) {
-            Ok(o) => o.stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+            Ok(o) => o
+                .stdout
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -95,7 +100,9 @@ fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
         cmd.process_group(0);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("cannot run command: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("cannot run command: {e}"))?;
 
     // Drained on background threads: a command that fills the pipe buffer deadlocks against
     // a parent that only reads after waiting, which turns a noisy command into a hang.
@@ -155,7 +162,10 @@ fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
         // a killed command that returns nothing tells it only that something went wrong.
         None => Ok(Output {
             stdout,
-            stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
+            stderr: format!(
+                "{stderr}\n[killed by superstate after {}s]",
+                timeout.as_secs()
+            ),
             exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
         }),
     }

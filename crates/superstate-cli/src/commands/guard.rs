@@ -7,11 +7,13 @@
 use clap::{Args, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
-use superstate_core::command_guard::{evaluate_command_guard, CommandGuardConfig, CommandGuardDecision};
-use superstate_core::read_cache::{self, CacheVerdict, ReadRecord};
+use superstate_core::command_guard::{
+    evaluate_command_guard, CommandGuardConfig, CommandGuardDecision,
+};
 use superstate_core::guard::{
     bulk_read_target, evaluate_file_read_guard, FileReadGuardConfig, GuardDecision,
 };
+use superstate_core::read_cache::{self, CacheVerdict, ReadRecord};
 
 /// Subcommands for the `superstate guard` namespace.
 #[derive(Subcommand, Debug, Clone)]
@@ -303,7 +305,9 @@ fn load_read_cache() -> Vec<ReadRecord> {
 }
 
 fn append_read_cache(record: &ReadRecord) {
-    let Some(path) = read_cache_path() else { return };
+    let Some(path) = read_cache_path() else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         if std::fs::create_dir_all(dir).is_err() {
             return;
@@ -311,7 +315,11 @@ fn append_read_cache(record: &ReadRecord) {
     }
     if let Ok(line) = serde_json::to_string(record) {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = writeln!(f, "{line}");
         }
     }
@@ -551,7 +559,11 @@ pub fn cmd_pre_tool_use(args: PreToolUseArgs) -> Result<(), String> {
     // Every read is recorded, not just the blocked ones: the question "was the same file read
     // repeatedly?" cannot be answered from denials alone.
     record_activity(
-        if start_line.is_some() || end_line.is_some() { "read_bounded" } else { "read_whole" },
+        if start_line.is_some() || end_line.is_some() {
+            "read_bounded"
+        } else {
+            "read_whole"
+        },
         &resolved.display().to_string(),
         lines,
         if cache_hit {
@@ -700,4 +712,3 @@ pub fn dispatch_guard(cmd: GuardCommands) -> Result<(), String> {
         GuardCommands::PreCommand(args) => cmd_pre_command(args),
     }
 }
-

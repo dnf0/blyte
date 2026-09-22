@@ -35,7 +35,9 @@ impl ContextStrategy for Conversational {
     fn build(&self, _state: &State, history: &[Message]) -> Vec<Message> {
         history.to_vec()
     }
-    fn name(&self) -> &'static str { "conversational" }
+    fn name(&self) -> &'static str {
+        "conversational"
+    }
 }
 
 /// `(P, Σ, O)`: the task, the state, and the most recent observation.
@@ -62,7 +64,10 @@ impl ContextStrategy for StateOnly {
         // The tool CALL is carried alongside its result because a result with no call is
         // meaningless -- and because providers reject a functionResponse with no matching
         // functionCall.
-        if let Some(pos) = history.iter().rposition(|m| matches!(m, Message::ToolResult { .. })) {
+        if let Some(pos) = history
+            .iter()
+            .rposition(|m| matches!(m, Message::ToolResult { .. }))
+        {
             if pos > 0 {
                 if let Message::ToolCall { .. } = &history[pos - 1] {
                     out.push(history[pos - 1].clone());
@@ -74,5 +79,7 @@ impl ContextStrategy for StateOnly {
         }
         out
     }
-    fn name(&self) -> &'static str { "state-only" }
+    fn name(&self) -> &'static str {
+        "state-only"
+    }
 }

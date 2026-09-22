@@ -51,8 +51,18 @@ pub struct ToolOutcome {
 }
 
 impl ToolOutcome {
-    fn ok(s: impl Into<String>) -> Self { Self { content: s.into(), is_error: false } }
-    fn err(s: impl Into<String>) -> Self { Self { content: s.into(), is_error: true } }
+    fn ok(s: impl Into<String>) -> Self {
+        Self {
+            content: s.into(),
+            is_error: false,
+        }
+    }
+    fn err(s: impl Into<String>) -> Self {
+        Self {
+            content: s.into(),
+            is_error: true,
+        }
+    }
 }
 
 /// Keep head and tail, drop the middle, and say how much was dropped.
@@ -68,7 +78,9 @@ pub fn distil(text: &str, budget: usize) -> String {
     let tail = budget - head;
     let dropped = lines.len() - budget;
     let mut out = lines[..head].join("\n");
-    out.push_str(&format!("\n\n[... {dropped} lines elided by superstate ...]\n\n"));
+    out.push_str(&format!(
+        "\n\n[... {dropped} lines elided by superstate ...]\n\n"
+    ));
     out.push_str(&lines[lines.len() - tail..].join("\n"));
     out
 }
@@ -109,10 +121,14 @@ fn lexically_normalize(p: &Path) -> PathBuf {
 /// harness relied on a prompt rule -- "confine all inspections to the workspace" -- which is
 /// exactly the kind of instruction Invariant IV exists because agents ignore under pressure.
 fn resolve_in_workspace(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, String> {
-    let joined = lexically_normalize(
-        &if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) },
-    );
-    let root_c = fs.canonicalize(root).map_err(|e| format!("workspace root unreadable: {e}"))?;
+    let joined = lexically_normalize(&if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        root.join(raw)
+    });
+    let root_c = fs
+        .canonicalize(root)
+        .map_err(|e| format!("workspace root unreadable: {e}"))?;
 
     // Canonicalise the NEAREST EXISTING ancestor, starting with the target itself. Walking
     // straight to `.parent()` was wrong for a directory target: `Path::new("/a/b/.").parent()`
@@ -144,8 +160,14 @@ fn shell_quote(s: &str) -> String {
 
 /// Whether a binary exists **where commands actually run**.
 pub fn have(shell: &dyn Shell, root: &Path, bin: &str) -> bool {
-    shell.exec(&format!("command -v {bin} >/dev/null"), root, COMMAND_TIMEOUT)
-        .map(|o| o.exit_code == 0).unwrap_or(false)
+    shell
+        .exec(
+            &format!("command -v {bin} >/dev/null"),
+            root,
+            COMMAND_TIMEOUT,
+        )
+        .map(|o| o.exit_code == 0)
+        .unwrap_or(false)
 }
 
 /// Optional accelerators worth telling the model about, because their presence changes strategy.
@@ -156,8 +178,9 @@ pub const ACCELERATORS: &[&str] = &["rg", "fd", "jq", "ast-grep"];
 
 /// Language toolchains. Reported against what the REPOSITORY declares, not as a bare list --
 /// "this is a Node project and `npm` is not reachable" is actionable; "npm: absent" is not.
-pub const TOOLCHAINS: &[&str] =
-    &["git", "cargo", "go", "npm", "yarn", "pnpm", "python3", "pytest", "node", "make"];
+pub const TOOLCHAINS: &[&str] = &[
+    "git", "cargo", "go", "npm", "yarn", "pnpm", "python3", "pytest", "node", "make",
+];
 
 /// What is reachable in the execution environment, probed through the seam.
 pub fn available_binaries(shell: &dyn Shell, root: &Path) -> Vec<String> {
@@ -198,7 +221,9 @@ pub fn specs() -> Vec<ToolSpec> {
                 "Run a shell command in the workspace and wait for it to finish. \
                  Commands run to completion (up to {}s) -- there is no background mode and \
                  nothing to poll. Output over {} lines is elided in the middle.",
-                COMMAND_TIMEOUT.as_secs(), OUTPUT_LINE_BUDGET),
+                COMMAND_TIMEOUT.as_secs(),
+                OUTPUT_LINE_BUDGET
+            ),
             parameters: json!({"type":"object","properties":{
                 "command":{"type":"string"}},"required":["command"]}),
         },
@@ -216,7 +241,8 @@ pub fn specs() -> Vec<ToolSpec> {
             description: format!(
                 "Search file contents by regular expression, returning `path:line:text`. \
                  Respects .gitignore. Use `glob` to find files by name and `grep` to find them \
-                 by content. Capped at {MAX_MATCHES} matches, and the total is always reported."),
+                 by content. Capped at {MAX_MATCHES} matches, and the total is always reported."
+            ),
             parameters: json!({"type":"object","properties":{
                 "pattern":{"type":"string","description":"regular expression"},
                 "path":{"type":"string","description":"subtree to search; defaults to the workspace"},
@@ -253,29 +279,55 @@ pub fn execute(
     name: &str,
     args: &Value,
 ) -> ToolOutcome {
-    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let s = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     match name {
         "read" => {
             let path = match resolve_in_workspace(fs, root, &s("path")) {
-                Ok(p) => p, Err(e) => return ToolOutcome::err(e) };
-            let body = match fs.read(&path) { Ok(b) => b, Err(e) => return ToolOutcome::err(e) };
+                Ok(p) => p,
+                Err(e) => return ToolOutcome::err(e),
+            };
+            let body = match fs.read(&path) {
+                Ok(b) => b,
+                Err(e) => return ToolOutcome::err(e),
+            };
             let lines: Vec<&str> = body.lines().collect();
-            let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-            let end = args.get("end_line").and_then(|v| v.as_u64())
-                .map(|e| e as usize).unwrap_or(lines.len()).min(lines.len());
+            let start = args
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as usize;
+            let end = args
+                .get("end_line")
+                .and_then(|v| v.as_u64())
+                .map(|e| e as usize)
+                .unwrap_or(lines.len())
+                .min(lines.len());
             if start > lines.len() {
-                return ToolOutcome::err(format!("{} has {} lines; start_line {start} is past the end",
-                                                s("path"), lines.len()));
+                return ToolOutcome::err(format!(
+                    "{} has {} lines; start_line {start} is past the end",
+                    s("path"),
+                    lines.len()
+                ));
             }
             // Numbered, because an agent that cannot cite a line cannot edit precisely.
-            let body = lines[start - 1..end].iter().enumerate()
+            let body = lines[start - 1..end]
+                .iter()
+                .enumerate()
                 .map(|(i, l)| format!("{:>6}\t{l}", start + i))
-                .collect::<Vec<_>>().join("\n");
+                .collect::<Vec<_>>()
+                .join("\n");
             ToolOutcome::ok(distil(&body, OUTPUT_LINE_BUDGET))
         }
         "write" => {
             let path = match resolve_in_workspace(fs, root, &s("path")) {
-                Ok(p) => p, Err(e) => return ToolOutcome::err(e) };
+                Ok(p) => p,
+                Err(e) => return ToolOutcome::err(e),
+            };
             match fs.write(&path, &s("content")) {
                 Ok(_) => ToolOutcome::ok(format!("wrote {}", s("path"))),
                 Err(e) => ToolOutcome::err(e),
@@ -283,15 +335,22 @@ pub fn execute(
         }
         "edit" => {
             let path = match resolve_in_workspace(fs, root, &s("path")) {
-                Ok(p) => p, Err(e) => return ToolOutcome::err(e) };
-            let body = match fs.read(&path) { Ok(b) => b, Err(e) => return ToolOutcome::err(e) };
+                Ok(p) => p,
+                Err(e) => return ToolOutcome::err(e),
+            };
+            let body = match fs.read(&path) {
+                Ok(b) => b,
+                Err(e) => return ToolOutcome::err(e),
+            };
             let (old, new) = (s("old"), s("new"));
             match body.matches(&old).count() {
                 0 => ToolOutcome::err(format!("`old` not found in {}. Read it first.", s("path"))),
                 // Ambiguity is an error, never a guess: replacing the first of several matches
                 // silently edits the wrong place and the agent cannot tell.
                 n if n > 1 => ToolOutcome::err(format!(
-                    "`old` appears {n} times in {}; include more context to make it unique", s("path"))),
+                    "`old` appears {n} times in {}; include more context to make it unique",
+                    s("path")
+                )),
                 _ => match fs.write(&path, &body.replacen(&old, &new, 1)) {
                     Ok(_) => ToolOutcome::ok(format!("edited {}", s("path"))),
                     Err(e) => ToolOutcome::err(e),
@@ -302,8 +361,10 @@ pub fn execute(
             Ok(o) => {
                 let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
                 // Exit code always stated: a non-zero exit with quiet output reads as success.
-                ToolOutcome { content: format!("exit {}\n{body}", o.exit_code),
-                              is_error: o.exit_code != 0 }
+                ToolOutcome {
+                    content: format!("exit {}\n{body}", o.exit_code),
+                    is_error: o.exit_code != 0,
+                }
             }
             Err(e) => ToolOutcome::err(e),
         },
@@ -329,19 +390,42 @@ pub fn execute(
         }
         "grep" => {
             let pattern = s("pattern");
-            let sub = { let p = s("path"); if p.is_empty() { ".".to_string() } else { p } };
-            if let Err(e) = resolve_in_workspace(fs, root, &sub) { return ToolOutcome::err(e); }
-            let globarg = { let g = s("glob"); if g.is_empty() { String::new() }
-                            else { format!("--glob {}", shell_quote(&g)) } };
+            let sub = {
+                let p = s("path");
+                if p.is_empty() {
+                    ".".to_string()
+                } else {
+                    p
+                }
+            };
+            if let Err(e) = resolve_in_workspace(fs, root, &sub) {
+                return ToolOutcome::err(e);
+            }
+            let globarg = {
+                let g = s("glob");
+                if g.is_empty() {
+                    String::new()
+                } else {
+                    format!("--glob {}", shell_quote(&g))
+                }
+            };
             // ripgrep when present -- it honours .gitignore, which keeps node_modules and
             // target/ out of the results and is most of why a repo search is usable at all.
             // grep -rn is the fallback so the tool never simply vanishes on a bare machine.
             let cmd = if have(shell, root, "rg") {
-                format!("rg --line-number --no-heading --color never {globarg} -e {} {} | head -n {}",
-                        shell_quote(&pattern), shell_quote(&sub), MAX_MATCHES + 1)
+                format!(
+                    "rg --line-number --no-heading --color never {globarg} -e {} {} | head -n {}",
+                    shell_quote(&pattern),
+                    shell_quote(&sub),
+                    MAX_MATCHES + 1
+                )
             } else {
-                format!("grep -rnI -e {} {} | head -n {}",
-                        shell_quote(&pattern), shell_quote(&sub), MAX_MATCHES + 1)
+                format!(
+                    "grep -rnI -e {} {} | head -n {}",
+                    shell_quote(&pattern),
+                    shell_quote(&sub),
+                    MAX_MATCHES + 1
+                )
             };
             match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
                 Ok(o) => {

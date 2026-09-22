@@ -145,9 +145,7 @@ pub fn evaluate(
         .collect();
 
     if !served.is_empty() && covered(&served, start, end) {
-        return CacheVerdict::AlreadyHeld {
-            covered_by: served,
-        };
+        return CacheVerdict::AlreadyHeld { covered_by: served };
     }
     CacheVerdict::Miss
 }

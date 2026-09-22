@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::symbols::{extract_symbols, SupportedLanguage, SymbolInfo, SyntaxError};
+use std::path::Path;
 
 /// Detects the programming language of a source file based on its file extension.
 pub fn detect_language(path: &Path) -> Option<SupportedLanguage> {
@@ -100,7 +100,5 @@ pub fn format_outline(symbols: &[SymbolInfo]) -> String {
 
 /// Performs a case-insensitive search for a symbol by name, returning the first match.
 pub fn find_symbol<'a>(symbols: &'a [SymbolInfo], name: &str) -> Option<&'a SymbolInfo> {
-    symbols
-        .iter()
-        .find(|s| s.name.eq_ignore_ascii_case(name))
+    symbols.iter().find(|s| s.name.eq_ignore_ascii_case(name))
 }

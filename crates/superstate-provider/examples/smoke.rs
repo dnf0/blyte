@@ -5,12 +5,17 @@ use superstate_provider::{gemini::Gemini, Message, Provider, Request, ToolSpec};
 fn main() {
     let g = match Gemini::from_env() {
         Ok(g) => g,
-        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     };
     println!("model: {}", g.model_id());
     let req = Request {
         system: "You are a coding agent. Use tools rather than guessing.".into(),
-        messages: vec![Message::User("Read the file src/main.rs and tell me what it does.".into())],
+        messages: vec![Message::User(
+            "Read the file src/main.rs and tell me what it does.".into(),
+        )],
         tools: vec![ToolSpec {
             name: "read_file".into(),
             description: "Read a file from the repository".into(),
@@ -27,6 +32,9 @@ fn main() {
             println!("finish      : {:?}", r.finish_reason);
             println!("usage       : {:?}", r.usage);
         }
-        Err(e) => { eprintln!("FAILED: {e}"); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("FAILED: {e}");
+            std::process::exit(1);
+        }
     }
 }

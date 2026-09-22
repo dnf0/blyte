@@ -445,13 +445,23 @@ fn on_regression_keeps_incomplete_work_but_resets_a_broken_suite() {
         })
         .expect("create runner");
         let outcome = runner.run_step().expect("run_step");
-        assert!(matches!(outcome, DaemonStepOutcome::Failed { .. }), "{label}");
+        assert!(
+            matches!(outcome, DaemonStepOutcome::Failed { .. }),
+            "{label}"
+        );
 
         let tracked = fs::read_to_string(repo_root.join("tracked.txt")).expect("read");
         if expect_reset {
-            assert_eq!(tracked, "initial content\n", "{label}: a regression must reset");
+            assert_eq!(
+                tracked, "initial content\n",
+                "{label}: a regression must reset"
+            );
         } else {
-            assert_eq!(tracked.trim(), "work", "{label}: incomplete work must survive");
+            assert_eq!(
+                tracked.trim(),
+                "work",
+                "{label}: incomplete work must survive"
+            );
         }
         // Reset the fixture for the next case.
         let _ = std::process::Command::new("git")

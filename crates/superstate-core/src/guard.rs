@@ -5,10 +5,10 @@
 //! without explicit range bounds, the guard blocks the read and returns an AST symbol
 //! outline or structural preview, guiding the agent to request bounded slices.
 
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 /// Decision returned by the file read guard evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,11 +126,7 @@ pub fn evaluate_file_read_guard(
         }
     } else {
         // Fall back to a structural preview of first 30 lines for unsupported languages or symbol-less files.
-        let preview = content
-            .lines()
-            .take(30)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let preview = content.lines().take(30).collect::<Vec<_>>().join("\n");
         GuardDecision::Deny {
             reason: format!(
                 "[superstate-guard] Full file read blocked ({} lines exceeds {}-line budget).\n\nFile preview (first 30 lines):\n{}\n...\nRe-read using bounded StartLine and EndLine (<= {} lines).",
@@ -193,7 +189,9 @@ pub fn bulk_read_target(command: &str) -> Option<PathBuf> {
     // Consider each pipeline stage: `cat big.go | grep foo` dumps the file before grep sees it.
     for stage in trimmed.split('|') {
         let mut tokens = stage.split_whitespace();
-        let Some(program) = tokens.next() else { continue };
+        let Some(program) = tokens.next() else {
+            continue;
+        };
         let program = program.rsplit('/').next().unwrap_or(program);
         if !matches!(program, "cat" | "less" | "more" | "head" | "tail") {
             continue;

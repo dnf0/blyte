@@ -289,8 +289,10 @@ fn test_custom_threshold_lines_parameter() {
     assert_eq!(json_default["decision"], "allow");
 
     // Custom threshold (50) denies 80 lines
-    let (code_custom, _, json_custom) =
-        run_guard(&payload, &["--threshold-lines", "50", "--read-cache", "false"]);
+    let (code_custom, _, json_custom) = run_guard(
+        &payload,
+        &["--threshold-lines", "50", "--read-cache", "false"],
+    );
     assert_eq!(code_custom, 0);
     assert_eq!(json_custom["decision"], "deny");
     let reason = json_custom["reason"].as_str().unwrap();

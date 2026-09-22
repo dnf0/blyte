@@ -62,7 +62,11 @@ fn detach_argv_forwards_the_read_budget_and_cache() {
     // carries the flag but never reaches the guard would still be a defect.
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
-    Command::new("git").args(["init", "-q"]).current_dir(repo).output().unwrap();
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
     std::fs::create_dir_all(repo.join(".agent-state")).unwrap();
     std::fs::write(
         repo.join(".agent-state/state.json"),
@@ -75,10 +79,14 @@ fn detach_argv_forwards_the_read_budget_and_cache() {
 
     let out = Command::new(bin())
         .args([
-            "state", "daemon",
-            "--state", ".agent-state/state.json",
-            "--driver", "true",
-            "--read-threshold-lines", "137",
+            "state",
+            "daemon",
+            "--state",
+            ".agent-state/state.json",
+            "--driver",
+            "true",
+            "--read-threshold-lines",
+            "137",
             "--no-read-cache",
         ])
         .current_dir(repo)

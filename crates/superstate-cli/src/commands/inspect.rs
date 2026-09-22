@@ -7,9 +7,7 @@
 use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
-use superstate_syntax::inspect::{
-    extract_symbols_from_file, find_symbol, format_outline,
-};
+use superstate_syntax::inspect::{extract_symbols_from_file, find_symbol, format_outline};
 use superstate_syntax::symbols::SyntaxError;
 
 #[derive(Args, Debug, Clone)]

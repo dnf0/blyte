@@ -62,7 +62,12 @@ impl Gemini {
                 Message::Assistant(t) => contents.push(json!({
                     "role": "model", "parts": [{"text": t}]
                 })),
-                Message::ToolCall { name, arguments, signature, .. } => {
+                Message::ToolCall {
+                    name,
+                    arguments,
+                    signature,
+                    ..
+                } => {
                     let mut part = json!({"functionCall": {"name": name, "args": arguments}});
                     // Echoed verbatim. Gemini 3.x binds the model's reasoning to the call and
                     // rejects the turn outright if it is absent.
@@ -74,7 +79,12 @@ impl Gemini {
                 // Gemini carries no tool-call id: a functionResponse is matched to its call by
                 // NAME and position. Ids are kept in our own Message type anyway, because the
                 // loop needs them and other providers require them.
-                Message::ToolResult { name, content, is_error, .. } => contents.push(json!({
+                Message::ToolResult {
+                    name,
+                    content,
+                    is_error,
+                    ..
+                } => contents.push(json!({
                     "role": "user",
                     "parts": [{"functionResponse": {
                         "name": name,
@@ -92,11 +102,13 @@ impl Gemini {
             let decls: Vec<Value> = req
                 .tools
                 .iter()
-                .map(|t| json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters
-                }))
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters
+                    })
+                })
                 .collect();
             body["tools"] = json!([{ "functionDeclarations": decls }]);
         }
@@ -115,7 +127,10 @@ impl Gemini {
             .ok_or_else(|| ProviderError::Parse(format!("no candidates in {v}")))?;
 
         let mut out = Response {
-            finish_reason: cand.get("finishReason").and_then(|f| f.as_str()).map(String::from),
+            finish_reason: cand
+                .get("finishReason")
+                .and_then(|f| f.as_str())
+                .map(String::from),
             ..Default::default()
         };
 
@@ -126,12 +141,18 @@ impl Gemini {
                 }
                 if let Some(fc) = part.get("functionCall") {
                     out.tool_calls.push(ToolCall {
-                        signature: part.get("thoughtSignature")
-                            .and_then(|s| s.as_str()).map(String::from),
+                        signature: part
+                            .get("thoughtSignature")
+                            .and_then(|s| s.as_str())
+                            .map(String::from),
                         // Synthesised: Gemini does not issue ids. Stable within a turn, which
                         // is all the loop needs to pair a result with its call.
                         id: format!("call_{i}"),
-                        name: fc.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+                        name: fc
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
                         arguments: fc.get("args").cloned().unwrap_or(json!({})),
                     });
                 }
@@ -169,7 +190,9 @@ impl Provider for Gemini {
 
         match resp {
             Ok(r) => {
-                let v: Value = r.into_json().map_err(|e| ProviderError::Parse(e.to_string()))?;
+                let v: Value = r
+                    .into_json()
+                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
                 Self::parse(&v)
             }
             Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {

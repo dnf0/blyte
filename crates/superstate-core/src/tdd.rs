@@ -69,12 +69,9 @@ fn any_entry(dir: &Path, pred: impl Fn(&str) -> bool) -> bool {
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return false;
     };
-    read_dir.flatten().any(|e| {
-        e.file_name()
-            .to_str()
-            .map(|n| pred(n))
-            .unwrap_or(false)
-    })
+    read_dir
+        .flatten()
+        .any(|e| e.file_name().to_str().map(|n| pred(n)).unwrap_or(false))
 }
 
 /// The bridge script an evaluation workspace uses to reach its sandbox container.
@@ -310,7 +307,10 @@ mod tests {
         // four spurious failures on katex costing $2.71 and the task. Every runner call must
         // reach the container; only `test -f`, which inspects the host checkout, may not.
         for files in [
-            vec![("go.mod", "module x\n"), ("run-in-container", "#!/bin/sh\n")],
+            vec![
+                ("go.mod", "module x\n"),
+                ("run-in-container", "#!/bin/sh\n"),
+            ],
             vec![("pyproject.toml", ""), ("run-in-container", "#!/bin/sh\n")],
             vec![
                 ("package.json", r#"{"devDependencies":{"vitest":"^2"}}"#),
@@ -404,7 +404,10 @@ mod tests {
             Some(vec![TDD_REPRODUCTION_ID.to_string()]),
             "implementation must not be reachable before the test is proven RED"
         );
-        assert_eq!(m[0].files, vec![std::path::PathBuf::from("reproduce_issue_test.go")]);
+        assert_eq!(
+            m[0].files,
+            vec![std::path::PathBuf::from("reproduce_issue_test.go")]
+        );
     }
 
     #[test]

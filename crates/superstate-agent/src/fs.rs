@@ -39,7 +39,8 @@ impl Fs for LocalFs {
         std::fs::write(path, content).map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, String> {
-        path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))
+        path.canonicalize()
+            .map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 
@@ -54,16 +55,33 @@ impl ContainerFs {
         use std::io::Write;
         use std::process::Stdio;
         let mut cmd = Command::new("docker");
-        cmd.args(["exec", "-i", &self.container_id]).args(args)
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("docker exec failed: {e}"))?;
+        cmd.args(["exec", "-i", &self.container_id])
+            .args(args)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("docker exec failed: {e}"))?;
         if let Some(body) = stdin {
-            child.stdin.take().ok_or("no stdin")?.write_all(body.as_bytes())
+            child
+                .stdin
+                .take()
+                .ok_or("no stdin")?
+                .write_all(body.as_bytes())
                 .map_err(|e| format!("cannot send content: {e}"))?;
         }
-        let out = child.wait_with_output().map_err(|e| format!("docker exec failed: {e}"))?;
-        Ok((String::from_utf8_lossy(&out.stdout).to_string(), out.status.code().unwrap_or(-1)))
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("docker exec failed: {e}"))?;
+        Ok((
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            out.status.code().unwrap_or(-1),
+        ))
     }
 }
 
@@ -77,7 +95,10 @@ impl Fs for ContainerFs {
     }
     fn write(&self, path: &Path, content: &str) -> Result<(), String> {
         let p = path.to_string_lossy().to_string();
-        let dir = path.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+        let dir = path
+            .parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
         if !dir.is_empty() {
             self.exec(&["mkdir", "-p", "--", &dir], None)?;
         }

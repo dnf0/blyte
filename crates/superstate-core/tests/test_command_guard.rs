@@ -88,7 +88,11 @@ fn test_manage_task_status_blocks_within_cooldown() {
     let decision2 = evaluate_command_guard("manage_task", &args, &config);
     match decision2 {
         CommandGuardDecision::Throttle { wait_sec, reason } => {
-            assert!(wait_sec > 0 && wait_sec <= 30, "unexpected wait: {}", wait_sec);
+            assert!(
+                wait_sec > 0 && wait_sec <= 30,
+                "unexpected wait: {}",
+                wait_sec
+            );
             assert!(
                 reason.contains("[superstate-guard] Polling throttled:"),
                 "unexpected reason: {}",
@@ -102,7 +106,10 @@ fn test_manage_task_status_blocks_within_cooldown() {
                 );
             }
         }
-        other => panic!("expected Throttle on an immediate status poll, got {:?}", other),
+        other => panic!(
+            "expected Throttle on an immediate status poll, got {:?}",
+            other
+        ),
     }
 }
 
@@ -397,7 +404,10 @@ fn test_fail_open_on_corrupted_state_file() {
 
     let content = fs::read_to_string(&state_file).unwrap();
     let parsed: Result<BTreeMap<String, u64>, _> = serde_json::from_str(&content);
-    assert!(parsed.is_ok(), "State file should be overwritten with valid JSON");
+    assert!(
+        parsed.is_ok(),
+        "State file should be overwritten with valid JSON"
+    );
 }
 
 #[test]

@@ -67,7 +67,10 @@ pub struct State {
 impl State {
     pub fn new(goal: impl Into<String>, verification_cmd: impl Into<String>) -> Self {
         Self {
-            orchestrator: Orchestrator { goal: goal.into(), verification_cmd: verification_cmd.into() },
+            orchestrator: Orchestrator {
+                goal: goal.into(),
+                verification_cmd: verification_cmd.into(),
+            },
             runtime: Runtime::default(),
             agent: Agent::default(),
         }

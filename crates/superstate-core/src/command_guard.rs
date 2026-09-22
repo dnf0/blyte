@@ -237,9 +237,19 @@ pub fn evaluate_command_guard(
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(serialized) = serde_json::to_string_pretty(&history) {
-        let parent = state_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let temp_file_path = parent.join(format!(".command_guard.{}.{}.tmp", std::process::id(), nanos));
+        let parent = state_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_file_path = parent.join(format!(
+            ".command_guard.{}.{}.tmp",
+            std::process::id(),
+            nanos
+        ));
         if fs::write(&temp_file_path, serialized.as_bytes()).is_ok() {
             let _ = fs::rename(&temp_file_path, &state_path);
         }

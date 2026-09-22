@@ -29,7 +29,11 @@ fn an_agent_patch_cannot_forge_runtime_observations() {
     let mut s = State::new("g", "make test");
     s.runtime.failures.push("exit 1: 3 tests failed".into());
     s.apply_agent_patch(&json!({"failures": [], "rollbacks": 0, "attempts": 0}));
-    assert_eq!(s.runtime.failures.len(), 1, "observed failures must survive any agent patch");
+    assert_eq!(
+        s.runtime.failures.len(),
+        1,
+        "observed failures must survive any agent patch"
+    );
     assert_eq!(s.last_failure(), Some("exit 1: 3 tests failed"));
 }
 

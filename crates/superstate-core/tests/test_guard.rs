@@ -21,7 +21,10 @@ fn test_serde_guard_decision() {
         reason: "file too large".to_string(),
     };
     let deny_json = serde_json::to_string(&deny).unwrap();
-    assert_eq!(deny_json, r#"{"decision":"deny","reason":"file too large"}"#);
+    assert_eq!(
+        deny_json,
+        r#"{"decision":"deny","reason":"file too large"}"#
+    );
     let deserialized_deny: GuardDecision = serde_json::from_str(&deny_json).unwrap();
     assert_eq!(deserialized_deny, deny);
 }
@@ -233,7 +236,9 @@ fn test_unsupported_language_falls_back_to_preview() {
     match decision {
         GuardDecision::Deny { reason } => {
             assert!(
-                reason.contains("[superstate-guard] Full file read blocked (250 lines exceeds 200-line budget)"),
+                reason.contains(
+                    "[superstate-guard] Full file read blocked (250 lines exceeds 200-line budget)"
+                ),
                 "header mismatch: {}",
                 reason
             );
@@ -263,7 +268,9 @@ fn test_unsupported_language_falls_back_to_preview() {
                 reason
             );
         }
-        GuardDecision::Allow => panic!("Expected Deny for unsupported language exceeding threshold"),
+        GuardDecision::Allow => {
+            panic!("Expected Deny for unsupported language exceeding threshold")
+        }
     }
 }
 

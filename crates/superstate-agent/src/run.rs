@@ -51,7 +51,10 @@ pub struct Budget {
 
 impl Default for Budget {
     fn default() -> Self {
-        Self { max_turns: 60, max_gate_attempts: 5 }
+        Self {
+            max_turns: 60,
+            max_gate_attempts: 5,
+        }
     }
 }
 
@@ -73,12 +76,26 @@ pub struct RunReport {
 /// is reported as it occurs, not summarised at the end.
 #[derive(Debug, Clone)]
 pub enum Event<'e> {
-    Turn { n: u32, text: &'e str },
+    Turn {
+        n: u32,
+        text: &'e str,
+    },
     /// `input` is the call's arguments, abbreviated. Logging only the RESULT made a run
     /// undiagnosable: twenty bash calls that changed nothing, with no record of what was run.
-    Tool { name: &'e str, input: String, summary: String, is_error: bool },
-    Gate { attempt: u32, passed: bool, output: &'e str },
-    RolledBack { to: &'e str },
+    Tool {
+        name: &'e str,
+        input: String,
+        summary: String,
+        is_error: bool,
+    },
+    Gate {
+        attempt: u32,
+        passed: bool,
+        output: &'e str,
+    },
+    RolledBack {
+        to: &'e str,
+    },
 }
 
 pub struct Runner<'a> {
@@ -96,7 +113,9 @@ pub struct Runner<'a> {
 
 impl<'a> Runner<'a> {
     fn emit(&self, e: Event<'_>) {
-        if let Some(f) = self.on_event { f(e) }
+        if let Some(f) = self.on_event {
+            f(e)
+        }
     }
 }
 
@@ -129,7 +148,11 @@ impl<'a> Runner<'a> {
 
     /// Run the verification command. Runtime-only: nothing in the tool surface reaches this.
     fn run_gate(&self, state: &State) -> (bool, String) {
-        match self.shell.exec(&state.orchestrator.verification_cmd, &self.root, Duration::from_secs(1800)) {
+        match self.shell.exec(
+            &state.orchestrator.verification_cmd,
+            &self.root,
+            Duration::from_secs(1800),
+        ) {
             Ok(o) => {
                 let body = tools::distil(o.merged().trim_end(), tools::OUTPUT_LINE_BUDGET);
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
@@ -141,20 +164,25 @@ impl<'a> Runner<'a> {
     }
 
     fn checkpoint(&self) -> Option<String> {
-        let out = self.shell.exec("git rev-parse HEAD", &self.root, Duration::from_secs(30)).ok()?;
+        let out = self
+            .shell
+            .exec("git rev-parse HEAD", &self.root, Duration::from_secs(30))
+            .ok()?;
         (out.exit_code == 0).then(|| out.stdout.trim().to_string())
     }
 
     fn reset_to(&self, commit: &str) {
         let _ = self.shell.exec(
             &format!("git reset --hard {commit} && git clean -fd"),
-            &self.root, Duration::from_secs(120));
+            &self.root,
+            Duration::from_secs(120),
+        );
     }
 
     pub fn run(&self, state: &mut State) -> (Outcome, RunReport) {
         let mut report = RunReport::default();
-        let mut history: Vec<Message> = vec![Message::User(format!(
-            "Begin. {}", state.orchestrator.goal))];
+        let mut history: Vec<Message> =
+            vec![Message::User(format!("Begin. {}", state.orchestrator.goal))];
         let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
@@ -180,7 +208,10 @@ impl<'a> Runner<'a> {
             if resp.text.trim().is_empty() && resp.tool_calls.is_empty() {
                 report.empty_turns += 1;
             }
-            self.emit(Event::Turn { n: turn, text: resp.text.trim() });
+            self.emit(Event::Turn {
+                n: turn,
+                text: resp.text.trim(),
+            });
             if !resp.text.trim().is_empty() {
                 history.push(Message::Assistant(resp.text.clone()));
             }
@@ -190,9 +221,11 @@ impl<'a> Runner<'a> {
                 for call in &resp.tool_calls {
                     report.tool_calls += 1;
                     history.push(Message::ToolCall {
-                        id: call.id.clone(), name: call.name.clone(),
+                        id: call.id.clone(),
+                        name: call.name.clone(),
                         arguments: call.arguments.clone(),
-                        signature: call.signature.clone() });
+                        signature: call.signature.clone(),
+                    });
 
                     // `note` is the loop's, not the tool layer's: it mutates state, and only
                     // the agent region can be reached from here.
@@ -200,29 +233,44 @@ impl<'a> Runner<'a> {
                         let patch = call.arguments.get("patch").cloned().unwrap_or_default();
                         state.apply_agent_patch(&patch);
                         crate::tools::ToolOutcome {
-                            content: format!("recorded; your state now has {} field(s)",
-                                             state.agent.fields.len()),
+                            content: format!(
+                                "recorded; your state now has {} field(s)",
+                                state.agent.fields.len()
+                            ),
                             is_error: false,
                         }
                     } else {
                         tools::execute(&self.root, self.shell, self.fs, &call.name, &call.arguments)
                     };
 
-                    let summary = outcome.content.lines().next().unwrap_or("").chars()
-                        .take(90).collect::<String>();
-                    let input = call.arguments.get("command")
+                    let summary = outcome
+                        .content
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(90)
+                        .collect::<String>();
+                    let input = call
+                        .arguments
+                        .get("command")
                         .or_else(|| call.arguments.get("pattern"))
                         .or_else(|| call.arguments.get("path"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.chars().take(70).collect::<String>())
-                        .unwrap_or_else(|| {
-                            call.arguments.to_string().chars().take(70).collect()
-                        });
-                    self.emit(Event::Tool { name: &call.name, input, summary,
-                                            is_error: outcome.is_error });
+                        .unwrap_or_else(|| call.arguments.to_string().chars().take(70).collect());
+                    self.emit(Event::Tool {
+                        name: &call.name,
+                        input,
+                        summary,
+                        is_error: outcome.is_error,
+                    });
                     history.push(Message::ToolResult {
-                        id: call.id.clone(), name: call.name.clone(),
-                        content: outcome.content, is_error: outcome.is_error });
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        content: outcome.content,
+                        is_error: outcome.is_error,
+                    });
                 }
                 continue;
             }
@@ -231,8 +279,11 @@ impl<'a> Runner<'a> {
             report.gate_attempts += 1;
             state.runtime.attempts += 1;
             let (passed, output) = self.run_gate(state);
-            self.emit(Event::Gate { attempt: report.gate_attempts, passed,
-                                    output: output.lines().next().unwrap_or("") });
+            self.emit(Event::Gate {
+                attempt: report.gate_attempts,
+                passed,
+                output: output.lines().next().unwrap_or(""),
+            });
             if passed {
                 return (Outcome::Verified, report);
             }
@@ -242,7 +293,9 @@ impl<'a> Runner<'a> {
                 if let Some(base) = &baseline {
                     self.reset_to(base);
                     state.runtime.rollbacks += 1;
-                    self.emit(Event::RolledBack { to: &base[..base.len().min(8)] });
+                    self.emit(Event::RolledBack {
+                        to: &base[..base.len().min(8)],
+                    });
                 }
             }
             if report.gate_attempts >= self.budget.max_gate_attempts {
@@ -255,9 +308,12 @@ impl<'a> Runner<'a> {
             let reset_note = if self.rollback && baseline.is_some() {
                 "\n\nYour changes have been reverted to the last verified state. Start from \
                  the current files, not from what you remember writing."
-            } else { "" };
+            } else {
+                ""
+            };
             history.push(Message::User(format!(
-                "Verification did not pass.\n\n{output}{reset_note}")));
+                "Verification did not pass.\n\n{output}{reset_note}"
+            )));
         }
         (Outcome::BudgetExhausted, report)
     }

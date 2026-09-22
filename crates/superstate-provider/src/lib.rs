@@ -75,7 +75,12 @@ pub enum Message {
         signature: Option<String>,
     },
     /// What the tool returned. `is_error` lets a provider mark failure where it supports it.
-    ToolResult { id: String, name: String, content: String, is_error: bool },
+    ToolResult {
+        id: String,
+        name: String,
+        content: String,
+        is_error: bool,
+    },
 }
 
 /// What a model turn produced. A turn yields text, tool calls, or both.

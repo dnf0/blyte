@@ -7,17 +7,33 @@ use superstate_core::read_cache::{
 };
 
 fn rec(path: &str, start: usize, end: usize, hash: u64) -> ReadRecord {
-    ReadRecord { path: path.into(), start, end, hash, suppressed: false }
+    ReadRecord {
+        path: path.into(),
+        start,
+        end,
+        hash,
+        suppressed: false,
+    }
 }
 
 fn suppressed(path: &str, start: usize, end: usize, hash: u64) -> ReadRecord {
-    ReadRecord { path: path.into(), start, end, hash, suppressed: true }
+    ReadRecord {
+        path: path.into(),
+        start,
+        end,
+        hash,
+        suppressed: true,
+    }
 }
 
 #[test]
 fn first_read_of_a_file_is_never_suppressed() {
     let v = evaluate(&[], Path::new("a.rs"), 1, 100, 7);
-    assert_eq!(v, CacheVerdict::Miss, "nothing is held yet; the read must go through");
+    assert_eq!(
+        v,
+        CacheVerdict::Miss,
+        "nothing is held yet; the read must go through"
+    );
 }
 
 #[test]
@@ -85,7 +101,10 @@ fn editing_the_file_invalidates_every_record_for_it() {
 #[test]
 fn records_for_another_file_do_not_cover_this_one() {
     let records = vec![rec("b.rs", 1, 100, 7)];
-    assert_eq!(evaluate(&records, Path::new("a.rs"), 1, 100, 7), CacheVerdict::Miss);
+    assert_eq!(
+        evaluate(&records, Path::new("a.rs"), 1, 100, 7),
+        CacheVerdict::Miss
+    );
 }
 
 #[test]
@@ -128,7 +147,10 @@ fn the_denial_is_short_enough_to_be_worth_sending() {
         "suppression text must stay far cheaper than a tool call, got {} bytes",
         reason.len()
     );
-    assert!(reason.contains("120-180"), "must say which lines, so it can be acted on");
+    assert!(
+        reason.contains("120-180"),
+        "must say which lines, so it can be acted on"
+    );
     assert!(
         reason.contains("identical read once more"),
         "must state the escape hatch: a worker that lost context has to know it can insist"
@@ -138,5 +160,8 @@ fn the_denial_is_short_enough_to_be_worth_sending() {
 #[test]
 fn an_inverted_window_is_never_treated_as_covered() {
     let records = vec![rec("a.rs", 1, 100, 7)];
-    assert_eq!(evaluate(&records, Path::new("a.rs"), 60, 40, 7), CacheVerdict::Miss);
+    assert_eq!(
+        evaluate(&records, Path::new("a.rs"), 60, 40, 7),
+        CacheVerdict::Miss
+    );
 }

@@ -510,11 +510,12 @@ fn test_daemon_runner_provisions_hooks_json_appends_to_git_exclude() {
 
     let exclude_content = fs::read_to_string(&exclude_file).unwrap();
     assert!(
-        exclude_content.lines().any(|line| line.trim() == ".agents/" || line.trim() == ".agents"),
+        exclude_content
+            .lines()
+            .any(|line| line.trim() == ".agents/" || line.trim() == ".agents"),
         ".git/info/exclude must contain .agents/ after provisioning"
     );
 }
-
 
 #[test]
 fn generated_hooks_invoke_the_running_binary_not_whatever_is_on_path() {
@@ -545,24 +546,27 @@ fn generated_hooks_invoke_the_running_binary_not_whatever_is_on_path() {
     )
     .expect("save state");
 
-    let mut runner = superstate_core::daemon::DaemonRunner::new(superstate_core::daemon::DaemonConfig {
-        state_path,
-        driver_cmd: Some("true".to_string()),
-        max_retries: 1,
-        timeout_secs: 5,
-        guard_file_reads: true,
-        read_threshold_lines: 640,
-        read_cache: true,
-        guard_commands: true,
-        ..Default::default()
-    })
-    .expect("runner");
+    let mut runner =
+        superstate_core::daemon::DaemonRunner::new(superstate_core::daemon::DaemonConfig {
+            state_path,
+            driver_cmd: Some("true".to_string()),
+            max_retries: 1,
+            timeout_secs: 5,
+            guard_file_reads: true,
+            read_threshold_lines: 640,
+            read_cache: true,
+            guard_commands: true,
+            ..Default::default()
+        })
+        .expect("runner");
     let _ = runner.run_step();
 
     let hooks = std::fs::read_to_string(repo.join(".agents").join("hooks.json"))
         .expect("hooks.json must be provisioned");
     for fragment in ["guard pre-tool-use", "guard pre-command"] {
-        let idx = hooks.find(fragment).unwrap_or_else(|| panic!("missing {fragment}: {hooks}"));
+        let idx = hooks
+            .find(fragment)
+            .unwrap_or_else(|| panic!("missing {fragment}: {hooks}"));
         let line_start = hooks[..idx].rfind('"').expect("command string start");
         let command = &hooks[line_start..idx];
         assert!(
@@ -594,7 +598,8 @@ fn test_daemon_config_default_read_threshold_lines() {
 fn test_daemon_config_deserialize_defaults_read_threshold_lines() {
     // A config written before this field existed must not silently fall back to 0, which
     // would shunt every read and cost roughly twice what no budget at all costs.
-    let json = r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
+    let json =
+        r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
     let config: DaemonConfig = serde_json::from_str(json).expect("valid DaemonConfig JSON");
     assert_eq!(
         config.read_threshold_lines,
@@ -670,7 +675,8 @@ fn test_read_cache_defaults_off_after_exp081() {
         "the read cache is a measured regression and must stay off by default (FINDINGS 13.25)"
     );
 
-    let json = r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
+    let json =
+        r#"{"state_path": ".agent-state/state.json", "max_retries": 3, "timeout_secs": 120}"#;
     let config: DaemonConfig = serde_json::from_str(json).expect("valid DaemonConfig JSON");
     assert!(
         !config.read_cache,
