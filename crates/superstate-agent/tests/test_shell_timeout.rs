@@ -62,3 +62,27 @@ fn a_normal_command_is_unaffected() {
     assert_eq!(out.stdout.trim(), "hello");
     assert_eq!(out.exit_code, 0);
 }
+
+#[test]
+fn grandchild_process_tree_is_killed_at_deadline() {
+    // If only the parent bash process is killed, background grandchildren
+    // (such as `find /` or subshells) stay alive, keep pipe handles open,
+    // and cause reader thread joins to hang.
+    let d = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let out = LocalShell
+        .exec("sh -c '(sleep 30) & wait'", d.path(), Duration::from_secs(1))
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "must not deadlock on grandchild pipe handles: took {elapsed:?}"
+    );
+    assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
+    assert!(
+        out.stderr.contains("killed by superstate"),
+        "kill notice missing from stderr: {:?}",
+        out.stderr
+    );
+}
+
