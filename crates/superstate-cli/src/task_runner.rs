@@ -3,7 +3,9 @@
 //! Wires together the configured LLM provider, execution shell (local host or container sandbox),
 //! filesystem abstraction, context strategy, and verification gate runner into an autonomous loop.
 
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Execution parameters for running an autonomous solver task to completion.
 #[derive(Debug, Clone)]
@@ -48,7 +50,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
     }
 }
 
-/// Executes an autonomous solver run using the provided task configuration.
+/// Executes an autonomous solver run using the provided task configuration and live stdout.
 ///
 /// Configures the AI provider, context strategy, execution environment (local or container),
 /// and deterministic gate loop, printing live event progress as turns execute.
@@ -63,13 +65,31 @@ impl From<&crate::cli::Cli> for TaskConfig {
 /// or an `Err(String)` describing initialization failure.
 pub fn run_task(
     config: TaskConfig,
-) -> Result<
-    (
-        superstate_agent::run::Outcome,
-        superstate_agent::run::RunReport,
-    ),
-    String,
-> {
+) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String> {
+    let verification_cmd = config.gate.as_deref().unwrap_or("");
+    let mut state = superstate_agent::state::State::new(&config.prompt, verification_cmd);
+    let mut stdout = std::io::stdout();
+    run_task_with_state_and_writer(&config, &mut state, &mut stdout)
+}
+
+/// Executes an autonomous solver run against an existing mutable `State`, streaming events to `writer`.
+///
+/// Preserves session mutations (epistemic ledger, patches, attempts) directly in the provided `state`.
+///
+/// # Arguments
+///
+/// * `config` - Execution parameters.
+/// * `state` - The mutable session state to advance.
+/// * `writer` - Stream writer sink for formatted events.
+///
+/// # Returns
+///
+/// Returns `Ok((Outcome, RunReport))` or an `Err(String)` describing failure.
+pub fn run_task_with_state_and_writer<W: Write>(
+    config: &TaskConfig,
+    state: &mut superstate_agent::state::State,
+    writer: &mut W,
+) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String> {
     // 1. Initialize LLM provider from environment credentials.
     // If the API key is missing, produce an explicit error instructing how to configure it.
     let provider = match superstate_provider::gemini::Gemini::from_env() {
@@ -106,14 +126,13 @@ pub fn run_task(
     // at `/workspace` so host environment is unaffected.
     let local_shell = superstate_agent::shell::LocalShell;
     let local_fs = superstate_agent::fs::LocalFs;
-    let container_shell =
-        config
-            .container
-            .as_ref()
-            .map(|cid| superstate_agent::shell::ContainerShell {
-                container_id: cid.clone(),
-                workdir: PathBuf::from("/workspace"),
-            });
+    let container_shell = config
+        .container
+        .as_ref()
+        .map(|cid| superstate_agent::shell::ContainerShell {
+            container_id: cid.clone(),
+            workdir: PathBuf::from("/workspace"),
+        });
     let container_fs = config
         .container
         .as_ref()
@@ -130,16 +149,15 @@ pub fn run_task(
         _ => (&local_shell, &local_fs, config.root.clone()),
     };
 
-    // 4. Initialize agent state with goal and verification gate command.
-    let verification_cmd = config.gate.as_deref().unwrap_or("");
-    let mut state = superstate_agent::state::State::new(&config.prompt, verification_cmd);
-
-    // 5. Setup live event logger streaming turn, tool, and gate events to stdout.
+    // 4. Wrap writer in a Mutex so the event callback satisfies Fn trait bounds.
+    let writer_mutex = Mutex::new(writer);
     let on_event = |event: superstate_agent::run::Event<'_>| {
-        println!("{}", crate::repl::format_event(&event));
+        if let Ok(mut w) = writer_mutex.lock() {
+            let _ = writeln!(w, "{}", crate::repl::format_event(&event));
+        }
     };
 
-    // 6. Assemble the autonomous runner and execute until terminal outcome or budget exhaustion.
+    // 5. Assemble the autonomous runner and execute until terminal outcome or budget exhaustion.
     let runner = superstate_agent::run::Runner {
         provider: &provider,
         shell,
@@ -154,6 +172,6 @@ pub fn run_task(
         on_event: Some(&on_event),
     };
 
-    let (outcome, report) = runner.run(&mut state);
+    let (outcome, report) = runner.run(state);
     Ok((outcome, report))
 }

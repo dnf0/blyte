@@ -56,7 +56,7 @@ impl ReplSession {
             model: config
                 .model
                 .clone()
-                .unwrap_or_else(|| "claude-3-5-sonnet".to_string()),
+                .unwrap_or_else(|| "gemini-2.5-flash".to_string()),
             context_strategy: config.context_strategy.clone(),
             container: config.container.clone(),
             max_turns: config.max_turns,
@@ -400,6 +400,10 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     .history
                     .push(superstate_provider::Message::User(prompt.clone()));
                 session.state.runtime.attempts += 1;
+                session.state.orchestrator.goal = prompt.clone();
+                if let Some(ref g) = session.gate {
+                    session.state.orchestrator.verification_cmd = g.clone();
+                }
 
                 // Build task configuration from current session parameters
                 let task_config = crate::task_runner::TaskConfig {
@@ -414,8 +418,12 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     root: session.repo_root.clone(),
                 };
 
-                // Invoke solver task runner and output results to REPL stream
-                match crate::task_runner::run_task(task_config) {
+                // Invoke solver task runner preserving state and outputting directly to REPL writer
+                match crate::task_runner::run_task_with_state_and_writer(
+                    &task_config,
+                    &mut session.state,
+                    &mut writer,
+                ) {
                     Ok((superstate_agent::run::Outcome::Verified, report)) => {
                         writeln!(
                             writer,

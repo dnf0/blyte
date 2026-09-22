@@ -118,27 +118,29 @@ fn main() {
         },
         None => {
             if let Some(ref prompt) = cli.prompt {
-                if !prompt.trim().is_empty() {
-                    let config = superstate_cli::task_runner::TaskConfig::from(&cli);
-                    match superstate_cli::task_runner::run_task(config) {
-                        Ok((superstate_agent::run::Outcome::Verified, report)) => {
-                            println!(
-                                "Task verified in {} turns (usage: {:?})",
-                                report.outcome_turns, report.usage
-                            );
-                            std::process::exit(0);
-                        }
-                        Ok((outcome, report)) => {
-                            eprintln!(
-                                "Task finished with outcome: {outcome:?} in {} turns",
-                                report.outcome_turns
-                            );
-                            std::process::exit(1);
-                        }
-                        Err(err) => {
-                            eprintln!("Error executing task: {err}");
-                            std::process::exit(1);
-                        }
+                if prompt.trim().is_empty() {
+                    eprintln!("Error: prompt cannot be empty");
+                    std::process::exit(1);
+                }
+                let config = superstate_cli::task_runner::TaskConfig::from(&cli);
+                match superstate_cli::task_runner::run_task(config) {
+                    Ok((superstate_agent::run::Outcome::Verified, report)) => {
+                        println!(
+                            "Task verified in {} turns (usage: {:?})",
+                            report.outcome_turns, report.usage
+                        );
+                        std::process::exit(0);
+                    }
+                    Ok((outcome, report)) => {
+                        eprintln!(
+                            "Task finished with outcome: {outcome:?} in {} turns",
+                            report.outcome_turns
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(err) => {
+                        eprintln!("Error executing task: {err}");
+                        std::process::exit(1);
                     }
                 }
             }
