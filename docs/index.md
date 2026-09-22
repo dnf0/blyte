@@ -1,41 +1,28 @@
 # Superstate
 
-**Superstate** is a high-performance, deterministic execution state engine, polyglot AST code intelligence platform, daemon-less adversarial code reviewer, and Model Context Protocol (MCP) server written in Rust.
+**Superstate** is a high-performance, deterministic Rust agent harness implementing the **[SKILL.state](https://arxiv.org/html/2608.26263v2)** architecture ([arXiv:2608.26263v2](https://arxiv.org/html/2608.26263v2)) for autonomous software engineering.
 
-> 📖 **Read [The Superstate Manifesto](manifesto.md)** to understand the architectural doctrine, the separation of Worker and Control planes, and the Five Invariants of autonomous execution.
+It replaces append-only conversational history with explicit, mutable execution state transitions $(P, \Sigma_t, O_t) \to (R_t, \Delta \Sigma_t, a_t)$, maintaining a strictly bounded $\mathcal{O}(1)$ prompt footprint and linear $\mathcal{O}(T)$ cumulative token complexity across long-horizon execution.
 
-## Features
+## Core Features
 
-- ⚡ **Deterministic State Engine (`superstate-core`):** DFA state machine with atomic file-locking (`fd-lock`), checkpoint/rollback safety, and append-only epistemic ledger.
-- 🌳 **Polyglot Code Intelligence (`superstate-syntax`):** Native Tree-sitter AST symbol extractor across Rust, Python, TypeScript, and Go.
-- 🛡️ **Daemon-less Adversarial Review (`superstate-review`):** Zero-noise static analysis and LLM review integration without background daemons.
-- 📜 **Guidance Generator (`superstate-rules`):** Minijinja template renderer for `AGENTS.md`, `CLAUDE.md`, and Cursor rules.
-- 🔌 **Detached Handoff Gateway (`superstate-mcp`):** Strict 4-tool JSON-RPC 2.0 stdio gateway connecting chat sessions into autonomous background worktrees (Cursor, Claude Code, Antigravity).
-- 🚀 **Native Daemon Harness (`superstate state daemon`):** Autonomous, out-of-loop worker driver with OS verification gates, retry error-injection, and automatic worktree merge.
-- 🩺 **5-Step Fail-Closed Doctor Handshake:** Automated end-to-end verification verifying binary integrity, MCP loopback, client configs, and file locks.
+- ⚡ **SKILL.state Runtime (`superstate-agent`):** Discrete state transitions where intermediate reasoning traces ($R_t$) are discarded after each turn, preventing prompt growth.
+- 🛡️ **Sealed Verification Gate:** Completion is decided strictly by runtime evaluation of an external command (`verification_cmd`); the gate is absent from the model's tool surface to prevent self-grading.
+- 🔄 **Verified Checkpoint Rollback:** On verification failure, git working trees are automatically reset to baseline while preserving failure telemetry in the state.
+- 🐚 **Seam Parity (`LocalShell` & `ContainerShell`):** Synchronous command execution with Unix process groups (`setpgid(0)` + `kill(-pgid, SIGKILL)`), preventing orphaned grandchildren and pipe-drain deadlocks.
+- 📦 **Pluggable Providers (`superstate-provider`):** Streaming provider interfaces for Anthropic, Gemini, and OpenAI.
 
 ## Quick Start
 
-### Installation
+### Build and Test
 
 ```bash
-cargo install superstate-cli
+cargo build
+cargo test
 ```
 
-### 5-Step Health Check
+### Run an Evaluation Task
 
 ```bash
-superstate doctor
-```
-
-### Initialize State Tracking
-
-```bash
-state init --plan docs/plan.md
-```
-
-### Advance Active Task
-
-```bash
-state next --verify-cmd "cargo test" --verify-git-clean
+cargo run -p superstate-agent --release --example solve
 ```

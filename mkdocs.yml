@@ -15,7 +15,6 @@ theme:
 
 nav:
   - Overview: index.md
-  - Manifesto: manifesto.md
   - Architecture: architecture.md
   - State Machine & DFA: state.md
   - Code Intelligence (AST): syntax.md
