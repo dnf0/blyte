@@ -280,17 +280,19 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
 
-                    // Synchronize working set on read, edit, and bash tool calls.
+                    // Synchronize working set on read, edit, write, and bash tool calls.
                     // Maintains external working memory in Runtime (Invariant I) without LLM intervention.
                     match call.name.as_str() {
                         "read" => {
-                            // Track active file snippet on successful read
+                            // Track active file snippet on successful read, stripping line numbers
                             if !outcome.is_error {
-                                let path = call
+                                let raw_path = call
                                     .arguments
                                     .get("path")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
+                                let path = normalize_path(raw_path);
+                                let raw_content = strip_line_number_prefixes(&outcome.content);
                                 let start = call.arguments.get("start_line").and_then(|v| {
                                     v.as_u64()
                                         .map(|n| n as usize)
@@ -303,7 +305,7 @@ impl<'a> Runner<'a> {
                                 });
                                 state.runtime.working_set.add_or_update(
                                     path,
-                                    &outcome.content,
+                                    &raw_content,
                                     start,
                                     end,
                                     turn,
@@ -313,11 +315,12 @@ impl<'a> Runner<'a> {
                         "edit" => {
                             // Apply exact replacement chunk to working set cache
                             if !outcome.is_error {
-                                let path = call
+                                let raw_path = call
                                     .arguments
                                     .get("path")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
+                                let path = normalize_path(raw_path);
                                 let old = call
                                     .arguments
                                     .get("old")
@@ -331,6 +334,29 @@ impl<'a> Runner<'a> {
                                 state.runtime.working_set.apply_edit(path, old, new, turn);
                             }
                         }
+                        "write" => {
+                            // Update or insert full file snippet on successful write
+                            if !outcome.is_error {
+                                let raw_path = call
+                                    .arguments
+                                    .get("path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let path = normalize_path(raw_path);
+                                let content = call
+                                    .arguments
+                                    .get("content")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                state.runtime.working_set.add_or_update(
+                                    path,
+                                    content,
+                                    None,
+                                    None,
+                                    turn,
+                                );
+                            }
+                        }
                         "bash" => {
                             // Track or clear test failures based on test command exit code
                             let cmd = call
@@ -338,9 +364,8 @@ impl<'a> Runner<'a> {
                                 .get("command")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
-                            let is_test_cmd = cmd.contains("test")
-                                || cmd.contains("pytest")
-                                || cmd.contains("unittest");
+                            let is_test_cmd =
+                                is_test_command(cmd, &state.orchestrator.verification_cmd);
                             if outcome.is_error && is_test_cmd {
                                 state.runtime.working_set.record_failure(&outcome.content);
                             } else if !outcome.is_error && is_test_cmd {
@@ -622,3 +647,98 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
         }
     }
 }
+
+/// Normalizes file paths for working set lookup and tracking.
+/// Strips leading `./` and whitespace to prevent path mismatches across tools.
+pub fn normalize_path(path: &str) -> &str {
+    let p = path.trim();
+    p.strip_prefix("./").unwrap_or(p)
+}
+
+/// Strips line number prefixes (`{:>6}\t`) generated by the `read` tool.
+///
+/// Ensures the raw file snippet content is stored in memory so that subsequent
+/// `apply_edit` string replacements match accurately across single-line and
+/// multi-line blocks.
+pub fn strip_line_number_prefixes(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            if let Some((num, rest)) = line.split_once('\t') {
+                if num.trim().chars().all(|c| c.is_ascii_digit()) {
+                    return rest;
+                }
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Determines if a shell command represents a test execution.
+///
+/// Distinguishes test runners (`cargo test`, `pytest`, `jest`, etc.) and the
+/// orchestrator verification command from benign filesystem or VCS operations
+/// (e.g. `cat tests/foo`, `ls tests/`, `git checkout test-branch`, `grep "test"`).
+pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    if !verification_cmd.is_empty()
+        && (trimmed == verification_cmd.trim() || trimmed.contains(verification_cmd))
+    {
+        return true;
+    }
+
+    // Split compound commands / pipelines into subcommands
+    for part in trimmed.split(&[';', '&', '|'][..]) {
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        if tokens.is_empty() {
+            continue;
+        }
+
+        // Skip leading environment variable assignments (e.g. `RUST_BACKTRACE=1 cargo test`)
+        let mut idx = 0;
+        while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
+            idx += 1;
+        }
+        if idx >= tokens.len() {
+            continue;
+        }
+
+        // Extract the executable name without directory path (e.g. `./venv/bin/pytest` -> `pytest`)
+        let exe = tokens[idx].rsplit('/').next().unwrap_or(tokens[idx]);
+        match exe {
+            "pytest" | "jest" | "vitest" | "rspec" | "ctest" | "nosetests" | "tox" => return true,
+            "cargo" if tokens.get(idx + 1).is_some_and(|&sub| sub == "test" || sub == "t") => {
+                return true;
+            }
+            "go" if tokens.get(idx + 1).is_some_and(|&sub| sub == "test") => {
+                return true;
+            }
+            "npm" | "yarn" | "pnpm" | "bun"
+                if tokens
+                    .get(idx + 1)
+                    .is_some_and(|&sub| sub == "test" || sub == "t" || sub == "run") =>
+            {
+                return true;
+            }
+            "python" | "python3" => {
+                for w in &tokens[idx + 1..] {
+                    if *w == "unittest" || *w == "pytest" {
+                        return true;
+                    }
+                }
+            }
+            "make"
+                if tokens
+                    .get(idx + 1)
+                    .is_some_and(|&sub| sub == "test" || sub == "check") =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+

@@ -538,16 +538,27 @@ fn test_state_only_runner_injects_action_ledger_in_prompts() {
 
 #[test]
 fn test_working_set_synchronized_during_run() {
-    // Verifies that during a run, calling read tracks the file snippet, calling edit updates
-    // the cached content in memory, and running a passing test leaves last_failure clear.
+    // Verifies that during a run, calling read tracks the file snippet with line numbers stripped,
+    // calling edit updates multi-line cached content in memory, and running a passing test leaves
+    // last_failure clear.
     let d = repo();
+    std::fs::write(
+        d.path().join("calc.rs"),
+        "fn calculate() -> i32 {\n    let val = 0;\n    val\n}\n",
+    )
+    .unwrap();
+
     let p = ScriptedProvider::new(vec![
-        calls("read", json!({"path": "marker"})),
+        calls("read", json!({"path": "calc.rs"})),
         calls(
             "edit",
-            json!({"path": "marker", "old": "0", "new": "1"}),
+            json!({
+                "path": "calc.rs",
+                "old": "    let val = 0;\n    val",
+                "new": "    let val = 42;\n    val"
+            }),
         ),
-        calls("bash", json!({"command": "echo 'test passed' && exit 0"})),
+        calls("bash", json!({"command": "cargo test --help"})),
         says("done"),
     ]);
     let mut st = State::new("sync working set", "true");
@@ -555,11 +566,11 @@ fn test_working_set_synchronized_during_run() {
     assert_eq!(outcome, Outcome::Verified);
     assert_eq!(rep.gate_attempts, 1);
 
-    // Working set must contain the edited file snippet with updated content
+    // Working set must contain the edited file snippet with multi-line updated content without line-number prefixes
     assert_eq!(st.runtime.working_set.files.len(), 1);
-    assert_eq!(st.runtime.working_set.files[0].path, "marker");
-    assert!(st.runtime.working_set.files[0].content.contains("1"));
-    assert!(!st.runtime.working_set.files[0].content.contains("0"));
+    assert_eq!(st.runtime.working_set.files[0].path, "calc.rs");
+    assert!(st.runtime.working_set.files[0].content.contains("let val = 42;"));
+    assert!(!st.runtime.working_set.files[0].content.contains("let val = 0;"));
     assert_eq!(st.runtime.working_set.files[0].last_accessed_turn, 2);
     assert!(st.runtime.working_set.last_failure.is_none());
 }
@@ -570,10 +581,7 @@ fn test_working_set_tracks_test_failure() {
     // and distills the failure output into state.runtime.working_set.last_failure.
     let d = repo();
     let p = ScriptedProvider::new(vec![
-        calls(
-            "bash",
-            json!({"command": "echo 'pytest test_suite failed: assertion error' && exit 1"}),
-        ),
+        calls("bash", json!({"command": "cargo test"})),
         says("done"),
     ]);
     let mut st = State::new("track failure", "true");
@@ -586,8 +594,7 @@ fn test_working_set_tracks_test_failure() {
         .last_failure
         .as_deref()
         .expect("last_failure should be populated");
-    assert!(failure.contains("pytest test_suite failed: assertion error"));
-    assert!(failure.contains("exit 1"));
+    assert!(failure.contains("could not find `Cargo.toml`") || failure.contains("exit"));
 }
 
 #[test]
@@ -596,14 +603,8 @@ fn test_working_set_clears_test_failure_on_pass() {
     // from external working memory.
     let d = repo();
     let p = ScriptedProvider::new(vec![
-        calls(
-            "bash",
-            json!({"command": "echo 'pytest test_suite failed: error' && exit 1"}),
-        ),
-        calls(
-            "bash",
-            json!({"command": "echo 'pytest test_suite passed: ok' && exit 0"}),
-        ),
+        calls("bash", json!({"command": "cargo test"})),
+        calls("bash", json!({"command": "cargo test --help"})),
         says("done"),
     ]);
     let mut st = State::new("clear failure", "true");
@@ -620,4 +621,83 @@ fn test_working_set_clears_test_failure_on_pass() {
         "passing test command must clear last_failure"
     );
 }
+
+#[test]
+fn test_benign_commands_do_not_affect_working_set_failure() {
+    // Commands operating on file paths containing 'test' (e.g. ls tests/, cat tests/foo, grep "test")
+    // must not falsely record failures or prematurely clear an active test failure.
+    let d = repo();
+    std::fs::create_dir_all(d.path().join("tests")).unwrap();
+    std::fs::write(d.path().join("tests/foo.rs"), "test helper\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Benign command that exits 0
+        calls("bash", json!({"command": "ls tests/"})),
+        // Benign command that exits non-zero (grep returns 1 when pattern not found)
+        calls(
+            "bash",
+            json!({"command": "grep 'nonexistent_pattern' tests/foo.rs"}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("preserve failure", "true");
+    st.runtime
+        .working_set
+        .record_failure("real compiler test failure");
+
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    assert_eq!(
+        st.runtime.working_set.last_failure.as_deref(),
+        Some("real compiler test failure"),
+        "benign commands touching tests/ or grep must not alter last_failure"
+    );
+}
+
+#[test]
+fn test_working_set_updates_on_write() {
+    // Overwriting a file via the write tool updates the cached snippet in the working set.
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "marker"})),
+        calls(
+            "write",
+            json!({"path": "marker", "content": "rewritten marker content\n"}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("write working set", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    assert_eq!(st.runtime.working_set.files.len(), 1);
+    assert_eq!(st.runtime.working_set.files[0].path, "marker");
+    assert_eq!(
+        st.runtime.working_set.files[0].content,
+        "rewritten marker content\n"
+    );
+}
+
+#[test]
+fn test_working_set_normalizes_leading_dot_slash() {
+    // Reading with './marker' and editing with 'marker' must resolve to the same snippet entry.
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "./marker"})),
+        calls(
+            "edit",
+            json!({"path": "marker", "old": "0", "new": "99"}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("normalize path", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    assert_eq!(st.runtime.working_set.files.len(), 1);
+    assert_eq!(st.runtime.working_set.files[0].path, "marker");
+    assert!(st.runtime.working_set.files[0].content.contains("99"));
+}
+
 
