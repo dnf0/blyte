@@ -52,11 +52,29 @@ pub struct StateOnly;
 impl ContextStrategy for StateOnly {
     fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
         let mut out = Vec::new();
-        let mut user_prompt = format!(
-            "## Task\n{}\n\n## Your state\n{}\n",
-            state.orchestrator.goal,
+        // Order is for the cache as much as for the reader. Gemini caches a shared prompt prefix
+        // of at least 4,096 tokens, so what is stable goes first: the task, then the append-only
+        // action ledger, which turn N+1 repeats exactly with one more line. Everything that
+        // changes turn to turn (notes, working set, failure, verification status) follows it.
+        let mut user_prompt = format!("## Task\n{}\n", state.orchestrator.goal);
+
+        // The chronological action ledger: episodic memory of tool outcomes without growing
+        // conversation history. Append-only, which is what makes it cacheable.
+        if !state.runtime.actions.is_empty() {
+            user_prompt.push_str("\n## Actions Taken So Far\n");
+            for action in &state.runtime.actions {
+                let status_indicator = if action.is_error { " [ERROR]" } else { "" };
+                user_prompt.push_str(&format!(
+                    "- Turn {}: `{}` `{}` -> {}{}\n",
+                    action.turn, action.tool, action.target, action.summary, status_indicator
+                ));
+            }
+        }
+
+        user_prompt.push_str(&format!(
+            "\n## Your state\n{}\n",
             serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
-        );
+        ));
 
         // External working memory: active file snippets inspected or edited by the worker.
         // Injects distilled snippets so the agent has continuous visibility across turns without
@@ -97,19 +115,6 @@ impl ContextStrategy for StateOnly {
                     "\n## Verification Status\nThe verification command `{}` exited 0 after your \
                      last edit. If your change is complete, stop calling tools to submit it.\n",
                     state.orchestrator.verification_cmd.trim()
-                ));
-            }
-        }
-
-        // When actions have been recorded, format the chronological action ledger.
-        // Provides episodic memory of tool outcomes without growing conversation history.
-        if !state.runtime.actions.is_empty() {
-            user_prompt.push_str("\n## Actions Taken So Far\n");
-            for action in &state.runtime.actions {
-                let status_indicator = if action.is_error { " [ERROR]" } else { "" };
-                user_prompt.push_str(&format!(
-                    "- Turn {}: `{}` `{}` -> {}{}\n",
-                    action.turn, action.tool, action.target, action.summary, status_indicator
                 ));
             }
         }
