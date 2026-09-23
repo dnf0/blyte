@@ -265,6 +265,21 @@ impl<'a> Runner<'a> {
                         summary,
                         is_error: outcome.is_error,
                     });
+
+                    // Record tool invocation in the chronological action ledger.
+                    // Captures deterministic targets and outcome summaries so that episodic memory
+                    // retains an accurate, bounded audit trail of all agent actions.
+                    let action_target = extract_action_target(&call.name, &call.arguments);
+                    let action_summary =
+                        extract_action_summary(&call.name, &outcome.content, outcome.is_error);
+                    state.runtime.actions.push(crate::state::ActionEntry {
+                        turn,
+                        tool: call.name.clone(),
+                        target: action_target,
+                        summary: action_summary,
+                        is_error: outcome.is_error,
+                    });
+
                     history.push(Message::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -293,8 +308,16 @@ impl<'a> Runner<'a> {
                 if let Some(base) = &baseline {
                     self.reset_to(base);
                     state.runtime.rollbacks += 1;
-                    self.emit(Event::RolledBack {
-                        to: &base[..base.len().min(8)],
+                    let short_sha = &base[..base.len().min(8)];
+                    self.emit(Event::RolledBack { to: short_sha });
+                    // Record rollback in the action ledger to ensure the worker and orchestrator
+                    // observe workspace resets explicitly within episodic action history.
+                    state.runtime.actions.push(crate::state::ActionEntry {
+                        turn,
+                        tool: "rollback".into(),
+                        target: format!("checkpoint {short_sha}"),
+                        summary: "Gate failed; working tree reset to verified state".into(),
+                        is_error: true,
                     });
                 }
             }
@@ -440,7 +463,11 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
             // Distinguish successful replacements from rejection/failure reasons.
             if is_error {
                 let first = content.lines().next().unwrap_or("edit failed");
-                let first = if first.is_empty() { "edit failed" } else { first };
+                let first = if first.is_empty() {
+                    "edit failed"
+                } else {
+                    first
+                };
                 format!("failed: {first}")
             } else {
                 "string replaced".to_string()
@@ -486,4 +513,3 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
         }
     }
 }
-

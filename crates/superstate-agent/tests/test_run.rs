@@ -348,3 +348,92 @@ fn the_turn_budget_bounds_a_model_that_never_stops() {
     assert_eq!(outcome, Outcome::BudgetExhausted);
     assert_eq!(rep.outcome_turns, 12);
 }
+
+#[test]
+fn test_actions_recorded_during_run() {
+    // Verifies that Runner records ActionEntry objects chronologically into state.runtime.actions
+    // for all invoked tools (bash, read, note), preserving action targets, summaries, and error flags.
+    let d = repo();
+    // Create a known file on disk so the 'read' tool succeeds with predictable line counts.
+    std::fs::write(d.path().join("sample.txt"), "first line\nsecond line\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        calls("bash", json!({"command": "echo hello"})),
+        calls("read", json!({"path": "sample.txt"})),
+        calls("note", json!({"patch": {"analysis": "verified"}})),
+        says("done"),
+    ]);
+    let mut st = State::new("test action ledger", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.tool_calls, 3);
+
+    // Ensure three action entries were captured in exact invocation sequence.
+    assert_eq!(st.runtime.actions.len(), 3);
+
+    // 1. Validate bash command action entry details.
+    let bash_action = &st.runtime.actions[0];
+    assert_eq!(bash_action.turn, 1);
+    assert_eq!(bash_action.tool, "bash");
+    assert_eq!(bash_action.target, "echo hello");
+    assert_eq!(bash_action.summary, "exit 0");
+    assert!(!bash_action.is_error);
+
+    // 2. Validate file read action entry details.
+    let read_action = &st.runtime.actions[1];
+    assert_eq!(read_action.turn, 2);
+    assert_eq!(read_action.tool, "read");
+    assert_eq!(read_action.target, "sample.txt");
+    assert_eq!(read_action.summary, "2 lines read");
+    assert!(!read_action.is_error);
+
+    // 3. Validate state note action entry details.
+    let note_action = &st.runtime.actions[2];
+    assert_eq!(note_action.turn, 3);
+    assert_eq!(note_action.tool, "note");
+    assert_eq!(note_action.target, "patch (1 keys)");
+    assert_eq!(
+        note_action.summary,
+        "recorded; your state now has 1 field(s)"
+    );
+    assert!(!note_action.is_error);
+}
+
+#[test]
+fn test_rollback_appends_action_entry() {
+    // Verifies that when a verification gate fails with rollback enabled, an ActionEntry
+    // is recorded in state.runtime.actions documenting the rollback event and checkpoint target.
+    let d = repo();
+    // The verification command checks for existence of 'target.txt'.
+    // On the first gate attempt, target.txt is missing -> gate fails and rollback occurs.
+    // On the second attempt, the model writes target.txt -> gate passes.
+    let p = ScriptedProvider::new(vec![
+        calls("bash", json!({"command": "echo attempt1"})),
+        says("done with attempt 1"),
+        calls(
+            "write",
+            json!({"path": "target.txt", "content": "passed\n"}),
+        ),
+        says("done with attempt 2"),
+    ]);
+    let mut st = State::new("create target file", "test -f target.txt");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, true).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 2);
+    assert_eq!(st.runtime.rollbacks, 1);
+
+    // Identify the rollback entry in the recorded action history.
+    let rollback_entry = st
+        .runtime
+        .actions
+        .iter()
+        .find(|a| a.tool == "rollback")
+        .expect("rollback action entry must be recorded in runtime.actions");
+
+    assert!(rollback_entry.target.starts_with("checkpoint "));
+    assert_eq!(
+        rollback_entry.summary,
+        "Gate failed; working tree reset to verified state"
+    );
+    assert!(rollback_entry.is_error);
+}
