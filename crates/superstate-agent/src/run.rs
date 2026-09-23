@@ -102,6 +102,55 @@ pub enum Event<'e> {
     },
 }
 
+/// One stage of a multi-phase run, with its own instruction and verification command.
+///
+/// Phases belong to the runtime, not the worker. The harness derives them (for example from the
+/// repository, by autonomous TDD), and the worker can neither see nor edit the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phase {
+    pub id: String,
+    pub instruction: String,
+    pub verify_cmd: String,
+    /// The only tracked path allowed to differ from the phase's starting commit when its gate
+    /// passes. RED uses it: a worker that fixes the bug while "writing a failing test" makes
+    /// the RED proof meaningless.
+    pub scope_only: Option<String>,
+    /// A path that must be unchanged from the phase's starting commit when its gate passes.
+    /// GREEN uses it: the test that defines done may not be weakened after it was seen to fail.
+    pub protect: Option<String>,
+}
+
+impl Phase {
+    /// The command the gate actually runs: the phase's own command plus its mechanical checks,
+    /// measured against `start`, the commit captured when the phase began. A worker that commits
+    /// mid-phase cannot move that reference point.
+    pub fn gate(&self, start: &str) -> String {
+        let mut cmd = format!("( {} )", self.verify_cmd);
+        if let Some(p) = &self.scope_only {
+            cmd.push_str(&format!(
+                " && {{ git diff --quiet {start} -- . ':(exclude){p}' || \
+                 {{ echo 'superstate: in this phase only {p} may change; revert your other edits'; false; }}; }}"
+            ));
+        }
+        if let Some(p) = &self.protect {
+            cmd.push_str(&format!(
+                " && {{ git diff --quiet {start} -- '{p}' || \
+                 {{ echo 'superstate: {p} defines done and may not change in this phase'; false; }}; }}"
+            ));
+        }
+        cmd
+    }
+}
+
+/// How one phase of a multi-phase run ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseResult {
+    pub id: String,
+    pub outcome: Outcome,
+    pub turns: u32,
+    pub gate_attempts: u32,
+}
+
 pub struct Runner<'a> {
     pub provider: &'a dyn Provider,
     pub shell: &'a dyn Shell,
@@ -188,19 +237,109 @@ impl<'a> Runner<'a> {
     }
 
     pub fn run(&self, state: &mut State) -> (Outcome, RunReport) {
+        let deadline = self
+            .budget
+            .max_duration
+            .map(|d| std::time::Instant::now() + d);
+        self.run_until(state, deadline)
+    }
+
+    /// Run `phases` in order under one deadline. After each verified phase except the last, a
+    /// checkpoint is committed, so the next phase's rollback baseline keeps it: a GREEN rollback
+    /// must never delete RED's verified test. Turn and gate budgets apply per phase, matching
+    /// the daemon's per-milestone retry budget. The deadline covers the whole run.
+    pub fn run_phases(
+        &self,
+        state: &mut State,
+        phases: &[Phase],
+    ) -> (Outcome, RunReport, Vec<PhaseResult>) {
+        let deadline = self
+            .budget
+            .max_duration
+            .map(|d| std::time::Instant::now() + d);
+        let task = state.orchestrator.goal.clone();
+        let mut total = RunReport::default();
+        let mut results = Vec::new();
+        for (i, phase) in phases.iter().enumerate() {
+            let Some(start) = self.checkpoint() else {
+                return (
+                    Outcome::Error("phases need a git repository: cannot read HEAD".into()),
+                    total,
+                    results,
+                );
+            };
+            state.orchestrator.goal = format!(
+                "{task}\n\n## Current milestone ({}/{}): {}\n{}",
+                i + 1,
+                phases.len(),
+                phase.id,
+                phase.instruction
+            );
+            state.orchestrator.verification_cmd = phase.gate(&start);
+            let (outcome, report) = self.run_until(state, deadline);
+            total.outcome_turns += report.outcome_turns;
+            total.usage.input += report.usage.input;
+            total.usage.cached += report.usage.cached;
+            total.usage.output += report.usage.output;
+            total.usage.thinking += report.usage.thinking;
+            total.empty_turns += report.empty_turns;
+            total.tool_calls += report.tool_calls;
+            total.gate_attempts += report.gate_attempts;
+            results.push(PhaseResult {
+                id: phase.id.clone(),
+                outcome: outcome.clone(),
+                turns: report.outcome_turns,
+                gate_attempts: report.gate_attempts,
+            });
+            if outcome != Outcome::Verified {
+                state.orchestrator.goal = task;
+                return (outcome, total, results);
+            }
+            if i + 1 < phases.len() {
+                if let Err(e) = self.commit_checkpoint(&phase.id) {
+                    state.orchestrator.goal = task;
+                    return (Outcome::Error(e), total, results);
+                }
+            }
+        }
+        state.orchestrator.goal = task;
+        (Outcome::Verified, total, results)
+    }
+
+    /// Commit the tree as the verified end of a phase. The identity is set inline because a
+    /// task container often has no git user configured.
+    fn commit_checkpoint(&self, phase_id: &str) -> Result<(), String> {
+        let cmd = format!(
+            "git add -A && git -c user.name=superstate -c user.email=superstate@localhost \
+             commit --no-gpg-sign -q --allow-empty -m 'chore(superstate): checkpoint phase {phase_id}'"
+        );
+        match self.shell.exec(&cmd, &self.root, Duration::from_secs(120)) {
+            Ok(o) if o.exit_code == 0 => Ok(()),
+            Ok(o) => Err(format!(
+                "checkpoint commit for phase {phase_id} failed: {}",
+                o.merged().trim()
+            )),
+            Err(e) => Err(format!(
+                "checkpoint commit for phase {phase_id} could not run: {e}"
+            )),
+        }
+    }
+
+    fn run_until(
+        &self,
+        state: &mut State,
+        deadline: Option<std::time::Instant>,
+    ) -> (Outcome, RunReport) {
         let mut report = RunReport::default();
         let mut history: Vec<Message> =
             vec![Message::User(format!("Begin. {}", state.orchestrator.goal))];
         let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
-        let started = std::time::Instant::now();
 
         for turn in 1..=self.budget.max_turns {
-            if let Some(limit) = self.budget.max_duration {
-                if started.elapsed() >= limit {
-                    return (Outcome::BudgetExhausted, report);
-                }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return (Outcome::BudgetExhausted, report);
             }
             report.outcome_turns = turn;
 
