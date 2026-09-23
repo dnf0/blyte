@@ -16,7 +16,7 @@ fn test_task_config_from_cli() {
         "--context",
         "state-only",
         "--model",
-        "gemini-2.5-flash",
+        "gemini-3.8-flash",
         "--container",
         "docker-123",
         "--max-turns",
@@ -30,7 +30,7 @@ fn test_task_config_from_cli() {
     assert_eq!(config.prompt, "solve the bug");
     assert_eq!(config.gate.as_deref(), Some("cargo test"));
     assert_eq!(config.context_strategy, "state-only");
-    assert_eq!(config.model.as_deref(), Some("gemini-2.5-flash"));
+    assert_eq!(config.model.as_deref(), Some("gemini-3.8-flash"));
     assert_eq!(config.container.as_deref(), Some("docker-123"));
     assert_eq!(config.max_turns, 42);
     assert_eq!(config.max_gates, 7);
@@ -63,9 +63,12 @@ fn test_task_config_defaults() {
 fn test_run_task_missing_api_key_returns_clear_error() {
     let _guard = ENV_LOCK.lock().unwrap();
 
-    // Ensure both GEMINI_API_KEY and GOOGLE_API_KEY are unset
+    // Ensure all provider keys are unset for deterministic fallback
     std::env::remove_var("GEMINI_API_KEY");
     std::env::remove_var("GOOGLE_API_KEY");
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    std::env::remove_var("OLLAMA_API_KEY");
+    std::env::remove_var("OLLAMA_HOST");
 
     let config = TaskConfig {
         prompt: "echo hello".to_string(),
@@ -89,11 +92,59 @@ fn test_run_task_missing_api_key_returns_clear_error() {
 }
 
 #[test]
+fn test_run_task_missing_api_key_for_specified_provider() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    std::env::remove_var("OLLAMA_API_KEY");
+    std::env::remove_var("OLLAMA_HOST");
+
+    let anthropic_config = TaskConfig {
+        prompt: "echo hello".to_string(),
+        gate: None,
+        context_strategy: "state-only".to_string(),
+        model: Some("claude-3-7-sonnet".to_string()),
+        container: None,
+        max_turns: 10,
+        max_gates: 2,
+        rollback: true,
+        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    };
+
+    let err = run_task(anthropic_config).unwrap_err();
+    assert!(
+        err.contains("ANTHROPIC_API_KEY"),
+        "Error message should mention ANTHROPIC_API_KEY: {err}"
+    );
+
+    let ollama_config = TaskConfig {
+        prompt: "echo hello".to_string(),
+        gate: None,
+        context_strategy: "state-only".to_string(),
+        model: Some("qwen2.5-coder:32b".to_string()),
+        container: None,
+        max_turns: 10,
+        max_gates: 2,
+        rollback: true,
+        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    };
+
+    let err = run_task(ollama_config).unwrap_err();
+    assert!(
+        err.contains("OLLAMA_API_KEY"),
+        "Error message should mention OLLAMA_API_KEY: {err}"
+    );
+}
+
+#[test]
 fn test_run_task_with_state_and_writer_preserves_state() {
     let _guard = ENV_LOCK.lock().unwrap();
 
     std::env::remove_var("GEMINI_API_KEY");
     std::env::remove_var("GOOGLE_API_KEY");
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    std::env::remove_var("OLLAMA_API_KEY");
+    std::env::remove_var("OLLAMA_HOST");
 
     let config = TaskConfig {
         prompt: "task goal".to_string(),
@@ -122,6 +173,9 @@ fn test_repl_stream_prompt_dispatch() {
 
     std::env::remove_var("GEMINI_API_KEY");
     std::env::remove_var("GOOGLE_API_KEY");
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    std::env::remove_var("OLLAMA_API_KEY");
+    std::env::remove_var("OLLAMA_HOST");
 
     let config = superstate_cli::repl::ReplConfig::default();
     let session = superstate_cli::repl::ReplSession::new(&config);

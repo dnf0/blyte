@@ -21,6 +21,9 @@
 pub mod anthropic;
 pub mod gemini;
 pub mod ollama;
+pub mod registry;
+
+pub use registry::{detect_provider_kind, discover_all_models, resolve_provider, ProviderKind};
 
 use serde::{Deserialize, Serialize};
 
