@@ -259,14 +259,17 @@ pub fn handle_repl_command<W: Write>(
             }
             "/state" => {
                 writeln!(writer, "=== Superstate SKILL.state ===").map_err(|e| e.to_string())?;
+                // Render orchestrator contract: goal specification and verification gate
                 let orch = serde_json::to_string_pretty(&session.state.orchestrator)
                     .map_err(|e| e.to_string())?;
                 writeln!(writer, "Orchestrator:\n{}", orch).map_err(|e| e.to_string())?;
 
+                // Render runtime state including attempt counts, rollback metrics, and action ledger
                 let rt = serde_json::to_string_pretty(&session.state.runtime)
                     .map_err(|e| e.to_string())?;
                 writeln!(writer, "Runtime:\n{}", rt).map_err(|e| e.to_string())?;
 
+                // Render agent domain state: epistemic ledger notes and hypothesis scratchpad
                 let agent = serde_json::to_string_pretty(&session.state.agent)
                     .map_err(|e| e.to_string())?;
                 writeln!(writer, "Agent:\n{}", agent).map_err(|e| e.to_string())?;
