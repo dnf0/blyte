@@ -33,10 +33,30 @@ pub struct FileSnippet {
 /// Harness-managed working set representing active external working memory.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkingSet {
-    /// Active file snippets tracked in LRU order.
+    /// Active file snippets. Insertion order is preserved; LRU eviction is ordered
+    /// strictly by `last_accessed_turn`.
     pub files: Vec<FileSnippet>,
     /// Distilled output of the most recent failed gate or command execution.
     pub last_failure: Option<String>,
+}
+
+/// Distills snippet text if line count exceeds `MAX_FILE_LINES`.
+fn distill_snippet(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() > MAX_FILE_LINES {
+        let half = MAX_FILE_LINES / 2;
+        let head = &lines[..half];
+        let tail = &lines[lines.len() - half..];
+        let omitted = lines.len() - MAX_FILE_LINES;
+        format!(
+            "{}\n\n[... {} lines omitted ...]\n\n{}",
+            head.join("\n"),
+            omitted,
+            tail.join("\n")
+        )
+    } else {
+        content.to_string()
+    }
 }
 
 impl WorkingSet {
@@ -59,24 +79,8 @@ impl WorkingSet {
         end_line: Option<usize>,
         turn: u32,
     ) {
-        // Collect snippet lines to enforce per-file line limits
-        let lines: Vec<&str> = content.lines().collect();
-
-        // Distill snippet if line count exceeds single-file budget
-        let distilled = if lines.len() > MAX_FILE_LINES {
-            let half = MAX_FILE_LINES / 2;
-            let head = &lines[..half];
-            let tail = &lines[lines.len() - half..];
-            let omitted = lines.len() - MAX_FILE_LINES;
-            format!(
-                "{}\n\n[... {} lines omitted ...]\n\n{}",
-                head.join("\n"),
-                omitted,
-                tail.join("\n")
-            )
-        } else {
-            content.to_string()
-        };
+        // Enforce per-file line limits via distillation
+        let distilled = distill_snippet(content);
 
         // Update existing entry or append a new snippet
         if let Some(existing) = self.files.iter_mut().find(|f| f.path == path) {
@@ -109,15 +113,38 @@ impl WorkingSet {
     /// # Returns
     /// `true` if the file was found and updated; `false` otherwise.
     pub fn apply_edit(&mut self, path: &str, old: &str, new: &str, turn: u32) -> bool {
+        // Reject empty search string to prevent unintentional prepending
+        if old.is_empty() {
+            return false;
+        }
+
         // Find cached file matching path and containing target substring
+        let mut edited = false;
         if let Some(existing) = self.files.iter_mut().find(|f| f.path == path) {
             if existing.content.contains(old) {
-                existing.content = existing.content.replacen(old, new, 1);
+                let replaced = existing.content.replacen(old, new, 1);
+                existing.content = distill_snippet(&replaced);
                 existing.last_accessed_turn = turn;
-                return true;
+
+                // Adjust end_line if snippet bounds were tracked
+                if let Some(end) = existing.end_line {
+                    let old_lines = old.lines().count();
+                    let new_lines = new.lines().count();
+                    if new_lines >= old_lines {
+                        existing.end_line = Some(end + (new_lines - old_lines));
+                    } else {
+                        existing.end_line = Some(end.saturating_sub(old_lines - new_lines));
+                    }
+                }
+                edited = true;
             }
         }
-        false
+
+        // Enforce aggregate line budget and capacity bounds after edit expansion
+        if edited {
+            self.prune_lru(MAX_ACTIVE_FILES, MAX_TOTAL_LINES);
+        }
+        edited
     }
 
     /// Record a distilled failure output from non-zero test or gate execution.

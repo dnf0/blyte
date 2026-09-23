@@ -106,3 +106,63 @@ fn test_invariant_i_agent_patch_cannot_mutate_working_set() {
     assert_eq!(state.runtime.working_set.files[0].path, "safe.rs");
     assert!(state.runtime.working_set.last_failure.is_some());
 }
+
+#[test]
+fn test_working_set_snippet_distillation() {
+    let mut ws = WorkingSet::default();
+    let content: String = (1..=120).map(|i| format!("line {i}\n")).collect();
+    ws.add_or_update("long.rs", &content, Some(1), Some(120), 1);
+
+    assert_eq!(ws.files.len(), 1);
+    let snippet = &ws.files[0];
+    assert!(snippet.content.contains("line 1\n"));
+    assert!(snippet.content.contains("line 50\n"));
+    assert!(snippet.content.contains("[... 20 lines omitted ...]"));
+    assert!(snippet.content.contains("line 71\n"));
+    assert!(snippet.content.contains("line 120"));
+    assert!(!snippet.content.contains("line 60\n"));
+}
+
+#[test]
+fn test_working_set_failure_distillation() {
+    let mut ws = WorkingSet::default();
+    let failure_output: String = (1..=30).map(|i| format!("FAIL error {i}\n")).collect();
+    ws.record_failure(&failure_output);
+
+    let recorded = ws.last_failure.as_ref().expect("failure should be present");
+    assert!(recorded.contains("FAIL error 1"));
+    assert!(recorded.contains("FAIL error 10"));
+    assert!(recorded.contains("...\nFAIL error 21"));
+    assert!(recorded.contains("FAIL error 30"));
+    assert!(!recorded.contains("FAIL error 15"));
+}
+
+#[test]
+fn test_working_set_apply_edit_edge_cases() {
+    let mut ws = WorkingSet::default();
+    ws.add_or_update("edit_target.rs", "fn foo() {\n    line 1\n    line 2\n}\n", Some(1), Some(4), 1);
+
+    // Empty old string should return false without altering content
+    let empty_res = ws.apply_edit("edit_target.rs", "", "injected\n", 2);
+    assert!(!empty_res);
+    assert!(!ws.files[0].content.contains("injected"));
+
+    // Non-existent file should return false
+    let missing_file_res = ws.apply_edit("non_existent.rs", "line 1", "line 1 modified", 2);
+    assert!(!missing_file_res);
+
+    // Substring not present should return false
+    let missing_chunk_res = ws.apply_edit("edit_target.rs", "not present in file", "replacement", 2);
+    assert!(!missing_chunk_res);
+
+    // Replacement that introduces lines should adjust end_line
+    let expansion_res = ws.apply_edit("edit_target.rs", "line 1\n    line 2", "line 1\n    line 1.5\n    line 2", 2);
+    assert!(expansion_res);
+    assert_eq!(ws.files[0].end_line, Some(5));
+
+    // Large edit expansion should trigger snippet distillation and LRU pruning
+    let huge_replacement: String = (1..=150).map(|i| format!("new_line {i}\n")).collect();
+    let huge_res = ws.apply_edit("edit_target.rs", "line 1\n    line 1.5\n    line 2", &huge_replacement, 3);
+    assert!(huge_res);
+    assert!(ws.files[0].content.contains("[..."));
+}
