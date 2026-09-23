@@ -125,6 +125,7 @@ impl WorkingSet {
                 Some(existing.content.replacen(old, new, 1))
             } else if let Some(trimmed_old) = old.strip_suffix('\n') {
                 if !trimmed_old.is_empty()
+                    && !existing.content.ends_with('\n')
                     && existing.end_line.is_none()
                     && existing.content.ends_with(trimmed_old)
                 {

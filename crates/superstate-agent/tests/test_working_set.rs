@@ -177,11 +177,23 @@ fn test_working_set_apply_edit_edge_cases() {
         "EOF fallback must replace only the suffix, never an earlier occurrence"
     );
 
-    // Newline-only old string must not match via EOF fallback or prepend
-    let newline_only_res = ws2.apply_edit("eof_test.rs", "\n", "prepended\n", 3);
+    // Newline-only old string must not match via EOF fallback on snippet without newlines
+    let mut ws_no_newline = WorkingSet::default();
+    ws_no_newline.add_or_update("no_newline.rs", "let val = 42", None, None, 1);
+    let newline_only_res = ws_no_newline.apply_edit("no_newline.rs", "\n", "prepended\n", 2);
     assert!(
-        !newline_only_res || !ws2.files[0].content.starts_with("prepended"),
-        "Newline-only string must not prepend to content"
+        !newline_only_res,
+        "Newline-only string must not match via EOF fallback on snippet without newlines"
+    );
+    assert_eq!(ws_no_newline.files[0].content, "let val = 42");
+
+    // Multiple trailing newlines in old on snippet ending in single newline must not match
+    let mut ws_trailing = WorkingSet::default();
+    ws_trailing.add_or_update("trailing.rs", "code\n", None, None, 1);
+    let multi_nl_res = ws_trailing.apply_edit("trailing.rs", "code\n\n", "new\n", 2);
+    assert!(
+        !multi_nl_res,
+        "Extra trailing newlines must not trigger fallback if content already ends with newline"
     );
 
     // Partial read slices (end_line is Some) must NOT trigger the EOF fallback
