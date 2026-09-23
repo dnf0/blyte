@@ -1,79 +1,62 @@
-# Task 1 Brief: Provider Trait Extension & Gemini Discovery
-
-## Objective
-Extend `Provider` trait in `crates/superstate-provider/src/lib.rs` with `ModelInfo` and `list_models(&self)`, implement `Gemini::list_models` with Google GenAI `models.list` parsing and filtering, and update `DEFAULT_MODEL` to `gemini-3.8-flash`.
+# Task 1 Brief: WorkingSet Data Structures and Invariant I State Partitioning
 
 ## Working Directory
-`/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
+`/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set`
 
-## Detailed Instructions
-1. **Extend `crates/superstate-provider/src/lib.rs`**:
-   - Add `ModelInfo`:
-     ```rust
-     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-     pub struct ModelInfo {
-         pub id: String,
-         pub display_name: String,
-         pub description: Option<String>,
-         pub provider: String,
-     }
-     ```
-   - In `pub trait Provider`:
-     ```rust
-     /// Lists available models supported by this provider for the configured credentials.
-     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-         Ok(Vec::new())
-     }
-     ```
-2. **Implement in `crates/superstate-provider/src/gemini.rs`**:
-   - Change `DEFAULT_MODEL`:
-     ```rust
-     const DEFAULT_MODEL: &str = "gemini-3.8-flash";
-     ```
-   - Implement `Gemini::parse_models_list(v: &Value) -> Result<Vec<ModelInfo>, ProviderError>`:
-     - Expects array at `v.get("models")`.
-     - For each model in the array:
-       - Checks if `supportedGenerationMethods` array contains `"generateContent"`. If not, skip.
-       - Extracts `name` (e.g. `"models/gemini-3.8-flash"`), strips `"models/"` prefix to yield `id`.
-       - Extracts `displayName` as `display_name` (fallback to `id.clone()`).
-       - Extracts `description` as `Option<String>`.
-       - Sets `provider: "gemini".to_string()`.
-   - Implement `Provider::list_models` for `Gemini`:
-     ```rust
-     let url = format!("{API_ROOT}");
-     let agent = ureq::AgentBuilder::new()
-         .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-         .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
-         .build();
-     let resp = agent
-         .get(&url)
-         .set("x-goog-api-key", &self.api_key)
-         .call();
-     match resp {
-         Ok(r) => {
-             let v: Value = r.into_json().map_err(|e| ProviderError::Parse(e.to_string()))?;
-             Self::parse_models_list(&v)
-         }
-         Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
-             status,
-             body: r.into_string().unwrap_or_default(),
-         }),
-         Err(e) => Err(ProviderError::Transport(e.to_string())),
-     }
-     ```
-     *(Note: `API_ROOT` in `gemini.rs` is `"https://generativelanguage.googleapis.com/v1beta/models"`. Verify the exact GET URL so it queries `https://generativelanguage.googleapis.com/v1beta/models`)*.
-3. **Write Unit Tests in `crates/superstate-provider/tests/test_gemini_models.rs`**:
-   - Write tests for `Gemini::parse_models_list`:
-     - Test that models with `"generateContent"` are kept and `"models/"` prefix is stripped.
-     - Test that models with only `["embedContent"]` are filtered out.
-     - Test handling of empty or missing `"models"` field.
-4. **Verification**:
-   - Run `cargo test -p superstate-provider --test test_gemini_models`.
-   - Run `cargo check --workspace --all-targets`.
-5. **Commit**:
-   - `git add crates/superstate-provider/src/lib.rs crates/superstate-provider/src/gemini.rs crates/superstate-provider/tests/test_gemini_models.rs`
-   - `git commit --no-gpg-sign -m "feat(provider): add ModelInfo and Gemini list_models discovery with gemini-3.8-flash default"`
-6. **Roborev**:
-   - Run `roborev status; roborev show HEAD`.
-7. **Report**:
-   - Write report to `docs/superpowers/plans/task-1-report.md`.
+## Context
+We are implementing the Harness-Observed Working Set to eliminate Stateless Amnesia and ping-pong file-reading oscillations in `StateOnly` mode.
+In this first task, we establish the core data structures and ensure they strictly live in `Runtime` (R) to uphold Invariant I.
+
+## Global Constraints
+- Target crate: `crates/superstate-agent`
+- Rust 2021 edition, zero compiler warnings (`cargo check -p superstate-agent`, `cargo clippy -p superstate-agent --all-targets -- -D warnings`)
+- Clean execution on Unix platforms (macOS / Linux)
+- Invariant I (Partition Integrity): `working_set` lives strictly in `Runtime` (R). Agent patches cannot modify or clear it.
+- Conventional commit message with `--no-gpg-sign`.
+
+## Files to Create / Modify
+- Create: `crates/superstate-agent/src/working_set.rs`
+- Modify: `crates/superstate-agent/src/lib.rs` (add `pub mod working_set;`)
+- Modify: `crates/superstate-agent/src/state.rs` (add `pub working_set: WorkingSet` to `Runtime`)
+- Create: `crates/superstate-agent/tests/test_working_set.rs`
+
+## Step-by-Step Instructions
+
+### 1. Write the tests first (TDD)
+Create `crates/superstate-agent/tests/test_working_set.rs` containing:
+- `test_working_set_add_and_update`: Verify adding and updating file snippets.
+- `test_working_set_apply_edit`: Verify exact string replacement in cached snippets.
+- `test_working_set_lru_eviction`: Verify LRU eviction when file count (3) or line budget (250) is exceeded.
+- `test_working_set_failure_lifecycle`: Verify recording distilled test failures and clearing on pass.
+- `test_invariant_i_agent_patch_cannot_mutate_working_set`: Verify `State.apply_agent_patch` cannot touch or nullify `working_set`.
+
+### 2. Run test to verify it fails
+Run: `cargo test -p superstate-agent --test test_working_set`
+Observe failure.
+
+### 3. Implement minimal code
+1. Create `crates/superstate-agent/src/working_set.rs`:
+   - `pub const MAX_ACTIVE_FILES: usize = 3;`
+   - `pub const MAX_FILE_LINES: usize = 100;`
+   - `pub const MAX_TOTAL_LINES: usize = 250;`
+   - `FileSnippet` struct (`path`, `content`, `start_line`, `end_line`, `last_accessed_turn`).
+   - `WorkingSet` struct (`files: Vec<FileSnippet>`, `last_failure: Option<String>`).
+   - Implement `add_or_update`, `apply_edit`, `record_failure`, `clear_failure`, and `prune_lru`.
+2. Add `pub mod working_set;` in `crates/superstate-agent/src/lib.rs`.
+3. Add `pub working_set: WorkingSet` (with `#[serde(default)]`) to `Runtime` in `crates/superstate-agent/src/state.rs`.
+
+### 4. Run tests and linter
+Run:
+- `cargo test -p superstate-agent --test test_working_set`
+- `cargo check -p superstate-agent --all-targets`
+- `cargo clippy -p superstate-agent --all-targets -- -D warnings`
+
+### 5. Commit
+```bash
+git add crates/superstate-agent/src/working_set.rs crates/superstate-agent/src/lib.rs crates/superstate-agent/src/state.rs crates/superstate-agent/tests/test_working_set.rs
+git commit --no-gpg-sign -m "feat(agent): implement WorkingSet data structures and Invariant I state partitioning"
+roborev status; roborev show HEAD
+```
+
+### 6. Write report
+Save report to `/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set/docs/superpowers/plans/task-1-report.md`.
