@@ -1,83 +1,110 @@
-diff --git a/crates/superstate-cli/Cargo.toml b/crates/superstate-cli/Cargo.toml
-index a65e98f..28cae7c 100644
---- a/crates/superstate-cli/Cargo.toml
-+++ b/crates/superstate-cli/Cargo.toml
-@@ -6,7 +6,7 @@ authors.workspace = true
- license.workspace = true
- repository.workspace = true
- readme = "README.md"
--description = "Superstate unified CLI and state engine runner."
-+description = "Superstate unified interactive agent harness and state engine runner."
+diff --git a/crates/superstate-agent/src/state.rs b/crates/superstate-agent/src/state.rs
+index 2ee2d68..09103d1 100644
+--- a/crates/superstate-agent/src/state.rs
++++ b/crates/superstate-agent/src/state.rs
+@@ -33,6 +33,21 @@ pub struct Orchestrator {
+     pub verification_cmd: String,
+ }
  
- [lib]
- name = "superstate_cli"
-@@ -16,10 +16,6 @@ path = "src/lib.rs"
- name = "superstate"
- path = "src/main.rs"
++/// A single action observed and summarized objectively by the harness.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++pub struct ActionEntry {
++    /// Turn number when this action occurred.
++    pub turn: u32,
++    /// Name of the tool invoked (e.g. "read", "write", "edit", "bash", "glob", "grep", "note", "rollback").
++    pub tool: String,
++    /// Canonical target or command (e.g. "stats.py (lines 1-30)", "cargo test", "pattern 'mean'").
++    pub target: String,
++    /// Short 1-line summary of the outcome (e.g. "22 lines read", "exit 1: ZeroDivisionError", "replaced 3 lines").
++    pub summary: String,
++    /// Whether the action resulted in an error or non-zero exit code.
++    pub is_error: bool,
++}
++
+ /// Facts the harness observed. Not opinions, and not reported by the worker.
+ #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+ pub struct Runtime {
+@@ -42,6 +57,9 @@ pub struct Runtime {
+     pub rollbacks: u32,
+     /// Files the harness saw written, in order of first write.
+     pub files_written: Vec<String>,
++    /// Chronological log of all actions executed in this session.
++    #[serde(default)]
++    pub actions: Vec<ActionEntry>,
+ }
  
--[[bin]]
--name = "state"
--path = "src/state_main.rs"
--
- [dependencies]
- libc = "0.2"
- superstate-core = { path = "../superstate-core", version = "0.1.0" }
-@@ -28,6 +24,8 @@ superstate-review = { path = "../superstate-review", version = "0.1.0" }
- superstate-rules = { path = "../superstate-rules", version = "0.1.0" }
- superstate-mcp = { path = "../superstate-mcp", version = "0.1.0" }
- superstate-worktree = { path = "../superstate-worktree", version = "0.1.0" }
-+superstate-agent = { path = "../superstate-agent", version = "0.1.0" }
-+superstate-provider = { path = "../superstate-provider", version = "0.1.0" }
- clap.workspace = true
- serde.workspace = true
- serde_json.workspace = true
-diff --git a/crates/superstate-cli/src/state_main.rs b/crates/superstate-cli/src/state_main.rs
-deleted file mode 100644
-index 1048840..0000000
---- a/crates/superstate-cli/src/state_main.rs
-+++ /dev/null
-@@ -1,44 +0,0 @@
--//! Standalone `state` binary. The subcommand surface lives in `state_cli` so the
--//! two binaries cannot drift apart.
--
--use clap::Parser;
--use std::path::PathBuf;
--use superstate_cli::state_cli::{dispatch, StateCommands};
--
--#[derive(Parser)]
--#[command(
--    name = "state",
--    about = "Deterministic state machine operations for agent execution"
--)]
--struct StateCli {
--    #[command(subcommand)]
--    cmd: Option<StateCommands>,
--}
--
--/// Restore the default SIGPIPE behaviour.
--///
--/// Rust disables SIGPIPE at start-up, so writing to a closed pipe returns EPIPE
--/// and `println!` panics on it. That turns the ordinary `… | head` or quitting
--/// out of a pager into a panic and a backtrace note. Restoring the default makes
--/// the process exit quietly, as every other Unix command line tool does.
--fn restore_sigpipe() {
--    // Safety: setting a signal disposition to the default is always sound, and
--    // this runs before any threads are spawned.
--    unsafe {
--        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
--    }
--}
--
--fn main() {
--    restore_sigpipe();
--    let cli = StateCli::parse();
--    let cmd = cli.cmd.unwrap_or(StateCommands::Status {
--        state: PathBuf::from(".agent-state/state.json"),
--        json: false,
--    });
--
--    if let Err(err) = dispatch(cmd) {
--        eprintln!("Error: {}", err);
--        std::process::exit(1);
--    }
--}
+ /// The worker's own scratch space. Free-form on purpose.
+diff --git a/crates/superstate-agent/tests/test_state.rs b/crates/superstate-agent/tests/test_state.rs
+new file mode 100644
+index 0000000..f8f40b6
+--- /dev/null
++++ b/crates/superstate-agent/tests/test_state.rs
+@@ -0,0 +1,68 @@
++//! Verification of state serialization and runtime action logging invariants.
++//!
++//! Validates that `ActionEntry` serializes and deserializes accurately,
++//! that legacy runtime states omitting `actions` deserialize cleanly via defaults,
++//! and that agent patches cannot tamper with or mutate the observed actions ledger.
++
++use serde_json::json;
++use superstate_agent::state::{ActionEntry, Runtime, State};
++
++/// Verifies that an ActionEntry round-trips through JSON serialization without loss.
++#[test]
++fn test_action_entry_serialization() {
++    // Construct an action entry with representative tool execution metadata.
++    let entry = ActionEntry {
++        turn: 1,
++        tool: "read".to_string(),
++        target: "src/main.rs (lines 1-10)".to_string(),
++        summary: "10 lines read".to_string(),
++        is_error: false,
++    };
++
++    // Serialize to JSON and parse back to verify round-trip fidelity.
++    let serialized = serde_json::to_string(&entry).expect("serialization should succeed");
++    let deserialized: ActionEntry =
++        serde_json::from_str(&serialized).expect("deserialization should succeed");
++
++    assert_eq!(entry, deserialized);
++}
++
++/// Verifies backward compatibility when deserializing Runtime instances that lack the `actions` field.
++#[test]
++fn test_runtime_actions_default_backward_compatibility() {
++    // JSON payload representing state written by an earlier version without the actions ledger.
++    let legacy_json = r#"{"attempts":1,"failures":[],"rollbacks":0,"files_written":[]}"#;
++
++    // Deserialization must succeed, using #[serde(default)] to supply an empty vector.
++    let runtime: Runtime =
++        serde_json::from_str(legacy_json).expect("deserializing legacy JSON should succeed");
++
++    assert!(runtime.actions.is_empty());
++}
++
++/// Verifies that agent patches cannot overwrite or corrupt the runtime actions ledger.
++#[test]
++fn test_agent_patch_cannot_mutate_runtime_actions() {
++    // Initialize state with an observed action entry in the runtime ledger.
++    let mut state = State::new("implement feature", "cargo test");
++    let initial_entry = ActionEntry {
++        turn: 1,
++        tool: "bash".to_string(),
++        target: "cargo test".to_string(),
++        summary: "exit 1: test failure".to_string(),
++        is_error: true,
++    };
++    state.runtime.actions.push(initial_entry.clone());
++
++    // Agent attempts to clear or overwrite the runtime actions ledger via patch.
++    state.apply_agent_patch(&json!({"actions": []}));
++    assert_eq!(
++        state.runtime.actions.len(),
++        1,
++        "runtime actions ledger must be immutable to agent patches"
++    );
++    assert_eq!(state.runtime.actions[0], initial_entry);
++
++    // Ensure poisoned key lands inertly in the agent region without altering runtime.
++    assert_eq!(state.agent.fields["actions"], json!([]));
++}

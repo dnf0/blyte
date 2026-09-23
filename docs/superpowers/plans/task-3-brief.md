@@ -1,100 +1,67 @@
-# Task 3: Interactive REPL Module with Live Event Streaming and Slash Commands
+# Task 3: Wire Action Ledger Logging and Rollback Tracking into Runner::run
 
-## Goal
-Implement the interactive terminal REPL harness in `crates/superstate-cli/src/repl.rs`, expose it in `crates/superstate-cli/src/lib.rs`, and write unit and integration tests in `crates/superstate-cli/tests/test_repl_commands.rs`.
+Working Directory: `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-## Working Directory
-`/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
+## What to Implement
 
-## Files
-- Create: `crates/superstate-cli/src/repl.rs`
-- Modify: `crates/superstate-cli/src/lib.rs` (add `pub mod repl;`)
-- Create: `crates/superstate-cli/tests/test_repl_commands.rs`
-
-## Detailed Implementation
-1. Create `crates/superstate-cli/src/repl.rs`:
-   - `ReplConfig`:
-     ```rust
-     #[derive(Debug, Clone)]
-     pub struct ReplConfig {
-         pub repo_root: std::path::PathBuf,
-         pub model: Option<String>,
-         pub gate: Option<String>,
-         pub context_strategy: String,
-         pub container: Option<String>,
-         pub max_turns: usize,
-         pub max_gates: usize,
-         pub rollback: bool,
-     }
-     ```
-   - `ReplSession`:
-     ```rust
-     pub struct ReplSession {
-         pub repo_root: std::path::PathBuf,
-         pub gate: Option<String>,
-         pub model: String,
-         pub context_strategy: String,
-         pub state: superstate_agent::state::State,
-         pub history: Vec<superstate_provider::Message>,
-     }
-     ```
-   - `ReplControl`:
-     ```rust
-     #[derive(Debug, PartialEq, Eq)]
-     pub enum ReplControl {
-         Handled,
-         Exit,
-         SubmitPrompt(String),
-     }
-     ```
-   - `handle_repl_command`:
-     Processes slash commands:
-     - `/help`: prints table of slash commands (`/help`, `/state`, `/diff`, `/review`, `/doctor`, `/gate`, `/clear`, `/exit`).
-     - `/state`: prints current SKILL.state: Orchestrator, Runtime, and Agent json fields.
-     - `/diff`: executes `git diff` in `session.repo_root` and prints output.
-     - `/review`: runs review engine or prints status of uncommitted diff.
-     - `/doctor`: runs doctor verification handshake.
-     - `/gate`: if argument provided (`/gate cargo test`), updates `session.gate`; otherwise prints current gate.
-     - `/clear`: clears `session.history` and resets working state.
-     - `/exit` or `/quit`: returns `ReplControl::Exit`.
-     - Returns `ReplControl::Handled` for handled slash commands.
-     - If line does not start with `/`, returns `ReplControl::SubmitPrompt(line.to_string())`.
-   - `render_banner`:
-     Prints ASCII banner, Superstate version, active repository root, model, gate, and detected toolchains.
-   - `format_event`:
-     Formats `superstate_agent::run::Event`:
-     - `Turn`: displays step number and turn preview.
-     - `Tool`: `● <name> <input> -> <summary>` (highlighted in red if `is_error`).
-     - `Gate`: `✓ Gate passed` or `✗ Gate failed`.
-     - `RolledBack`: `↺ Rolled back working tree to <to>`.
-   - `run_repl_stream<R: std::io::BufRead, W: std::io::Write>(mut reader: R, mut writer: W, mut session: ReplSession) -> Result<(), String>`:
-     Loops reading lines from `reader`:
-     - Writes prompt `superstate > ` and flushes.
-     - Parses line via `handle_repl_command`.
-     - Breaks on `ReplControl::Exit` or EOF.
-     - On `ReplControl::SubmitPrompt(prompt)`:
-       Logs action, updates state/history, and if a provider is configured, executes turn or logs dispatch.
-   - `pub fn run_repl(config: ReplConfig) -> Result<(), String>`:
-     Initializes `ReplSession` with environment inspection (probes git branch, available tools), calls `render_banner`, and runs `run_repl_stream` on `std::io::stdin().lock()` and `std::io::stdout()`.
-
-2. Expose in `crates/superstate-cli/src/lib.rs`:
-   Add `pub mod repl;`.
-
-3. Tests in `crates/superstate-cli/tests/test_repl_commands.rs`:
-   - `test_slash_help`: verifies `/help` outputs command guide.
-   - `test_slash_gate_get_and_set`: verifies `/gate` inspects and sets gate command.
-   - `test_slash_state_inspection`: verifies `/state` outputs Orchestrator, Runtime, and Agent state.
-   - `test_slash_exit`: verifies `/exit` and `/quit` return `ReplControl::Exit`.
-   - `test_repl_stream_driving`: feeds commands `/help`, `/gate cargo test`, `/state`, `/exit` through a `Cursor` and asserts clean execution.
-
-4. Verify:
-   `cargo test -p superstate --test test_repl_commands`
-   `cargo check --workspace --all-targets`
-
-5. Commit:
-   ```bash
-   git add crates/superstate-cli/src/repl.rs crates/superstate-cli/src/lib.rs crates/superstate-cli/tests/test_repl_commands.rs
-   git commit --no-gpg-sign -m "feat(cli): add interactive REPL module with live event streaming and slash commands"
+In `crates/superstate-agent/src/run.rs`:
+1. **Tool Call Logging**:
+   In `Runner::run`, inside the tool call execution loop (around lines 245-274):
+   After executing each tool (whether built-in tool or `"note"`), construct an `ActionEntry` using `extract_action_target` and `extract_action_summary`:
+   ```rust
+   let target = extract_action_target(&call.name, &call.arguments);
+   let summary = extract_action_summary(&call.name, &outcome.content, outcome.is_error);
+   state.runtime.actions.push(crate::state::ActionEntry {
+       turn: report.turns,
+       tool: call.name.clone(),
+       target,
+       summary,
+       is_error: outcome.is_error,
+   });
    ```
-6. Run `roborev status; roborev show HEAD`.
-7. Write report to `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness/docs/superpowers/plans/task-3-report.md`.
+   (Note: can also use `target` and `summary` for `Event::Tool` if clean, or keep them consistent).
+
+2. **Rollback Action Logging**:
+   When a gate fails and rollback is executed (around lines 292-300):
+   ```rust
+   if self.rollback {
+       if let Some(base) = &baseline {
+           self.reset_to(base);
+           state.runtime.rollbacks += 1;
+           let short_sha = &base[..base.len().min(8)];
+           self.emit(Event::RolledBack {
+               to: short_sha,
+           });
+           state.runtime.actions.push(crate::state::ActionEntry {
+               turn: report.turns,
+               tool: "rollback".into(),
+               target: format!("checkpoint {short_sha}"),
+               summary: "Gate failed; working tree reset to verified state".into(),
+               is_error: true,
+           });
+       }
+   }
+   ```
+
+---
+
+## Testing Requirements (TDD)
+
+In `crates/superstate-agent/tests/test_run.rs`:
+Add tests:
+1. `test_actions_recorded_during_run`:
+   Run a `Runner` with a `ScriptedProvider` making several tool calls (e.g. `bash`, `read`, `note`).
+   Verify `state.runtime.actions` contains entries for each tool with correct `turn`, `tool`, `target`, `summary`, and `is_error` status.
+2. `test_rollback_appends_action_entry`:
+   Run a `Runner` with rollback enabled (`runner.rollback = true;`) where a gate fails on the first attempt and passes on the second.
+   Verify `state.runtime.actions` contains an `ActionEntry` with `tool == "rollback"`, `target.starts_with("checkpoint ")`, `is_error == true`.
+
+## Execution Steps
+1. Write the tests in `crates/superstate-agent/tests/test_run.rs`.
+2. Run `cargo test -p superstate-agent --test test_run` to observe test failures.
+3. Update `crates/superstate-agent/src/run.rs` to record the actions and rollback entry.
+4. Run `cargo test -p superstate-agent --test test_run` and verify all tests pass.
+5. Run full crate tests: `cargo test -p superstate-agent` and clippy: `cargo clippy -p superstate-agent --all-targets -- -D warnings`.
+6. Commit: `git add crates/superstate-agent/src/run.rs crates/superstate-agent/tests/test_run.rs && git commit --no-gpg-sign -m "feat(agent): record tool calls and rollbacks into state.runtime.actions"`
+7. Run `roborev status; roborev show HEAD`.
+8. Write completion report to `docs/superpowers/plans/task-3-report.md`.

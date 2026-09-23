@@ -1,41 +1,58 @@
-# Task 2 Report: CLI Argument Parser with Dual-Mode Support
+# Task 2 Completion Report: Deterministic Target and Outcome Extraction Helpers in run.rs
+
+## Summary
+Successfully implemented deterministic, zero-latency target and outcome extraction helpers (`extract_action_target` and `extract_action_summary`) in `crates/superstate-agent/src/run.rs`, following strict Test-Driven Development (TDD).
+
+## Implemented Changes
+
+1. **`crates/superstate-agent/src/run.rs`**:
+   - Added `extract_action_target(tool: &str, args: &serde_json::Value) -> String`:
+     - `"read"`: extracts `path`, with optional line bounds `format!("{path} (L{start_line}-L{end_line})")`.
+     - `"write"`: extracts `path`, annotating with byte length `format!("{path} ({} bytes)", content.len())`.
+     - `"edit"`: extracts target `path`.
+     - `"bash"`: extracts `command`, truncating with `...` if exceeding 60 characters.
+     - `"glob"`: extracts search `pattern`.
+     - `"grep"`: extracts regex `pattern`, optionally qualified by search `path`.
+     - `"note"`: extracts `patch`, formatted as `format!("patch ({} keys)", keys)`.
+     - Fallback: extracts first string argument value found, or defaults to tool name.
+   - Added `extract_action_summary(tool: &str, content: &str, is_error: bool) -> String`:
+     - `"read"`: returns `format!("{} lines read", count)`.
+     - `"write"`: returns `"file written"`.
+     - `"edit"`: returns `"string replaced"` on success, or `format!("failed: {}", first_line)` on error.
+     - `"bash"`: returns `"exit 0"` on success, or parses the last non-empty failure line clamped to 80 chars.
+     - `"glob"`: returns `format!("{} files matched", count)`.
+     - `"grep"`: returns `format!("{} matches found", count)`.
+     - `"note"`: returns the first status line (defaults to `"recorded"`).
+     - Fallback: first line clamped to 80 chars.
+
+2. **`crates/superstate-agent/tests/test_action_extraction.rs`**:
+   - Comprehensive test suite validating:
+     - `test_read_target_and_summary`: line-bounded vs full read targets and line counts.
+     - `test_write_target_and_summary`: byte size annotations and status string.
+     - `test_edit_target_and_summary`: success message and failure error extraction.
+     - `test_bash_target_and_summary`: short command, exact 60-char, >60-char truncation, `exit 0`, error line extraction, and 80-char clamping.
+     - `test_glob_target_and_summary`: pattern target and file match count.
+     - `test_grep_target_and_summary`: pattern only vs pattern+path, match count.
+     - `test_note_target_and_summary`: patch key count and note status line.
+     - `test_fallback_target_and_summary`: custom/unknown tool string extraction, missing args, and 80-char summary clamping.
+
+## TDD Verification
+
+1. **RED Phase**:
+   - Created test suite in `crates/superstate-agent/tests/test_action_extraction.rs`.
+   - Executed `cargo test -p superstate-agent --test test_action_extraction`.
+   - Observed expected compiler errors: `unresolved imports superstate_agent::run::extract_action_summary, superstate_agent::run::extract_action_target`.
+2. **GREEN Phase**:
+   - Implemented `extract_action_target` and `extract_action_summary` in `crates/superstate-agent/src/run.rs`.
+   - Executed `cargo test -p superstate-agent --test test_action_extraction`: 8 passed, 0 failed.
+   - Executed workspace-wide checks:
+     - `cargo test -p superstate-agent`: 67 passed, 0 failed across all test targets.
+     - `cargo clippy --workspace --all-targets -- -D warnings`: passed with 0 warnings.
+     - `cargo check --workspace --all-targets`: passed with 0 errors.
+
+## Commit
+- Commit: `9360fdb`
+- Message: `feat(agent): implement deterministic action target and outcome summarizers`
 
 ## Status
 DONE
-
-## Commit
-- SHA: `c8a9ee59ea7871d9d0b4c9495aa33d18edb3c62b`
-- Message: `feat(cli): add dual-mode prompt and execution flags to CLI parser`
-
-## Actions Taken
-1. Created `crates/superstate-cli/src/cli.rs`:
-   - Defined `Cli` with optional positional `prompt`, execution flags (`--gate`, `--context`, `--model`, `--container`, `--max-turns`, `--max-gates`, `--rollback`), and optional subcommand `command: Option<Commands>`.
-   - Added `args_conflicts_with_subcommands = true` to prevent ambiguous parsing between single-shot prompt and subcommands.
-   - Configured `context` with `value_parser = ["state-only", "conversational"]` for strict validation.
-   - Configured `rollback` with `require_equals = true`, `num_args = 0..=1`, and `BoolishValueParser` to cleanly support `--rollback`, `--rollback=true`, and `--rollback=false` regardless of argument ordering.
-   - Derived `clap::Parser, Debug, PartialEq` on `Cli` and `clap::Subcommand, Debug, PartialEq` on `Commands`.
-2. Derived `PartialEq` across underlying CLI argument structs:
-   - Added `PartialEq` derive to `StateCommands`, `InitArgs`, `ListArgs`, `ShowArgs`, `DaemonSubcommands`, `DaemonArgs`, `CancelArgs`, `LogsArgs`, `HandoffArgs` in `crates/superstate-cli/src/state_cli.rs`.
-   - Added `PartialEq` derive to `WorktreeCommands` in `crates/superstate-cli/src/commands/worktree.rs`.
-   - Added `PartialEq` derive to `InspectArgs` in `crates/superstate-cli/src/commands/inspect.rs`.
-   - Added `PartialEq` derive to `GuardCommands`, `PreToolUseArgs`, `PreCommandArgs` in `crates/superstate-cli/src/commands/guard.rs`.
-3. Exposed `cli` module and updated `crates/superstate-cli/src/main.rs`:
-   - Added `pub mod cli;` in `crates/superstate-cli/src/lib.rs`.
-   - Updated `main.rs` to import `Cli` and `Commands` from `superstate_cli::cli`, matching on `Some(Commands::...)` and stubbing headless task prompt execution vs. interactive REPL launch when `cli.command` is `None`.
-4. Comprehensive integration tests in `crates/superstate-cli/tests/test_cli_dispatch.rs`:
-   - `test_parse_no_args_launches_interactive`: Verifies default interactive REPL dispatch with default configuration (`conversational` context, `max_turns: 25`, `max_gates: 5`, `rollback: true`).
-   - `test_parse_single_shot_prompt`: Verifies single-shot prompt with `--gate` and `--context`.
-   - `test_parse_custom_execution_flags`: Verifies custom execution flags (`--model`, `--container`, `--max-turns`, `--max-gates`, `--rollback`).
-   - `test_parse_rollback_disabled`: Verifies disabling and enabling rollback via `--rollback=false`, `--rollback=true`, and `--rollback`, both trailing and preceding positional prompts.
-   - `test_context_validation`: Verifies strict rejection of invalid context strategies.
-   - `test_parse_subcommand_doctor`: Verifies routing to `Commands::Doctor`.
-   - `test_parse_subcommand_mcp`: Verifies routing to `Commands::Mcp`.
-   - `test_parse_subcommand_state_init`: Verifies routing to `Commands::State(StateCommands::Init(...))` with full equality comparison.
-   - `test_prompt_conflicts_with_subcommand`: Verifies positional prompts conflicting with subcommands are rejected by clap parser.
-5. Verification:
-   - `cargo test -p superstate --test test_cli_dispatch`: 9 passed, 0 failed.
-   - `cargo check -p superstate`: Completed cleanly with 0 errors and 0 warnings.
-   - `cargo check --workspace --all-targets`: Completed cleanly with 0 errors and 0 warnings.
-6. Roborev Code Review:
-   - Initial review identified boolean flag ergonomics and `PartialEq` reflexivity; fully addressed and refined.
-   - Final review on commit `c8a9ee5`: PASSED with "No issues found." (exit code 0).

@@ -1,148 +1,77 @@
-# Task 2: CLI Argument Parser with Dual-Mode Support
+# Task 2: Deterministic Target and Outcome Extraction Helpers in run.rs
 
-## Goal
-Implement dual-mode CLI argument parsing for `superstate`:
-- Running `superstate` with no arguments defaults to interactive mode (`prompt == None`, `command == None`).
-- Running `superstate "<prompt>"` or `superstate "<prompt>" --gate "pytest"` parses single-shot task mode.
-- Running `superstate doctor`, `superstate review`, etc., parses subcommands cleanly.
-- Support execution flags: `--gate`, `--context`, `--model`, `--container`, `--max-turns`, `--max-gates`, `--rollback`.
+Working Directory: `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-## Working Directory
-`/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
+## What to Implement
 
-## Files
-- Create: `crates/superstate-cli/src/cli.rs` (defining `Cli` and `Commands`, derived with `clap::Parser` and `clap::Subcommand`, with `Debug, PartialEq`)
-- Modify: `crates/superstate-cli/src/lib.rs` (add `pub mod cli;`)
-- Modify: `crates/superstate-cli/src/main.rs` (use `superstate_cli::cli::{Cli, Commands}`)
-- Create: `crates/superstate-cli/tests/test_cli_dispatch.rs`
+In `crates/superstate-agent/src/run.rs`:
+Implement two extraction helper functions:
+```rust
+pub(crate) fn extract_action_target(tool: &str, args: &serde_json::Value) -> String;
+pub(crate) fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String;
+```
 
-## Detailed Implementation Steps
-1. Create `crates/superstate-cli/src/cli.rs`:
-   Move the `Cli` struct and `Commands` enum from `main.rs` into `cli.rs`:
-   ```rust
-   use clap::{Parser, Subcommand};
-   use std::path::PathBuf;
-   use crate::commands;
-   use crate::state_cli::StateCommands;
+### Extraction Specifications:
 
-   #[derive(Parser, Debug, PartialEq)]
-   #[command(
-       name = "superstate",
-       version = "0.1.0",
-       about = "Superstate: Autonomous agent harness with deterministic state and verification gates"
-   )]
-   pub struct Cli {
-       /// Direct task prompt to run in single-shot / headless mode
-       #[arg(index = 1)]
-       pub prompt: Option<String>,
+#### `extract_action_target`:
+- `"read"`:
+  - Extract `"path"`. If `"start_line"` and `"end_line"` are present, return `format!("{path} (L{start_line}-L{end_line})")`.
+  - If only `"path"` is present, return `path.to_string()`.
+- `"write"`:
+  - Extract `"path"` and `"content"`. Return `format!("{path} ({} bytes)", content.len())`. If content missing, return `path.to_string()`.
+- `"edit"`:
+  - Extract `"path"`. Return `path.to_string()`.
+- `"bash"`:
+  - Extract `"command"`. If length > 60 characters, return first 57 characters + `"..."`.
+- `"glob"`:
+  - Extract `"pattern"`. Return `pattern.to_string()`.
+- `"grep"`:
+  - Extract `"pattern"`. If `"path"` is provided, return `format!("pattern '{pattern}' in {path}")`. Otherwise return `format!("pattern '{pattern}'")`.
+- `"note"`:
+  - Extract `"patch"`. If it's a JSON object, return `format!("patch ({} keys)", patch.as_object().map_or(0, |o| o.len()))`.
+- Fallback / Unknown tool:
+  - Return first string argument value found or tool name.
 
-       /// Verification gate command (e.g. 'pytest', 'cargo test')
-       #[arg(short, long)]
-       pub gate: Option<String>,
+#### `extract_action_summary`:
+- `"read"`:
+  - Return `format!("{} lines read", content.lines().count())`.
+- `"write"`:
+  - Return `"file written".to_string()`.
+- `"edit"`:
+  - If `is_error`: return `format!("failed: {}", content.lines().next().unwrap_or("edit failed"))`.
+  - Else: return `"string replaced".to_string()`.
+- `"bash"`:
+  - If `!is_error`: return `"exit 0".to_string()`.
+  - Else: find the last non-empty line of `content`, clamped to 80 chars, and return `format!("failed: {}", last_line)`.
+- `"glob"`:
+  - Count non-empty lines in `content`: `format!("{} files matched", count)`.
+- `"grep"`:
+  - Count non-empty lines in `content`: `format!("{} matches found", count)`.
+- `"note"`:
+  - Return `content.lines().next().unwrap_or("recorded").to_string()`.
+- Fallback:
+  - First line of `content` clamped to 80 chars.
 
-       /// Context strategy: 'state-only' (SKILL.state O(1) prompt) or 'conversational' (append-all chat)
-       #[arg(long, default_value = "conversational")]
-       pub context: String,
+---
 
-       /// Model identifier or provider selection
-       #[arg(short, long)]
-       pub model: Option<String>,
+## Testing Requirements (TDD)
 
-       /// Run inside an isolated container workspace instead of local host
-       #[arg(long)]
-       pub container: Option<String>,
+Create `crates/superstate-agent/tests/test_action_extraction.rs`:
+Test extraction for:
+1. `read`: with and without line numbers.
+2. `write`: target includes bytes, summary is "file written".
+3. `edit`: success ("string replaced") and failure ("failed: string not found").
+4. `bash`: short command and long command truncation (>60 chars); success ("exit 0") and failure (last non-empty line extracted).
+5. `glob`: file count matching.
+6. `grep`: pattern and path, match count.
+7. `note`: key count, status string.
 
-       /// Maximum turn budget
-       #[arg(long, default_value = "25")]
-       pub max_turns: usize,
-
-       /// Maximum verification gate attempts before failing
-       #[arg(long, default_value = "5")]
-       pub max_gates: usize,
-
-       /// Enable automatic rollback to baseline git commit if gate fails
-       #[arg(long, default_value_t = true)]
-       pub rollback: bool,
-
-       #[command(subcommand)]
-       pub command: Option<Commands>,
-   }
-
-   #[derive(Subcommand, Debug, PartialEq)]
-   pub enum Commands {
-       Doctor,
-       Mcp,
-       Review {
-           commit_range: Option<String>,
-           #[arg(short, long, default_value = ".")]
-           repo: PathBuf,
-           #[arg(short, long)]
-           driver: Option<String>,
-           #[arg(long)]
-           state_path: Option<PathBuf>,
-           #[arg(long)]
-           record: bool,
-           #[arg(long)]
-           json: bool,
-           #[arg(long)]
-           fail_on_blocking: bool,
-       },
-       Init {
-           #[arg(short, long, default_value = ".")]
-           dest: PathBuf,
-           #[arg(short, long, default_value = "rust")]
-           language: String,
-           #[arg(short, long, default_value = "balanced")]
-           strictness: String,
-       },
-       State {
-           #[command(subcommand)]
-           cmd: StateCommands,
-       },
-       Worktree {
-           #[command(subcommand)]
-           cmd: commands::worktree::WorktreeCommands,
-       },
-       Daemon(crate::state_cli::DaemonArgs),
-       Cancel(crate::state_cli::CancelArgs),
-       Logs(crate::state_cli::LogsArgs),
-       Handoff(crate::state_cli::HandoffArgs),
-       Shunt {
-           #[arg(long, default_value = "50")]
-           threshold_lines: usize,
-           #[arg(long)]
-           logs_dir: Option<PathBuf>,
-           #[arg(trailing_var_arg = true, required = true)]
-           cmd: Vec<String>,
-       },
-       Inspect(commands::inspect::InspectArgs),
-       Guard {
-           #[command(subcommand)]
-           cmd: commands::guard::GuardCommands,
-       },
-   }
-   ```
-2. Update `crates/superstate-cli/src/lib.rs` to expose `pub mod cli;`.
-3. Update `crates/superstate-cli/src/main.rs` to use `superstate_cli::cli::{Cli, Commands}`.
-   In `main()`:
-   - If `cli.command` is `Some(cmd)`: match and execute existing subcommand logic.
-   - If `cli.command` is `None`:
-     - If `let Some(ref prompt) = cli.prompt`: for now, print `eprintln!("Running headless task: {prompt}");`
-     - Else: print `eprintln!("Launching interactive REPL...");`
-4. Add unit / integration tests in `crates/superstate-cli/tests/test_cli_dispatch.rs`:
-   - `test_parse_no_args_launches_interactive`:
-     Verifies parsing `["superstate"]` yields `prompt == None` and `command == None`.
-   - `test_parse_single_shot_prompt`:
-     Verifies parsing `["superstate", "fix issue", "--gate", "pytest", "--context", "state-only"]` yields `prompt == Some("fix issue")`, `gate == Some("pytest")`, `context == "state-only"`, `command == None`.
-   - `test_parse_subcommand`:
-     Verifies parsing `["superstate", "doctor"]` yields `command == Some(Commands::Doctor)` and `prompt == None`.
-5. Run tests:
-   `cargo test -p superstate --test test_cli_dispatch`
-6. Run `cargo check --workspace --all-targets` to ensure 0 warnings.
-7. Commit:
-   ```bash
-   git add crates/superstate-cli/src/cli.rs crates/superstate-cli/src/lib.rs crates/superstate-cli/src/main.rs crates/superstate-cli/tests/test_cli_dispatch.rs
-   git commit --no-gpg-sign -m "feat(cli): add dual-mode prompt and execution flags to CLI parser"
-   ```
-8. Run `roborev status; roborev show HEAD`.
-9. Write report to `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness/docs/superpowers/plans/task-2-report.md`.
+## Execution Steps
+1. Write tests in `crates/superstate-agent/tests/test_action_extraction.rs`.
+2. Run `cargo test -p superstate-agent --test test_action_extraction` to observe failure.
+3. Implement `extract_action_target` and `extract_action_summary` in `crates/superstate-agent/src/run.rs`.
+4. Run `cargo test -p superstate-agent --test test_action_extraction` to verify all tests pass.
+5. Verify `cargo check -p superstate-agent` and `cargo clippy -p superstate-agent`.
+6. Commit: `git add crates/superstate-agent/src/run.rs crates/superstate-agent/tests/test_action_extraction.rs && git commit --no-gpg-sign -m "feat(agent): implement deterministic action target and outcome summarizers"`
+7. Run `roborev status; roborev show HEAD`.
+8. Write your completion report to `docs/superpowers/plans/task-2-report.md`.

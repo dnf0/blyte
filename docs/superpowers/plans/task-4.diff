@@ -1,557 +1,149 @@
-diff --git a/crates/superstate-cli/src/lib.rs b/crates/superstate-cli/src/lib.rs
-index b511330..63a116c 100644
---- a/crates/superstate-cli/src/lib.rs
-+++ b/crates/superstate-cli/src/lib.rs
-@@ -2,3 +2,4 @@ pub mod cli;
- pub mod commands;
- pub mod repl;
- pub mod state_cli;
-+pub mod task_runner;
-diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
-index 999405d..22bb418 100644
---- a/crates/superstate-cli/src/main.rs
-+++ b/crates/superstate-cli/src/main.rs
-@@ -23,7 +23,9 @@ fn main() {
- 
-     let result = match cli.command {
-         Some(Commands::Doctor) => commands::doctor::run_doctor(),
--        Some(Commands::Mcp) => superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string()),
-+        Some(Commands::Mcp) => {
-+            superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string())
-+        }
-         Some(Commands::Review {
-             commit_range,
-             repo,
-@@ -116,9 +118,46 @@ fn main() {
-         },
-         None => {
-             if let Some(ref prompt) = cli.prompt {
--                eprintln!("Running headless task: {prompt}");
--            } else {
--                eprintln!("Launching interactive REPL...");
-+                if prompt.trim().is_empty() {
-+                    eprintln!("Error: prompt cannot be empty");
-+                    std::process::exit(1);
-+                }
-+                let config = superstate_cli::task_runner::TaskConfig::from(&cli);
-+                match superstate_cli::task_runner::run_task(config) {
-+                    Ok((superstate_agent::run::Outcome::Verified, report)) => {
-+                        println!(
-+                            "Task verified in {} turns (usage: {:?})",
-+                            report.outcome_turns, report.usage
-+                        );
-+                        std::process::exit(0);
-+                    }
-+                    Ok((outcome, report)) => {
-+                        eprintln!(
-+                            "Task finished with outcome: {outcome:?} in {} turns",
-+                            report.outcome_turns
-+                        );
-+                        std::process::exit(1);
-+                    }
-+                    Err(err) => {
-+                        eprintln!("Error executing task: {err}");
-+                        std::process::exit(1);
-+                    }
-+                }
-+            }
+diff --git a/crates/superstate-agent/src/context.rs b/crates/superstate-agent/src/context.rs
+index 8dca97a..c9de708 100644
+--- a/crates/superstate-agent/src/context.rs
++++ b/crates/superstate-agent/src/context.rs
+@@ -52,11 +52,25 @@ pub struct StateOnly;
+ impl ContextStrategy for StateOnly {
+     fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
+         let mut out = Vec::new();
+-        out.push(Message::User(format!(
++        let mut user_prompt = format!(
+             "## Task\n{}\n\n## Your state\n{}\n",
+             state.orchestrator.goal,
+             serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
+-        )));
++        );
 +
-+            let repl_config = superstate_cli::repl::ReplConfig {
-+                repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-+                model: cli.model,
-+                gate: cli.gate,
-+                context_strategy: cli.context,
-+                container: cli.container,
-+                max_turns: cli.max_turns,
-+                max_gates: cli.max_gates,
-+                rollback: cli.rollback,
-+            };
-+            if let Err(e) = superstate_cli::repl::run_repl(repl_config) {
-+                eprintln!("REPL error: {e}");
-+                std::process::exit(1);
-             }
-             Ok(())
-         }
-diff --git a/crates/superstate-cli/src/repl.rs b/crates/superstate-cli/src/repl.rs
-index 6a8f762..638cee6 100644
---- a/crates/superstate-cli/src/repl.rs
-+++ b/crates/superstate-cli/src/repl.rs
-@@ -35,6 +35,10 @@ pub struct ReplSession {
-     pub gate: Option<String>,
-     pub model: String,
-     pub context_strategy: String,
-+    pub container: Option<String>,
-+    pub max_turns: usize,
-+    pub max_gates: usize,
-+    pub rollback: bool,
-     pub state: superstate_agent::state::State,
-     pub history: Vec<superstate_provider::Message>,
++        // When actions have been recorded, format the chronological action ledger.
++        // Provides episodic memory of tool outcomes without growing conversation history.
++        if !state.runtime.actions.is_empty() {
++            user_prompt.push_str("\n## Actions Taken So Far\n");
++            for action in &state.runtime.actions {
++                user_prompt.push_str(&format!(
++                    "- Turn {}: `{}` `{}` -> {}\n",
++                    action.turn, action.tool, action.target, action.summary
++                ));
++            }
++        }
++
++        out.push(Message::User(user_prompt));
+ 
+         // The latest observation, and only that. A tool result the model has already acted on
+         // is not re-sent; if it mattered, it belonged in state.
+diff --git a/crates/superstate-agent/tests/test_run.rs b/crates/superstate-agent/tests/test_run.rs
+index e776f49..4b7e809 100644
+--- a/crates/superstate-agent/tests/test_run.rs
++++ b/crates/superstate-agent/tests/test_run.rs
+@@ -7,8 +7,8 @@ use superstate_agent::context::{ContextStrategy, Conversational, StateOnly};
+ use superstate_agent::fs::LocalFs;
+ use superstate_agent::run::{Budget, Outcome, Runner};
+ use superstate_agent::shell::{LocalShell, Shell};
+-use superstate_agent::state::State;
+-use superstate_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
++use superstate_agent::state::{ActionEntry, State};
++use superstate_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
+ 
+ /// Replays a fixed list of responses and records every request it was given.
+ struct ScriptedProvider {
+@@ -437,3 +437,101 @@ fn test_rollback_appends_action_entry() {
+     );
+     assert!(rollback_entry.is_error);
  }
-@@ -52,8 +56,12 @@ impl ReplSession {
-             model: config
-                 .model
-                 .clone()
--                .unwrap_or_else(|| "claude-3-5-sonnet".to_string()),
-+                .unwrap_or_else(|| "gemini-2.5-flash".to_string()),
-             context_strategy: config.context_strategy.clone(),
-+            container: config.container.clone(),
-+            max_turns: config.max_turns,
-+            max_gates: config.max_gates,
-+            rollback: config.rollback,
-             state,
-             history: Vec::new(),
-         }
-@@ -392,6 +400,51 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
-                     .history
-                     .push(superstate_provider::Message::User(prompt.clone()));
-                 session.state.runtime.attempts += 1;
-+                session.state.orchestrator.goal = prompt.clone();
-+                if let Some(ref g) = session.gate {
-+                    session.state.orchestrator.verification_cmd = g.clone();
-+                }
 +
-+                // Build task configuration from current session parameters
-+                let task_config = crate::task_runner::TaskConfig {
-+                    prompt: prompt.clone(),
-+                    gate: session.gate.clone(),
-+                    context_strategy: session.context_strategy.clone(),
-+                    model: Some(session.model.clone()),
-+                    container: session.container.clone(),
-+                    max_turns: session.max_turns,
-+                    max_gates: session.max_gates,
-+                    rollback: session.rollback,
-+                    root: session.repo_root.clone(),
-+                };
++#[test]
++fn test_state_only_context_omits_actions_when_empty() {
++    // When state.runtime.actions is empty, StateOnly::build must omit the action ledger section
++    // to preserve a minimal, clean prompt for the initial turn or until actions occur.
++    let state = State::new("my goal", "cargo test");
++    let history = vec![];
++    let messages = StateOnly.build(&state, &history);
++    assert_eq!(messages.len(), 1);
 +
-+                // Invoke solver task runner preserving state and outputting directly to REPL writer
-+                match crate::task_runner::run_task_with_state_and_writer(
-+                    &task_config,
-+                    &mut session.state,
-+                    &mut writer,
-+                ) {
-+                    Ok((superstate_agent::run::Outcome::Verified, report)) => {
-+                        writeln!(
-+                            writer,
-+                            "Task verified in {} turns (usage: {:?})",
-+                            report.outcome_turns, report.usage
-+                        )
-+                        .map_err(|e| e.to_string())?;
-+                    }
-+                    Ok((outcome, report)) => {
-+                        writeln!(
-+                            writer,
-+                            "Task finished with outcome: {:?} in {} turns",
-+                            outcome, report.outcome_turns
-+                        )
-+                        .map_err(|e| e.to_string())?;
-+                    }
-+                    Err(err) => {
-+                        writeln!(writer, "Task execution error: {}", err)
-+                            .map_err(|e| e.to_string())?;
-+                    }
-+                }
-             }
-         }
-     }
-diff --git a/crates/superstate-cli/src/task_runner.rs b/crates/superstate-cli/src/task_runner.rs
-new file mode 100644
-index 0000000..56f2239
---- /dev/null
-+++ b/crates/superstate-cli/src/task_runner.rs
-@@ -0,0 +1,177 @@
-+//! Headless single-shot solver runner for executing direct agent prompts.
-+//!
-+//! Wires together the configured LLM provider, execution shell (local host or container sandbox),
-+//! filesystem abstraction, context strategy, and verification gate runner into an autonomous loop.
-+
-+use std::io::Write;
-+use std::path::PathBuf;
-+use std::sync::Mutex;
-+
-+/// Execution parameters for running an autonomous solver task to completion.
-+#[derive(Debug, Clone)]
-+pub struct TaskConfig {
-+    /// Goal or task prompt for the agent to resolve.
-+    pub prompt: String,
-+    /// Optional command string executed to determine task success (exit 0).
-+    pub gate: Option<String>,
-+    /// Context assembly strategy ("state-only" or "conversational").
-+    pub context_strategy: String,
-+    /// Model identifier override passed to the provider.
-+    pub model: Option<String>,
-+    /// Container identifier if execution is sandboxed inside a Docker container.
-+    pub container: Option<String>,
-+    /// Maximum allowed turn iterations before exhausting budget.
-+    pub max_turns: usize,
-+    /// Maximum verification gate retry attempts.
-+    pub max_gates: usize,
-+    /// Whether to roll back working tree on gate failure.
-+    pub rollback: bool,
-+    /// Target repository or workspace root on the local filesystem.
-+    pub root: PathBuf,
++    let Message::User(prompt) = &messages[0] else {
++        panic!("expected Message::User");
++    };
++    assert!(!prompt.contains("## Actions Taken So Far"));
 +}
 +
-+impl From<&crate::cli::Cli> for TaskConfig {
-+    /// Maps parsed CLI flags into a concrete `TaskConfig` configuration.
-+    fn from(cli: &crate::cli::Cli) -> Self {
-+        // Fall back to current working directory if not running in container mode
-+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
++#[test]
++fn test_state_only_context_formats_action_ledger() {
++    // When actions exist, StateOnly::build formats them chronologically into the initial user prompt,
++    // retaining Invariant II by keeping the total message count bounded (messages.len() <= 3).
++    let mut state = State::new("solve bug", "pytest");
++    state.runtime.actions.push(ActionEntry {
++        turn: 1,
++        tool: "read".into(),
++        target: "src/main.rs (lines 1-20)".into(),
++        summary: "20 lines read".into(),
++        is_error: false,
++    });
++    state.runtime.actions.push(ActionEntry {
++        turn: 2,
++        tool: "bash".into(),
++        target: "cargo test".into(),
++        summary: "exit 101".into(),
++        is_error: true,
++    });
 +
-+        Self {
-+            prompt: cli.prompt.clone().unwrap_or_default(),
-+            gate: cli.gate.clone(),
-+            context_strategy: cli.context.clone(),
-+            model: cli.model.clone(),
-+            container: cli.container.clone(),
-+            max_turns: cli.max_turns,
-+            max_gates: cli.max_gates,
-+            rollback: cli.rollback,
-+            root,
-+        }
-+    }
-+}
-+
-+/// Executes an autonomous solver run using the provided task configuration and live stdout.
-+///
-+/// Configures the AI provider, context strategy, execution environment (local or container),
-+/// and deterministic gate loop, printing live event progress as turns execute.
-+///
-+/// # Arguments
-+///
-+/// * `config` - Parameters governing prompt, budgets, gate verification, and environment.
-+///
-+/// # Returns
-+///
-+/// Returns `Ok((Outcome, RunReport))` containing final completion status and metrics,
-+/// or an `Err(String)` describing initialization failure.
-+pub fn run_task(
-+    config: TaskConfig,
-+) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String> {
-+    let verification_cmd = config.gate.as_deref().unwrap_or("");
-+    let mut state = superstate_agent::state::State::new(&config.prompt, verification_cmd);
-+    let mut stdout = std::io::stdout();
-+    run_task_with_state_and_writer(&config, &mut state, &mut stdout)
-+}
-+
-+/// Executes an autonomous solver run against an existing mutable `State`, streaming events to `writer`.
-+///
-+/// Preserves session mutations (epistemic ledger, patches, attempts) directly in the provided `state`.
-+///
-+/// # Arguments
-+///
-+/// * `config` - Execution parameters.
-+/// * `state` - The mutable session state to advance.
-+/// * `writer` - Stream writer sink for formatted events.
-+///
-+/// # Returns
-+///
-+/// Returns `Ok((Outcome, RunReport))` or an `Err(String)` describing failure.
-+pub fn run_task_with_state_and_writer<W: Write>(
-+    config: &TaskConfig,
-+    state: &mut superstate_agent::state::State,
-+    writer: &mut W,
-+) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String> {
-+    // 1. Initialize LLM provider from environment credentials.
-+    // If the API key is missing, produce an explicit error instructing how to configure it.
-+    let provider = match superstate_provider::gemini::Gemini::from_env() {
-+        Ok(mut p) => {
-+            if let Some(ref m) = config.model {
-+                p = p.with_model(m);
-+            }
-+            p
-+        }
-+        Err(superstate_provider::ProviderError::MissingKey(key)) => {
-+            return Err(format!(
-+                "Provider error: no API key: set {key} (or GOOGLE_API_KEY)"
-+            ));
-+        }
-+        Err(e) => {
-+            return Err(format!("Provider error: {e}"));
-+        }
-+    };
-+
-+    // 2. Select context assembly strategy.
-+    // "state-only" discards prior conversational turns and keeps only structured state O(1),
-+    // whereas "conversational" accumulates full turn history.
-+    let state_only = superstate_agent::context::StateOnly;
-+    let conversational = superstate_agent::context::Conversational;
-+    let context_strategy: &dyn superstate_agent::context::ContextStrategy =
-+        if config.context_strategy == "state-only" {
-+            &state_only
-+        } else {
-+            &conversational
-+        };
-+
-+    // 3. Select execution shell and filesystem target.
-+    // If a container ID is specified, execution and file operations land inside Docker
-+    // at `/workspace` so host environment is unaffected.
-+    let local_shell = superstate_agent::shell::LocalShell;
-+    let local_fs = superstate_agent::fs::LocalFs;
-+    let container_shell = config
-+        .container
-+        .as_ref()
-+        .map(|cid| superstate_agent::shell::ContainerShell {
-+            container_id: cid.clone(),
-+            workdir: PathBuf::from("/workspace"),
-+        });
-+    let container_fs = config
-+        .container
-+        .as_ref()
-+        .map(|cid| superstate_agent::fs::ContainerFs {
-+            container_id: cid.clone(),
-+        });
-+
-+    let (shell, fs, root): (
-+        &dyn superstate_agent::shell::Shell,
-+        &dyn superstate_agent::fs::Fs,
-+        PathBuf,
-+    ) = match (&container_shell, &container_fs) {
-+        (Some(cs), Some(cf)) => (cs, cf, PathBuf::from("/workspace")),
-+        _ => (&local_shell, &local_fs, config.root.clone()),
-+    };
-+
-+    // 4. Wrap writer in a Mutex so the event callback satisfies Fn trait bounds.
-+    let writer_mutex = Mutex::new(writer);
-+    let on_event = |event: superstate_agent::run::Event<'_>| {
-+        if let Ok(mut w) = writer_mutex.lock() {
-+            let _ = writeln!(w, "{}", crate::repl::format_event(&event));
-+        }
-+    };
-+
-+    // 5. Assemble the autonomous runner and execute until terminal outcome or budget exhaustion.
-+    let runner = superstate_agent::run::Runner {
-+        provider: &provider,
-+        shell,
-+        fs,
-+        context: context_strategy,
-+        root,
-+        budget: superstate_agent::run::Budget {
-+            max_turns: config.max_turns as u32,
-+            max_gate_attempts: config.max_gates as u32,
++    // Provide history with tool call and result to verify bounded message length.
++    let history = vec![
++        Message::User("initial user message".into()),
++        Message::ToolCall {
++            id: "tc_1".into(),
++            name: "bash".into(),
++            arguments: json!({"command": "cargo test"}),
++            signature: None,
 +        },
-+        rollback: config.rollback,
-+        on_event: Some(&on_event),
-+    };
++        Message::ToolResult {
++            id: "tc_1".into(),
++            name: "bash".into(),
++            content: "test failure".into(),
++            is_error: true,
++        },
++    ];
 +
-+    let (outcome, report) = runner.run(state);
-+    Ok((outcome, report))
-+}
-diff --git a/crates/superstate-cli/tests/test_task_runner.rs b/crates/superstate-cli/tests/test_task_runner.rs
-new file mode 100644
-index 0000000..72928fd
---- /dev/null
-+++ b/crates/superstate-cli/tests/test_task_runner.rs
-@@ -0,0 +1,139 @@
-+use clap::Parser;
-+use std::sync::Mutex;
-+use superstate_cli::cli::Cli;
-+use superstate_cli::task_runner::{run_task, run_task_with_state_and_writer, TaskConfig};
-+
-+/// Global lock synchronizing tests that mutate environment variables.
-+static ENV_LOCK: Mutex<()> = Mutex::new(());
-+
-+#[test]
-+fn test_task_config_from_cli() {
-+    let cli = Cli::parse_from([
-+        "superstate",
-+        "solve the bug",
-+        "--gate",
-+        "cargo test",
-+        "--context",
-+        "state-only",
-+        "--model",
-+        "gemini-2.5-flash",
-+        "--container",
-+        "docker-123",
-+        "--max-turns",
-+        "42",
-+        "--max-gates",
-+        "7",
-+        "--rollback=false",
-+    ]);
-+
-+    let config = TaskConfig::from(&cli);
-+    assert_eq!(config.prompt, "solve the bug");
-+    assert_eq!(config.gate.as_deref(), Some("cargo test"));
-+    assert_eq!(config.context_strategy, "state-only");
-+    assert_eq!(config.model.as_deref(), Some("gemini-2.5-flash"));
-+    assert_eq!(config.container.as_deref(), Some("docker-123"));
-+    assert_eq!(config.max_turns, 42);
-+    assert_eq!(config.max_gates, 7);
-+    assert!(!config.rollback);
-+    assert_eq!(
-+        config.root,
-+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-+    );
-+}
-+
-+#[test]
-+fn test_task_config_defaults() {
-+    let cli = Cli::parse_from(["superstate"]);
-+    let config = TaskConfig::from(&cli);
-+    assert_eq!(config.prompt, "");
-+    assert_eq!(config.gate, None);
-+    assert_eq!(config.context_strategy, "conversational");
-+    assert_eq!(config.model, None);
-+    assert_eq!(config.container, None);
-+    assert_eq!(config.max_turns, 25);
-+    assert_eq!(config.max_gates, 5);
-+    assert!(config.rollback);
-+    assert_eq!(
-+        config.root,
-+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-+    );
-+}
-+
-+#[test]
-+fn test_run_task_missing_api_key_returns_clear_error() {
-+    let _guard = ENV_LOCK.lock().unwrap();
-+
-+    // Ensure both GEMINI_API_KEY and GOOGLE_API_KEY are unset
-+    std::env::remove_var("GEMINI_API_KEY");
-+    std::env::remove_var("GOOGLE_API_KEY");
-+
-+    let config = TaskConfig {
-+        prompt: "echo hello".to_string(),
-+        gate: None,
-+        context_strategy: "state-only".to_string(),
-+        model: None,
-+        container: None,
-+        max_turns: 10,
-+        max_gates: 2,
-+        rollback: true,
-+        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-+    };
-+
-+    let result = run_task(config);
-+    assert!(result.is_err(), "Expected error when API key is missing");
-+    let err = result.unwrap_err();
++    let messages = StateOnly.build(&state, &history);
 +    assert!(
-+        err.contains("GEMINI_API_KEY"),
-+        "Error message should mention GEMINI_API_KEY: {err}"
++        messages.len() <= 3,
++        "messages.len() must be <= 3, got {}",
++        messages.len()
 +    );
-+}
 +
-+#[test]
-+fn test_run_task_with_state_and_writer_preserves_state() {
-+    let _guard = ENV_LOCK.lock().unwrap();
-+
-+    std::env::remove_var("GEMINI_API_KEY");
-+    std::env::remove_var("GOOGLE_API_KEY");
-+
-+    let config = TaskConfig {
-+        prompt: "task goal".to_string(),
-+        gate: Some("echo 1".to_string()),
-+        context_strategy: "state-only".to_string(),
-+        model: None,
-+        container: None,
-+        max_turns: 5,
-+        max_gates: 1,
-+        rollback: false,
-+        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
++    let Message::User(prompt) = &messages[0] else {
++        panic!("expected first message to be Message::User");
 +    };
-+
-+    let mut state = superstate_agent::state::State::new("custom goal", "echo 1");
-+    let mut output = Vec::new();
-+
-+    let result = run_task_with_state_and_writer(&config, &mut state, &mut output);
-+    assert!(result.is_err());
-+    assert_eq!(state.orchestrator.goal, "custom goal");
-+    assert_eq!(state.orchestrator.verification_cmd, "echo 1");
++    assert!(prompt.contains("## Actions Taken So Far"));
++    assert!(prompt.contains("- Turn 1: `read` `src/main.rs (lines 1-20)` -> 20 lines read"));
++    assert!(prompt.contains("- Turn 2: `bash` `cargo test` -> exit 101"));
 +}
 +
 +#[test]
-+fn test_repl_stream_prompt_dispatch() {
-+    let _guard = ENV_LOCK.lock().unwrap();
++fn test_state_only_runner_injects_action_ledger_in_prompts() {
++    // Verifies end-to-end integration: Runner executing with StateOnly strategy injects
++    // actions executed in turn 1 into the turn 2 request prompt.
++    let d = repo();
++    let p = ScriptedProvider::new(vec![
++        calls("bash", json!({"command": "echo step1"})),
++        says("done"),
++    ]);
++    let mut st = State::new("step goal", "true");
++    let (outcome, rep) = runner(&p, d.path(), &StateOnly, false).run(&mut st);
++    assert_eq!(outcome, Outcome::Verified);
++    assert_eq!(rep.gate_attempts, 1);
 +
-+    std::env::remove_var("GEMINI_API_KEY");
-+    std::env::remove_var("GOOGLE_API_KEY");
++    let seen = p.seen.lock().unwrap();
++    assert_eq!(seen.len(), 2);
 +
-+    let config = superstate_cli::repl::ReplConfig::default();
-+    let session = superstate_cli::repl::ReplSession::new(&config);
++    // Turn 1 prompt must not contain actions as none have run yet.
++    let Message::User(first_prompt) = &seen[0].messages[0] else {
++        panic!("expected Message::User in turn 1");
++    };
++    assert!(!first_prompt.contains("## Actions Taken So Far"));
 +
-+    let input = b"Implement feature X\n/exit\n";
-+    let reader = std::io::Cursor::new(input);
-+    let mut writer = Vec::new();
-+
-+    let res = superstate_cli::repl::run_repl_stream(reader, &mut writer, session);
-+    assert!(res.is_ok());
-+
-+    let output = String::from_utf8(writer).unwrap();
-+    assert!(output.contains("Dispatching turn for prompt: Implement feature X"));
-+    assert!(output.contains("GEMINI_API_KEY"));
++    // Turn 2 prompt must contain the action ledger capturing turn 1's bash invocation.
++    let Message::User(second_prompt) = &seen[1].messages[0] else {
++        panic!("expected Message::User in turn 2");
++    };
++    assert!(second_prompt.contains("## Actions Taken So Far"));
++    assert!(second_prompt.contains("- Turn 1: `bash` `echo step1` -> exit 0"));
 +}
-diff --git a/docs/superpowers/plans/task-4-report.md b/docs/superpowers/plans/task-4-report.md
-index 7cf6da6..cdc2316 100644
---- a/docs/superpowers/plans/task-4-report.md
-+++ b/docs/superpowers/plans/task-4-report.md
-@@ -1,20 +1,51 @@
--# Task 4 Implementer Report: Wire ContainerShell::exec to exec_command with Timeout Parity
-+# Task 4 Implementation Report: Headless Single-Shot Solver Integration
- 
--**Status:** DONE
-+## Overview
-+Implemented the headless single-shot solver runner in `crates/superstate-cli/src/task_runner.rs`, exposed it via `crates/superstate-cli/src/lib.rs`, wired prompt dispatch and REPL fallback into `crates/superstate-cli/src/main.rs`, and connected prompt submission in the REPL event loop (`crates/superstate-cli/src/repl.rs`). Followed up on automated roborev code review findings to preserve session state and redirect stream output to the caller's writer.
- 
--### Summary of Changes:
--1. **ContainerShell Delegation to `exec_command`:**
--   - Modified `ContainerShell::exec` in `crates/superstate-agent/src/shell.rs` to build the `docker exec` command and delegate directly to `exec_command(cmd, timeout)`, ensuring process group isolation, timeout enforcement, and standardized output reporting parity with `LocalShell`.
--2. **Integration Test Added:**
--   - Added `container_shell_enforces_timeout_on_hung_execution` in `crates/superstate-agent/tests/test_shell_timeout.rs` to verify bounded execution when running commands via `ContainerShell`.
--3. **Verification Results:**
--   - `cargo check -p superstate-agent`: Finished with 0 errors, 0 warnings.
--   - `cargo clippy -p superstate-agent --tests`: Finished with 0 warnings.
--   - `cargo test -p superstate-agent`: All 57 tests passed cleanly:
--     - `test_shell_timeout.rs`: 7 passed, 0 failed.
--     - `test_run.rs`: 13 passed, 0 failed.
--     - `test_state_authority.rs`: 5 passed, 0 failed.
--     - `test_tools.rs`: 31 passed, 0 failed.
--4. **Git Commit:**
--   - Commit: `67feab3`
--   - Message: `feat(agent): wire ContainerShell to exec_command with full timeout parity`
-+## Changes Made
-+1. **`crates/superstate-cli/src/task_runner.rs`**:
-+   - Implemented `TaskConfig` struct capturing execution parameters: `prompt`, `gate`, `context_strategy`, `model`, `container`, `max_turns`, `max_gates`, `rollback`, `root`.
-+   - Implemented `From<&crate::cli::Cli> for TaskConfig` mapping CLI arguments and fallback values.
-+   - Implemented `run_task(config: TaskConfig) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String>`:
-+     - Configures AI provider using `Gemini::from_env()` with custom model override support, returning clear actionable guidance (`Provider error: no API key: set GEMINI_API_KEY (or GOOGLE_API_KEY)`) if missing.
-+     - Selects context strategy: `superstate_agent::context::StateOnly` when `context_strategy == "state-only"`, otherwise `superstate_agent::context::Conversational`.
-+     - Selects shell & filesystem: `ContainerShell` & `ContainerFs` targeted at `/workspace` if container ID is configured, otherwise `LocalShell` & `LocalFs` in host working directory.
-+     - Initializes `superstate_agent::state::State`.
-+     - Connects `crate::repl::format_event` live event streaming.
-+     - Executes `superstate_agent::run::Runner::run(&mut state)`.
-+   - Implemented `run_task_with_state_and_writer`:
-+     - Allows running the solver while preserving an existing mutable `State` (epistemic ledger, patches, attempts) across multiple turns.
-+     - Directs formatted live events into the provided generic `writer: &mut W` via a synchronized Mutex wrapper.
-+
-+2. **`crates/superstate-cli/src/lib.rs`**:
-+   - Exposed `pub mod task_runner;`.
-+
-+3. **`crates/superstate-cli/src/main.rs`**:
-+   - In `cli.command == None`:
-+     - Dispatches headless task execution via `task_runner::run_task` when a non-empty `prompt` is provided, exiting with 0 on `Outcome::Verified` or 1 on gate failure/error.
-+     - Fails fast with `Error: prompt cannot be empty` and exit code 1 if a prompt was provided with only whitespace.
-+     - Launches `repl::run_repl` when no prompt or subcommand is given.
-+
-+4. **`crates/superstate-cli/src/repl.rs`**:
-+   - Augmented `ReplSession` with execution parameters (`container`, `max_turns`, `max_gates`, `rollback`) initialized from `ReplConfig`.
-+   - Updated default model fallback from `"claude-3-5-sonnet"` to `"gemini-2.5-flash"` to match `superstate-provider`.
-+   - Wired `ReplControl::SubmitPrompt(prompt)` in `run_repl_stream` to dispatch `task_runner::run_task_with_state_and_writer` with active session settings, updating `session.state.orchestrator.goal` and `session.state.orchestrator.verification_cmd`, and streaming events directly to `writer`.
-+
-+5. **`crates/superstate-cli/tests/test_task_runner.rs`**:
-+   - Added thread synchronization (`ENV_LOCK`) for tests mutating process environment variables.
-+   - Added `test_task_config_from_cli`: asserts full CLI flag mapping to `TaskConfig`.
-+   - Added `test_task_config_defaults`: asserts default values.
-+   - Added `test_run_task_missing_api_key_returns_clear_error`: verifies explicit error message mentioning `GEMINI_API_KEY`.
-+   - Added `test_run_task_with_state_and_writer_preserves_state`: verifies state retention and writer sink.
-+   - Added `test_repl_stream_prompt_dispatch`: verifies REPL stream handles prompt submission and dispatches to task runner.
-+
-+## Verification
-+- `cargo test -p superstate --test test_task_runner`: 5 passed, 0 failed.
-+- `cargo test -p superstate`: all CLI tests passed.
-+- `cargo test --workspace`: all workspace unit and integration tests passed.
-+- `cargo check --workspace --all-targets`: 0 errors, 0 warnings.
-+- `cargo clippy -p superstate --all-targets -- -D warnings`: 0 warnings.
-+- Commits:
-+  - `a06408c feat(cli): integrate headless single-shot solver and wire REPL prompt dispatch`
-+  - `e097519 fix(cli): preserve REPL state across prompts and redirect live event writer`

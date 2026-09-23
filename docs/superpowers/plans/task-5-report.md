@@ -1,68 +1,52 @@
-# Task 5 Implementation Report: End-to-End Integration Tests & CLI Verification
+# Task 5 Completion Report: End-to-End CLI Verification and Invariant Checks
 
-## Overview
-Implemented end-to-end integration tests in `crates/superstate-cli/tests/test_e2e_cli.rs` verifying the real compiled `superstate` binary in both headless and interactive REPL modes, as well as subcommand dispatch. Updated `README.md` with comprehensive documentation covering the interactive harness REPL, headless single-shot execution with verification gates, SKILL.state $\mathcal{O}(1)$ prompt bounded memory options, interactive slash commands, and CLI flags.
+## Summary
+Successfully implemented and executed comprehensive end-to-end integration tests in `crates/superstate-cli/tests/test_action_ledger_e2e.rs`, validating action ledger accumulation, REPL `/state` inspection, and bounded context preservation under the `StateOnly` context strategy. All workspace verification gates (`cargo check`, `cargo clippy`, and `cargo test`) passed cleanly, and Roborev automated review completed with no issues found.
 
-## Changes Made
+## Implemented Changes
 
-1. **`crates/superstate-cli/tests/test_e2e_cli.rs`**:
-   - `test_cli_binary_help_screen`:
-     - Executes `env!("CARGO_BIN_EXE_superstate")` with `--help`.
-     - Asserts exit success (`status.success()`).
-     - Asserts stdout contains: `superstate`, `[PROMPT]`, `--gate`, `--context`, `--model`, `--container`, `--max-turns`, `--max-gates`, and `--rollback`.
-   - `test_cli_empty_prompt_error`:
-     - Executes binary with `""`.
-     - Asserts exit code 1 and stderr contains `Error: prompt cannot be empty`.
-   - `test_cli_headless_missing_api_key`:
-     - Executes binary with `"fix math bug"` after clearing `GEMINI_API_KEY` and `GOOGLE_API_KEY` from child process environment.
-     - Asserts exit code 1 and stderr contains `GEMINI_API_KEY`.
-   - `test_cli_subcommand_dispatch`:
-     - Executes binary with `doctor`.
-     - Asserts exit success and stdout contains `Verification Handshake Passed`.
-   - `test_cli_interactive_repl_stdin_driving`:
-     - Spawns binary in interactive mode with piped stdin/stdout/stderr.
-     - Feeds command sequence: `"/help\n/gate cargo test\n/state\n/exit\n"`.
-     - Asserts exit success (`status.success()`).
-     - Asserts stdout contains ASCII banner (`Superstate Interactive Harness`), `/help` reference (`Available Slash Commands:`), gate update notification (`Gate set to: cargo test`), and structured state partitions (`=== Superstate SKILL.state ===`, `Orchestrator:`, `Runtime:`, `Agent:`).
+1. **`crates/superstate-cli/tests/test_action_ledger_e2e.rs`**:
+   - `test_repl_state_command_displays_action_ledger`:
+     - Creates a `ReplSession` and adds `ActionEntry` records (representing `read`, `bash`, and `note` operations).
+     - Dispatches `/state` slash command to `handle_repl_command`.
+     - Asserts that the rendered output includes `"actions": [` and accurately displays turn, tool, target, summary, and error flags.
+   - `test_repl_session_records_actions_across_turns`:
+     - Sets up an isolated git repository and executes a multi-turn autonomous `Runner` task with simulated gate failure and rollback.
+     - Confirms that actions accumulate chronologically across turns (`bash`, `rollback`, `write`).
+     - Verifies that rollback records checkpoint target and error status.
+     - Confirms that `/state` displays all accumulated actions.
+     - Confirms that `/clear` resets `session.state.runtime.actions` cleanly.
+   - `test_state_only_invariant_preservation_e2e`:
+     - Executes an 8-turn sequence under `StateOnly` strategy.
+     - Enforces Invariant II across all captured requests: prompt message vector length strictly bounded (`messages.len() <= 3`).
+     - Verifies that turns subsequent to turn 1 format preceding actions into `## Actions Taken So Far` with exact tool names, targets, and exit summaries.
+     - Confirms that even when given large simulated conversation histories, `StateOnly.build` keeps prompt length bounded (`<= 3`).
 
-2. **`README.md`**:
-   - Expanded the **Quick Start** section:
-     - Documented interactive REPL launch (`superstate`, with custom model, gate, and context flags).
-     - Documented headless single-shot solver usage (`superstate "<prompt>" --gate "<gate_cmd>"`).
-     - Illustrated SKILL.state $\mathcal{O}(1)$ prompt bounded memory mode and container workspace isolation (`--context state-only`, `--container <id>`).
-   - Added **Command-Line Interface (CLI)** section:
-     - **CLI Execution Flags table**: documents `[PROMPT]`, `-g, --gate`, `--context`, `-m, --model`, `--container`, `--max-turns`, `--max-gates`, and `--rollback`.
-     - **Interactive REPL Slash Commands table**: documents `/help`, `/state`, `/diff`, `/review`, `/doctor`, `/gate`, `/clear`, `/exit` / `/quit`.
-     - **Core Subcommands reference table**: documents `doctor`, `mcp`, `review`, `state`, `worktree`, `daemon`, `cancel`, `logs`, `handoff`, `shunt`, `inspect`, and `guard`.
+2. **`crates/superstate-cli/src/repl.rs`**:
+   - Added descriptive inline documentation detailing the role of the `/state` handler in rendering the orchestrator contract, runtime state (including attempt counts, rollback metrics, and action ledger), and agent domain state.
 
-## Verification Evidence
-- `cargo test -p superstate --test test_e2e_cli`:
-  ```
-  running 5 tests
-  test test_cli_empty_prompt_error ... ok
-  test test_cli_binary_help_screen ... ok
-  test test_cli_headless_missing_api_key ... ok
-  test test_cli_interactive_repl_stdin_driving ... ok
-  test test_cli_subcommand_dispatch ... ok
+## Verification & Test Results
 
-  test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
-  ```
-- `cargo check --workspace --all-targets`:
-  ```
-  Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.06s (0 errors, 0 warnings)
-  ```
-- `cargo test --workspace`:
-  ```
-  All workspace unit tests, integration tests, and doc-tests passed cleanly (exit code 0).
-  ```
-- `roborev status; roborev show HEAD`:
-  ```
-  Daemon running, health OK; review job queued for commit 78bc1ed.
-  ```
+1. **Test Execution**:
+   - `cargo test -p superstate --test test_action_ledger_e2e`:
+     - `test_repl_state_command_displays_action_ledger ... ok`
+     - `test_repl_session_records_actions_across_turns ... ok`
+     - `test_state_only_invariant_preservation_e2e ... ok`
+     - 3 passed; 0 failed.
 
-## Git Commit Details
-- **Commit SHA**: `78bc1ed`
-- **Commit Message**: `feat(cli): add end-to-end integration tests and update README harness documentation`
-- **Files**:
-  - `crates/superstate-cli/tests/test_e2e_cli.rs` (+75)
-  - `README.md` (+95, -5)
+2. **Workspace-Wide Verification**:
+   - `cargo check --workspace --all-targets`: Passed with 0 errors.
+   - `cargo clippy --workspace --all-targets -- -D warnings`: Passed with 0 warnings.
+   - `cargo test --workspace`: All unit tests, integration tests, and doc-tests passed across all crates in the workspace.
+
+## Commit
+- Commit: `4f301a5`
+- Message: `test(cli): add end-to-end verification for action ledger in REPL`
+
+## Roborev Review
+- Job: 5153
+- Target Commit: `4f301a5`
+- Verdict: Pass ("No issues found.")
+
+## Status
+DONE

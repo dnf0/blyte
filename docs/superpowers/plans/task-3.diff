@@ -1,637 +1,160 @@
-diff --git a/crates/superstate-cli/src/lib.rs b/crates/superstate-cli/src/lib.rs
-index 939b276..b511330 100644
---- a/crates/superstate-cli/src/lib.rs
-+++ b/crates/superstate-cli/src/lib.rs
-@@ -1,3 +1,4 @@
- pub mod cli;
- pub mod commands;
-+pub mod repl;
- pub mod state_cli;
-diff --git a/crates/superstate-cli/src/repl.rs b/crates/superstate-cli/src/repl.rs
-new file mode 100644
-index 0000000..67ac441
---- /dev/null
-+++ b/crates/superstate-cli/src/repl.rs
-@@ -0,0 +1,407 @@
-+use std::io::{BufRead, Write};
-+use std::path::PathBuf;
+diff --git a/crates/superstate-agent/src/run.rs b/crates/superstate-agent/src/run.rs
+index 9fa21a4..a25340f 100644
+--- a/crates/superstate-agent/src/run.rs
++++ b/crates/superstate-agent/src/run.rs
+@@ -265,6 +265,21 @@ impl<'a> Runner<'a> {
+                         summary,
+                         is_error: outcome.is_error,
+                     });
 +
-+/// Configuration options for launching the interactive REPL harness.
-+#[derive(Debug, Clone)]
-+pub struct ReplConfig {
-+    pub repo_root: PathBuf,
-+    pub model: Option<String>,
-+    pub gate: Option<String>,
-+    pub context_strategy: String,
-+    pub container: Option<String>,
-+    pub max_turns: usize,
-+    pub max_gates: usize,
-+    pub rollback: bool,
-+}
++                    // Record tool invocation in the chronological action ledger.
++                    // Captures deterministic targets and outcome summaries so that episodic memory
++                    // retains an accurate, bounded audit trail of all agent actions.
++                    let action_target = extract_action_target(&call.name, &call.arguments);
++                    let action_summary =
++                        extract_action_summary(&call.name, &outcome.content, outcome.is_error);
++                    state.runtime.actions.push(crate::state::ActionEntry {
++                        turn,
++                        tool: call.name.clone(),
++                        target: action_target,
++                        summary: action_summary,
++                        is_error: outcome.is_error,
++                    });
 +
-+impl Default for ReplConfig {
-+    fn default() -> Self {
-+        Self {
-+            repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-+            model: None,
-+            gate: None,
-+            context_strategy: "state-only".to_string(),
-+            container: None,
-+            max_turns: 60,
-+            max_gates: 5,
-+            rollback: true,
-+        }
-+    }
-+}
-+
-+/// Active state and parameters of an ongoing REPL session.
-+pub struct ReplSession {
-+    pub repo_root: PathBuf,
-+    pub gate: Option<String>,
-+    pub model: String,
-+    pub context_strategy: String,
-+    pub state: superstate_agent::state::State,
-+    pub history: Vec<superstate_provider::Message>,
-+}
-+
-+impl ReplSession {
-+    /// Creates a new `ReplSession` initialized with the given `ReplConfig`.
-+    pub fn new(config: &ReplConfig) -> Self {
-+        let gate = config.gate.clone();
-+        let verification_cmd = gate.clone().unwrap_or_default();
-+        let goal = "Interactive REPL session".to_string();
-+        let state = superstate_agent::state::State::new(goal, verification_cmd);
-+        Self {
-+            repo_root: config.repo_root.clone(),
-+            gate,
-+            model: config
-+                .model
-+                .clone()
-+                .unwrap_or_else(|| "claude-3-5-sonnet".to_string()),
-+            context_strategy: config.context_strategy.clone(),
-+            state,
-+            history: Vec::new(),
-+        }
-+    }
-+}
-+
-+/// Control flow signal emitted after handling REPL input.
-+#[derive(Debug, PartialEq, Eq)]
-+pub enum ReplControl {
-+    Handled,
-+    Exit,
-+    SubmitPrompt(String),
-+}
-+
-+/// Formats a runtime event emitted during agent turn or gate execution.
-+pub fn format_event(event: &superstate_agent::run::Event<'_>) -> String {
-+    match event {
-+        superstate_agent::run::Event::Turn { n, text } => {
-+            let preview = if text.len() > 80 {
-+                format!("{}...", &text[..80])
-+            } else {
-+                text.to_string()
-+            };
-+            format!("[Turn {}] {}", n, preview)
-+        }
-+        superstate_agent::run::Event::Tool {
-+            name,
-+            input,
-+            summary,
-+            is_error,
-+        } => {
-+            if *is_error {
-+                format!("\x1b[31m● {} {} -> {}\x1b[0m", name, input, summary)
-+            } else {
-+                format!("● {} {} -> {}", name, input, summary)
-+            }
-+        }
-+        superstate_agent::run::Event::Gate {
-+            attempt,
-+            passed,
-+            output,
-+        } => {
-+            if *passed {
-+                format!("✓ Gate passed (attempt {})", attempt)
-+            } else {
-+                format!("✗ Gate failed (attempt {}): {}", attempt, output.trim())
-+            }
-+        }
-+        superstate_agent::run::Event::RolledBack { to } => {
-+            format!("↺ Rolled back working tree to {}", to)
-+        }
-+    }
-+}
-+
-+/// Renders the Superstate ASCII banner and environment summary to a writer.
-+pub fn render_banner_to<W: Write>(writer: &mut W, session: &ReplSession) -> std::io::Result<()> {
-+    let version = env!("CARGO_PKG_VERSION");
-+    let repo = session.repo_root.display().to_string();
-+    let model = &session.model;
-+    let gate = session
-+        .gate
-+        .as_deref()
-+        .unwrap_or("None (fail-closed disabled)");
-+
-+    let mut toolchains = Vec::new();
-+    if session.repo_root.join("Cargo.toml").exists() {
-+        toolchains.push("Rust (Cargo)");
-+    }
-+    if session.repo_root.join("pyproject.toml").exists()
-+        || session.repo_root.join("requirements.txt").exists()
-+    {
-+        toolchains.push("Python");
-+    }
-+    if session.repo_root.join("package.json").exists() {
-+        toolchains.push("Node.js");
-+    }
-+    if session.repo_root.join("go.mod").exists() {
-+        toolchains.push("Go");
-+    }
-+    let toolchains_str = if toolchains.is_empty() {
-+        "Standard POSIX".to_string()
-+    } else {
-+        toolchains.join(", ")
-+    };
-+
-+    writeln!(
-+        writer,
-+        "╔═══════════════════════════════════════════════════════════╗"
-+    )?;
-+    writeln!(
-+        writer,
-+        "║   ____                                _        _          ║"
-+    )?;
-+    writeln!(
-+        writer,
-+        "║  / ___| _   _ _ __   ___ _ __ ___   __| |  ___| |_ ___    ║"
-+    )?;
-+    writeln!(
-+        writer,
-+        "║  \\___ \\| | | | '_ \\ / _ \\ '__/ __| / _` | / __| __/ _ \\   ║"
-+    )?;
-+    writeln!(
-+        writer,
-+        "║   ___) | |_| | |_) |  __/ |  \\__ \\| (_| || (__| ||  __/   ║"
-+    )?;
-+    writeln!(
-+        writer,
-+        "║  |____/ \\__,_| .__/ \\___|_|  |___/ \\__,_(_)___|\\__\\___|   ║"
-+    )?;
-+    writeln!(
-+        writer,
-+        "║              |_|                                          ║"
-+    )?;
-+    writeln!(
-+        writer,
-+        "║  Superstate Interactive Harness v{:<25}║",
-+        version
-+    )?;
-+    writeln!(
-+        writer,
-+        "╚═══════════════════════════════════════════════════════════╝"
-+    )?;
-+    writeln!(writer, "  Repository : {}", repo)?;
-+    writeln!(writer, "  Model      : {}", model)?;
-+    writeln!(writer, "  Gate       : {}", gate)?;
-+    writeln!(writer, "  Toolchains : {}", toolchains_str)?;
-+    writeln!(
-+        writer,
-+        "  Type /help for slash commands or enter a prompt to begin."
-+    )?;
-+    writeln!(writer)?;
-+    Ok(())
-+}
-+
-+/// Renders the Superstate banner to standard output.
-+pub fn render_banner(session: &ReplSession) {
-+    let mut stdout = std::io::stdout();
-+    let _ = render_banner_to(&mut stdout, session);
-+}
-+
-+/// Processes a single line of REPL input, dispatching slash commands or submitting prompts.
-+pub fn handle_repl_command<W: Write>(
-+    session: &mut ReplSession,
-+    line: &str,
-+    writer: &mut W,
-+) -> Result<ReplControl, String> {
-+    let trimmed = line.trim();
-+
-+    // Check if input is a slash command
-+    if trimmed.starts_with('/') {
-+        let (cmd, args) = match trimmed.split_once(char::is_whitespace) {
-+            Some((c, a)) => (c, a.trim()),
-+            None => (trimmed, ""),
-+        };
-+
-+        match cmd {
-+            "/help" => {
-+                writeln!(writer, "Available Slash Commands:").map_err(|e| e.to_string())?;
-+                writeln!(writer, "  /help         - Show this command reference")
-+                    .map_err(|e| e.to_string())?;
-+                writeln!(
-+                    writer,
-+                    "  /state        - Inspect SKILL.state (Orchestrator, Runtime, Agent)"
-+                )
-+                .map_err(|e| e.to_string())?;
-+                writeln!(
-+                    writer,
-+                    "  /diff         - Show current git diff in working tree"
-+                )
-+                .map_err(|e| e.to_string())?;
-+                writeln!(
-+                    writer,
-+                    "  /review       - Run code review engine on uncommitted changes"
-+                )
-+                .map_err(|e| e.to_string())?;
-+                writeln!(
-+                    writer,
-+                    "  /doctor       - Run 5-step system verification handshake"
-+                )
-+                .map_err(|e| e.to_string())?;
-+                writeln!(
-+                    writer,
-+                    "  /gate [cmd]   - Inspect or update the verification gate command"
-+                )
-+                .map_err(|e| e.to_string())?;
-+                writeln!(
-+                    writer,
-+                    "  /clear        - Clear session history and reset working state"
-+                )
-+                .map_err(|e| e.to_string())?;
-+                writeln!(writer, "  /exit, /quit  - Exit the interactive REPL")
-+                    .map_err(|e| e.to_string())?;
-+                Ok(ReplControl::Handled)
-+            }
-+            "/state" => {
-+                writeln!(writer, "=== Superstate SKILL.state ===").map_err(|e| e.to_string())?;
-+                let orch = serde_json::to_string_pretty(&session.state.orchestrator)
-+                    .map_err(|e| e.to_string())?;
-+                writeln!(writer, "Orchestrator:\n{}", orch).map_err(|e| e.to_string())?;
-+
-+                let rt = serde_json::to_string_pretty(&session.state.runtime)
-+                    .map_err(|e| e.to_string())?;
-+                writeln!(writer, "Runtime:\n{}", rt).map_err(|e| e.to_string())?;
-+
-+                let agent = serde_json::to_string_pretty(&session.state.agent)
-+                    .map_err(|e| e.to_string())?;
-+                writeln!(writer, "Agent:\n{}", agent).map_err(|e| e.to_string())?;
-+                Ok(ReplControl::Handled)
-+            }
-+            "/diff" => {
-+                let out = std::process::Command::new("git")
-+                    .arg("diff")
-+                    .current_dir(&session.repo_root)
-+                    .output();
-+                match out {
-+                    Ok(output) => {
-+                        let stdout = String::from_utf8_lossy(&output.stdout);
-+                        if stdout.trim().is_empty() {
-+                            writeln!(writer, "No uncommitted diff in repository.")
-+                                .map_err(|e| e.to_string())?;
-+                        } else {
-+                            write!(writer, "{}", stdout).map_err(|e| e.to_string())?;
-+                        }
-+                    }
-+                    Err(e) => {
-+                        writeln!(writer, "Failed to run git diff: {}", e)
-+                            .map_err(|e| e.to_string())?;
-+                    }
-+                }
-+                Ok(ReplControl::Handled)
-+            }
-+            "/review" => {
-+                writeln!(
-+                    writer,
-+                    "Running review engine on {}...",
-+                    session.repo_root.display()
-+                )
-+                .map_err(|e| e.to_string())?;
-+                match crate::commands::review::cmd_review(crate::commands::review::ReviewArgs {
-+                    commit_range: None,
-+                    repo: session.repo_root.clone(),
-+                    driver: None,
-+                    state_path: None,
-+                    record: false,
-+                    json: false,
-+                    fail_on_blocking: false,
-+                }) {
-+                    Ok(()) => {}
-+                    Err(e) => {
-+                        writeln!(writer, "Review advisory: {}", e).map_err(|e| e.to_string())?;
-+                    }
-+                }
-+                Ok(ReplControl::Handled)
-+            }
-+            "/doctor" => {
-+                writeln!(writer, "Running system verification handshake...")
-+                    .map_err(|e| e.to_string())?;
-+                match crate::commands::doctor::run_doctor() {
-+                    Ok(()) => {}
-+                    Err(e) => {
-+                        writeln!(writer, "Doctor check failed: {}", e)
-+                            .map_err(|e| e.to_string())?;
-+                    }
-+                }
-+                Ok(ReplControl::Handled)
-+            }
-+            "/gate" => {
-+                if args.is_empty() {
-+                    match &session.gate {
-+                        Some(g) => {
-+                            writeln!(writer, "Current gate: {}", g).map_err(|e| e.to_string())?
-+                        }
-+                        None => {
-+                            writeln!(writer, "No gate configured.").map_err(|e| e.to_string())?
-+                        }
-+                    }
+                     history.push(Message::ToolResult {
+                         id: call.id.clone(),
+                         name: call.name.clone(),
+@@ -293,8 +308,16 @@ impl<'a> Runner<'a> {
+                 if let Some(base) = &baseline {
+                     self.reset_to(base);
+                     state.runtime.rollbacks += 1;
+-                    self.emit(Event::RolledBack {
+-                        to: &base[..base.len().min(8)],
++                    let short_sha = &base[..base.len().min(8)];
++                    self.emit(Event::RolledBack { to: short_sha });
++                    // Record rollback in the action ledger to ensure the worker and orchestrator
++                    // observe workspace resets explicitly within episodic action history.
++                    state.runtime.actions.push(crate::state::ActionEntry {
++                        turn,
++                        tool: "rollback".into(),
++                        target: format!("checkpoint {short_sha}"),
++                        summary: "Gate failed; working tree reset to verified state".into(),
++                        is_error: true,
+                     });
+                 }
+             }
+@@ -440,7 +463,11 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
+             // Distinguish successful replacements from rejection/failure reasons.
+             if is_error {
+                 let first = content.lines().next().unwrap_or("edit failed");
+-                let first = if first.is_empty() { "edit failed" } else { first };
++                let first = if first.is_empty() {
++                    "edit failed"
 +                } else {
-+                    session.gate = Some(args.to_string());
-+                    session.state.orchestrator.verification_cmd = args.to_string();
-+                    writeln!(writer, "Gate set to: {}", args).map_err(|e| e.to_string())?;
-+                }
-+                Ok(ReplControl::Handled)
-+            }
-+            "/clear" => {
-+                session.history.clear();
-+                session.state.runtime = superstate_agent::state::Runtime::default();
-+                session.state.agent = superstate_agent::state::Agent::default();
-+                writeln!(writer, "Session history cleared and working state reset.")
-+                    .map_err(|e| e.to_string())?;
-+                Ok(ReplControl::Handled)
-+            }
-+            "/exit" | "/quit" => Ok(ReplControl::Exit),
-+            unknown => {
-+                writeln!(
-+                    writer,
-+                    "Unknown command: {}. Type /help for available commands.",
-+                    unknown
-+                )
-+                .map_err(|e| e.to_string())?;
-+                Ok(ReplControl::Handled)
-+            }
-+        }
-+    } else if trimmed.is_empty() {
-+        Ok(ReplControl::Handled)
-+    } else {
-+        Ok(ReplControl::SubmitPrompt(line.to_string()))
-+    }
-+}
-+
-+/// Runs the interactive REPL event loop over generic input and output streams.
-+pub fn run_repl_stream<R: BufRead, W: Write>(
-+    mut reader: R,
-+    mut writer: W,
-+    mut session: ReplSession,
-+) -> Result<(), String> {
-+    loop {
-+        write!(writer, "superstate > ").map_err(|e| e.to_string())?;
-+        writer.flush().map_err(|e| e.to_string())?;
-+
-+        let mut line = String::new();
-+        let bytes_read = reader.read_line(&mut line).map_err(|e| e.to_string())?;
-+        if bytes_read == 0 {
-+            // EOF reached
-+            break;
-+        }
-+
-+        let trimmed = line.trim_end();
-+        match handle_repl_command(&mut session, trimmed, &mut writer)? {
-+            ReplControl::Exit => break,
-+            ReplControl::Handled => {}
-+            ReplControl::SubmitPrompt(prompt) => {
-+                writeln!(writer, "Dispatching turn for prompt: {}", prompt)
-+                    .map_err(|e| e.to_string())?;
-+                session
-+                    .history
-+                    .push(superstate_provider::Message::User(prompt.clone()));
-+                session.state.runtime.attempts += 1;
-+            }
-+        }
-+    }
-+    Ok(())
-+}
-+
-+/// Initializes a REPL session and runs the interactive terminal loop.
-+pub fn run_repl(config: ReplConfig) -> Result<(), String> {
-+    let session = ReplSession::new(&config);
-+    render_banner(&session);
-+    let stdin = std::io::stdin();
-+    let stdout = std::io::stdout();
-+    run_repl_stream(stdin.lock(), stdout.lock(), session)
-+}
-diff --git a/crates/superstate-cli/tests/test_repl_commands.rs b/crates/superstate-cli/tests/test_repl_commands.rs
-new file mode 100644
-index 0000000..d80d299
---- /dev/null
-+++ b/crates/superstate-cli/tests/test_repl_commands.rs
-@@ -0,0 +1,209 @@
-+use superstate_cli::repl::{
-+    format_event, handle_repl_command, run_repl_stream, ReplConfig, ReplControl, ReplSession,
-+};
++                    first
++                };
+                 format!("failed: {first}")
+             } else {
+                 "string replaced".to_string()
+@@ -486,4 +513,3 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
+         }
+     }
+ }
+-
+diff --git a/crates/superstate-agent/tests/test_run.rs b/crates/superstate-agent/tests/test_run.rs
+index fd803f6..e776f49 100644
+--- a/crates/superstate-agent/tests/test_run.rs
++++ b/crates/superstate-agent/tests/test_run.rs
+@@ -348,3 +348,92 @@ fn the_turn_budget_bounds_a_model_that_never_stops() {
+     assert_eq!(outcome, Outcome::BudgetExhausted);
+     assert_eq!(rep.outcome_turns, 12);
+ }
 +
 +#[test]
-+fn test_slash_help() {
-+    let config = ReplConfig {
-+        repo_root: std::path::PathBuf::from("."),
-+        model: None,
-+        gate: None,
-+        context_strategy: "state-only".to_string(),
-+        container: None,
-+        max_turns: 60,
-+        max_gates: 5,
-+        rollback: true,
-+    };
-+    let mut session = ReplSession::new(&config);
-+    let mut out = Vec::new();
-+    let res = handle_repl_command(&mut session, "/help", &mut out).unwrap();
-+    assert_eq!(res, ReplControl::Handled);
-+    let text = String::from_utf8(out).unwrap();
-+    assert!(text.contains("/help"));
-+    assert!(text.contains("/state"));
-+    assert!(text.contains("/diff"));
-+    assert!(text.contains("/review"));
-+    assert!(text.contains("/doctor"));
-+    assert!(text.contains("/gate"));
-+    assert!(text.contains("/clear"));
-+    assert!(text.contains("/exit"));
-+}
++fn test_actions_recorded_during_run() {
++    // Verifies that Runner records ActionEntry objects chronologically into state.runtime.actions
++    // for all invoked tools (bash, read, note), preserving action targets, summaries, and error flags.
++    let d = repo();
++    // Create a known file on disk so the 'read' tool succeeds with predictable line counts.
++    std::fs::write(d.path().join("sample.txt"), "first line\nsecond line\n").unwrap();
 +
-+#[test]
-+fn test_slash_gate_get_and_set() {
-+    let config = ReplConfig {
-+        repo_root: std::path::PathBuf::from("."),
-+        model: None,
-+        gate: None,
-+        context_strategy: "state-only".to_string(),
-+        container: None,
-+        max_turns: 60,
-+        max_gates: 5,
-+        rollback: true,
-+    };
-+    let mut session = ReplSession::new(&config);
++    let p = ScriptedProvider::new(vec![
++        calls("bash", json!({"command": "echo hello"})),
++        calls("read", json!({"path": "sample.txt"})),
++        calls("note", json!({"patch": {"analysis": "verified"}})),
++        says("done"),
++    ]);
++    let mut st = State::new("test action ledger", "true");
++    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
++    assert_eq!(outcome, Outcome::Verified);
++    assert_eq!(rep.tool_calls, 3);
 +
-+    // Initial inspection (no gate configured)
-+    let mut out = Vec::new();
-+    let res = handle_repl_command(&mut session, "/gate", &mut out).unwrap();
-+    assert_eq!(res, ReplControl::Handled);
-+    let text = String::from_utf8(out).unwrap();
-+    assert!(text.to_lowercase().contains("no gate"));
++    // Ensure three action entries were captured in exact invocation sequence.
++    assert_eq!(st.runtime.actions.len(), 3);
 +
-+    // Set gate
-+    let mut out = Vec::new();
-+    let res = handle_repl_command(&mut session, "/gate cargo test", &mut out).unwrap();
-+    assert_eq!(res, ReplControl::Handled);
-+    assert_eq!(session.gate.as_deref(), Some("cargo test"));
-+    assert_eq!(session.state.orchestrator.verification_cmd, "cargo test");
++    // 1. Validate bash command action entry details.
++    let bash_action = &st.runtime.actions[0];
++    assert_eq!(bash_action.turn, 1);
++    assert_eq!(bash_action.tool, "bash");
++    assert_eq!(bash_action.target, "echo hello");
++    assert_eq!(bash_action.summary, "exit 0");
++    assert!(!bash_action.is_error);
 +
-+    // Inspect updated gate
-+    let mut out = Vec::new();
-+    let res = handle_repl_command(&mut session, "/gate", &mut out).unwrap();
-+    assert_eq!(res, ReplControl::Handled);
-+    let text = String::from_utf8(out).unwrap();
-+    assert!(text.contains("cargo test"));
-+}
++    // 2. Validate file read action entry details.
++    let read_action = &st.runtime.actions[1];
++    assert_eq!(read_action.turn, 2);
++    assert_eq!(read_action.tool, "read");
++    assert_eq!(read_action.target, "sample.txt");
++    assert_eq!(read_action.summary, "2 lines read");
++    assert!(!read_action.is_error);
 +
-+#[test]
-+fn test_slash_state_inspection() {
-+    let config = ReplConfig {
-+        repo_root: std::path::PathBuf::from("."),
-+        model: None,
-+        gate: Some("cargo test".to_string()),
-+        context_strategy: "state-only".to_string(),
-+        container: None,
-+        max_turns: 60,
-+        max_gates: 5,
-+        rollback: true,
-+    };
-+    let mut session = ReplSession::new(&config);
-+    let mut out = Vec::new();
-+    let res = handle_repl_command(&mut session, "/state", &mut out).unwrap();
-+    assert_eq!(res, ReplControl::Handled);
-+    let text = String::from_utf8(out).unwrap();
-+    assert!(text.to_lowercase().contains("orchestrator"));
-+    assert!(text.to_lowercase().contains("runtime"));
-+    assert!(text.to_lowercase().contains("agent"));
-+}
-+
-+#[test]
-+fn test_slash_exit() {
-+    let config = ReplConfig {
-+        repo_root: std::path::PathBuf::from("."),
-+        model: None,
-+        gate: None,
-+        context_strategy: "state-only".to_string(),
-+        container: None,
-+        max_turns: 60,
-+        max_gates: 5,
-+        rollback: true,
-+    };
-+    let mut session = ReplSession::new(&config);
-+
-+    let mut out = Vec::new();
-+    let res1 = handle_repl_command(&mut session, "/exit", &mut out).unwrap();
-+    assert_eq!(res1, ReplControl::Exit);
-+
-+    let mut out = Vec::new();
-+    let res2 = handle_repl_command(&mut session, "/quit", &mut out).unwrap();
-+    assert_eq!(res2, ReplControl::Exit);
-+}
-+
-+#[test]
-+fn test_repl_stream_driving() {
-+    let config = ReplConfig {
-+        repo_root: std::path::PathBuf::from("."),
-+        model: None,
-+        gate: None,
-+        context_strategy: "state-only".to_string(),
-+        container: None,
-+        max_turns: 60,
-+        max_gates: 5,
-+        rollback: true,
-+    };
-+    let session = ReplSession::new(&config);
-+
-+    let input = b"/help\n/gate cargo test\n/state\n/exit\n";
-+    let reader = std::io::Cursor::new(input);
-+    let mut writer = Vec::new();
-+
-+    let res = run_repl_stream(reader, &mut writer, session);
-+    assert!(res.is_ok());
-+
-+    let output = String::from_utf8(writer).unwrap();
-+    assert!(output.contains("superstate > "));
-+    assert!(output.contains("/help"));
-+    assert!(output.contains("Gate set to: cargo test"));
-+}
-+
-+#[test]
-+fn test_format_event() {
-+    use superstate_agent::run::Event;
-+
-+    let e1 = Event::Turn {
-+        n: 1,
-+        text: "Thinking about plan",
-+    };
-+    let s1 = format_event(&e1);
-+    assert!(s1.contains('1') && s1.contains("Thinking about plan"));
-+
-+    let e2 = Event::Tool {
-+        name: "bash",
-+        input: "git status".to_string(),
-+        summary: "clean working tree".to_string(),
-+        is_error: false,
-+    };
-+    let s2 = format_event(&e2);
-+    assert!(s2.contains('●') && s2.contains("bash") && s2.contains("git status"));
-+
-+    let e3 = Event::Tool {
-+        name: "bash",
-+        input: "cargo test".to_string(),
-+        summary: "exit 101".to_string(),
-+        is_error: true,
-+    };
-+    let s3 = format_event(&e3);
-+    assert!(s3.contains('●') && s3.contains("cargo test"));
-+
-+    let e4 = Event::Gate {
-+        attempt: 1,
-+        passed: true,
-+        output: "ok",
-+    };
-+    let s4 = format_event(&e4);
-+    assert!(s4.contains("✓ Gate passed"));
-+
-+    let e5 = Event::Gate {
-+        attempt: 2,
-+        passed: false,
-+        output: "failed",
-+    };
-+    let s5 = format_event(&e5);
-+    assert!(s5.contains("✗ Gate failed"));
-+
-+    let e6 = Event::RolledBack { to: "abc1234" };
-+    let s6 = format_event(&e6);
-+    assert!(s6.contains("↺ Rolled back working tree to abc1234"));
-+}
-+
-+#[test]
-+fn test_prompt_submission() {
-+    let config = ReplConfig {
-+        repo_root: std::path::PathBuf::from("."),
-+        model: None,
-+        gate: None,
-+        context_strategy: "state-only".to_string(),
-+        container: None,
-+        max_turns: 60,
-+        max_gates: 5,
-+        rollback: true,
-+    };
-+    let mut session = ReplSession::new(&config);
-+    let mut out = Vec::new();
-+    let res = handle_repl_command(&mut session, "Fix the broken parser", &mut out).unwrap();
++    // 3. Validate state note action entry details.
++    let note_action = &st.runtime.actions[2];
++    assert_eq!(note_action.turn, 3);
++    assert_eq!(note_action.tool, "note");
++    assert_eq!(note_action.target, "patch (1 keys)");
 +    assert_eq!(
-+        res,
-+        ReplControl::SubmitPrompt("Fix the broken parser".to_string())
++        note_action.summary,
++        "recorded; your state now has 1 field(s)"
 +    );
++    assert!(!note_action.is_error);
++}
++
++#[test]
++fn test_rollback_appends_action_entry() {
++    // Verifies that when a verification gate fails with rollback enabled, an ActionEntry
++    // is recorded in state.runtime.actions documenting the rollback event and checkpoint target.
++    let d = repo();
++    // The verification command checks for existence of 'target.txt'.
++    // On the first gate attempt, target.txt is missing -> gate fails and rollback occurs.
++    // On the second attempt, the model writes target.txt -> gate passes.
++    let p = ScriptedProvider::new(vec![
++        calls("bash", json!({"command": "echo attempt1"})),
++        says("done with attempt 1"),
++        calls(
++            "write",
++            json!({"path": "target.txt", "content": "passed\n"}),
++        ),
++        says("done with attempt 2"),
++    ]);
++    let mut st = State::new("create target file", "test -f target.txt");
++    let (outcome, rep) = runner(&p, d.path(), &Conversational, true).run(&mut st);
++    assert_eq!(outcome, Outcome::Verified);
++    assert_eq!(rep.gate_attempts, 2);
++    assert_eq!(st.runtime.rollbacks, 1);
++
++    // Identify the rollback entry in the recorded action history.
++    let rollback_entry = st
++        .runtime
++        .actions
++        .iter()
++        .find(|a| a.tool == "rollback")
++        .expect("rollback action entry must be recorded in runtime.actions");
++
++    assert!(rollback_entry.target.starts_with("checkpoint "));
++    assert_eq!(
++        rollback_entry.summary,
++        "Gate failed; working tree reset to verified state"
++    );
++    assert!(rollback_entry.is_error);
 +}

@@ -1,618 +1,387 @@
-diff --git a/crates/superstate-cli/src/cli.rs b/crates/superstate-cli/src/cli.rs
-new file mode 100644
-index 0000000..8376136
---- /dev/null
-+++ b/crates/superstate-cli/src/cli.rs
-@@ -0,0 +1,140 @@
-+use clap::{Parser, Subcommand};
-+use std::path::PathBuf;
-+use crate::commands;
-+use crate::state_cli::StateCommands;
-+
-+#[derive(Parser, Debug, PartialEq)]
-+#[command(
-+    name = "superstate",
-+    version = "0.1.0",
-+    about = "Superstate: Autonomous agent harness with deterministic state and verification gates",
-+    args_conflicts_with_subcommands = true
-+)]
-+pub struct Cli {
-+    /// Direct task prompt to run in single-shot / headless mode
-+    #[arg(index = 1)]
-+    pub prompt: Option<String>,
-+
-+    /// Verification gate command (e.g. 'pytest', 'cargo test')
-+    #[arg(short, long)]
-+    pub gate: Option<String>,
-+
-+    /// Context strategy: 'state-only' (SKILL.state O(1) prompt) or 'conversational' (append-all chat)
-+    #[arg(
-+        long,
-+        default_value = "conversational",
-+        value_parser = ["state-only", "conversational"]
-+    )]
-+    pub context: String,
-+
-+    /// Model identifier or provider selection
-+    #[arg(short, long)]
-+    pub model: Option<String>,
-+
-+    /// Run inside an isolated container workspace instead of local host
-+    #[arg(long)]
-+    pub container: Option<String>,
-+
-+    /// Maximum turn budget
-+    #[arg(long, default_value = "25")]
-+    pub max_turns: usize,
-+
-+    /// Maximum verification gate attempts before failing
-+    #[arg(long, default_value = "5")]
-+    pub max_gates: usize,
-+
-+    /// Enable automatic rollback to baseline git commit if gate fails (disable with --rollback=false)
-+    #[arg(
-+        long,
-+        default_value_t = true,
-+        action = clap::ArgAction::Set,
-+        num_args = 0..=1,
-+        require_equals = true,
-+        default_missing_value = "true",
-+        value_parser = clap::builder::BoolishValueParser::new()
-+    )]
-+    pub rollback: bool,
-+
-+    #[command(subcommand)]
-+    pub command: Option<Commands>,
-+}
-+
-+#[derive(Subcommand, Debug, PartialEq)]
-+pub enum Commands {
-+    /// Run 5-step verification handshake and health check
-+    Doctor,
-+    /// Run stdio JSON-RPC MCP server
-+    Mcp,
-+    /// Adversarial code review over git diff
-+    Review {
-+        /// Git commit range (e.g. HEAD~1..HEAD). If omitted, inspects uncommitted diff in working tree
-+        commit_range: Option<String>,
-+        /// Repository root path
-+        #[arg(short, long, default_value = ".")]
-+        repo: PathBuf,
-+        /// Reviewer driver command (e.g. "agy --model gemini-3.8-flash-low" or "claude")
-+        #[arg(short, long)]
-+        driver: Option<String>,
-+        /// Path to .agent-state/state.json (auto-detected if omitted)
-+        #[arg(long)]
-+        state_path: Option<PathBuf>,
-+        /// Record critical/high findings into the state epistemic ledger
-+        #[arg(long)]
-+        record: bool,
-+        /// Output full ReviewReport JSON to stdout
-+        #[arg(long)]
-+        json: bool,
-+        /// Exit with code 1 if blocking issues are present
-+        #[arg(long)]
-+        fail_on_blocking: bool,
-+    },
-+    /// Initialize agent guidance (AGENTS.md, Cursor rules)
-+    Init {
-+        /// Destination directory
-+        #[arg(short, long, default_value = ".")]
-+        dest: PathBuf,
-+        /// Primary language
-+        #[arg(short, long, default_value = "rust")]
-+        language: String,
-+        /// Strictness profile
-+        #[arg(short, long, default_value = "balanced")]
-+        strictness: String,
-+    },
-+    /// State machine operations
-+    State {
-+        #[command(subcommand)]
-+        cmd: StateCommands,
-+    },
-+    /// Git worktree and COW cache operations
-+    Worktree {
-+        #[command(subcommand)]
-+        cmd: commands::worktree::WorktreeCommands,
-+    },
-+    /// Run autonomous background daemon over milestones
-+    Daemon(crate::state_cli::DaemonArgs),
-+    /// Cancel a running background daemon process
-+    Cancel(crate::state_cli::CancelArgs),
-+    /// Inspect background daemon logs
-+    Logs(crate::state_cli::LogsArgs),
-+    /// Prepare standardized cross-agent handoff package
-+    Handoff(crate::state_cli::HandoffArgs),
-+    /// Execute a shell command through the output shunting distillation layer
-+    Shunt {
-+        /// Line count threshold before shunting triggers
-+        #[arg(long, default_value = "50")]
-+        threshold_lines: usize,
-+        /// Directory where full unstripped command logs are stored
-+        #[arg(long)]
-+        logs_dir: Option<PathBuf>,
-+        /// Command and arguments to execute
-+        #[arg(trailing_var_arg = true, required = true)]
-+        cmd: Vec<String>,
-+    },
-+    /// Inspect AST symbols, outlines, and code slices
-+    Inspect(commands::inspect::InspectArgs),
-+    /// Intercept and evaluate agent tool invocations before execution
-+    Guard {
-+        #[command(subcommand)]
-+        cmd: commands::guard::GuardCommands,
-+    },
-+}
-diff --git a/crates/superstate-cli/src/commands/guard.rs b/crates/superstate-cli/src/commands/guard.rs
-index 98f9ada..7ee4104 100644
---- a/crates/superstate-cli/src/commands/guard.rs
-+++ b/crates/superstate-cli/src/commands/guard.rs
-@@ -16,7 +16,7 @@ use superstate_core::guard::{
- use superstate_core::read_cache::{self, CacheVerdict, ReadRecord};
- 
- /// Subcommands for the `superstate guard` namespace.
--#[derive(Subcommand, Debug, Clone)]
-+#[derive(Subcommand, Debug, Clone, PartialEq)]
- pub enum GuardCommands {
-     /// Evaluate file read operations against deterministic line boundaries
-     PreToolUse(PreToolUseArgs),
-@@ -25,7 +25,7 @@ pub enum GuardCommands {
+diff --git a/crates/superstate-agent/src/run.rs b/crates/superstate-agent/src/run.rs
+index 1b211bd..9fa21a4 100644
+--- a/crates/superstate-agent/src/run.rs
++++ b/crates/superstate-agent/src/run.rs
+@@ -318,3 +318,172 @@ impl<'a> Runner<'a> {
+         (Outcome::BudgetExhausted, report)
+     }
  }
- 
- /// Command-line arguments for `superstate guard pre-tool-use`.
--#[derive(Args, Debug, Clone)]
-+#[derive(Args, Debug, Clone, PartialEq)]
- pub struct PreToolUseArgs {
-     /// Maximum lines permitted before shunting to symbol outline
-     #[arg(long, default_value_t = superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES)]
-@@ -52,7 +52,7 @@ pub struct PreToolUseArgs {
- }
- 
- /// Command-line arguments for `superstate guard pre-command`.
--#[derive(Args, Debug, Clone)]
-+#[derive(Args, Debug, Clone, PartialEq)]
- pub struct PreCommandArgs {
-     /// Cooldown window in seconds before allowing repeated polling queries
-     #[arg(long, default_value_t = 30)]
-diff --git a/crates/superstate-cli/src/commands/inspect.rs b/crates/superstate-cli/src/commands/inspect.rs
-index ad9b8e5..4051743 100644
---- a/crates/superstate-cli/src/commands/inspect.rs
-+++ b/crates/superstate-cli/src/commands/inspect.rs
-@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
- use superstate_syntax::inspect::{extract_symbols_from_file, find_symbol, format_outline};
- use superstate_syntax::symbols::SyntaxError;
- 
--#[derive(Args, Debug, Clone)]
-+#[derive(Args, Debug, Clone, PartialEq)]
- pub struct InspectArgs {
-     /// Path to target source file to inspect
-     pub path: PathBuf,
-diff --git a/crates/superstate-cli/src/commands/worktree.rs b/crates/superstate-cli/src/commands/worktree.rs
-index d4ac366..53bde3a 100644
---- a/crates/superstate-cli/src/commands/worktree.rs
-+++ b/crates/superstate-cli/src/commands/worktree.rs
-@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
- use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
- use superstate_worktree::types::WorktreeConfig;
- 
--#[derive(Subcommand, Debug, Clone)]
-+#[derive(Subcommand, Debug, Clone, PartialEq)]
- pub enum WorktreeCommands {
-     /// Create a new isolated worktree
-     Create {
-diff --git a/crates/superstate-cli/src/lib.rs b/crates/superstate-cli/src/lib.rs
-index 857635a..939b276 100644
---- a/crates/superstate-cli/src/lib.rs
-+++ b/crates/superstate-cli/src/lib.rs
-@@ -1,2 +1,3 @@
-+pub mod cli;
- pub mod commands;
- pub mod state_cli;
-diff --git a/crates/superstate-cli/src/main.rs b/crates/superstate-cli/src/main.rs
-index 3fad91a..999405d 100644
---- a/crates/superstate-cli/src/main.rs
-+++ b/crates/superstate-cli/src/main.rs
-@@ -1,99 +1,7 @@
--use superstate_cli::commands;
--
--use clap::{Parser, Subcommand};
-+use clap::Parser;
- use std::path::PathBuf;
--use superstate_cli::state_cli::StateCommands;
--
--#[derive(Parser)]
--#[command(
--    name = "superstate",
--    version = "0.1.0",
--    about = "Superstate: Deterministic state engine, AST intelligence, zero-noise review & MCP server"
--)]
--struct Cli {
--    #[command(subcommand)]
--    command: Commands,
--}
--
--#[derive(Subcommand)]
--enum Commands {
--    /// Run 5-step verification handshake and health check
--    Doctor,
--    /// Run stdio JSON-RPC MCP server
--    Mcp,
--    /// Adversarial code review over git diff
--    Review {
--        /// Git commit range (e.g. HEAD~1..HEAD). If omitted, inspects uncommitted diff in working tree
--        commit_range: Option<String>,
--        /// Repository root path
--        #[arg(short, long, default_value = ".")]
--        repo: PathBuf,
--        /// Reviewer driver command (e.g. "agy --model gemini-3.8-flash-low" or "claude")
--        #[arg(short, long)]
--        driver: Option<String>,
--        /// Path to .agent-state/state.json (auto-detected if omitted)
--        #[arg(long)]
--        state_path: Option<PathBuf>,
--        /// Record critical/high findings into the state epistemic ledger
--        #[arg(long)]
--        record: bool,
--        /// Output full ReviewReport JSON to stdout
--        #[arg(long)]
--        json: bool,
--        /// Exit with code 1 if blocking issues are present
--        #[arg(long)]
--        fail_on_blocking: bool,
--    },
--    /// Initialize agent guidance (AGENTS.md, Cursor rules)
--    Init {
--        /// Destination directory
--        #[arg(short, long, default_value = ".")]
--        dest: PathBuf,
--        /// Primary language
--        #[arg(short, long, default_value = "rust")]
--        language: String,
--        /// Strictness profile
--        #[arg(short, long, default_value = "balanced")]
--        strictness: String,
--    },
--    /// State machine operations
--    State {
--        #[command(subcommand)]
--        cmd: StateCommands,
--    },
--    /// Git worktree and COW cache operations
--    Worktree {
--        #[command(subcommand)]
--        cmd: commands::worktree::WorktreeCommands,
--    },
--    /// Run autonomous background daemon over milestones
--    Daemon(superstate_cli::state_cli::DaemonArgs),
--    /// Cancel a running background daemon process
--    Cancel(superstate_cli::state_cli::CancelArgs),
--    /// Inspect background daemon logs
--    Logs(superstate_cli::state_cli::LogsArgs),
--    /// Prepare standardized cross-agent handoff package
--    Handoff(superstate_cli::state_cli::HandoffArgs),
--    /// Execute a shell command through the output shunting distillation layer
--    Shunt {
--        /// Line count threshold before shunting triggers
--        #[arg(long, default_value = "50")]
--        threshold_lines: usize,
--        /// Directory where full unstripped command logs are stored
--        #[arg(long)]
--        logs_dir: Option<PathBuf>,
--        /// Command and arguments to execute
--        #[arg(trailing_var_arg = true, required = true)]
--        cmd: Vec<String>,
--    },
--    /// Inspect AST symbols, outlines, and code slices
--    Inspect(commands::inspect::InspectArgs),
--    /// Intercept and evaluate agent tool invocations before execution
--    Guard {
--        #[command(subcommand)]
--        cmd: commands::guard::GuardCommands,
--    },
--}
-+use superstate_cli::cli::{Cli, Commands};
-+use superstate_cli::commands;
- 
- /// Restore the default SIGPIPE behaviour.
- ///
-@@ -114,9 +22,9 @@ fn main() {
-     let cli = Cli::parse();
- 
-     let result = match cli.command {
--        Commands::Doctor => commands::doctor::run_doctor(),
--        Commands::Mcp => superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string()),
--        Commands::Review {
-+        Some(Commands::Doctor) => commands::doctor::run_doctor(),
-+        Some(Commands::Mcp) => superstate_mcp::server::run_stdio_mcp_server().map_err(|e| e.to_string()),
-+        Some(Commands::Review {
-             commit_range,
-             repo,
-             driver,
-@@ -124,7 +32,7 @@ fn main() {
-             record,
-             json,
-             fail_on_blocking,
--        } => commands::review::cmd_review(commands::review::ReviewArgs {
-+        }) => commands::review::cmd_review(commands::review::ReviewArgs {
-             commit_range,
-             repo,
-             driver,
-@@ -133,14 +41,14 @@ fn main() {
-             json,
-             fail_on_blocking,
-         }),
--        Commands::Init {
-+        Some(Commands::Init {
-             dest,
-             language,
-             strictness,
--        } => commands::init::cmd_init_rules(&dest, &language, &strictness),
--        Commands::State { cmd } => superstate_cli::state_cli::dispatch(cmd),
--        Commands::Worktree { cmd } => commands::worktree::dispatch_worktree(cmd),
--        Commands::Daemon(args) => match args.command {
-+        }) => commands::init::cmd_init_rules(&dest, &language, &strictness),
-+        Some(Commands::State { cmd }) => superstate_cli::state_cli::dispatch(cmd),
-+        Some(Commands::Worktree { cmd }) => commands::worktree::dispatch_worktree(cmd),
-+        Some(Commands::Daemon(args)) => match args.command {
-             Some(superstate_cli::state_cli::DaemonSubcommands::List { repo, json }) => {
-                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                 let repo_root = repo.unwrap_or_else(|| {
-@@ -185,27 +93,35 @@ fn main() {
-                 args.impact_slicing,
-             ),
-         },
--        Commands::Cancel(args) => {
-+        Some(Commands::Cancel(args)) => {
-             commands::daemon::cmd_cancel(args.state.as_deref(), args.branch.as_deref(), args.all)
-         }
--        Commands::Logs(args) => {
-+        Some(Commands::Logs(args)) => {
-             commands::daemon::cmd_logs(args.state.as_deref(), args.branch.as_deref(), args.tail)
-                 .map(|_| ())
-         }
--        Commands::Handoff(args) => commands::handoff::cmd_handoff(&args),
--        Commands::Inspect(args) => commands::inspect::cmd_inspect(&args),
--        Commands::Guard { cmd } => commands::guard::dispatch_guard(cmd),
--        Commands::Shunt {
-+        Some(Commands::Handoff(args)) => commands::handoff::cmd_handoff(&args),
-+        Some(Commands::Inspect(args)) => commands::inspect::cmd_inspect(&args),
-+        Some(Commands::Guard { cmd }) => commands::guard::dispatch_guard(cmd),
-+        Some(Commands::Shunt {
-             threshold_lines,
-             logs_dir,
-             cmd,
--        } => match commands::shunt::execute_shunt(&cmd, threshold_lines, logs_dir) {
-+        }) => match commands::shunt::execute_shunt(&cmd, threshold_lines, logs_dir) {
-             Ok(code) => std::process::exit(code),
-             Err(e) => {
-                 eprintln!("Error: {}", e);
-                 std::process::exit(1);
-             }
-         },
-+        None => {
-+            if let Some(ref prompt) = cli.prompt {
-+                eprintln!("Running headless task: {prompt}");
-+            } else {
-+                eprintln!("Launching interactive REPL...");
++
++/// Extracts a concise, human-readable target descriptor from a tool call's arguments.
++///
++/// Deterministic and zero-latency: formats tool targets without LLM invocation to
++/// bound the prompt footprint in episodic action ledgers.
++///
++/// # Arguments
++/// * `tool` - The name of the tool invoked (e.g. "read", "bash", "write").
++/// * `args` - The JSON arguments supplied to the tool.
++///
++/// # Returns
++/// A compact string identifying the target file, command, or parameter.
++pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
++    // Discriminate on known tool types to extract their canonical target representations.
++    match tool {
++        "read" => {
++            // Extract the target file path and optionally the requested line range.
++            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                let start = args.get("start_line").and_then(|v| {
++                    v.as_u64()
++                        .map(|n| n.to_string())
++                        .or_else(|| v.as_str().map(|s| s.to_string()))
++                });
++                let end = args.get("end_line").and_then(|v| {
++                    v.as_u64()
++                        .map(|n| n.to_string())
++                        .or_else(|| v.as_str().map(|s| s.to_string()))
++                });
++                // When line bounds are specified, annotate the path with 1-indexed line boundaries.
++                if let (Some(s), Some(e)) = (start, end) {
++                    return format!("{path} (L{s}-L{e})");
++                }
++                return path.to_string();
 +            }
-+            Ok(())
 +        }
-     };
- 
-     if let Err(e) = result {
-diff --git a/crates/superstate-cli/src/state_cli.rs b/crates/superstate-cli/src/state_cli.rs
-index 9596395..778e8e1 100644
---- a/crates/superstate-cli/src/state_cli.rs
-+++ b/crates/superstate-cli/src/state_cli.rs
-@@ -13,7 +13,7 @@ use crate::commands;
- pub const DEFAULT_STATE: &str = ".agent-state/state.json";
- 
- /// Arguments for initializing state from a plan or direct goal.
--#[derive(clap::Args, Clone, Debug)]
-+#[derive(clap::Args, Clone, Debug, PartialEq)]
- pub struct InitArgs {
-     /// Path to plan markdown (`--from-plan` is accepted for reference parity)
-     #[arg(short, long, alias = "from-plan")]
-@@ -42,7 +42,7 @@ pub struct InitArgs {
- }
- 
- /// Arguments for listing branch-scoped states.
--#[derive(clap::Args, Clone, Debug, Default)]
-+#[derive(clap::Args, Clone, Debug, Default, PartialEq)]
- pub struct ListArgs {
-     /// Emit machine-readable JSON
-     #[arg(long)]
-@@ -89,7 +89,7 @@ impl InitArgs {
- }
- 
- /// Arguments for showing execution state in markdown or JSON format.
--#[derive(clap::Args, Clone, Debug)]
-+#[derive(clap::Args, Clone, Debug, PartialEq)]
- pub struct ShowArgs {
-     #[arg(short, long, default_value = DEFAULT_STATE)]
-     pub state: PathBuf,
-@@ -111,7 +111,7 @@ impl Default for ShowArgs {
-     }
- }
- 
--#[derive(Subcommand, Debug, Clone)]
-+#[derive(Subcommand, Debug, Clone, PartialEq)]
- pub enum StateCommands {
-     /// Initialize state from plan markdown or direct goal
-     Init(InitArgs),
-@@ -293,7 +293,7 @@ pub struct StateArgs {
-     pub command: StateCommands,
- }
- 
--#[derive(Subcommand, Debug, Clone)]
-+#[derive(Subcommand, Debug, Clone, PartialEq)]
- pub enum DaemonSubcommands {
-     /// List active and managed daemon processes
-     List {
-@@ -306,7 +306,7 @@ pub enum DaemonSubcommands {
-     },
- }
- 
--#[derive(clap::Args, Debug, Clone)]
-+#[derive(clap::Args, Debug, Clone, PartialEq)]
- pub struct DaemonArgs {
-     #[command(subcommand)]
-     pub command: Option<DaemonSubcommands>,
-@@ -443,7 +443,7 @@ impl DaemonArgs {
-     }
- }
- 
--#[derive(clap::Args, Debug, Clone)]
-+#[derive(clap::Args, Debug, Clone, PartialEq)]
- pub struct CancelArgs {
-     #[arg(short, long)]
-     pub state: Option<PathBuf>,
-@@ -455,7 +455,7 @@ pub struct CancelArgs {
-     pub all: bool,
- }
- 
--#[derive(clap::Args, Debug, Clone)]
-+#[derive(clap::Args, Debug, Clone, PartialEq)]
- pub struct LogsArgs {
-     #[arg(short, long)]
-     pub state: Option<PathBuf>,
-@@ -468,7 +468,7 @@ pub struct LogsArgs {
- }
- 
- /// Arguments for preparing a cross-agent handoff package.
--#[derive(clap::Args, Clone, Debug)]
-+#[derive(clap::Args, Clone, Debug, PartialEq)]
- pub struct HandoffArgs {
-     /// High-level goal statement
-     #[arg(long)]
-diff --git a/crates/superstate-cli/tests/test_cli_dispatch.rs b/crates/superstate-cli/tests/test_cli_dispatch.rs
++        "write" => {
++            // Extract the destination path and include byte size for visibility into write volume.
++            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
++                    return format!("{path} ({} bytes)", content.len());
++                }
++                return path.to_string();
++            }
++        }
++        "edit" => {
++            // Edit targets are identified primarily by the target file being modified.
++            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                return path.to_string();
++            }
++        }
++        "bash" => {
++            // Bash commands are bounded at 60 characters so long pipelines do not dominate context.
++            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
++                if cmd.chars().count() > 60 {
++                    let prefix: String = cmd.chars().take(57).collect();
++                    return format!("{prefix}...");
++                }
++                return cmd.to_string();
++            }
++        }
++        "glob" => {
++            // Glob targets are represented by the file search pattern.
++            if let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) {
++                return pattern.to_string();
++            }
++        }
++        "grep" => {
++            // Grep targets represent the regex pattern and, when restricted, the target subtree.
++            if let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) {
++                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                    if !path.is_empty() {
++                        return format!("pattern '{pattern}' in {path}");
++                    }
++                }
++                return format!("pattern '{pattern}'");
++            }
++        }
++        "note" => {
++            // Note patches are summarized by the number of state keys modified.
++            if let Some(patch) = args.get("patch").and_then(|v| v.as_object()) {
++                return format!("patch ({} keys)", patch.len());
++            }
++        }
++        _ => {}
++    }
++
++    // Fallback: extract the first string argument value found, or default to the tool name.
++    if let Some(obj) = args.as_object() {
++        for val in obj.values() {
++            if let Some(s) = val.as_str() {
++                return s.to_string();
++            }
++        }
++    }
++    tool.to_string()
++}
++
++/// Extracts a one-line deterministic outcome summary from a tool execution result.
++///
++/// # Arguments
++/// * `tool` - The name of the tool executed.
++/// * `content` - Raw string output produced by the tool.
++/// * `is_error` - Whether the tool execution resulted in an error status.
++///
++/// # Returns
++/// A single-line summary string describing the outcome.
++pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String {
++    // Produce deterministic, bounded status summaries per tool category.
++    match tool {
++        "read" => {
++            // Count lines returned to indicate the volume read without including full content.
++            let count = content.lines().count();
++            format!("{count} lines read")
++        }
++        "write" => {
++            // Static confirmation of file write completion.
++            "file written".to_string()
++        }
++        "edit" => {
++            // Distinguish successful replacements from rejection/failure reasons.
++            if is_error {
++                let first = content.lines().next().unwrap_or("edit failed");
++                let first = if first.is_empty() { "edit failed" } else { first };
++                format!("failed: {first}")
++            } else {
++                "string replaced".to_string()
++            }
++        }
++        "bash" => {
++            // Non-zero bash exits extract the terminal failure line to preserve diagnostics.
++            if !is_error {
++                "exit 0".to_string()
++            } else {
++                let last_line = content
++                    .lines()
++                    .rev()
++                    .find(|l| !l.trim().is_empty())
++                    .unwrap_or("command failed");
++                let clamped: String = last_line.chars().take(80).collect();
++                format!("failed: {clamped}")
++            }
++        }
++        "glob" => {
++            // Count matching file entries in the glob output.
++            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
++            format!("{count} files matched")
++        }
++        "grep" => {
++            // Count matching occurrences found in content search.
++            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
++            format!("{count} matches found")
++        }
++        "note" => {
++            // Surface the first line of the note confirmation message.
++            let first = content.lines().next().unwrap_or("recorded");
++            if first.is_empty() {
++                "recorded".to_string()
++            } else {
++                first.to_string()
++            }
++        }
++        _ => {
++            // Fallback for custom or unknown tools clamps the first line to 80 chars.
++            let first = content.lines().next().unwrap_or("");
++            first.chars().take(80).collect()
++        }
++    }
++}
++
+diff --git a/crates/superstate-agent/tests/test_action_extraction.rs b/crates/superstate-agent/tests/test_action_extraction.rs
 new file mode 100644
-index 0000000..ba2afaf
+index 0000000..a2fdba2
 --- /dev/null
-+++ b/crates/superstate-cli/tests/test_cli_dispatch.rs
-@@ -0,0 +1,124 @@
-+use clap::Parser;
-+use superstate_cli::cli::{Cli, Commands};
-+use superstate_cli::state_cli::{InitArgs, StateCommands};
-+use std::path::PathBuf;
++++ b/crates/superstate-agent/tests/test_action_extraction.rs
+@@ -0,0 +1,204 @@
++use serde_json::json;
++use superstate_agent::run::{extract_action_summary, extract_action_target};
 +
 +#[test]
-+fn test_parse_no_args_launches_interactive() {
-+    let cli = Cli::try_parse_from(["superstate"]).expect("should parse");
-+    assert_eq!(cli.prompt, None);
-+    assert_eq!(cli.command, None);
-+    assert_eq!(cli.context, "conversational");
-+    assert_eq!(cli.max_turns, 25);
-+    assert_eq!(cli.max_gates, 5);
-+    assert!(cli.rollback);
-+    assert_eq!(cli.model, None);
-+    assert_eq!(cli.container, None);
++fn test_read_target_and_summary() {
++    // 1. read: with and without line numbers
++    let target_no_lines = extract_action_target("read", &json!({"path": "src/main.rs"}));
++    assert_eq!(target_no_lines, "src/main.rs");
++
++    let target_with_lines = extract_action_target(
++        "read",
++        &json!({"path": "src/main.rs", "start_line": 10, "end_line": 25}),
++    );
++    assert_eq!(target_with_lines, "src/main.rs (L10-L25)");
++
++    // read summary: line count
++    let summary_lines =
++        extract_action_summary("read", "line 1\nline 2\nline 3\n", false);
++    assert_eq!(summary_lines, "3 lines read");
++
++    let summary_empty = extract_action_summary("read", "", false);
++    assert_eq!(summary_empty, "0 lines read");
 +}
 +
 +#[test]
-+fn test_parse_single_shot_prompt() {
-+    let cli = Cli::try_parse_from([
-+        "superstate",
-+        "fix issue",
-+        "--gate",
-+        "pytest",
-+        "--context",
-+        "state-only",
-+    ])
-+    .expect("should parse");
-+    assert_eq!(cli.prompt, Some("fix issue".to_string()));
-+    assert_eq!(cli.gate, Some("pytest".to_string()));
-+    assert_eq!(cli.context, "state-only");
-+    assert_eq!(cli.command, None);
++fn test_write_target_and_summary() {
++    // 2. write: target includes bytes, summary is "file written"
++    let target_with_content = extract_action_target(
++        "write",
++        &json!({"path": "config.json", "content": "hello world"}),
++    );
++    assert_eq!(target_with_content, "config.json (11 bytes)");
++
++    let target_missing_content =
++        extract_action_target("write", &json!({"path": "config.json"}));
++    assert_eq!(target_missing_content, "config.json");
++
++    let summary_ok = extract_action_summary("write", "wrote config.json", false);
++    assert_eq!(summary_ok, "file written");
++
++    let summary_err = extract_action_summary("write", "failed to write", true);
++    assert_eq!(summary_err, "file written");
 +}
 +
 +#[test]
-+fn test_parse_custom_execution_flags() {
-+    let cli = Cli::try_parse_from([
-+        "superstate",
-+        "solve bug",
-+        "--model",
-+        "gemini-2.5-pro",
-+        "--container",
-+        "docker-workspace",
-+        "--max-turns",
-+        "42",
-+        "--max-gates",
-+        "10",
-+        "--rollback",
-+    ])
-+    .expect("should parse");
-+    assert_eq!(cli.prompt.as_deref(), Some("solve bug"));
-+    assert_eq!(cli.model.as_deref(), Some("gemini-2.5-pro"));
-+    assert_eq!(cli.container.as_deref(), Some("docker-workspace"));
-+    assert_eq!(cli.max_turns, 42);
-+    assert_eq!(cli.max_gates, 10);
-+    assert!(cli.rollback);
++fn test_edit_target_and_summary() {
++    // 3. edit: success ("string replaced") and failure ("failed: string not found")
++    let target = extract_action_target(
++        "edit",
++        &json!({"path": "src/lib.rs", "old": "foo", "new": "bar"}),
++    );
++    assert_eq!(target, "src/lib.rs");
++
++    let summary_success = extract_action_summary("edit", "edited src/lib.rs", false);
++    assert_eq!(summary_success, "string replaced");
++
++    let summary_failure = extract_action_summary(
++        "edit",
++        "`old` not found in src/lib.rs. Read it first.\nStack trace...",
++        true,
++    );
++    assert_eq!(
++        summary_failure,
++        "failed: `old` not found in src/lib.rs. Read it first."
++    );
++
++    let summary_failure_empty = extract_action_summary("edit", "", true);
++    assert_eq!(summary_failure_empty, "failed: edit failed");
 +}
 +
 +#[test]
-+fn test_parse_rollback_disabled() {
-+    let cli_eq = Cli::try_parse_from(["superstate", "task", "--rollback=false"]).expect("should parse");
-+    assert!(!cli_eq.rollback);
++fn test_bash_target_and_summary() {
++    // 4. bash: short command and long command truncation (>60 chars); success ("exit 0") and failure (last non-empty line extracted)
++    let short_cmd = "cargo check";
++    let target_short = extract_action_target("bash", &json!({"command": short_cmd}));
++    assert_eq!(target_short, "cargo check");
 +
-+    let cli_preceding = Cli::try_parse_from(["superstate", "--rollback=false", "task"]).expect("should parse");
-+    assert!(!cli_preceding.rollback);
-+    assert_eq!(cli_preceding.prompt.as_deref(), Some("task"));
++    let exact_60 = "123456789012345678901234567890123456789012345678901234567890";
++    assert_eq!(exact_60.chars().count(), 60);
++    let target_60 = extract_action_target("bash", &json!({"command": exact_60}));
++    assert_eq!(target_60, exact_60);
 +
-+    let cli_true = Cli::try_parse_from(["superstate", "--rollback=true", "task"]).expect("should parse");
-+    assert!(cli_true.rollback);
-+    assert_eq!(cli_true.prompt.as_deref(), Some("task"));
++    let long_cmd = "cargo test --workspace --all-targets --all-features --no-fail-fast -- --nocapture";
++    assert!(long_cmd.chars().count() > 60);
++    let expected_truncated = format!("{}...", &long_cmd[..57]);
++    let target_long = extract_action_target("bash", &json!({"command": long_cmd}));
++    assert_eq!(target_long, expected_truncated);
 +
-+    let cli_flag_preceding = Cli::try_parse_from(["superstate", "--rollback", "task"]).expect("should parse");
-+    assert!(cli_flag_preceding.rollback);
-+    assert_eq!(cli_flag_preceding.prompt.as_deref(), Some("task"));
++    // Bash summary success
++    let summary_ok = extract_action_summary("bash", "exit 0\nEverything is fine", false);
++    assert_eq!(summary_ok, "exit 0");
++
++    // Bash summary failure
++    let summary_err = extract_action_summary(
++        "bash",
++        "exit 1\nthread 'main' panicked\nassertion failed: left == right\n\n",
++        true,
++    );
++    assert_eq!(summary_err, "failed: assertion failed: left == right");
++
++    // Bash summary failure clamped to 80 chars
++    let long_err_line = "x".repeat(100);
++    let summary_clamped = extract_action_summary(
++        "bash",
++        &format!("exit 1\n{long_err_line}"),
++        true,
++    );
++    assert_eq!(summary_clamped, format!("failed: {}", "x".repeat(80)));
++
++    let summary_err_empty = extract_action_summary("bash", "", true);
++    assert_eq!(summary_err_empty, "failed: command failed");
 +}
 +
 +#[test]
-+fn test_context_validation() {
-+    let cli = Cli::try_parse_from(["superstate", "task", "--context", "state-only"]).expect("should parse");
-+    assert_eq!(cli.context, "state-only");
++fn test_glob_target_and_summary() {
++    // 5. glob: file count matching
++    let target = extract_action_target("glob", &json!({"pattern": "**/*.rs"}));
++    assert_eq!(target, "**/*.rs");
 +
-+    let invalid = Cli::try_parse_from(["superstate", "task", "--context", "invalid-strategy"]);
-+    assert!(invalid.is_err(), "invalid context strategy must be rejected");
++    let summary = extract_action_summary(
++        "glob",
++        "src/lib.rs\nsrc/main.rs\nsrc/run.rs\n",
++        false,
++    );
++    assert_eq!(summary, "3 files matched");
++
++    let summary_empty = extract_action_summary("glob", "", false);
++    assert_eq!(summary_empty, "0 files matched");
 +}
 +
 +#[test]
-+fn test_parse_subcommand_doctor() {
-+    let cli = Cli::try_parse_from(["superstate", "doctor"]).expect("should parse");
-+    assert_eq!(cli.prompt, None);
-+    assert_eq!(cli.command, Some(Commands::Doctor));
++fn test_grep_target_and_summary() {
++    // 6. grep: pattern and path, match count
++    let target_with_path =
++        extract_action_target("grep", &json!({"pattern": "TODO", "path": "src"}));
++    assert_eq!(target_with_path, "pattern 'TODO' in src");
++
++    let target_without_path =
++        extract_action_target("grep", &json!({"pattern": "TODO"}));
++    assert_eq!(target_without_path, "pattern 'TODO'");
++
++    let summary = extract_action_summary(
++        "grep",
++        "src/lib.rs:1:TODO\nsrc/run.rs:10:TODO\n",
++        false,
++    );
++    assert_eq!(summary, "2 matches found");
++
++    let summary_empty = extract_action_summary("grep", "", false);
++    assert_eq!(summary_empty, "0 matches found");
 +}
 +
 +#[test]
-+fn test_parse_subcommand_mcp() {
-+    let cli = Cli::try_parse_from(["superstate", "mcp"]).expect("should parse");
-+    assert_eq!(cli.prompt, None);
-+    assert_eq!(cli.command, Some(Commands::Mcp));
++fn test_note_target_and_summary() {
++    // 7. note: key count, status string
++    let target = extract_action_target(
++        "note",
++        &json!({"patch": {"findings": "root cause", "fixed": true}}),
++    );
++    assert_eq!(target, "patch (2 keys)");
++
++    let target_empty = extract_action_target("note", &json!({"patch": {}}));
++    assert_eq!(target_empty, "patch (0 keys)");
++
++    let summary = extract_action_summary(
++        "note",
++        "recorded; your state now has 3 field(s)\nmore info",
++        false,
++    );
++    assert_eq!(summary, "recorded; your state now has 3 field(s)");
++
++    let summary_empty = extract_action_summary("note", "", false);
++    assert_eq!(summary_empty, "recorded");
 +}
 +
 +#[test]
-+fn test_parse_subcommand_state_init() {
-+    let cli = Cli::try_parse_from(["superstate", "state", "init", "--plan", "plan.md"]).expect("should parse");
-+    assert_eq!(cli.prompt, None);
-+    let expected = Commands::State {
-+        cmd: StateCommands::Init(InitArgs {
-+            plan: Some(PathBuf::from("plan.md")),
-+            state: PathBuf::from(".agent-state/state.json"),
-+            worktree: false,
-+            no_worktree: false,
-+            goal: None,
-+            verify_cmd: None,
-+            files: None,
-+            milestones: None,
-+        }),
-+    };
-+    assert_eq!(cli.command, Some(expected));
-+}
++fn test_fallback_target_and_summary() {
++    // Fallback target: first string argument value found or tool name
++    let target_string_arg =
++        extract_action_target("custom_tool", &json!({"query": "SELECT 1"}));
++    assert_eq!(target_string_arg, "SELECT 1");
 +
-+#[test]
-+fn test_prompt_conflicts_with_subcommand() {
-+    let result = Cli::try_parse_from(["superstate", "fix task", "doctor"]);
-+    assert!(result.is_err(), "prompt should conflict with subcommand");
++    let target_no_string_arg =
++        extract_action_target("custom_tool", &json!({"count": 42}));
++    assert_eq!(target_no_string_arg, "custom_tool");
++
++    let target_null_arg = extract_action_target("custom_tool", &json!(null));
++    assert_eq!(target_null_arg, "custom_tool");
++
++    // Fallback summary: first line clamped to 80 chars
++    let summary_first_line = extract_action_summary(
++        "custom_tool",
++        "first line of result\nsecond line",
++        false,
++    );
++    assert_eq!(summary_first_line, "first line of result");
++
++    let long_line = "a".repeat(120);
++    let summary_clamped = extract_action_summary("custom_tool", &long_line, false);
++    assert_eq!(summary_clamped, "a".repeat(80));
++
++    let summary_empty = extract_action_summary("custom_tool", "", false);
++    assert_eq!(summary_empty, "");
 +}

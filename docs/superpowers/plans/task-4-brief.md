@@ -1,95 +1,60 @@
-# Task 4: Headless Single-Shot Solver Integration in crates/superstate-cli
+# Task 4: Wire Context Assembly in StateOnly::build
 
-## Goal
-Implement headless single-shot solver integration in `crates/superstate-cli/src/task_runner.rs`, wire execution into `crates/superstate-cli/src/main.rs` (so `superstate "<prompt>"` runs headless, and `superstate` launches REPL), expose `task_runner` in `crates/superstate-cli/src/lib.rs`, and write unit / integration tests in `crates/superstate-cli/tests/test_task_runner.rs`.
+Working Directory: `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-## Working Directory
-`/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
+## What to Implement
 
-## Files
-- Create: `crates/superstate-cli/src/task_runner.rs`
-- Modify: `crates/superstate-cli/src/lib.rs` (add `pub mod task_runner;`)
-- Modify: `crates/superstate-cli/src/main.rs` (wire `task_runner::run_task` when `prompt` is provided, and `repl::run_repl` when no prompt/subcommand)
-- Modify: `crates/superstate-cli/src/repl.rs` (wire prompt submission in REPL loop to execute via `task_runner` when provider is available)
-- Create: `crates/superstate-cli/tests/test_task_runner.rs`
+In `crates/superstate-agent/src/context.rs`:
+Update `StateOnly::build` (lines 53-81) to format `state.runtime.actions` into the first user message when actions are present:
 
-## Detailed Implementation Steps
-1. Create `crates/superstate-cli/src/task_runner.rs`:
-   - `TaskConfig`:
-     ```rust
-     #[derive(Debug, Clone)]
-     pub struct TaskConfig {
-         pub prompt: String,
-         pub gate: Option<String>,
-         pub context_strategy: String,
-         pub model: Option<String>,
-         pub container: Option<String>,
-         pub max_turns: usize,
-         pub max_gates: usize,
-         pub rollback: bool,
-         pub root: std::path::PathBuf,
-     }
+1. **Format Action Ledger**:
+   - If `state.runtime.actions.is_empty()`, do NOT add the `## Actions Taken So Far` section. The user prompt remains:
+     ```markdown
+     ## Task
+     {goal}
+
+     ## Your state
+     {json_agent_fields}
      ```
-   - Implement `From<&crate::cli::Cli> for TaskConfig`.
-   - `run_task(config: TaskConfig) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String>`:
-     - Check `Gemini::from_env()`. If missing API key, return a clear error: `Provider error: no API key: set GEMINI_API_KEY (or GOOGLE_API_KEY)`.
-     - Select context strategy: `"state-only"` => `superstate_agent::context::StateOnly`, else `superstate_agent::context::Conversational`.
-     - Select shell: if `let Some(cid) = config.container`, `superstate_agent::shell::ContainerShell { container_id: cid, workdir: std::path::PathBuf::from("/workspace") }`, else `superstate_agent::shell::LocalShell`.
-     - Initialize `state = superstate_agent::state::State::new(&config.prompt, config.gate.as_deref().unwrap_or(""))`.
-     - Event logger: uses `crate::repl::format_event(&event)` to print progress as it happens.
-     - Build `Runner` and call `runner.run(&mut state)`.
-     - Return `(outcome, report)`.
-2. Update `crates/superstate-cli/src/main.rs`:
-   - When `cli.command` is `None`:
-     - If `let Some(ref prompt) = cli.prompt`:
-       - If prompt is not empty:
-         ```rust
-         let config = superstate_cli::task_runner::TaskConfig::from(&cli);
-         match superstate_cli::task_runner::run_task(config) {
-             Ok((superstate_agent::run::Outcome::Verified, report)) => {
-                 println!("Task verified in {} turns (usage: {:?})", report.outcome_turns, report.usage);
-                 std::process::exit(0);
-             }
-             Ok((outcome, report)) => {
-                 eprintln!("Task finished with outcome: {outcome:?} in {} turns", report.outcome_turns);
-                 std::process::exit(1);
-             }
-             Err(err) => {
-                 eprintln!("Error executing task: {err}");
-                 std::process::exit(1);
-             }
-         }
-         ```
-     - Else:
-       - Run interactive REPL:
-         ```rust
-         let repl_config = superstate_cli::repl::ReplConfig {
-             repo_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-             model: cli.model,
-             gate: cli.gate,
-             context_strategy: cli.context,
-             container: cli.container,
-             max_turns: cli.max_turns,
-             max_gates: cli.max_gates,
-             rollback: cli.rollback,
-         };
-         if let Err(e) = superstate_cli::repl::run_repl(repl_config) {
-             eprintln!("REPL error: {e}");
-             std::process::exit(1);
-         }
-         ```
-3. Update `crates/superstate-cli/src/repl.rs`:
-   - In `run_repl_stream`: when `ReplControl::SubmitPrompt(prompt)` is returned, invoke `task_runner::run_task` or print execution notice/result using the session configuration.
-4. Add tests in `crates/superstate-cli/tests/test_task_runner.rs`:
-   - `test_task_config_from_cli`: asserts mapping from `Cli` to `TaskConfig` preserves all flags and defaults.
-   - `test_run_task_missing_api_key_returns_clear_error`: unsets `GEMINI_API_KEY` and `GOOGLE_API_KEY`, runs `run_task`, and asserts error message explicitly mentions `GEMINI_API_KEY`.
-5. Verify:
-   `cargo test -p superstate --test test_task_runner`
-   `cargo check --workspace --all-targets`
-6. Commit:
-   ```bash
-   git add crates/superstate-cli/src/task_runner.rs crates/superstate-cli/src/lib.rs crates/superstate-cli/src/main.rs crates/superstate-cli/src/repl.rs crates/superstate-cli/tests/test_task_runner.rs
-   git commit --no-gpg-sign -m "feat(cli): integrate headless single-shot solver and wire REPL prompt dispatch"
-   ```
+   - If `!state.runtime.actions.is_empty()`, append:
+     ```markdown
+
+     ## Actions Taken So Far
+     - Turn {turn}: `{tool}` `{target}` -> {summary}
+     ```
+     For each `action` in `state.runtime.actions`.
+
+2. **Invariant II Preservation**:
+   - `out` must continue to have `messages.len() <= 3` (one `Message::User`, plus at most one previous `Message::ToolCall` and `Message::ToolResult`, or just the single user message on initial turn).
+
+---
+
+## Testing Requirements (TDD)
+
+In `crates/superstate-agent/tests/test_run.rs` (or a dedicated test):
+1. `test_state_only_context_omits_actions_when_empty`:
+   - Initialize `state` with no actions.
+   - Call `StateOnly.build(&state, &history)`.
+   - Verify `Message::User` string does NOT contain `"## Actions Taken So Far"`.
+2. `test_state_only_context_formats_action_ledger`:
+   - Initialize `state`, push `ActionEntry` elements to `state.runtime.actions`.
+   - Call `StateOnly.build(&state, &history)`.
+   - Verify `Message::User` string contains `"## Actions Taken So Far"`.
+   - Verify each action is formatted as `- Turn {turn}: \`{tool}\` \`{target}\` -> {summary}`.
+   - Verify `messages.len() <= 3`.
+3. `test_state_only_runner_injects_action_ledger_in_prompts`:
+   - Run a `Runner` with `StateOnly` context strategy and a multi-step `ScriptedProvider`.
+   - Inspect `p.seen` after turn 1.
+   - Verify that in turn 2's request, the initial `Message::User` contains the action taken in turn 1.
+
+---
+
+## Execution Steps
+1. Write the tests in `crates/superstate-agent/tests/test_run.rs`.
+2. Run `cargo test -p superstate-agent --test test_run` to observe failures (RED phase).
+3. Implement action ledger formatting in `crates/superstate-agent/src/context.rs` (GREEN phase).
+4. Run `cargo test -p superstate-agent --test test_run` and verify all tests pass.
+5. Verify `cargo check -p superstate-agent` and `cargo clippy -p superstate-agent --all-targets -- -D warnings`.
+6. Commit: `git add crates/superstate-agent/src/context.rs crates/superstate-agent/tests/test_run.rs && git commit --no-gpg-sign -m "feat(agent): format action ledger into StateOnly prompt context"`
 7. Run `roborev status; roborev show HEAD`.
-8. Write report to `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness/docs/superpowers/plans/task-4-report.md`.
+8. Write completion report to `docs/superpowers/plans/task-4-report.md`.
