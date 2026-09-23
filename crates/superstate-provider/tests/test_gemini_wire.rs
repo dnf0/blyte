@@ -172,3 +172,79 @@ fn a_candidateless_response_is_an_error_not_a_silent_empty() {
         "a response with no candidates must surface, not parse to empty"
     );
 }
+
+#[test]
+fn effort_suffix_becomes_thinking_level_and_leaves_the_model_id() {
+    use superstate_provider::Provider;
+    let g = gemini().with_model("gemini-3.8-flash-high");
+    assert_eq!(g.model_id(), "gemini/gemini-3.8-flash");
+    assert_eq!(g.thinking_level(), Some("high"));
+    let b = g.body(&Request {
+        messages: vec![Message::User("hi".into())],
+        ..Default::default()
+    });
+    assert_eq!(
+        b["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high"
+    );
+}
+
+#[test]
+fn a_bare_model_sends_no_generation_config() {
+    let g = gemini().with_model("gemini-3.8-flash");
+    assert_eq!(g.thinking_level(), None);
+    let b = g.body(&Request {
+        messages: vec![Message::User("hi".into())],
+        ..Default::default()
+    });
+    assert!(b.get("generationConfig").is_none());
+}
+
+#[test]
+fn unsupported_effort_suffixes_stay_in_the_model_id() {
+    // -xhigh and -max have no Gemini equivalent. They must reach the API and fail loudly,
+    // never run at a silently different effort.
+    use superstate_provider::Provider;
+    for m in ["gemini-3.8-flash-xhigh", "gemini-3.8-flash-max"] {
+        let g = gemini().with_model(m);
+        assert_eq!(g.model_id(), format!("gemini/{m}"));
+        assert_eq!(g.thinking_level(), None);
+    }
+}
+
+#[test]
+fn thinking_level_and_max_output_tokens_coexist() {
+    let g = gemini().with_model("gemini-3.8-flash-low");
+    let b = g.body(&Request {
+        messages: vec![Message::User("hi".into())],
+        max_output_tokens: Some(1024),
+        ..Default::default()
+    });
+    assert_eq!(b["generationConfig"]["maxOutputTokens"], 1024);
+    assert_eq!(
+        b["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "low"
+    );
+}
+
+#[test]
+fn split_effort_handles_each_supported_level() {
+    use superstate_provider::gemini::split_effort;
+    assert_eq!(
+        split_effort("gemini-3.8-flash-low"),
+        ("gemini-3.8-flash".to_string(), Some("low".to_string()))
+    );
+    assert_eq!(
+        split_effort("gemini-3.8-flash-medium"),
+        ("gemini-3.8-flash".to_string(), Some("medium".to_string()))
+    );
+    assert_eq!(
+        split_effort("gemini-3.8-flash-high"),
+        ("gemini-3.8-flash".to_string(), Some("high".to_string()))
+    );
+    assert_eq!(
+        split_effort("gemini-3.8-flash"),
+        ("gemini-3.8-flash".to_string(), None)
+    );
+    assert_eq!(split_effort("-high"), ("-high".to_string(), None));
+}
