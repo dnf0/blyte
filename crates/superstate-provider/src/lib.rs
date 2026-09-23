@@ -18,6 +18,7 @@
 //! carrying the whole conversation (FINDINGS 13.29). A blocking client makes that failure mode
 //! unrepresentable.
 
+pub mod anthropic;
 pub mod gemini;
 
 use serde::{Deserialize, Serialize};
