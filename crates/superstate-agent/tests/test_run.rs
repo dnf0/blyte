@@ -1486,5 +1486,34 @@ fn test_loop_breaker_allows_subslice_on_distilled_bounded_snippet() {
     assert!(content2.contains("line 150"));
 }
 
+#[test]
+fn test_target_matches_path_edge_cases() {
+    use superstate_agent::run::target_matches_path;
+
+    // Normal paths and prefixes
+    assert!(target_matches_path("foo.rs", "foo.rs"));
+    assert!(target_matches_path("./foo.rs", "foo.rs"));
+
+    // Line range annotations
+    assert!(target_matches_path("foo.rs (L1-L20)", "foo.rs"));
+    assert!(target_matches_path("foo.rs (L5+)", "foo.rs"));
+    assert!(target_matches_path("foo.rs (L1)", "foo.rs"));
+
+    // Paths containing parentheses and " (L"
+    assert!(target_matches_path("model (L)", "model (L)"));
+    assert!(target_matches_path("file (L✓)", "file (L✓)"));
+    assert!(target_matches_path("test (L1).rs (L1-L2)", "test (L1).rs"));
+    assert!(target_matches_path("data (Large).json", "data (Large).json"));
+
+    // Byte annotations
+    assert!(target_matches_path(
+        "data (Large).json (26 bytes)",
+        "data (Large).json"
+    ));
+    assert!(target_matches_path("data (sample bytes)", "data (sample bytes)"));
+    assert!(!target_matches_path("data (sample bytes)", "data"));
+}
+
+
 
 

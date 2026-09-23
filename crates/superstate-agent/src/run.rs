@@ -457,17 +457,23 @@ pub fn target_matches_path(target: &str, path: &str) -> bool {
     let mut raw = target;
     if target.ends_with(" bytes)") {
         if let Some(idx) = target.rfind(" (") {
-            raw = &target[..idx];
+            let byte_str = &target[idx + 2..target.len() - 7];
+            if !byte_str.is_empty() && byte_str.chars().all(|c| c.is_ascii_digit()) {
+                raw = &target[..idx];
+            }
         }
     } else if target.ends_with(')') {
         if let Some(idx) = target.rfind(" (L") {
-            let inside = &target[idx + 4..target.len() - 1];
-            if !inside.is_empty()
-                && inside
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '-' || c == '+' || c == 'L')
-            {
-                raw = &target[..idx];
+            // " (L" is 3 bytes, closing ')' is 1 byte at target.len() - 1
+            if target.len() >= idx + 5 {
+                let inside = &target[idx + 3..target.len() - 1];
+                if inside.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && inside
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == '-' || c == '+' || c == 'L')
+                {
+                    raw = &target[..idx];
+                }
             }
         }
     }
