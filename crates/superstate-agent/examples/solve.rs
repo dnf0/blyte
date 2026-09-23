@@ -90,8 +90,10 @@ fn main() {
         budget: Budget {
             max_turns: 20,
             max_gate_attempts: 4,
+            max_duration: None,
         },
         rollback: true,
+        loop_breaker: true,
         on_event: Some(&log),
     };
 

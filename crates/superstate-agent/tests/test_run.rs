@@ -99,8 +99,10 @@ fn runner<'a>(
         budget: Budget {
             max_turns: 12,
             max_gate_attempts: 3,
+            max_duration: None,
         },
         rollback,
+        loop_breaker: true,
         on_event: None,
     }
 }
@@ -326,6 +328,7 @@ fn a_provider_error_is_reported_as_an_error_not_as_failed_work() {
         root: d.path().to_path_buf(),
         budget: Budget::default(),
         rollback: false,
+        loop_breaker: true,
         on_event: None,
     };
     let (outcome, _) = r.run(&mut st);
@@ -1209,9 +1212,10 @@ fn test_loop_breaker_resets_on_write() {
 }
 
 #[test]
-fn test_loop_breaker_remains_intercepted_on_consecutive_attempts() {
-    // Verifies that consecutive read attempts on the same cached path remain
-    // intercepted, rather than alternating back to disk execution.
+fn test_loop_breaker_serves_an_insisted_repeat() {
+    // The second read is intercepted; the third repeats it verbatim and is served. Insisting
+    // wins: refusing an identical request again only spends the turn budget, which is how
+    // 90% insist rates turned the perimeter read cache into a regression (FINDINGS 13.25).
     let d = repo();
     std::fs::write(d.path().join("lru.py"), "def cache(): return 1\n").unwrap();
 
@@ -1239,7 +1243,8 @@ fn test_loop_breaker_remains_intercepted_on_consecutive_attempts() {
         panic!("expected ToolResult at index 6");
     };
     assert!(content2.contains("[Harness Working Memory Guard]"));
-    assert!(content3.contains("[Harness Working Memory Guard]"));
+    assert!(!content3.contains("[Harness Working Memory Guard]"));
+    assert!(content3.contains("return 1"));
 }
 
 #[test]

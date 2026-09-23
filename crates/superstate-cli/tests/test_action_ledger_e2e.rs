@@ -200,8 +200,10 @@ fn test_repl_session_records_actions_across_turns() {
         budget: Budget {
             max_turns: 10,
             max_gate_attempts: 3,
+            max_duration: None,
         },
         rollback: true,
+        loop_breaker: true,
         on_event: None,
     };
 
@@ -271,8 +273,10 @@ fn test_state_only_invariant_preservation_e2e() {
         budget: Budget {
             max_turns: 12,
             max_gate_attempts: 2,
+            max_duration: None,
         },
         rollback: false,
+        loop_breaker: true,
         on_event: None,
     };
 
