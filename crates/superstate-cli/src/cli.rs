@@ -19,11 +19,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub gate: Option<String>,
 
-    /// Context strategy: 'state-only' (O(1) prompt, latest result only), 'state-window' (O(1) prompt plus the last 8 results) or 'conversational' (append-all chat)
+    /// Context strategy: 'state-only' (O(1) prompt, latest result only), 'state-window' (O(1) prompt plus the last 8 results) or 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
     #[arg(
         long,
         default_value = "conversational",
-        value_parser = ["state-only", "state-window", "conversational"]
+        value_parser = ["state-only", "state-window", "conversational", "folded"]
     )]
     pub context: String,
 

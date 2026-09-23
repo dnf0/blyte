@@ -223,3 +223,121 @@ impl ContextStrategy for StateWindow {
         "state-window"
     }
 }
+
+/// An append-only conversation, bounded by folding.
+///
+/// `Conversational` keeps everything, which is what Gemini expects ("You MUST always resend all
+/// `thought` blocks exactly as they were received") and what caches well, but it grows without
+/// limit. The bounded strategies rebuild the prompt every turn, which drops thought signatures,
+/// caches badly, and in every eval run lost the thread (superstate-eval FINDINGS 13.33-13.35).
+///
+/// `Folded` sends `[opening] [digest 1] … [digest k] [verbatim tail]`. Once the verbatim part
+/// passes `budget_tokens`, its older half becomes one harness-written digest. Boundaries are
+/// computed greedily from the start of history, so each depends only on the messages before it:
+/// the next turn reproduces every earlier fold exactly, and between folds the output is pure
+/// append. A cut never separates a tool call from its result.
+#[derive(Debug, Clone)]
+pub struct Folded {
+    /// Approximate token budget (characters / 4) for the verbatim tail.
+    pub budget_tokens: usize,
+}
+
+impl Default for Folded {
+    fn default() -> Self {
+        Self {
+            budget_tokens: 48_000,
+        }
+    }
+}
+
+/// Characters / 4: a budget, not a billing figure.
+fn approx_tokens(m: &Message) -> usize {
+    let chars = match m {
+        Message::User(t) | Message::Assistant(t) => t.len(),
+        Message::ToolCall { arguments, .. } => arguments.to_string().len(),
+        Message::ToolResult { content, .. } => content.len(),
+    };
+    chars / 4
+}
+
+fn clip(text: &str, max: usize) -> String {
+    let one_line = text.lines().next().unwrap_or("").trim();
+    if one_line.chars().count() > max {
+        format!("{}...", one_line.chars().take(max).collect::<String>())
+    } else {
+        one_line.to_string()
+    }
+}
+
+/// One harness-written line per folded item, from the same summarisers as the action ledger.
+fn digest(folded: &[Message], first: usize, last: usize) -> Message {
+    let mut text =
+        format!("## Earlier turns, folded (messages {first}-{last}; summarised by the harness)\n");
+    let mut i = 0;
+    while i < folded.len() {
+        match &folded[i] {
+            Message::ToolCall {
+                name, arguments, ..
+            } => {
+                let target = crate::run::extract_action_target(name, arguments);
+                let summary = match folded.get(i + 1) {
+                    Some(Message::ToolResult {
+                        content, is_error, ..
+                    }) => {
+                        i += 1;
+                        crate::run::extract_action_summary(name, content, *is_error)
+                    }
+                    _ => "no result".to_string(),
+                };
+                text.push_str(&format!("- `{name}` `{target}` -> {summary}\n"));
+            }
+            Message::Assistant(t) => text.push_str(&format!("- you said: {}\n", clip(t, 160))),
+            Message::User(t) => text.push_str(&format!("- harness: {}\n", clip(t, 160))),
+            Message::ToolResult { .. } => {}
+        }
+        i += 1;
+    }
+    Message::User(text)
+}
+
+impl ContextStrategy for Folded {
+    fn build(&self, _state: &State, history: &[Message]) -> Vec<Message> {
+        let Some((opening, rest)) = history.split_first() else {
+            return Vec::new();
+        };
+
+        // Greedy boundaries from the start: each fold depends only on messages before it.
+        let mut folds: Vec<(usize, usize)> = Vec::new();
+        let mut seg_start = 0;
+        let mut size = 0;
+        for i in 0..rest.len() {
+            size += approx_tokens(&rest[i]);
+            if size <= self.budget_tokens {
+                continue;
+            }
+            // Fold roughly the older half, cutting before a message that is not a result, so a
+            // call is never separated from its result. No safe cut yet: keep accumulating.
+            let target = seg_start + (i + 1 - seg_start) / 2;
+            let lo = target.max(seg_start + 1);
+            let Some(cut) = (lo..=i).find(|&j| !matches!(rest[j], Message::ToolResult { .. }))
+            else {
+                continue;
+            };
+            folds.push((seg_start, cut));
+            size = rest[cut..=i].iter().map(approx_tokens).sum();
+            seg_start = cut;
+        }
+
+        let mut out = vec![opening.clone()];
+        for (a, b) in folds {
+            // Message numbers are 1-based positions in the full history.
+            out.push(digest(&rest[a..b], a + 2, b + 1));
+        }
+        out.extend_from_slice(&rest[seg_start..]);
+        out
+    }
+
+    fn name(&self) -> &'static str {
+        "folded"
+    }
+}
