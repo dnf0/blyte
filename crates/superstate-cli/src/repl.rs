@@ -569,6 +569,10 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     max_gates: session.max_gates,
                     rollback: session.rollback,
                     root: session.repo_root.clone(),
+                    loop_breaker: true,
+                    container_workdir: "/workspace".into(),
+                    max_seconds: None,
+                    report: None,
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer

@@ -55,6 +55,22 @@ pub struct Cli {
     )]
     pub rollback: bool,
 
+    /// Disable the loop-breaker guards (redundant read / inspection interception). Ablation control
+    #[arg(long)]
+    pub no_loop_breaker: bool,
+
+    /// Working directory inside the container when --container is set
+    #[arg(long, default_value = "/workspace")]
+    pub container_workdir: String,
+
+    /// Wall-clock budget in seconds; the run stops itself and reports when it is spent
+    #[arg(long)]
+    pub max_seconds: Option<u64>,
+
+    /// Write a JSON run report to this path when the headless run exits
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

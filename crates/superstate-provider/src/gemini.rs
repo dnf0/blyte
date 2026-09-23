@@ -28,9 +28,31 @@ const CONNECT_TIMEOUT_SECS: u64 = 20;
 const READ_TIMEOUT_SECS: u64 = 300;
 const API_ROOT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
+/// agy's effort suffixes that map onto Gemini's `thinkingLevel`. `-xhigh` and `-max` are
+/// deliberately absent: they have no Gemini equivalent, so they stay in the model id and the
+/// API rejects the request instead of running at a silently different effort.
+const EFFORT_LEVELS: [&str; 3] = ["low", "medium", "high"];
+
+/// Split `gemini-3.8-flash-high` into `("gemini-3.8-flash", Some("high"))`.
+///
+/// The eval pins every driver to one model string, agy's, which carries the effort as a
+/// suffix. Sending that string to the API verbatim either fails or silently drops the effort --
+/// the "`--model` not pinned" parity defect in another form.
+pub fn split_effort(model: &str) -> (String, Option<String>) {
+    for level in EFFORT_LEVELS {
+        if let Some(base) = model.strip_suffix(&format!("-{level}")) {
+            if !base.is_empty() {
+                return (base.to_string(), Some(level.to_string()));
+            }
+        }
+    }
+    (model.to_string(), None)
+}
+
 pub struct Gemini {
     api_key: String,
     model: String,
+    thinking_level: Option<String>,
 }
 
 impl Gemini {
@@ -39,15 +61,26 @@ impl Gemini {
         let api_key = std::env::var("GEMINI_API_KEY")
             .or_else(|_| std::env::var("GOOGLE_API_KEY"))
             .map_err(|_| ProviderError::MissingKey("GEMINI_API_KEY"))?;
+        let (model, thinking_level) = split_effort(
+            &std::env::var("SUPERSTATE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
+        );
         Ok(Self {
             api_key,
-            model: std::env::var("SUPERSTATE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
+            model,
+            thinking_level,
         })
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = model.into();
+        let (model, thinking_level) = split_effort(&model.into());
+        self.model = model;
+        self.thinking_level = thinking_level;
         self
+    }
+
+    /// The `thinkingLevel` sent with every request, if the model string carried an effort.
+    pub fn thinking_level(&self) -> Option<&str> {
+        self.thinking_level.as_deref()
     }
 
     /// Build the request body. Separated from the HTTP call so the wire shape is testable
@@ -112,8 +145,15 @@ impl Gemini {
                 .collect();
             body["tools"] = json!([{ "functionDeclarations": decls }]);
         }
+        let mut generation = serde_json::Map::new();
         if let Some(max) = req.max_output_tokens {
-            body["generationConfig"] = json!({"maxOutputTokens": max});
+            generation.insert("maxOutputTokens".into(), json!(max));
+        }
+        if let Some(level) = &self.thinking_level {
+            generation.insert("thinkingConfig".into(), json!({"thinkingLevel": level}));
+        }
+        if !generation.is_empty() {
+            body["generationConfig"] = Value::Object(generation);
         }
         body
     }

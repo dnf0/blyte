@@ -47,6 +47,9 @@ pub enum Outcome {
 pub struct Budget {
     pub max_turns: u32,
     pub max_gate_attempts: u32,
+    /// Wall-clock limit, checked before each turn. The harness stops itself and reports, rather
+    /// than being killed from outside with its telemetry lost (FINDINGS 13.5).
+    pub max_duration: Option<Duration>,
 }
 
 impl Default for Budget {
@@ -54,6 +57,7 @@ impl Default for Budget {
         Self {
             max_turns: 60,
             max_gate_attempts: 5,
+            max_duration: None,
         }
     }
 }
@@ -107,6 +111,10 @@ pub struct Runner<'a> {
     pub budget: Budget,
     /// Reset the tree to the checkpoint when the gate fails. Invariant III; default on.
     pub rollback: bool,
+    /// Run the loop-breaker guards (redundant read and inspection interception). Default on;
+    /// off is the ablation control, because a guard that changes what the worker sees must be
+    /// measured, not assumed (FINDINGS 13.25).
+    pub loop_breaker: bool,
     /// Called as the run proceeds. Default is silent.
     pub on_event: Option<&'a dyn Fn(Event<'_>)>,
 }
@@ -186,8 +194,14 @@ impl<'a> Runner<'a> {
         let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
+        let started = std::time::Instant::now();
 
         for turn in 1..=self.budget.max_turns {
+            if let Some(limit) = self.budget.max_duration {
+                if started.elapsed() >= limit {
+                    return (Outcome::BudgetExhausted, report);
+                }
+            }
             report.outcome_turns = turn;
 
             let req = Request {
@@ -227,25 +241,37 @@ impl<'a> Runner<'a> {
                         signature: call.signature.clone(),
                     });
 
+                    let guards_on = self.loop_breaker && !is_insist(call, &state.runtime.actions);
+
                     // Intercept redundant file reads and redundant read-only inspections before execution
                     // using the loop-breaker guard.
                     // Also `note` is the loop's, not the tool layer's: it mutates state, and only
                     // the agent region can be reached from here.
-                    let outcome = if let Some(guard_msg) = should_intercept_redundant_read(
-                        call,
-                        &state.runtime.working_set,
-                        &state.runtime.actions,
-                    ) {
+                    let outcome = if let Some(guard_msg) = guards_on
+                        .then(|| {
+                            should_intercept_redundant_read(
+                                call,
+                                &state.runtime.working_set,
+                                &state.runtime.actions,
+                            )
+                        })
+                        .flatten()
+                    {
                         crate::tools::ToolOutcome {
                             content: guard_msg,
                             is_error: false,
                         }
-                    } else if let Some(guard_msg) = should_intercept_redundant_bash(
-                        call,
-                        &state.runtime.actions,
-                        &state.runtime.working_set,
-                        &state.orchestrator.verification_cmd,
-                    ) {
+                    } else if let Some(guard_msg) = guards_on
+                        .then(|| {
+                            should_intercept_redundant_bash(
+                                call,
+                                &state.runtime.actions,
+                                &state.runtime.working_set,
+                                &state.orchestrator.verification_cmd,
+                            )
+                        })
+                        .flatten()
+                    {
                         crate::tools::ToolOutcome {
                             content: guard_msg,
                             is_error: false,
@@ -488,6 +514,17 @@ pub fn target_matches_path(target: &str, path: &str) -> bool {
         }
     }
     normalize_path(raw) == path || target == path
+}
+
+/// True when `call` repeats, verbatim, a call the loop-breaker intercepted on the immediately
+/// preceding action. Insisting wins: a worker that re-issues a refused request has decided it
+/// needs it, and refusing again only spends the turn budget (FINDINGS 13.22, 13.25).
+pub fn is_insist(call: &ToolCall, actions: &[ActionEntry]) -> bool {
+    actions.last().is_some_and(|a| {
+        a.summary.starts_with("intercepted")
+            && a.tool == call.name
+            && a.target == extract_action_target(&call.name, &call.arguments)
+    })
 }
 
 /// Evaluates whether a requested tool call is a redundant file read that should
