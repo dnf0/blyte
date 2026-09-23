@@ -28,6 +28,14 @@ pub struct TaskConfig {
     pub rollback: bool,
     /// Target repository or workspace root on the local filesystem.
     pub root: PathBuf,
+    /// Run the loop-breaker guards. False is the ablation control (`--no-loop-breaker`).
+    pub loop_breaker: bool,
+    /// Working directory inside the container (`--container-workdir`).
+    pub container_workdir: String,
+    /// Wall-clock budget in seconds (`--max-seconds`).
+    pub max_seconds: Option<u64>,
+    /// Where to write the JSON run report, if anywhere (`--report`).
+    pub report: Option<PathBuf>,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -46,6 +54,10 @@ impl From<&crate::cli::Cli> for TaskConfig {
             max_gates: cli.max_gates,
             rollback: cli.rollback,
             root,
+            loop_breaker: !cli.no_loop_breaker,
+            container_workdir: cli.container_workdir.clone(),
+            max_seconds: cli.max_seconds,
+            report: cli.report.clone(),
         }
     }
 }
@@ -72,10 +84,20 @@ pub fn run_task(
     ),
     String,
 > {
+    let started = std::time::Instant::now();
     let verification_cmd = config.gate.as_deref().unwrap_or("");
     let mut state = superstate_agent::state::State::new(&config.prompt, verification_cmd);
     let mut stdout = std::io::stdout();
-    run_task_with_state_and_writer(&config, &mut state, &mut stdout)
+    let result = run_task_with_state_and_writer(&config, &mut state, &mut stdout);
+    // The loop writes its own report; this covers a run that never reached it (e.g. no API
+    // key), so a caller always finds one. An absent report would read as a crash.
+    if let (Err(e), Some(path)) = (&result, &config.report) {
+        crate::report::write(
+            path,
+            &crate::report::RunRecord::from_error(&config, e, started.elapsed()),
+        )?;
+    }
+    result
 }
 
 /// Executes an autonomous solver run against an existing mutable `State`, streaming events to `writer`.
@@ -102,6 +124,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     ),
     String,
 > {
+    let started = std::time::Instant::now();
     // 1. Initialize LLM provider from environment credentials or model specification.
     // If credentials for the detected provider are missing, produce a clear error indicating which key to set.
     let provider = match superstate_provider::resolve_provider(config.model.as_deref()) {
@@ -137,7 +160,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
             .as_ref()
             .map(|cid| superstate_agent::shell::ContainerShell {
                 container_id: cid.clone(),
-                workdir: PathBuf::from("/workspace"),
+                workdir: PathBuf::from(&config.container_workdir),
             });
     let container_fs = config
         .container
@@ -151,7 +174,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
         &dyn superstate_agent::fs::Fs,
         PathBuf,
     ) = match (&container_shell, &container_fs) {
-        (Some(cs), Some(cf)) => (cs, cf, PathBuf::from("/workspace")),
+        (Some(cs), Some(cf)) => (cs, cf, PathBuf::from(&config.container_workdir)),
         _ => (&local_shell, &local_fs, config.root.clone()),
     };
 
@@ -173,13 +196,25 @@ pub fn run_task_with_state_and_writer<W: Write>(
         budget: superstate_agent::run::Budget {
             max_turns: config.max_turns as u32,
             max_gate_attempts: config.max_gates as u32,
-            max_duration: None,
+            max_duration: config.max_seconds.map(std::time::Duration::from_secs),
         },
         rollback: config.rollback,
-        loop_breaker: true,
+        loop_breaker: config.loop_breaker,
         on_event: Some(&on_event),
     };
 
     let (outcome, report) = runner.run(state);
+    if let Some(path) = &config.report {
+        let model_id = superstate_provider::Provider::model_id(provider.as_ref());
+        let record = crate::report::RunRecord::from_run(
+            config,
+            &model_id,
+            &outcome,
+            &report,
+            state,
+            started.elapsed(),
+        );
+        crate::report::write(path, &record)?;
+    }
     Ok((outcome, report))
 }
