@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use superstate_worktree::manager::{IsolatedWorktree, WorktreeManager};
 use superstate_worktree::types::WorktreeConfig;
 
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, PartialEq)]
 pub enum WorktreeCommands {
     /// Create a new isolated worktree
     Create {

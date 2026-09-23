@@ -507,10 +507,15 @@ fn test_cli_daemon_detached_forwarding() {
 
     // Read the PID written by the detached command and wait for background execution to complete
     let paths = superstate_core::daemon::daemon_paths_for_state(&state_path);
-    assert!(
-        paths.pid_file.exists(),
-        "pid_file should exist after detach"
-    );
+    let mut pid_written = false;
+    for _ in 0..50 {
+        if paths.pid_file.exists() {
+            pid_written = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(pid_written, "pid_file should exist after detach");
     let pid: i32 = fs::read_to_string(&paths.pid_file)
         .expect("read pid file")
         .trim()

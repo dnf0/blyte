@@ -13,7 +13,7 @@ use crate::commands;
 pub const DEFAULT_STATE: &str = ".agent-state/state.json";
 
 /// Arguments for initializing state from a plan or direct goal.
-#[derive(clap::Args, Clone, Debug)]
+#[derive(clap::Args, Clone, Debug, PartialEq)]
 pub struct InitArgs {
     /// Path to plan markdown (`--from-plan` is accepted for reference parity)
     #[arg(short, long, alias = "from-plan")]
@@ -42,7 +42,7 @@ pub struct InitArgs {
 }
 
 /// Arguments for listing branch-scoped states.
-#[derive(clap::Args, Clone, Debug, Default)]
+#[derive(clap::Args, Clone, Debug, Default, PartialEq)]
 pub struct ListArgs {
     /// Emit machine-readable JSON
     #[arg(long)]
@@ -89,7 +89,7 @@ impl InitArgs {
 }
 
 /// Arguments for showing execution state in markdown or JSON format.
-#[derive(clap::Args, Clone, Debug)]
+#[derive(clap::Args, Clone, Debug, PartialEq)]
 pub struct ShowArgs {
     #[arg(short, long, default_value = DEFAULT_STATE)]
     pub state: PathBuf,
@@ -111,7 +111,7 @@ impl Default for ShowArgs {
     }
 }
 
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, PartialEq)]
 pub enum StateCommands {
     /// Initialize state from plan markdown or direct goal
     Init(InitArgs),
@@ -293,7 +293,7 @@ pub struct StateArgs {
     pub command: StateCommands,
 }
 
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, PartialEq)]
 pub enum DaemonSubcommands {
     /// List active and managed daemon processes
     List {
@@ -306,7 +306,7 @@ pub enum DaemonSubcommands {
     },
 }
 
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, PartialEq)]
 pub struct DaemonArgs {
     #[command(subcommand)]
     pub command: Option<DaemonSubcommands>,
@@ -443,7 +443,7 @@ impl DaemonArgs {
     }
 }
 
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, PartialEq)]
 pub struct CancelArgs {
     #[arg(short, long)]
     pub state: Option<PathBuf>,
@@ -455,7 +455,7 @@ pub struct CancelArgs {
     pub all: bool,
 }
 
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, PartialEq)]
 pub struct LogsArgs {
     #[arg(short, long)]
     pub state: Option<PathBuf>,
@@ -468,7 +468,7 @@ pub struct LogsArgs {
 }
 
 /// Arguments for preparing a cross-agent handoff package.
-#[derive(clap::Args, Clone, Debug)]
+#[derive(clap::Args, Clone, Debug, PartialEq)]
 pub struct HandoffArgs {
     /// High-level goal statement
     #[arg(long)]

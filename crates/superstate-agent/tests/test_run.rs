@@ -7,8 +7,8 @@ use superstate_agent::context::{ContextStrategy, Conversational, StateOnly};
 use superstate_agent::fs::LocalFs;
 use superstate_agent::run::{Budget, Outcome, Runner};
 use superstate_agent::shell::{LocalShell, Shell};
-use superstate_agent::state::State;
-use superstate_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
+use superstate_agent::state::{ActionEntry, State};
+use superstate_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
 
 /// Replays a fixed list of responses and records every request it was given.
 struct ScriptedProvider {
@@ -347,4 +347,191 @@ fn the_turn_budget_bounds_a_model_that_never_stops() {
     let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
     assert_eq!(outcome, Outcome::BudgetExhausted);
     assert_eq!(rep.outcome_turns, 12);
+}
+
+#[test]
+fn test_actions_recorded_during_run() {
+    // Verifies that Runner records ActionEntry objects chronologically into state.runtime.actions
+    // for all invoked tools (bash, read, note), preserving action targets, summaries, and error flags.
+    let d = repo();
+    // Create a known file on disk so the 'read' tool succeeds with predictable line counts.
+    std::fs::write(d.path().join("sample.txt"), "first line\nsecond line\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        calls("bash", json!({"command": "echo hello"})),
+        calls("read", json!({"path": "sample.txt"})),
+        calls("note", json!({"patch": {"analysis": "verified"}})),
+        says("done"),
+    ]);
+    let mut st = State::new("test action ledger", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.tool_calls, 3);
+
+    // Ensure three action entries were captured in exact invocation sequence.
+    assert_eq!(st.runtime.actions.len(), 3);
+
+    // 1. Validate bash command action entry details.
+    let bash_action = &st.runtime.actions[0];
+    assert_eq!(bash_action.turn, 1);
+    assert_eq!(bash_action.tool, "bash");
+    assert_eq!(bash_action.target, "echo hello");
+    assert_eq!(bash_action.summary, "exit 0");
+    assert!(!bash_action.is_error);
+
+    // 2. Validate file read action entry details.
+    let read_action = &st.runtime.actions[1];
+    assert_eq!(read_action.turn, 2);
+    assert_eq!(read_action.tool, "read");
+    assert_eq!(read_action.target, "sample.txt");
+    assert_eq!(read_action.summary, "2 lines read");
+    assert!(!read_action.is_error);
+
+    // 3. Validate state note action entry details.
+    let note_action = &st.runtime.actions[2];
+    assert_eq!(note_action.turn, 3);
+    assert_eq!(note_action.tool, "note");
+    assert_eq!(note_action.target, "patch (1 keys)");
+    assert_eq!(
+        note_action.summary,
+        "recorded; your state now has 1 field(s)"
+    );
+    assert!(!note_action.is_error);
+}
+
+#[test]
+fn test_rollback_appends_action_entry() {
+    // Verifies that when a verification gate fails with rollback enabled, an ActionEntry
+    // is recorded in state.runtime.actions documenting the rollback event and checkpoint target.
+    let d = repo();
+    // The verification command checks for existence of 'target.txt'.
+    // On the first gate attempt, target.txt is missing -> gate fails and rollback occurs.
+    // On the second attempt, the model writes target.txt -> gate passes.
+    let p = ScriptedProvider::new(vec![
+        calls("bash", json!({"command": "echo attempt1"})),
+        says("done with attempt 1"),
+        calls(
+            "write",
+            json!({"path": "target.txt", "content": "passed\n"}),
+        ),
+        says("done with attempt 2"),
+    ]);
+    let mut st = State::new("create target file", "test -f target.txt");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, true).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 2);
+    assert_eq!(st.runtime.rollbacks, 1);
+
+    // Identify the rollback entry in the recorded action history.
+    let rollback_entry = st
+        .runtime
+        .actions
+        .iter()
+        .find(|a| a.tool == "rollback")
+        .expect("rollback action entry must be recorded in runtime.actions");
+
+    assert!(rollback_entry.target.starts_with("checkpoint "));
+    assert_eq!(
+        rollback_entry.summary,
+        "Gate failed; working tree reset to verified state"
+    );
+    assert!(rollback_entry.is_error);
+}
+
+#[test]
+fn test_state_only_context_omits_actions_when_empty() {
+    // When state.runtime.actions is empty, StateOnly::build must omit the action ledger section
+    // to preserve a minimal, clean prompt for the initial turn or until actions occur.
+    let state = State::new("my goal", "cargo test");
+    let history = vec![];
+    let messages = StateOnly.build(&state, &history);
+    assert_eq!(messages.len(), 1);
+
+    let Message::User(prompt) = &messages[0] else {
+        panic!("expected Message::User");
+    };
+    assert!(!prompt.contains("## Actions Taken So Far"));
+}
+
+#[test]
+fn test_state_only_context_formats_action_ledger() {
+    // When actions exist, StateOnly::build formats them chronologically into the initial user prompt,
+    // retaining Invariant II by keeping the total message count bounded (messages.len() <= 3).
+    let mut state = State::new("solve bug", "pytest");
+    state.runtime.actions.push(ActionEntry {
+        turn: 1,
+        tool: "read".into(),
+        target: "src/main.rs (lines 1-20)".into(),
+        summary: "20 lines read".into(),
+        is_error: false,
+    });
+    state.runtime.actions.push(ActionEntry {
+        turn: 2,
+        tool: "bash".into(),
+        target: "cargo test".into(),
+        summary: "exit 101".into(),
+        is_error: true,
+    });
+
+    // Provide history with tool call and result to verify bounded message length.
+    let history = vec![
+        Message::User("initial user message".into()),
+        Message::ToolCall {
+            id: "tc_1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "cargo test"}),
+            signature: None,
+        },
+        Message::ToolResult {
+            id: "tc_1".into(),
+            name: "bash".into(),
+            content: "test failure".into(),
+            is_error: true,
+        },
+    ];
+
+    let messages = StateOnly.build(&state, &history);
+    assert!(
+        messages.len() <= 3,
+        "messages.len() must be <= 3, got {}",
+        messages.len()
+    );
+
+    let Message::User(prompt) = &messages[0] else {
+        panic!("expected first message to be Message::User");
+    };
+    assert!(prompt.contains("## Actions Taken So Far"));
+    assert!(prompt.contains("- Turn 1: `read` `src/main.rs (lines 1-20)` -> 20 lines read"));
+    assert!(prompt.contains("- Turn 2: `bash` `cargo test` -> exit 101 [ERROR]"));
+}
+
+#[test]
+fn test_state_only_runner_injects_action_ledger_in_prompts() {
+    // Verifies end-to-end integration: Runner executing with StateOnly strategy injects
+    // actions executed in turn 1 into the turn 2 request prompt.
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls("bash", json!({"command": "echo step1"})),
+        says("done"),
+    ]);
+    let mut st = State::new("step goal", "true");
+    let (outcome, rep) = runner(&p, d.path(), &StateOnly, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+
+    // Turn 1 prompt must not contain actions as none have run yet.
+    let Message::User(first_prompt) = &seen[0].messages[0] else {
+        panic!("expected Message::User in turn 1");
+    };
+    assert!(!first_prompt.contains("## Actions Taken So Far"));
+
+    // Turn 2 prompt must contain the action ledger capturing turn 1's bash invocation.
+    let Message::User(second_prompt) = &seen[1].messages[0] else {
+        panic!("expected Message::User in turn 2");
+    };
+    assert!(second_prompt.contains("## Actions Taken So Far"));
+    assert!(second_prompt.contains("- Turn 1: `bash` `echo step1` -> exit 0"));
 }

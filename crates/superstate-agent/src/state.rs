@@ -33,6 +33,21 @@ pub struct Orchestrator {
     pub verification_cmd: String,
 }
 
+/// A single action observed and summarized objectively by the harness.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionEntry {
+    /// Turn number when this action occurred.
+    pub turn: u32,
+    /// Name of the tool invoked (e.g. "read", "write", "edit", "bash", "glob", "grep", "note", "rollback").
+    pub tool: String,
+    /// Canonical target or command (e.g. "stats.py (lines 1-30)", "cargo test", "pattern 'mean'").
+    pub target: String,
+    /// Short 1-line summary of the outcome (e.g. "22 lines read", "exit 1: ZeroDivisionError", "replaced 3 lines").
+    pub summary: String,
+    /// Whether the action resulted in an error or non-zero exit code.
+    pub is_error: bool,
+}
+
 /// Facts the harness observed. Not opinions, and not reported by the worker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Runtime {
@@ -42,6 +57,9 @@ pub struct Runtime {
     pub rollbacks: u32,
     /// Files the harness saw written, in order of first write.
     pub files_written: Vec<String>,
+    /// Chronological log of all actions executed in this session.
+    #[serde(default)]
+    pub actions: Vec<ActionEntry>,
 }
 
 /// The worker's own scratch space. Free-form on purpose.

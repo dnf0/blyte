@@ -16,7 +16,7 @@ use superstate_core::guard::{
 use superstate_core::read_cache::{self, CacheVerdict, ReadRecord};
 
 /// Subcommands for the `superstate guard` namespace.
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, PartialEq)]
 pub enum GuardCommands {
     /// Evaluate file read operations against deterministic line boundaries
     PreToolUse(PreToolUseArgs),
@@ -25,7 +25,7 @@ pub enum GuardCommands {
 }
 
 /// Command-line arguments for `superstate guard pre-tool-use`.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, PartialEq)]
 pub struct PreToolUseArgs {
     /// Maximum lines permitted before shunting to symbol outline
     #[arg(long, default_value_t = superstate_core::guard::DEFAULT_READ_THRESHOLD_LINES)]
@@ -52,7 +52,7 @@ pub struct PreToolUseArgs {
 }
 
 /// Command-line arguments for `superstate guard pre-command`.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, PartialEq)]
 pub struct PreCommandArgs {
     /// Cooldown window in seconds before allowing repeated polling queries
     #[arg(long, default_value_t = 30)]

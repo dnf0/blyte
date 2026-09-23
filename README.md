@@ -100,25 +100,97 @@ superstate/
 
 ## Quick Start
 
-### Build and Test
+### Build and Install
 
 ```bash
 # Build the workspace
-cargo build
+cargo build --release
 
 # Run all unit and integration tests
 cargo test
 ```
 
-### Running an Evaluation Task
+### Interactive Agent Harness (REPL)
+
+Running `superstate` without a prompt launches the interactive agent harness REPL with live turn event streaming, tool outcome indicators, gate verification, and slash commands:
 
 ```bash
-# Run the end-to-end solve runner against a sample task
-cargo run -p superstate-agent --release --example solve
+# Start interactive REPL in the current repository
+superstate
+
+# Launch REPL configured with a specific verification gate and model
+superstate --gate "cargo test" --model gemini-2.5-flash --context state-only
 ```
+
+### Headless Single-Shot Solver
+
+Provide a prompt argument to run Superstate autonomously in headless mode. The harness attempts the task, evaluates the external verification gate, automatically rolls back on failure, and exits 0 only when the gate passes:
+
+```bash
+# Autonomous bug fix with fail-closed gate verification
+superstate "fix parsing bug in token lexer" --gate "cargo test -p my-crate --test lexer"
+
+# Run with SKILL.state O(1) bounded memory and container isolation
+superstate "refactor database migration" \
+  --gate "pytest tests/test_migrations.py" \
+  --context state-only \
+  --container alpine-dev \
+  --max-turns 30 \
+  --max-gates 3
+```
+
+---
+
+## Command-Line Interface (CLI)
+
+### CLI Execution Flags
+
+| Flag | Description | Default |
+|---|---|---|
+| `[PROMPT]` | Direct task prompt for single-shot / headless execution | `None` (launches interactive REPL) |
+| `-g, --gate <CMD>` | External verification gate command (e.g. `'cargo test'`, `'pytest'`) | `None` (fail-closed disabled) |
+| `--context <STRATEGY>` | Context management strategy: `state-only` ($\mathcal{O}(1)$ prompt bounded memory) or `conversational` (append-all chat) | `conversational` |
+| `-m, --model <MODEL>` | Model identifier or provider selection override | `gemini-2.5-flash` |
+| `--container <ID>` | Run execution and filesystem seams inside an isolated container workspace | Local host |
+| `--max-turns <N>` | Maximum turn budget per attempt | `25` |
+| `--max-gates <N>` | Maximum verification gate retry attempts before failing | `5` |
+| `--rollback[=<BOOL>]` | Deterministic rollback to baseline git checkpoint on gate failure | `true` |
+
+### Interactive REPL Slash Commands
+
+Inside the interactive REPL (`superstate`), the following slash commands control session execution and state:
+
+| Slash Command | Description |
+|---|---|
+| `/help` | Display available slash commands and usage reference |
+| `/state` | Inspect active SKILL.state partitions (`Orchestrator`, `Runtime`, `Agent`) |
+| `/diff` | Display uncommitted git diff in the current working tree |
+| `/review` | Run the adversarial code review engine over uncommitted changes |
+| `/doctor` | Run 5-step system verification handshake and health check |
+| `/gate [cmd]` | Inspect current verification gate or update it dynamically (e.g. `/gate cargo test`) |
+| `/clear` | Clear session conversation history and reset runtime working state |
+| `/exit`, `/quit` | Exit the interactive REPL |
+
+### Core Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `superstate doctor` | Run 5-step verification handshake and health check |
+| `superstate mcp` | Launch standard JSON-RPC Model Context Protocol (MCP) server over stdio |
+| `superstate review` | Run adversarial code review engine over git diff or commit ranges |
+| `superstate state` | Manage SKILL.state lifecycle (`init`, `apply`, `checkpoint`, `resume`, `show`) |
+| `superstate worktree` | Manage isolated git worktree environments and COW caches |
+| `superstate daemon` | Run autonomous background daemon over milestones with DAG dependencies |
+| `superstate cancel` | Cancel running background daemon processes |
+| `superstate logs` | Inspect background daemon logs and telemetry |
+| `superstate handoff` | Generate standardized cross-agent handoff packages |
+| `superstate shunt` | Execute commands with output shunting distillation for token efficiency |
+| `superstate inspect` | Inspect AST symbols, structural outlines, and code slices |
+| `superstate guard` | Intercept and evaluate agent tool invocations before execution |
 
 ---
 
 ## References
 
 - Badhe et al. (2026). *SKILL.state: Scalable Long-Horizon Agent Skills.* [arXiv:2608.26263v2](https://arxiv.org/html/2608.26263v2).
+

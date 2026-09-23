@@ -1,44 +1,387 @@
-b22b15b test(agent): add failing test for grandchild process tree termination
----
- .../superstate-agent/tests/test_shell_timeout.rs   | 24 ++++++++++++++++++++++
- 1 file changed, 24 insertions(+)
----
-diff --git a/crates/superstate-agent/tests/test_shell_timeout.rs b/crates/superstate-agent/tests/test_shell_timeout.rs
-index 2da9349..a1e7b67 100644
---- a/crates/superstate-agent/tests/test_shell_timeout.rs
-+++ b/crates/superstate-agent/tests/test_shell_timeout.rs
-@@ -55,10 +55,34 @@ fn a_command_producing_more_output_than_the_pipe_buffer_does_not_deadlock() {
-     assert!(started.elapsed() < Duration::from_secs(25), "must not have deadlocked");
- }
- 
- #[test]
- fn a_normal_command_is_unaffected() {
-     let d = tempfile::tempdir().unwrap();
-     let out = LocalShell.exec("echo hello", d.path(), Duration::from_secs(30)).unwrap();
-     assert_eq!(out.stdout.trim(), "hello");
-     assert_eq!(out.exit_code, 0);
+diff --git a/crates/superstate-agent/src/run.rs b/crates/superstate-agent/src/run.rs
+index 1b211bd..9fa21a4 100644
+--- a/crates/superstate-agent/src/run.rs
++++ b/crates/superstate-agent/src/run.rs
+@@ -318,3 +318,172 @@ impl<'a> Runner<'a> {
+         (Outcome::BudgetExhausted, report)
+     }
  }
 +
-+#[test]
-+fn grandchild_process_tree_is_killed_at_deadline() {
-+    // If only the parent bash process is killed, background grandchildren
-+    // (such as `find /` or subshells) stay alive, keep pipe handles open,
-+    // and cause reader thread joins to hang.
-+    let d = tempfile::tempdir().unwrap();
-+    let started = Instant::now();
-+    let out = LocalShell
-+        .exec("sh -c '(sleep 30) & wait'", d.path(), Duration::from_secs(1))
-+        .unwrap();
-+    let elapsed = started.elapsed();
-+    assert!(
-+        elapsed < Duration::from_secs(4),
-+        "must not deadlock on grandchild pipe handles: took {elapsed:?}"
-+    );
-+    assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
-+    assert!(
-+        out.stderr.contains("killed by superstate"),
-+        "kill notice missing from stderr: {:?}",
-+        out.stderr
-+    );
++/// Extracts a concise, human-readable target descriptor from a tool call's arguments.
++///
++/// Deterministic and zero-latency: formats tool targets without LLM invocation to
++/// bound the prompt footprint in episodic action ledgers.
++///
++/// # Arguments
++/// * `tool` - The name of the tool invoked (e.g. "read", "bash", "write").
++/// * `args` - The JSON arguments supplied to the tool.
++///
++/// # Returns
++/// A compact string identifying the target file, command, or parameter.
++pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
++    // Discriminate on known tool types to extract their canonical target representations.
++    match tool {
++        "read" => {
++            // Extract the target file path and optionally the requested line range.
++            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                let start = args.get("start_line").and_then(|v| {
++                    v.as_u64()
++                        .map(|n| n.to_string())
++                        .or_else(|| v.as_str().map(|s| s.to_string()))
++                });
++                let end = args.get("end_line").and_then(|v| {
++                    v.as_u64()
++                        .map(|n| n.to_string())
++                        .or_else(|| v.as_str().map(|s| s.to_string()))
++                });
++                // When line bounds are specified, annotate the path with 1-indexed line boundaries.
++                if let (Some(s), Some(e)) = (start, end) {
++                    return format!("{path} (L{s}-L{e})");
++                }
++                return path.to_string();
++            }
++        }
++        "write" => {
++            // Extract the destination path and include byte size for visibility into write volume.
++            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
++                    return format!("{path} ({} bytes)", content.len());
++                }
++                return path.to_string();
++            }
++        }
++        "edit" => {
++            // Edit targets are identified primarily by the target file being modified.
++            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                return path.to_string();
++            }
++        }
++        "bash" => {
++            // Bash commands are bounded at 60 characters so long pipelines do not dominate context.
++            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
++                if cmd.chars().count() > 60 {
++                    let prefix: String = cmd.chars().take(57).collect();
++                    return format!("{prefix}...");
++                }
++                return cmd.to_string();
++            }
++        }
++        "glob" => {
++            // Glob targets are represented by the file search pattern.
++            if let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) {
++                return pattern.to_string();
++            }
++        }
++        "grep" => {
++            // Grep targets represent the regex pattern and, when restricted, the target subtree.
++            if let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) {
++                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
++                    if !path.is_empty() {
++                        return format!("pattern '{pattern}' in {path}");
++                    }
++                }
++                return format!("pattern '{pattern}'");
++            }
++        }
++        "note" => {
++            // Note patches are summarized by the number of state keys modified.
++            if let Some(patch) = args.get("patch").and_then(|v| v.as_object()) {
++                return format!("patch ({} keys)", patch.len());
++            }
++        }
++        _ => {}
++    }
++
++    // Fallback: extract the first string argument value found, or default to the tool name.
++    if let Some(obj) = args.as_object() {
++        for val in obj.values() {
++            if let Some(s) = val.as_str() {
++                return s.to_string();
++            }
++        }
++    }
++    tool.to_string()
 +}
 +
++/// Extracts a one-line deterministic outcome summary from a tool execution result.
++///
++/// # Arguments
++/// * `tool` - The name of the tool executed.
++/// * `content` - Raw string output produced by the tool.
++/// * `is_error` - Whether the tool execution resulted in an error status.
++///
++/// # Returns
++/// A single-line summary string describing the outcome.
++pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String {
++    // Produce deterministic, bounded status summaries per tool category.
++    match tool {
++        "read" => {
++            // Count lines returned to indicate the volume read without including full content.
++            let count = content.lines().count();
++            format!("{count} lines read")
++        }
++        "write" => {
++            // Static confirmation of file write completion.
++            "file written".to_string()
++        }
++        "edit" => {
++            // Distinguish successful replacements from rejection/failure reasons.
++            if is_error {
++                let first = content.lines().next().unwrap_or("edit failed");
++                let first = if first.is_empty() { "edit failed" } else { first };
++                format!("failed: {first}")
++            } else {
++                "string replaced".to_string()
++            }
++        }
++        "bash" => {
++            // Non-zero bash exits extract the terminal failure line to preserve diagnostics.
++            if !is_error {
++                "exit 0".to_string()
++            } else {
++                let last_line = content
++                    .lines()
++                    .rev()
++                    .find(|l| !l.trim().is_empty())
++                    .unwrap_or("command failed");
++                let clamped: String = last_line.chars().take(80).collect();
++                format!("failed: {clamped}")
++            }
++        }
++        "glob" => {
++            // Count matching file entries in the glob output.
++            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
++            format!("{count} files matched")
++        }
++        "grep" => {
++            // Count matching occurrences found in content search.
++            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
++            format!("{count} matches found")
++        }
++        "note" => {
++            // Surface the first line of the note confirmation message.
++            let first = content.lines().next().unwrap_or("recorded");
++            if first.is_empty() {
++                "recorded".to_string()
++            } else {
++                first.to_string()
++            }
++        }
++        _ => {
++            // Fallback for custom or unknown tools clamps the first line to 80 chars.
++            let first = content.lines().next().unwrap_or("");
++            first.chars().take(80).collect()
++        }
++    }
++}
++
+diff --git a/crates/superstate-agent/tests/test_action_extraction.rs b/crates/superstate-agent/tests/test_action_extraction.rs
+new file mode 100644
+index 0000000..a2fdba2
+--- /dev/null
++++ b/crates/superstate-agent/tests/test_action_extraction.rs
+@@ -0,0 +1,204 @@
++use serde_json::json;
++use superstate_agent::run::{extract_action_summary, extract_action_target};
++
++#[test]
++fn test_read_target_and_summary() {
++    // 1. read: with and without line numbers
++    let target_no_lines = extract_action_target("read", &json!({"path": "src/main.rs"}));
++    assert_eq!(target_no_lines, "src/main.rs");
++
++    let target_with_lines = extract_action_target(
++        "read",
++        &json!({"path": "src/main.rs", "start_line": 10, "end_line": 25}),
++    );
++    assert_eq!(target_with_lines, "src/main.rs (L10-L25)");
++
++    // read summary: line count
++    let summary_lines =
++        extract_action_summary("read", "line 1\nline 2\nline 3\n", false);
++    assert_eq!(summary_lines, "3 lines read");
++
++    let summary_empty = extract_action_summary("read", "", false);
++    assert_eq!(summary_empty, "0 lines read");
++}
++
++#[test]
++fn test_write_target_and_summary() {
++    // 2. write: target includes bytes, summary is "file written"
++    let target_with_content = extract_action_target(
++        "write",
++        &json!({"path": "config.json", "content": "hello world"}),
++    );
++    assert_eq!(target_with_content, "config.json (11 bytes)");
++
++    let target_missing_content =
++        extract_action_target("write", &json!({"path": "config.json"}));
++    assert_eq!(target_missing_content, "config.json");
++
++    let summary_ok = extract_action_summary("write", "wrote config.json", false);
++    assert_eq!(summary_ok, "file written");
++
++    let summary_err = extract_action_summary("write", "failed to write", true);
++    assert_eq!(summary_err, "file written");
++}
++
++#[test]
++fn test_edit_target_and_summary() {
++    // 3. edit: success ("string replaced") and failure ("failed: string not found")
++    let target = extract_action_target(
++        "edit",
++        &json!({"path": "src/lib.rs", "old": "foo", "new": "bar"}),
++    );
++    assert_eq!(target, "src/lib.rs");
++
++    let summary_success = extract_action_summary("edit", "edited src/lib.rs", false);
++    assert_eq!(summary_success, "string replaced");
++
++    let summary_failure = extract_action_summary(
++        "edit",
++        "`old` not found in src/lib.rs. Read it first.\nStack trace...",
++        true,
++    );
++    assert_eq!(
++        summary_failure,
++        "failed: `old` not found in src/lib.rs. Read it first."
++    );
++
++    let summary_failure_empty = extract_action_summary("edit", "", true);
++    assert_eq!(summary_failure_empty, "failed: edit failed");
++}
++
++#[test]
++fn test_bash_target_and_summary() {
++    // 4. bash: short command and long command truncation (>60 chars); success ("exit 0") and failure (last non-empty line extracted)
++    let short_cmd = "cargo check";
++    let target_short = extract_action_target("bash", &json!({"command": short_cmd}));
++    assert_eq!(target_short, "cargo check");
++
++    let exact_60 = "123456789012345678901234567890123456789012345678901234567890";
++    assert_eq!(exact_60.chars().count(), 60);
++    let target_60 = extract_action_target("bash", &json!({"command": exact_60}));
++    assert_eq!(target_60, exact_60);
++
++    let long_cmd = "cargo test --workspace --all-targets --all-features --no-fail-fast -- --nocapture";
++    assert!(long_cmd.chars().count() > 60);
++    let expected_truncated = format!("{}...", &long_cmd[..57]);
++    let target_long = extract_action_target("bash", &json!({"command": long_cmd}));
++    assert_eq!(target_long, expected_truncated);
++
++    // Bash summary success
++    let summary_ok = extract_action_summary("bash", "exit 0\nEverything is fine", false);
++    assert_eq!(summary_ok, "exit 0");
++
++    // Bash summary failure
++    let summary_err = extract_action_summary(
++        "bash",
++        "exit 1\nthread 'main' panicked\nassertion failed: left == right\n\n",
++        true,
++    );
++    assert_eq!(summary_err, "failed: assertion failed: left == right");
++
++    // Bash summary failure clamped to 80 chars
++    let long_err_line = "x".repeat(100);
++    let summary_clamped = extract_action_summary(
++        "bash",
++        &format!("exit 1\n{long_err_line}"),
++        true,
++    );
++    assert_eq!(summary_clamped, format!("failed: {}", "x".repeat(80)));
++
++    let summary_err_empty = extract_action_summary("bash", "", true);
++    assert_eq!(summary_err_empty, "failed: command failed");
++}
++
++#[test]
++fn test_glob_target_and_summary() {
++    // 5. glob: file count matching
++    let target = extract_action_target("glob", &json!({"pattern": "**/*.rs"}));
++    assert_eq!(target, "**/*.rs");
++
++    let summary = extract_action_summary(
++        "glob",
++        "src/lib.rs\nsrc/main.rs\nsrc/run.rs\n",
++        false,
++    );
++    assert_eq!(summary, "3 files matched");
++
++    let summary_empty = extract_action_summary("glob", "", false);
++    assert_eq!(summary_empty, "0 files matched");
++}
++
++#[test]
++fn test_grep_target_and_summary() {
++    // 6. grep: pattern and path, match count
++    let target_with_path =
++        extract_action_target("grep", &json!({"pattern": "TODO", "path": "src"}));
++    assert_eq!(target_with_path, "pattern 'TODO' in src");
++
++    let target_without_path =
++        extract_action_target("grep", &json!({"pattern": "TODO"}));
++    assert_eq!(target_without_path, "pattern 'TODO'");
++
++    let summary = extract_action_summary(
++        "grep",
++        "src/lib.rs:1:TODO\nsrc/run.rs:10:TODO\n",
++        false,
++    );
++    assert_eq!(summary, "2 matches found");
++
++    let summary_empty = extract_action_summary("grep", "", false);
++    assert_eq!(summary_empty, "0 matches found");
++}
++
++#[test]
++fn test_note_target_and_summary() {
++    // 7. note: key count, status string
++    let target = extract_action_target(
++        "note",
++        &json!({"patch": {"findings": "root cause", "fixed": true}}),
++    );
++    assert_eq!(target, "patch (2 keys)");
++
++    let target_empty = extract_action_target("note", &json!({"patch": {}}));
++    assert_eq!(target_empty, "patch (0 keys)");
++
++    let summary = extract_action_summary(
++        "note",
++        "recorded; your state now has 3 field(s)\nmore info",
++        false,
++    );
++    assert_eq!(summary, "recorded; your state now has 3 field(s)");
++
++    let summary_empty = extract_action_summary("note", "", false);
++    assert_eq!(summary_empty, "recorded");
++}
++
++#[test]
++fn test_fallback_target_and_summary() {
++    // Fallback target: first string argument value found or tool name
++    let target_string_arg =
++        extract_action_target("custom_tool", &json!({"query": "SELECT 1"}));
++    assert_eq!(target_string_arg, "SELECT 1");
++
++    let target_no_string_arg =
++        extract_action_target("custom_tool", &json!({"count": 42}));
++    assert_eq!(target_no_string_arg, "custom_tool");
++
++    let target_null_arg = extract_action_target("custom_tool", &json!(null));
++    assert_eq!(target_null_arg, "custom_tool");
++
++    // Fallback summary: first line clamped to 80 chars
++    let summary_first_line = extract_action_summary(
++        "custom_tool",
++        "first line of result\nsecond line",
++        false,
++    );
++    assert_eq!(summary_first_line, "first line of result");
++
++    let long_line = "a".repeat(120);
++    let summary_clamped = extract_action_summary("custom_tool", &long_line, false);
++    assert_eq!(summary_clamped, "a".repeat(80));
++
++    let summary_empty = extract_action_summary("custom_tool", "", false);
++    assert_eq!(summary_empty, "");
++}

@@ -1,191 +1,160 @@
-5d5809c fix(agent): kill process group on timeout to prevent orphan grandchild leaks
----
- crates/superstate-agent/src/shell.rs | 155 ++++++++++++++++++++++-------------
- 1 file changed, 98 insertions(+), 57 deletions(-)
----
-diff --git a/crates/superstate-agent/src/shell.rs b/crates/superstate-agent/src/shell.rs
-index 2608bb7..f94d842 100644
---- a/crates/superstate-agent/src/shell.rs
-+++ b/crates/superstate-agent/src/shell.rs
-@@ -55,83 +55,124 @@ pub trait Shell: Send + Sync {
-             .map(|b| format!("command -v {b} >/dev/null 2>&1 && echo {b}"))
-             .collect::<Vec<_>>()
-             .join("; ");
-         match self.exec(&probe, cwd, Duration::from_secs(30)) {
-             Ok(o) => o.stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
-             Err(_) => Vec::new(),
+diff --git a/crates/superstate-agent/src/run.rs b/crates/superstate-agent/src/run.rs
+index 9fa21a4..a25340f 100644
+--- a/crates/superstate-agent/src/run.rs
++++ b/crates/superstate-agent/src/run.rs
+@@ -265,6 +265,21 @@ impl<'a> Runner<'a> {
+                         summary,
+                         is_error: outcome.is_error,
+                     });
++
++                    // Record tool invocation in the chronological action ledger.
++                    // Captures deterministic targets and outcome summaries so that episodic memory
++                    // retains an accurate, bounded audit trail of all agent actions.
++                    let action_target = extract_action_target(&call.name, &call.arguments);
++                    let action_summary =
++                        extract_action_summary(&call.name, &outcome.content, outcome.is_error);
++                    state.runtime.actions.push(crate::state::ActionEntry {
++                        turn,
++                        tool: call.name.clone(),
++                        target: action_target,
++                        summary: action_summary,
++                        is_error: outcome.is_error,
++                    });
++
+                     history.push(Message::ToolResult {
+                         id: call.id.clone(),
+                         name: call.name.clone(),
+@@ -293,8 +308,16 @@ impl<'a> Runner<'a> {
+                 if let Some(base) = &baseline {
+                     self.reset_to(base);
+                     state.runtime.rollbacks += 1;
+-                    self.emit(Event::RolledBack {
+-                        to: &base[..base.len().min(8)],
++                    let short_sha = &base[..base.len().min(8)];
++                    self.emit(Event::RolledBack { to: short_sha });
++                    // Record rollback in the action ledger to ensure the worker and orchestrator
++                    // observe workspace resets explicitly within episodic action history.
++                    state.runtime.actions.push(crate::state::ActionEntry {
++                        turn,
++                        tool: "rollback".into(),
++                        target: format!("checkpoint {short_sha}"),
++                        summary: "Gate failed; working tree reset to verified state".into(),
++                        is_error: true,
+                     });
+                 }
+             }
+@@ -440,7 +463,11 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
+             // Distinguish successful replacements from rejection/failure reasons.
+             if is_error {
+                 let first = content.lines().next().unwrap_or("edit failed");
+-                let first = if first.is_empty() { "edit failed" } else { first };
++                let first = if first.is_empty() {
++                    "edit failed"
++                } else {
++                    first
++                };
+                 format!("failed: {first}")
+             } else {
+                 "string replaced".to_string()
+@@ -486,4 +513,3 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
          }
      }
  }
- 
-+/// Executes a command with timeout enforcement, pipe draining, and process group isolation.
-+///
-+/// # Arguments
-+///
-+/// * `cmd` - The prepared [`Command`] ready to be configured and spawned.
-+/// * `timeout` - Maximum duration allowed before the process and its descendants are terminated.
-+///
-+/// # Returns
-+///
-+/// Returns an [`Output`] containing collected stdout, stderr, and the process exit code,
-+/// or an error message if the process cannot be spawned or waited on. On timeout, returns
-+/// exit code 124 with a notice appended to stderr.
-+fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
-+    use std::io::Read;
-+    use std::process::Stdio;
+-
+diff --git a/crates/superstate-agent/tests/test_run.rs b/crates/superstate-agent/tests/test_run.rs
+index fd803f6..e776f49 100644
+--- a/crates/superstate-agent/tests/test_run.rs
++++ b/crates/superstate-agent/tests/test_run.rs
+@@ -348,3 +348,92 @@ fn the_turn_budget_bounds_a_model_that_never_stops() {
+     assert_eq!(outcome, Outcome::BudgetExhausted);
+     assert_eq!(rep.outcome_turns, 12);
+ }
 +
-+    // The deadline is ENFORCED, not advisory.
-+    // stdin is null so commands that read input (e.g. bare python, git commit, prompts)
-+    // do not block forever on an unattended terminal.
-+    cmd.stdin(Stdio::null())
-+        .stdout(Stdio::piped())
-+        .stderr(Stdio::piped());
++#[test]
++fn test_actions_recorded_during_run() {
++    // Verifies that Runner records ActionEntry objects chronologically into state.runtime.actions
++    // for all invoked tools (bash, read, note), preserving action targets, summaries, and error flags.
++    let d = repo();
++    // Create a known file on disk so the 'read' tool succeeds with predictable line counts.
++    std::fs::write(d.path().join("sample.txt"), "first line\nsecond line\n").unwrap();
 +
-+    // Place the spawned command in its own process group on Unix.
-+    // Without this, background grandchildren (e.g., `(sleep 30) & wait`) stay alive
-+    // when the immediate child is killed, keeping pipe handles open and causing
-+    // the reader threads to hang indefinitely.
-+    #[cfg(unix)]
-+    {
-+        use std::os::unix::process::CommandExt;
-+        cmd.process_group(0);
-+    }
++    let p = ScriptedProvider::new(vec![
++        calls("bash", json!({"command": "echo hello"})),
++        calls("read", json!({"path": "sample.txt"})),
++        calls("note", json!({"patch": {"analysis": "verified"}})),
++        says("done"),
++    ]);
++    let mut st = State::new("test action ledger", "true");
++    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
++    assert_eq!(outcome, Outcome::Verified);
++    assert_eq!(rep.tool_calls, 3);
 +
-+    let mut child = cmd.spawn().map_err(|e| format!("cannot run command: {e}"))?;
++    // Ensure three action entries were captured in exact invocation sequence.
++    assert_eq!(st.runtime.actions.len(), 3);
 +
-+    // Drained on background threads: a command that fills the pipe buffer deadlocks against
-+    // a parent that only reads after waiting, which turns a noisy command into a hang.
-+    let mut so = child.stdout.take().ok_or("no stdout")?;
-+    let mut se = child.stderr.take().ok_or("no stderr")?;
-+    let t_out = std::thread::spawn(move || {
-+        let mut b = String::new();
-+        let _ = so.read_to_string(&mut b);
-+        b
-+    });
-+    let t_err = std::thread::spawn(move || {
-+        let mut b = String::new();
-+        let _ = se.read_to_string(&mut b);
-+        b
-+    });
++    // 1. Validate bash command action entry details.
++    let bash_action = &st.runtime.actions[0];
++    assert_eq!(bash_action.turn, 1);
++    assert_eq!(bash_action.tool, "bash");
++    assert_eq!(bash_action.target, "echo hello");
++    assert_eq!(bash_action.summary, "exit 0");
++    assert!(!bash_action.is_error);
 +
-+    let deadline = std::time::Instant::now() + timeout;
-+    let status = loop {
-+        match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
-+            Some(s) => break Some(s),
-+            None if std::time::Instant::now() >= deadline => {
-+                // On Unix, kill the entire process group with a negative PGID.
-+                // This ensures all child and grandchild processes are terminated simultaneously,
-+                // releasing standard stream pipe handles so reader threads unblock promptly.
-+                #[cfg(unix)]
-+                {
-+                    let pgid = child.id() as i32;
-+                    unsafe {
-+                        libc::kill(-pgid, libc::SIGKILL);
-+                    }
-+                }
-+                #[cfg(not(unix))]
-+                {
-+                    let _ = child.kill();
-+                }
-+                let _ = child.wait();
-+                break None;
-+            }
-+            None => std::thread::sleep(Duration::from_millis(50)),
-+        }
-+    };
++    // 2. Validate file read action entry details.
++    let read_action = &st.runtime.actions[1];
++    assert_eq!(read_action.turn, 2);
++    assert_eq!(read_action.tool, "read");
++    assert_eq!(read_action.target, "sample.txt");
++    assert_eq!(read_action.summary, "2 lines read");
++    assert!(!read_action.is_error);
 +
-+    let stdout = t_out.join().unwrap_or_default();
-+    let stderr = t_err.join().unwrap_or_default();
-+
-+    match status {
-+        Some(s) => Ok(Output {
-+            stdout,
-+            stderr,
-+            exit_code: s.code().unwrap_or(-1),
-+        }),
-+        // Reported as a failure the model can act on, with the output captured so far --
-+        // a killed command that returns nothing tells it only that something went wrong.
-+        None => Ok(Output {
-+            stdout,
-+            stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
-+            exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
-+        }),
-+    }
++    // 3. Validate state note action entry details.
++    let note_action = &st.runtime.actions[2];
++    assert_eq!(note_action.turn, 3);
++    assert_eq!(note_action.tool, "note");
++    assert_eq!(note_action.target, "patch (1 keys)");
++    assert_eq!(
++        note_action.summary,
++        "recorded; your state now has 1 field(s)"
++    );
++    assert!(!note_action.is_error);
 +}
 +
- /// Commands run on this machine, in the workspace directory.
- #[derive(Debug, Default, Clone)]
- pub struct LocalShell;
- 
- impl Shell for LocalShell {
-     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
--        use std::io::Read;
--        use std::process::Stdio;
--
--        // The deadline is ENFORCED, not advisory. This was a documented TODO for about an
--        // hour, and the very first live run hit it: the model opened with
--        // `which pytest; which python3; find / -name pytest 2>/dev/null` and the `find /`
--        // scanned the entire filesystem for three and a half minutes before being killed by
--        // hand. An agent will do this; a harness that merely documents a bound will hang.
--        //
--        // stdin is null for the same class of reason. Inheriting it lets any command that
--        // reads input -- a bare `python3`, a `git commit` opening an editor, an `npm` prompt --
--        // block forever on a terminal nobody is watching.
--        let mut child = Command::new("bash")
--            .arg("-lc")
--            .arg(command)
--            .current_dir(cwd)
--            .stdin(Stdio::null())
--            .stdout(Stdio::piped())
--            .stderr(Stdio::piped())
--            .spawn()
--            .map_err(|e| format!("cannot run command: {e}"))?;
--
--        // Drained on threads: a command that fills the pipe buffer deadlocks against a parent
--        // that only reads after waiting, which turns a noisy command into a hang.
--        let mut so = child.stdout.take().ok_or("no stdout")?;
--        let mut se = child.stderr.take().ok_or("no stderr")?;
--        let t_out = std::thread::spawn(move || {
--            let mut b = String::new(); let _ = so.read_to_string(&mut b); b });
--        let t_err = std::thread::spawn(move || {
--            let mut b = String::new(); let _ = se.read_to_string(&mut b); b });
--
--        let deadline = std::time::Instant::now() + timeout;
--        let status = loop {
--            match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
--                Some(s) => break Some(s),
--                None if std::time::Instant::now() >= deadline => {
--                    let _ = child.kill();
--                    let _ = child.wait();
--                    break None;
--                }
--                None => std::thread::sleep(Duration::from_millis(50)),
--            }
--        };
--
--        let stdout = t_out.join().unwrap_or_default();
--        let stderr = t_err.join().unwrap_or_default();
--
--        match status {
--            Some(s) => Ok(Output { stdout, stderr, exit_code: s.code().unwrap_or(-1) }),
--            // Reported as a failure the model can act on, with the output captured so far --
--            // a killed command that returns nothing tells it only that something went wrong.
--            None => Ok(Output {
--                stdout,
--                stderr: format!("{stderr}\n[killed by superstate after {}s]", timeout.as_secs()),
--                exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
--            }),
--        }
-+        let mut cmd = Command::new("bash");
-+        cmd.arg("-lc").arg(command).current_dir(cwd);
-+        exec_command(cmd, timeout)
-     }
- 
-     fn describe(&self) -> String {
-         "Commands run directly on this machine, in the workspace directory.".into()
-     }
- }
- 
- /// Commands run inside an already-running container via `docker exec`.
- ///
- /// The case the previous harness handled with a prose instruction. Here the model still calls
++#[test]
++fn test_rollback_appends_action_entry() {
++    // Verifies that when a verification gate fails with rollback enabled, an ActionEntry
++    // is recorded in state.runtime.actions documenting the rollback event and checkpoint target.
++    let d = repo();
++    // The verification command checks for existence of 'target.txt'.
++    // On the first gate attempt, target.txt is missing -> gate fails and rollback occurs.
++    // On the second attempt, the model writes target.txt -> gate passes.
++    let p = ScriptedProvider::new(vec![
++        calls("bash", json!({"command": "echo attempt1"})),
++        says("done with attempt 1"),
++        calls(
++            "write",
++            json!({"path": "target.txt", "content": "passed\n"}),
++        ),
++        says("done with attempt 2"),
++    ]);
++    let mut st = State::new("create target file", "test -f target.txt");
++    let (outcome, rep) = runner(&p, d.path(), &Conversational, true).run(&mut st);
++    assert_eq!(outcome, Outcome::Verified);
++    assert_eq!(rep.gate_attempts, 2);
++    assert_eq!(st.runtime.rollbacks, 1);
++
++    // Identify the rollback entry in the recorded action history.
++    let rollback_entry = st
++        .runtime
++        .actions
++        .iter()
++        .find(|a| a.tool == "rollback")
++        .expect("rollback action entry must be recorded in runtime.actions");
++
++    assert!(rollback_entry.target.starts_with("checkpoint "));
++    assert_eq!(
++        rollback_entry.summary,
++        "Gate failed; working tree reset to verified state"
++    );
++    assert!(rollback_entry.is_error);
++}

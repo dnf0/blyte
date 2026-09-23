@@ -1,64 +1,32 @@
-# Task 5 Brief: Worktree Lifecycle Handlers (`crates/superstate-mcp/src/server.rs`)
+# Task 5: End-to-End CLI Verification and Invariant Checks
 
-- **Working Directory:** `/Users/danielfisher/repos/superstate/.wt/feat-mcp-cli-complete-parity-task-5`
-- **Branch:** `wt/feat-mcp-cli-complete-parity-task-5`
-- **Depends on:** Task 4
+Working Directory: `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-## Files
-- Modify: `crates/superstate-mcp/src/server.rs`
-- Test: `crates/superstate-mcp/tests/test_mcp_worktree_lifecycle.rs`
+## What to Implement
 
-## Requirements
-Implement handlers in `handle_tool_call` for the 3 remaining worktree lifecycle tools:
+1. **Create Integration Test File**:
+   `crates/superstate-cli/tests/test_action_ledger_e2e.rs`:
+   - Test 1: `test_repl_state_command_displays_action_ledger`:
+     - Construct a `ReplSession` with initial state.
+     - Add several `ActionEntry` items to `session.state.runtime.actions` (e.g. read, bash, note).
+     - Call `handle_repl_command(&mut session, "/state", &mut output)`.
+     - Verify that the output contains `"actions": [` with the recorded action entries (turn, tool, target, summary, is_error).
+   - Test 2: `test_repl_session_records_actions_across_turns`:
+     - Test REPL prompt execution or multi-turn simulation ensuring `state.runtime.actions` accumulates actions across turns.
+   - Test 3: `test_state_only_invariant_preservation_e2e`:
+     - Verify that for a session configured with `StateOnly`, prompt context contains `## Actions Taken So Far` while the total message vector length remains bounded (`<= 3`).
 
-1. `worktree_list`:
-   - Parameters: `repo?: string`, `json?: boolean`
-   - Resolve repo root.
-   - Initialize `WorktreeManager::new(&repo_root)`.
-   - Call `manager.list_worktrees()`.
-   - Return list of worktrees (branch, path, HEAD commit, active status).
-   - If `json == true`: return structured JSON list.
-   - If `json == false`: return formatted text/markdown table matching CLI `superstate worktree list`.
+2. **REPL State Command Enhancement (if desirable)**:
+   In `crates/superstate-cli/src/repl.rs`:
+   - Ensure `/state` output clearly shows the actions count or formatted action summary if desired, or verify that the JSON serialization of `Runtime` includes `"actions"`.
 
-2. `worktree_remove`:
-   - Parameters: `branch: string` (required), `force?: boolean` (default false), `repo?: string`
-   - Resolve repo root.
-   - Initialize `WorktreeManager::new(&repo_root)`.
-   - Call `manager.remove_worktree(&branch, force)`.
-   - Return confirmation:
-     ```json
-     {
-       "branch": branch,
-       "removed": true,
-       "content": [{ "type": "text", "text": format!("Removed worktree for branch '{}'", branch) }]
-     }
-     ```
+3. **Workspace-Wide Verification**:
+   - `cargo check --workspace --all-targets`
+   - `cargo clippy --workspace --all-targets -- -D warnings`
+   - `cargo test --workspace`
 
-3. `worktree_clean`:
-   - Parameters: `repo?: string`, `force?: boolean` (default false)
-   - Resolve repo root.
-   - Initialize `WorktreeManager::new(&repo_root)`.
-   - Call `manager.clean_orphaned_worktrees(force)`.
-   - Return clean report:
-     ```json
-     {
-       "cleaned": cleaned_count,
-       "branches": cleaned_branches,
-       "content": [{ "type": "text", "text": format!("Cleaned {} orphaned worktree(s)", cleaned_count) }]
-     }
-     ```
-
-## Steps (TDD)
-1. Write failing integration tests in `crates/superstate-mcp/tests/test_mcp_worktree_lifecycle.rs`:
-   - Test `worktree_list`: creates 2 worktrees and asserts `worktree_list` returns both with correct branch names and paths in both text and JSON modes.
-   - Test `worktree_remove`: removes a worktree and asserts it is no longer listed and its directory is removed.
-   - Test `worktree_clean`: creates an orphaned worktree directory or branch and asserts `worktree_clean` cleans it up.
-   - Test JSON-RPC dispatch for all 3 tools.
-2. Run test to verify failure: `cargo test -p superstate-mcp --test test_mcp_worktree_lifecycle`.
-3. Implement the 3 handlers in `crates/superstate-mcp/src/server.rs`.
-4. Run test to verify passing: `cargo test -p superstate-mcp --test test_mcp_worktree_lifecycle`.
-5. Check `cargo clippy -p superstate-mcp` and `cargo fmt -p superstate-mcp --check`.
-6. Commit in the worktree:
-   `git add crates/superstate-mcp/src/server.rs crates/superstate-mcp/tests/test_mcp_worktree_lifecycle.rs`
-   `git commit -m "feat(mcp): implement worktree_list, worktree_remove, and worktree_clean handlers"`
-7. Write report to `/Users/danielfisher/repos/superstate/docs/superpowers/plans/task-5-report.md`.
+4. **Commit & Roborev Review**:
+   - `git add crates/superstate-cli/tests/test_action_ledger_e2e.rs crates/superstate-cli/src/repl.rs`
+   - `git commit --no-gpg-sign -m "test(cli): add end-to-end verification for action ledger in REPL"`
+   - `roborev status; roborev show HEAD`
+   - Write report to `docs/superpowers/plans/task-5-report.md`.

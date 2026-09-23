@@ -52,11 +52,26 @@ pub struct StateOnly;
 impl ContextStrategy for StateOnly {
     fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
         let mut out = Vec::new();
-        out.push(Message::User(format!(
+        let mut user_prompt = format!(
             "## Task\n{}\n\n## Your state\n{}\n",
             state.orchestrator.goal,
             serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
-        )));
+        );
+
+        // When actions have been recorded, format the chronological action ledger.
+        // Provides episodic memory of tool outcomes without growing conversation history.
+        if !state.runtime.actions.is_empty() {
+            user_prompt.push_str("\n## Actions Taken So Far\n");
+            for action in &state.runtime.actions {
+                let status_indicator = if action.is_error { " [ERROR]" } else { "" };
+                user_prompt.push_str(&format!(
+                    "- Turn {}: `{}` `{}` -> {}{}\n",
+                    action.turn, action.tool, action.target, action.summary, status_indicator
+                ));
+            }
+        }
+
+        out.push(Message::User(user_prompt));
 
         // The latest observation, and only that. A tool result the model has already acted on
         // is not re-sent; if it mattered, it belonged in state.

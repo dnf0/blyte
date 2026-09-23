@@ -118,19 +118,13 @@ fn with_graph_warns_rather_than_silently_doing_nothing() {
 }
 
 #[test]
-fn both_binaries_expose_the_same_state_commands() {
-    // The surface was previously duplicated, so a command wired into one binary
-    // compiled and then failed at runtime when invoked through the other.
+fn superstate_exposes_state_commands() {
     for cmd in ["ready", "prompt", "note", "next", "status", "init"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_state"))
-            .args([cmd, "--help"])
+        let out = Command::new(env!("CARGO_BIN_EXE_superstate"))
+            .args(["state", cmd, "--help"])
             .output()
             .unwrap();
-        assert!(
-            out.status.success(),
-            "`state {}` missing from the standalone binary",
-            cmd
-        );
+        assert!(out.status.success(), "`superstate state {}` missing", cmd);
     }
 }
 

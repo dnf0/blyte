@@ -1,56 +1,63 @@
-# Task 3 Report: Shared `exec_command` with Process Groups and Negative PGID Termination
+# Task 3 Completion Report: Wire Action Ledger Logging and Rollback Tracking into Runner::run
 
-**Status: DONE**
+## Summary
+Successfully wired action ledger logging and rollback tracking into `Runner::run` within `crates/superstate-agent/src/run.rs`, following strict Test-Driven Development (TDD).
 
-## 1. Summary of Changes
-- Extracted subprocess execution logic in `crates/superstate-agent/src/shell.rs` into `fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String>`.
-- Configured child process on Unix with `cmd.process_group(0)` (`setpgid(0)`).
-- On timeout deadline expiry on Unix, invoked `libc::kill(-pgid, libc::SIGKILL)` to signal the entire process group simultaneously.
-- Ensured stdout and stderr reader threads join cleanly without deadlocks caused by leaked open pipe handles in background grandchild processes.
-- Refactored `LocalShell::exec` to delegate to `exec_command`.
+## Implemented Changes
 
-## 2. Verification Evidence
-Ran command:
-```bash
-cargo test -p superstate-agent --test test_shell_timeout
-```
+1. **`crates/superstate-agent/src/run.rs`**:
+   - **Tool Call Action Logging**: In `Runner::run`, inside the tool call execution loop, each executed tool call (whether a built-in tool or `"note"`) computes its canonical target via `extract_action_target` and deterministic summary via `extract_action_summary`, and appends an `ActionEntry` to `state.runtime.actions`:
+     ```rust
+     let action_target = extract_action_target(&call.name, &call.arguments);
+     let action_summary =
+         extract_action_summary(&call.name, &outcome.content, outcome.is_error);
+     state.runtime.actions.push(crate::state::ActionEntry {
+         turn,
+         tool: call.name.clone(),
+         target: action_target,
+         summary: action_summary,
+         is_error: outcome.is_error,
+     });
+     ```
+   - **Rollback Action Logging**: In `Runner::run`, when verification fails with rollback enabled, working tree reset appends a corresponding rollback `ActionEntry` to `state.runtime.actions`:
+     ```rust
+     state.runtime.actions.push(crate::state::ActionEntry {
+         turn,
+         tool: "rollback".into(),
+         target: format!("checkpoint {short_sha}"),
+         summary: "Gate failed; working tree reset to verified state".into(),
+         is_error: true,
+     });
+     ```
 
-Output:
-```text
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
-     Running tests/test_shell_timeout.rs (target/debug/deps/test_shell_timeout-835d8b3741828074)
+2. **`crates/superstate-agent/tests/test_run.rs`**:
+   - `test_actions_recorded_during_run`: Verifies that tool executions (`bash`, `read`, `note`) append chronological `ActionEntry` records to `state.runtime.actions` with accurate `turn`, `tool`, `target`, `summary`, and `is_error` values.
+   - `test_rollback_appends_action_entry`: Verifies that a gate failure triggering git rollback appends an `ActionEntry` with `tool == "rollback"`, target starting with `"checkpoint "`, summary indicating gate failure and tree reset, and `is_error == true`.
 
-running 6 tests
-test a_command_that_reads_stdin_does_not_block_forever ... ok
-test a_normal_command_is_unaffected ... ok
-test a_command_producing_more_output_than_the_pipe_buffer_does_not_deadlock ... ok
-test a_runaway_command_is_killed_at_the_deadline ... ok
-test grandchild_process_tree_is_killed_at_deadline ... ok
-test output_produced_before_the_kill_is_kept ... ok
+## TDD Verification
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
-```
+1. **RED Phase**:
+   - Authored `test_actions_recorded_during_run` and `test_rollback_appends_action_entry` in `tests/test_run.rs`.
+   - Executed `cargo test -p superstate-agent --test test_run`.
+   - Observed expected test failures:
+     - `test_actions_recorded_during_run`: assertion failed `left: 0, right: 3`.
+     - `test_rollback_appends_action_entry`: assertion failed `rollback action entry must be recorded in runtime.actions`.
+2. **GREEN Phase**:
+   - Implemented tool call and rollback action recording in `crates/superstate-agent/src/run.rs`.
+   - Executed `cargo test -p superstate-agent --test test_run`: all 15 tests passed.
+3. **Quality & Regression Checks**:
+   - Executed `cargo test -p superstate-agent`: all 69 tests passed across all unit and integration test binaries.
+   - Executed `cargo check -p superstate-agent`: cleanly passed.
+   - Executed `cargo clippy -p superstate-agent --all-targets -- -D warnings`: cleanly passed with 0 warnings.
 
-All 6 tests passed in ~2.04 seconds (specifically, `grandchild_process_tree_is_killed_at_deadline` was killed at the 1s timeout and finished well under the 4s threshold without hanging).
+## Commit
+- Commit: `78b8778`
+- Message: `feat(agent): record tool calls and rollbacks into state.runtime.actions`
+## Roborev Code Review
+- Job: 5151
+- Target Commit: `78b8778`
+- Verdict: Pass ("No issues found.")
 
-Full test suite verification:
-```bash
-cargo test -p superstate-agent
-```
-Output:
-```text
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s (lib)
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.64s (test_run)
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s (test_shell_timeout)
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s (test_state_authority)
-test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s (test_tools)
-```
+## Status
+DONE
 
-Static analysis verification:
-- `cargo check -p superstate-agent`: 0 warnings
-- `cargo clippy -p superstate-agent`: 0 warnings
-
-## 3. Commit Details
-- **Commit SHA:** `5d5809c`
-- **Message:** `fix(agent): kill process group on timeout to prevent orphan grandchild leaks`
-- **GPG Verification:** Skipped (`--no-gpg-sign`)

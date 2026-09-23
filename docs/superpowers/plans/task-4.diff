@@ -1,93 +1,149 @@
-67feab3 feat(agent): wire ContainerShell to exec_command with full timeout parity
----
- crates/superstate-agent/src/shell.rs               | 18 ++++++---------
- .../superstate-agent/tests/test_shell_timeout.rs   | 27 ++++++++++++++++++++++
- 2 files changed, 34 insertions(+), 11 deletions(-)
----
-diff --git a/crates/superstate-agent/src/shell.rs b/crates/superstate-agent/src/shell.rs
-index f94d842..4aeb70f 100644
---- a/crates/superstate-agent/src/shell.rs
-+++ b/crates/superstate-agent/src/shell.rs
-@@ -178,33 +178,29 @@ impl Shell for LocalShell {
- /// The case the previous harness handled with a prose instruction. Here the model still calls
- /// `bash` and cannot route around it, because there is no host shell in its tool surface.
- #[derive(Debug, Clone)]
- pub struct ContainerShell {
-     pub container_id: String,
-     /// Where the workspace is mounted inside the container.
-     pub workdir: PathBuf,
- }
- 
- impl Shell for ContainerShell {
--    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
--        let out = Command::new("docker")
--            .args(["exec", "-i", "-w"])
-+    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
-+        // Construct docker exec invocation targeting the running container and its workdir.
-+        let mut cmd = Command::new("docker");
-+        cmd.args(["exec", "-i", "-w"])
-             .arg(&self.workdir)
-             .arg(&self.container_id)
--            .args(["bash", "-lc", command])
--            .output()
--            .map_err(|e| format!("cannot exec in container {}: {e}", self.container_id))?;
--        Ok(Output {
--            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
--            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
--            exit_code: out.status.code().unwrap_or(-1),
--        })
-+            .args(["bash", "-lc", command]);
-+        // Delegate to exec_command to ensure process group isolation and timeout parity.
-+        exec_command(cmd, timeout)
-     }
- 
-     fn describe(&self) -> String {
-         format!(
-             "Commands run inside the project container at {}. Project dependencies are \
-              installed there, not on the host.",
-             self.workdir.display()
-         )
-     }
- }
-diff --git a/crates/superstate-agent/tests/test_shell_timeout.rs b/crates/superstate-agent/tests/test_shell_timeout.rs
-index a1e7b67..aff2c4c 100644
---- a/crates/superstate-agent/tests/test_shell_timeout.rs
-+++ b/crates/superstate-agent/tests/test_shell_timeout.rs
-@@ -79,10 +79,37 @@ fn grandchild_process_tree_is_killed_at_deadline() {
-         "must not deadlock on grandchild pipe handles: took {elapsed:?}"
-     );
-     assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
-     assert!(
-         out.stderr.contains("killed by superstate"),
-         "kill notice missing from stderr: {:?}",
-         out.stderr
-     );
- }
- 
-+#[test]
-+fn container_shell_enforces_timeout_on_hung_execution() {
-+    use std::path::PathBuf;
-+    use superstate_agent::shell::ContainerShell;
+diff --git a/crates/superstate-agent/src/context.rs b/crates/superstate-agent/src/context.rs
+index 8dca97a..c9de708 100644
+--- a/crates/superstate-agent/src/context.rs
++++ b/crates/superstate-agent/src/context.rs
+@@ -52,11 +52,25 @@ pub struct StateOnly;
+ impl ContextStrategy for StateOnly {
+     fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
+         let mut out = Vec::new();
+-        out.push(Message::User(format!(
++        let mut user_prompt = format!(
+             "## Task\n{}\n\n## Your state\n{}\n",
+             state.orchestrator.goal,
+             serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
+-        )));
++        );
 +
-+    let shell = ContainerShell {
-+        container_id: "non-existent-container-id-12345".into(),
-+        workdir: PathBuf::from("/workspace"),
++        // When actions have been recorded, format the chronological action ledger.
++        // Provides episodic memory of tool outcomes without growing conversation history.
++        if !state.runtime.actions.is_empty() {
++            user_prompt.push_str("\n## Actions Taken So Far\n");
++            for action in &state.runtime.actions {
++                user_prompt.push_str(&format!(
++                    "- Turn {}: `{}` `{}` -> {}\n",
++                    action.turn, action.tool, action.target, action.summary
++                ));
++            }
++        }
++
++        out.push(Message::User(user_prompt));
+ 
+         // The latest observation, and only that. A tool result the model has already acted on
+         // is not re-sent; if it mattered, it belonged in state.
+diff --git a/crates/superstate-agent/tests/test_run.rs b/crates/superstate-agent/tests/test_run.rs
+index e776f49..4b7e809 100644
+--- a/crates/superstate-agent/tests/test_run.rs
++++ b/crates/superstate-agent/tests/test_run.rs
+@@ -7,8 +7,8 @@ use superstate_agent::context::{ContextStrategy, Conversational, StateOnly};
+ use superstate_agent::fs::LocalFs;
+ use superstate_agent::run::{Budget, Outcome, Runner};
+ use superstate_agent::shell::{LocalShell, Shell};
+-use superstate_agent::state::State;
+-use superstate_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
++use superstate_agent::state::{ActionEntry, State};
++use superstate_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
+ 
+ /// Replays a fixed list of responses and records every request it was given.
+ struct ScriptedProvider {
+@@ -437,3 +437,101 @@ fn test_rollback_appends_action_entry() {
+     );
+     assert!(rollback_entry.is_error);
+ }
++
++#[test]
++fn test_state_only_context_omits_actions_when_empty() {
++    // When state.runtime.actions is empty, StateOnly::build must omit the action ledger section
++    // to preserve a minimal, clean prompt for the initial turn or until actions occur.
++    let state = State::new("my goal", "cargo test");
++    let history = vec![];
++    let messages = StateOnly.build(&state, &history);
++    assert_eq!(messages.len(), 1);
++
++    let Message::User(prompt) = &messages[0] else {
++        panic!("expected Message::User");
 +    };
-+    let d = tempfile::tempdir().unwrap();
-+    let started = Instant::now();
-+    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
-+    let elapsed = started.elapsed();
-+    assert!(
-+        elapsed < Duration::from_secs(3),
-+        "container exec must obey timeout bound: took {elapsed:?}"
-+    );
-+    match res {
-+        Ok(out) => {
-+            assert!(out.exit_code != 0);
-+        }
-+        Err(e) => {
-+            assert!(!e.is_empty());
-+        }
-+    }
++    assert!(!prompt.contains("## Actions Taken So Far"));
 +}
 +
++#[test]
++fn test_state_only_context_formats_action_ledger() {
++    // When actions exist, StateOnly::build formats them chronologically into the initial user prompt,
++    // retaining Invariant II by keeping the total message count bounded (messages.len() <= 3).
++    let mut state = State::new("solve bug", "pytest");
++    state.runtime.actions.push(ActionEntry {
++        turn: 1,
++        tool: "read".into(),
++        target: "src/main.rs (lines 1-20)".into(),
++        summary: "20 lines read".into(),
++        is_error: false,
++    });
++    state.runtime.actions.push(ActionEntry {
++        turn: 2,
++        tool: "bash".into(),
++        target: "cargo test".into(),
++        summary: "exit 101".into(),
++        is_error: true,
++    });
++
++    // Provide history with tool call and result to verify bounded message length.
++    let history = vec![
++        Message::User("initial user message".into()),
++        Message::ToolCall {
++            id: "tc_1".into(),
++            name: "bash".into(),
++            arguments: json!({"command": "cargo test"}),
++            signature: None,
++        },
++        Message::ToolResult {
++            id: "tc_1".into(),
++            name: "bash".into(),
++            content: "test failure".into(),
++            is_error: true,
++        },
++    ];
++
++    let messages = StateOnly.build(&state, &history);
++    assert!(
++        messages.len() <= 3,
++        "messages.len() must be <= 3, got {}",
++        messages.len()
++    );
++
++    let Message::User(prompt) = &messages[0] else {
++        panic!("expected first message to be Message::User");
++    };
++    assert!(prompt.contains("## Actions Taken So Far"));
++    assert!(prompt.contains("- Turn 1: `read` `src/main.rs (lines 1-20)` -> 20 lines read"));
++    assert!(prompt.contains("- Turn 2: `bash` `cargo test` -> exit 101"));
++}
++
++#[test]
++fn test_state_only_runner_injects_action_ledger_in_prompts() {
++    // Verifies end-to-end integration: Runner executing with StateOnly strategy injects
++    // actions executed in turn 1 into the turn 2 request prompt.
++    let d = repo();
++    let p = ScriptedProvider::new(vec![
++        calls("bash", json!({"command": "echo step1"})),
++        says("done"),
++    ]);
++    let mut st = State::new("step goal", "true");
++    let (outcome, rep) = runner(&p, d.path(), &StateOnly, false).run(&mut st);
++    assert_eq!(outcome, Outcome::Verified);
++    assert_eq!(rep.gate_attempts, 1);
++
++    let seen = p.seen.lock().unwrap();
++    assert_eq!(seen.len(), 2);
++
++    // Turn 1 prompt must not contain actions as none have run yet.
++    let Message::User(first_prompt) = &seen[0].messages[0] else {
++        panic!("expected Message::User in turn 1");
++    };
++    assert!(!first_prompt.contains("## Actions Taken So Far"));
++
++    // Turn 2 prompt must contain the action ledger capturing turn 1's bash invocation.
++    let Message::User(second_prompt) = &seen[1].messages[0] else {
++        panic!("expected Message::User in turn 2");
++    };
++    assert!(second_prompt.contains("## Actions Taken So Far"));
++    assert!(second_prompt.contains("- Turn 1: `bash` `echo step1` -> exit 0"));
++}

@@ -265,6 +265,21 @@ impl<'a> Runner<'a> {
                         summary,
                         is_error: outcome.is_error,
                     });
+
+                    // Record tool invocation in the chronological action ledger.
+                    // Captures deterministic targets and outcome summaries so that episodic memory
+                    // retains an accurate, bounded audit trail of all agent actions.
+                    let action_target = extract_action_target(&call.name, &call.arguments);
+                    let action_summary =
+                        extract_action_summary(&call.name, &outcome.content, outcome.is_error);
+                    state.runtime.actions.push(crate::state::ActionEntry {
+                        turn,
+                        tool: call.name.clone(),
+                        target: action_target,
+                        summary: action_summary,
+                        is_error: outcome.is_error,
+                    });
+
                     history.push(Message::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -293,8 +308,16 @@ impl<'a> Runner<'a> {
                 if let Some(base) = &baseline {
                     self.reset_to(base);
                     state.runtime.rollbacks += 1;
-                    self.emit(Event::RolledBack {
-                        to: &base[..base.len().min(8)],
+                    let short_sha = &base[..base.len().min(8)];
+                    self.emit(Event::RolledBack { to: short_sha });
+                    // Record rollback in the action ledger to ensure the worker and orchestrator
+                    // observe workspace resets explicitly within episodic action history.
+                    state.runtime.actions.push(crate::state::ActionEntry {
+                        turn,
+                        tool: "rollback".into(),
+                        target: format!("checkpoint {short_sha}"),
+                        summary: "Gate failed; working tree reset to verified state".into(),
+                        is_error: true,
                     });
                 }
             }
@@ -316,5 +339,216 @@ impl<'a> Runner<'a> {
             )));
         }
         (Outcome::BudgetExhausted, report)
+    }
+}
+
+/// Extracts a concise, human-readable target descriptor from a tool call's arguments.
+///
+/// Deterministic and zero-latency: formats tool targets without LLM invocation to
+/// bound the prompt footprint in episodic action ledgers.
+///
+/// # Arguments
+/// * `tool` - The name of the tool invoked (e.g. "read", "bash", "write").
+/// * `args` - The JSON arguments supplied to the tool.
+///
+/// # Returns
+/// A compact string identifying the target file, command, or parameter.
+pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
+    // Discriminate on known tool types to extract their canonical target representations.
+    match tool {
+        "read" => {
+            // Extract the target file path and optionally the requested line range.
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                let start = args.get("start_line").and_then(|v| {
+                    v.as_u64()
+                        .map(|n| n.to_string())
+                        .or_else(|| v.as_str().map(|s| s.to_string()))
+                });
+                let end = args.get("end_line").and_then(|v| {
+                    v.as_u64()
+                        .map(|n| n.to_string())
+                        .or_else(|| v.as_str().map(|s| s.to_string()))
+                });
+                // When line bounds are specified, annotate the path with 1-indexed line boundaries.
+                match (start, end) {
+                    (Some(s), Some(e)) => return format!("{path} (L{s}-L{e})"),
+                    (Some(s), None) => return format!("{path} (L{s}+)"),
+                    (None, Some(e)) => return format!("{path} (L1-L{e})"),
+                    (None, None) => return path.to_string(),
+                }
+            }
+        }
+        "write" => {
+            // Extract the destination path and include byte size for visibility into write volume.
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+                    return format!("{path} ({} bytes)", content.len());
+                }
+                return path.to_string();
+            }
+        }
+        "edit" => {
+            // Edit targets are identified primarily by the target file being modified.
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                return path.to_string();
+            }
+        }
+        "bash" => {
+            // Bash commands are bounded at 60 characters so long pipelines do not dominate context.
+            // Newlines are sanitized to spaces to preserve single-line formatting in the action ledger.
+            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                let single_line = cmd.replace('\n', " ");
+                if single_line.chars().count() > 60 {
+                    let prefix: String = single_line.chars().take(57).collect();
+                    return format!("{prefix}...");
+                }
+                return single_line;
+            }
+        }
+        "glob" => {
+            // Glob targets are represented by the file search pattern.
+            if let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) {
+                return pattern.to_string();
+            }
+        }
+        "grep" => {
+            // Grep targets represent the regex pattern and, when restricted, the target subtree.
+            if let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        return format!("pattern '{pattern}' in {path}");
+                    }
+                }
+                return format!("pattern '{pattern}'");
+            }
+        }
+        "note" => {
+            // Note patches are summarized by the number of state keys modified.
+            if let Some(patch) = args.get("patch").and_then(|v| v.as_object()) {
+                return format!("patch ({} keys)", patch.len());
+            }
+        }
+        _ => {}
+    }
+
+    // Fallback: extract the first string argument value found, or default to the tool name.
+    if let Some(obj) = args.as_object() {
+        for val in obj.values() {
+            if let Some(s) = val.as_str() {
+                return s.to_string();
+            }
+        }
+    }
+    tool.to_string()
+}
+
+/// Extracts a one-line deterministic outcome summary from a tool execution result.
+///
+/// # Arguments
+/// * `tool` - The name of the tool executed.
+/// * `content` - Raw string output produced by the tool.
+/// * `is_error` - Whether the tool execution resulted in an error status.
+///
+/// # Returns
+/// A single-line summary string describing the outcome.
+pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String {
+    // Produce deterministic, bounded status summaries per tool category.
+    match tool {
+        "read" => {
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("read failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Count lines returned to indicate the volume read without including full content.
+                let count = content.lines().count();
+                format!("{count} lines read")
+            }
+        }
+        "write" => {
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("write failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Static confirmation of file write completion.
+                "file written".to_string()
+            }
+        }
+        "edit" => {
+            // Distinguish successful replacements from rejection/failure reasons.
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("edit failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                "string replaced".to_string()
+            }
+        }
+        "bash" => {
+            // Non-zero bash exits extract the terminal failure line to preserve diagnostics.
+            if !is_error {
+                "exit 0".to_string()
+            } else {
+                let last_line = content
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("command failed");
+                let clamped: String = last_line.chars().take(80).collect();
+                format!("failed: {clamped}")
+            }
+        }
+        "glob" => {
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("glob failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Count matching file entries in the glob output.
+                let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+                format!("{count} files matched")
+            }
+        }
+        "grep" => {
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("grep failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Count matching occurrences found in content search.
+                let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+                format!("{count} matches found")
+            }
+        }
+        "note" => {
+            // Surface the first line of the note confirmation message.
+            let first = content.lines().next().unwrap_or("recorded");
+            if first.is_empty() {
+                "recorded".to_string()
+            } else {
+                first.to_string()
+            }
+        }
+        _ => {
+            // Fallback for custom or unknown tools clamps the first line to 80 chars.
+            let first = content.lines().next().unwrap_or("");
+            first.chars().take(80).collect()
+        }
     }
 }

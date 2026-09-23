@@ -1,51 +1,77 @@
-# Task 2 Brief: Failing Regression Test for Grandchild Process Tree Termination
+# Task 2: Deterministic Target and Outcome Extraction Helpers in run.rs
 
-## Global Constraints
-- Target crate: `crates/superstate-agent`
-- Rust 2021 edition, zero compiler warnings
-- Clean execution on Unix platforms (macOS / Linux)
+Working Directory: `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-## Task Description
-Write a regression test in `crates/superstate-agent/tests/test_shell_timeout.rs` named `grandchild_process_tree_is_killed_at_deadline`.
+## What to Implement
 
-### Context:
-When an agent runs a command that forks grandchild processes (e.g. `sh -c '(sleep 30) & wait'`), killing only the parent PID leaves the grandchild alive. The grandchild inherits the write descriptors of stdout and stderr, causing reader threads to deadlock or wait until the grandchild exits.
-
-### Steps:
-1. In `crates/superstate-agent/tests/test_shell_timeout.rs`, add:
+In `crates/superstate-agent/src/run.rs`:
+Implement two extraction helper functions:
 ```rust
-#[test]
-fn grandchild_process_tree_is_killed_at_deadline() {
-    // If only the parent bash process is killed, background grandchildren
-    // (such as `find /` or subshells) stay alive, keep pipe handles open,
-    // and cause reader thread joins to hang.
-    let d = tempfile::tempdir().unwrap();
-    let started = Instant::now();
-    let out = LocalShell
-        .exec("sh -c '(sleep 30) & wait'", d.path(), Duration::from_secs(1))
-        .unwrap();
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(4),
-        "must not deadlock on grandchild pipe handles: took {elapsed:?}"
-    );
-    assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
-    assert!(
-        out.stderr.contains("killed by superstate"),
-        "kill notice missing from stderr: {:?}",
-        out.stderr
-    );
-}
+pub(crate) fn extract_action_target(tool: &str, args: &serde_json::Value) -> String;
+pub(crate) fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String;
 ```
-2. Run the test:
-```bash
-cargo test -p superstate-agent --test test_shell_timeout grandchild_process_tree_is_killed_at_deadline -- --nocapture
-```
-Confirm whether it fails or hangs (demonstrating the bug). If it hangs, kill it after a few seconds or note the timeout.
-3. Commit the test:
-```bash
-git add crates/superstate-agent/tests/test_shell_timeout.rs
-git commit --no-gpg-sign -m "test(agent): add failing test for grandchild process tree termination"
-```
-4. Run `roborev status; roborev show HEAD`.
-5. Report back status: DONE (or DONE_WITH_CONCERNS) with the failure reproduction evidence.
+
+### Extraction Specifications:
+
+#### `extract_action_target`:
+- `"read"`:
+  - Extract `"path"`. If `"start_line"` and `"end_line"` are present, return `format!("{path} (L{start_line}-L{end_line})")`.
+  - If only `"path"` is present, return `path.to_string()`.
+- `"write"`:
+  - Extract `"path"` and `"content"`. Return `format!("{path} ({} bytes)", content.len())`. If content missing, return `path.to_string()`.
+- `"edit"`:
+  - Extract `"path"`. Return `path.to_string()`.
+- `"bash"`:
+  - Extract `"command"`. If length > 60 characters, return first 57 characters + `"..."`.
+- `"glob"`:
+  - Extract `"pattern"`. Return `pattern.to_string()`.
+- `"grep"`:
+  - Extract `"pattern"`. If `"path"` is provided, return `format!("pattern '{pattern}' in {path}")`. Otherwise return `format!("pattern '{pattern}'")`.
+- `"note"`:
+  - Extract `"patch"`. If it's a JSON object, return `format!("patch ({} keys)", patch.as_object().map_or(0, |o| o.len()))`.
+- Fallback / Unknown tool:
+  - Return first string argument value found or tool name.
+
+#### `extract_action_summary`:
+- `"read"`:
+  - Return `format!("{} lines read", content.lines().count())`.
+- `"write"`:
+  - Return `"file written".to_string()`.
+- `"edit"`:
+  - If `is_error`: return `format!("failed: {}", content.lines().next().unwrap_or("edit failed"))`.
+  - Else: return `"string replaced".to_string()`.
+- `"bash"`:
+  - If `!is_error`: return `"exit 0".to_string()`.
+  - Else: find the last non-empty line of `content`, clamped to 80 chars, and return `format!("failed: {}", last_line)`.
+- `"glob"`:
+  - Count non-empty lines in `content`: `format!("{} files matched", count)`.
+- `"grep"`:
+  - Count non-empty lines in `content`: `format!("{} matches found", count)`.
+- `"note"`:
+  - Return `content.lines().next().unwrap_or("recorded").to_string()`.
+- Fallback:
+  - First line of `content` clamped to 80 chars.
+
+---
+
+## Testing Requirements (TDD)
+
+Create `crates/superstate-agent/tests/test_action_extraction.rs`:
+Test extraction for:
+1. `read`: with and without line numbers.
+2. `write`: target includes bytes, summary is "file written".
+3. `edit`: success ("string replaced") and failure ("failed: string not found").
+4. `bash`: short command and long command truncation (>60 chars); success ("exit 0") and failure (last non-empty line extracted).
+5. `glob`: file count matching.
+6. `grep`: pattern and path, match count.
+7. `note`: key count, status string.
+
+## Execution Steps
+1. Write tests in `crates/superstate-agent/tests/test_action_extraction.rs`.
+2. Run `cargo test -p superstate-agent --test test_action_extraction` to observe failure.
+3. Implement `extract_action_target` and `extract_action_summary` in `crates/superstate-agent/src/run.rs`.
+4. Run `cargo test -p superstate-agent --test test_action_extraction` to verify all tests pass.
+5. Verify `cargo check -p superstate-agent` and `cargo clippy -p superstate-agent`.
+6. Commit: `git add crates/superstate-agent/src/run.rs crates/superstate-agent/tests/test_action_extraction.rs && git commit --no-gpg-sign -m "feat(agent): implement deterministic action target and outcome summarizers"`
+7. Run `roborev status; roborev show HEAD`.
+8. Write your completion report to `docs/superpowers/plans/task-2-report.md`.

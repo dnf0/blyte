@@ -1,0 +1,139 @@
+use clap::Parser;
+use std::sync::Mutex;
+use superstate_cli::cli::Cli;
+use superstate_cli::task_runner::{run_task, run_task_with_state_and_writer, TaskConfig};
+
+/// Global lock synchronizing tests that mutate environment variables.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn test_task_config_from_cli() {
+    let cli = Cli::parse_from([
+        "superstate",
+        "solve the bug",
+        "--gate",
+        "cargo test",
+        "--context",
+        "state-only",
+        "--model",
+        "gemini-2.5-flash",
+        "--container",
+        "docker-123",
+        "--max-turns",
+        "42",
+        "--max-gates",
+        "7",
+        "--rollback=false",
+    ]);
+
+    let config = TaskConfig::from(&cli);
+    assert_eq!(config.prompt, "solve the bug");
+    assert_eq!(config.gate.as_deref(), Some("cargo test"));
+    assert_eq!(config.context_strategy, "state-only");
+    assert_eq!(config.model.as_deref(), Some("gemini-2.5-flash"));
+    assert_eq!(config.container.as_deref(), Some("docker-123"));
+    assert_eq!(config.max_turns, 42);
+    assert_eq!(config.max_gates, 7);
+    assert!(!config.rollback);
+    assert_eq!(
+        config.root,
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    );
+}
+
+#[test]
+fn test_task_config_defaults() {
+    let cli = Cli::parse_from(["superstate"]);
+    let config = TaskConfig::from(&cli);
+    assert_eq!(config.prompt, "");
+    assert_eq!(config.gate, None);
+    assert_eq!(config.context_strategy, "conversational");
+    assert_eq!(config.model, None);
+    assert_eq!(config.container, None);
+    assert_eq!(config.max_turns, 25);
+    assert_eq!(config.max_gates, 5);
+    assert!(config.rollback);
+    assert_eq!(
+        config.root,
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    );
+}
+
+#[test]
+fn test_run_task_missing_api_key_returns_clear_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    // Ensure both GEMINI_API_KEY and GOOGLE_API_KEY are unset
+    std::env::remove_var("GEMINI_API_KEY");
+    std::env::remove_var("GOOGLE_API_KEY");
+
+    let config = TaskConfig {
+        prompt: "echo hello".to_string(),
+        gate: None,
+        context_strategy: "state-only".to_string(),
+        model: None,
+        container: None,
+        max_turns: 10,
+        max_gates: 2,
+        rollback: true,
+        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    };
+
+    let result = run_task(config);
+    assert!(result.is_err(), "Expected error when API key is missing");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("GEMINI_API_KEY"),
+        "Error message should mention GEMINI_API_KEY: {err}"
+    );
+}
+
+#[test]
+fn test_run_task_with_state_and_writer_preserves_state() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    std::env::remove_var("GEMINI_API_KEY");
+    std::env::remove_var("GOOGLE_API_KEY");
+
+    let config = TaskConfig {
+        prompt: "task goal".to_string(),
+        gate: Some("echo 1".to_string()),
+        context_strategy: "state-only".to_string(),
+        model: None,
+        container: None,
+        max_turns: 5,
+        max_gates: 1,
+        rollback: false,
+        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    };
+
+    let mut state = superstate_agent::state::State::new("custom goal", "echo 1");
+    let mut output = Vec::new();
+
+    let result = run_task_with_state_and_writer(&config, &mut state, &mut output);
+    assert!(result.is_err());
+    assert_eq!(state.orchestrator.goal, "custom goal");
+    assert_eq!(state.orchestrator.verification_cmd, "echo 1");
+}
+
+#[test]
+fn test_repl_stream_prompt_dispatch() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    std::env::remove_var("GEMINI_API_KEY");
+    std::env::remove_var("GOOGLE_API_KEY");
+
+    let config = superstate_cli::repl::ReplConfig::default();
+    let session = superstate_cli::repl::ReplSession::new(&config);
+
+    let input = b"Implement feature X\n/exit\n";
+    let reader = std::io::Cursor::new(input);
+    let mut writer = Vec::new();
+
+    let res = superstate_cli::repl::run_repl_stream(reader, &mut writer, session);
+    assert!(res.is_ok());
+
+    let output = String::from_utf8(writer).unwrap();
+    assert!(output.contains("Dispatching turn for prompt: Implement feature X"));
+    assert!(output.contains("GEMINI_API_KEY"));
+}

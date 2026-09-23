@@ -1,101 +1,60 @@
-# Task 4 Brief: Wire `ContainerShell::exec` to `exec_command` with Timeout Parity
+# Task 4: Wire Context Assembly in StateOnly::build
 
-## Global Constraints
-- Target crate: `crates/superstate-agent`
-- Rust 2021 edition, zero compiler warnings
-- Clean execution on Unix platforms (macOS / Linux)
-- Full timeout and seam parity between `LocalShell` and `ContainerShell`
+Working Directory: `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
 
-## Task Description
-Wire `ContainerShell::exec` to `exec_command(cmd, timeout)` in `crates/superstate-agent/src/shell.rs`.
+## What to Implement
 
-### Current state of `ContainerShell::exec`:
-```rust
-impl Shell for ContainerShell {
-    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
-        let out = Command::new("docker")
-            .args(["exec", "-i", "-w"])
-            .arg(&self.workdir)
-            .arg(&self.container_id)
-            .args(["bash", "-lc", command])
-            .output()
-            .map_err(|e| format!("cannot exec in container {}: {e}", self.container_id))?;
-        Ok(Output {
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            exit_code: out.status.code().unwrap_or(-1),
-        })
-    }
-    // ...
-}
-```
+In `crates/superstate-agent/src/context.rs`:
+Update `StateOnly::build` (lines 53-81) to format `state.runtime.actions` into the first user message when actions are present:
 
-### Steps:
-1. In `crates/superstate-agent/src/shell.rs`:
-Update `ContainerShell::exec`:
-```rust
-impl Shell for ContainerShell {
-    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        let mut cmd = Command::new("docker");
-        cmd.args(["exec", "-i", "-w"])
-            .arg(&self.workdir)
-            .arg(&self.container_id)
-            .args(["bash", "-lc", command]);
-        exec_command(cmd, timeout)
-    }
+1. **Format Action Ledger**:
+   - If `state.runtime.actions.is_empty()`, do NOT add the `## Actions Taken So Far` section. The user prompt remains:
+     ```markdown
+     ## Task
+     {goal}
 
-    fn describe(&self) -> String {
-        format!(
-            "Commands run inside the project container at {}. Project dependencies are \
-             installed there, not on the host.",
-            self.workdir.display()
-        )
-    }
-}
-```
+     ## Your state
+     {json_agent_fields}
+     ```
+   - If `!state.runtime.actions.is_empty()`, append:
+     ```markdown
 
-2. Add a test in `crates/superstate-agent/tests/test_shell_timeout.rs`:
-```rust
-#[test]
-fn container_shell_enforces_timeout_on_hung_execution() {
-    use std::path::PathBuf;
-    use superstate_agent::shell::ContainerShell;
+     ## Actions Taken So Far
+     - Turn {turn}: `{tool}` `{target}` -> {summary}
+     ```
+     For each `action` in `state.runtime.actions`.
 
-    let shell = ContainerShell {
-        container_id: "non-existent-container-id-12345".into(),
-        workdir: PathBuf::from("/workspace"),
-    };
-    let d = tempfile::tempdir().unwrap();
-    let started = Instant::now();
-    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "container exec must obey timeout bound: took {elapsed:?}"
-    );
-    match res {
-        Ok(out) => {
-            assert!(out.exit_code != 0);
-        }
-        Err(e) => {
-            assert!(!e.is_empty());
-        }
-    }
-}
-```
+2. **Invariant II Preservation**:
+   - `out` must continue to have `messages.len() <= 3` (one `Message::User`, plus at most one previous `Message::ToolCall` and `Message::ToolResult`, or just the single user message on initial turn).
 
-3. Verification:
-Run:
-```bash
-cargo check -p superstate-agent
-cargo test -p superstate-agent
-```
-All tests must pass with 0 warnings.
+---
 
-4. Commit:
-```bash
-git add crates/superstate-agent/src/shell.rs crates/superstate-agent/tests/test_shell_timeout.rs
-git commit --no-gpg-sign -m "feat(agent): wire ContainerShell to exec_command with full timeout parity"
-```
-Run `roborev status; roborev show HEAD`.
-Report back status: DONE.
+## Testing Requirements (TDD)
+
+In `crates/superstate-agent/tests/test_run.rs` (or a dedicated test):
+1. `test_state_only_context_omits_actions_when_empty`:
+   - Initialize `state` with no actions.
+   - Call `StateOnly.build(&state, &history)`.
+   - Verify `Message::User` string does NOT contain `"## Actions Taken So Far"`.
+2. `test_state_only_context_formats_action_ledger`:
+   - Initialize `state`, push `ActionEntry` elements to `state.runtime.actions`.
+   - Call `StateOnly.build(&state, &history)`.
+   - Verify `Message::User` string contains `"## Actions Taken So Far"`.
+   - Verify each action is formatted as `- Turn {turn}: \`{tool}\` \`{target}\` -> {summary}`.
+   - Verify `messages.len() <= 3`.
+3. `test_state_only_runner_injects_action_ledger_in_prompts`:
+   - Run a `Runner` with `StateOnly` context strategy and a multi-step `ScriptedProvider`.
+   - Inspect `p.seen` after turn 1.
+   - Verify that in turn 2's request, the initial `Message::User` contains the action taken in turn 1.
+
+---
+
+## Execution Steps
+1. Write the tests in `crates/superstate-agent/tests/test_run.rs`.
+2. Run `cargo test -p superstate-agent --test test_run` to observe failures (RED phase).
+3. Implement action ledger formatting in `crates/superstate-agent/src/context.rs` (GREEN phase).
+4. Run `cargo test -p superstate-agent --test test_run` and verify all tests pass.
+5. Verify `cargo check -p superstate-agent` and `cargo clippy -p superstate-agent --all-targets -- -D warnings`.
+6. Commit: `git add crates/superstate-agent/src/context.rs crates/superstate-agent/tests/test_run.rs && git commit --no-gpg-sign -m "feat(agent): format action ledger into StateOnly prompt context"`
+7. Run `roborev status; roborev show HEAD`.
+8. Write completion report to `docs/superpowers/plans/task-4-report.md`.
