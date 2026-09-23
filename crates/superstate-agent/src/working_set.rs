@@ -121,8 +121,18 @@ impl WorkingSet {
         // Find cached file matching path and containing target substring
         let mut edited = false;
         if let Some(existing) = self.files.iter_mut().find(|f| f.path == path) {
-            if existing.content.contains(old) {
-                let replaced = existing.content.replacen(old, new, 1);
+            let replaced = if existing.content.contains(old) {
+                Some(existing.content.replacen(old, new, 1))
+            } else if old.ends_with('\n') && existing.content.ends_with(old.trim_end_matches('\n')) {
+                // If the cached snippet was from a read tool call without trailing newline,
+                // allow matching an EOF edit whose search string included a trailing newline.
+                let trimmed_old = old.trim_end_matches('\n');
+                Some(existing.content.replacen(trimmed_old, new, 1))
+            } else {
+                None
+            };
+
+            if let Some(replaced) = replaced {
                 existing.content = distill_snippet(&replaced);
                 existing.last_accessed_turn = turn;
 

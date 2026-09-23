@@ -676,8 +676,8 @@ pub fn strip_line_number_prefixes(content: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Preserve trailing newline to match write and support edits at EOF
-    if !res.is_empty() && !res.ends_with('\n') {
+    // Preserve trailing newline if present in input content
+    if content.ends_with('\n') {
         res.push('\n');
     }
     res
@@ -692,6 +692,17 @@ pub fn strip_line_number_prefixes(content: &str) -> String {
 pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
     let trimmed = cmd.trim();
     let trimmed_verif = verification_cmd.trim();
+
+    // Check exact match of the entire command against verification_cmd first
+    // (supporting compound commands like "cargo test && cargo check", while ignoring
+    // dummy shell defaults like "true" or "false").
+    if !trimmed_verif.is_empty()
+        && trimmed_verif != "true"
+        && trimmed_verif != "false"
+        && trimmed == trimmed_verif
+    {
+        return true;
+    }
 
     // Split compound commands / pipelines into subcommands
     for part in trimmed.split(&[';', '&', '|'][..]) {

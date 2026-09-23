@@ -744,8 +744,8 @@ fn test_package_manager_and_flagged_test_commands() {
     let p = ScriptedProvider::new(vec![
         // Command with 'true' substring should not clear failure when verification_cmd is "true"
         calls("bash", json!({"command": "rm -rf nonexistent_dir || true"})),
-        // npm run build is not a test runner
-        calls("bash", json!({"command": "echo 'build ok' && exit 0"})),
+        // npm run build is not a test runner (exits non-zero or zero, failure remains untouched)
+        calls("bash", json!({"command": "npm run build"})),
         // cargo with flag before test subcommand is a test runner and clears failure
         calls("bash", json!({"command": "cargo -q test --help"})),
         says("done"),
@@ -762,6 +762,35 @@ fn test_package_manager_and_flagged_test_commands() {
         st.runtime.working_set.last_failure.is_none(),
         "cargo -q test --help must clear test failure"
     );
+}
+
+#[test]
+fn test_strip_line_number_prefixes_unit() {
+    use superstate_agent::run::strip_line_number_prefixes;
+
+    // Normal line numbered output without trailing newline
+    let numbered = "     1\tfn main() {\n     2\t    let x = 1;\n     3\t}";
+    assert_eq!(
+        strip_line_number_prefixes(numbered),
+        "fn main() {\n    let x = 1;\n}"
+    );
+
+    // Numbered output with trailing newline
+    let numbered_trailing = "     1\tfn main() {\n     2\t    let x = 1;\n     3\t}\n";
+    assert_eq!(
+        strip_line_number_prefixes(numbered_trailing),
+        "fn main() {\n    let x = 1;\n}\n"
+    );
+
+    // Tab-indented source lines (line starts with tab, no line number)
+    let tab_indented = "\tfn indented() {}\n\t\tlet x = 2;";
+    assert_eq!(
+        strip_line_number_prefixes(tab_indented),
+        "\tfn indented() {}\n\t\tlet x = 2;"
+    );
+
+    // Empty string
+    assert_eq!(strip_line_number_prefixes(""), "");
 }
 
 #[test]
@@ -787,9 +816,17 @@ fn test_is_test_command_unit() {
     assert!(is_test_command("python3 -m pytest", "true"));
     assert!(is_test_command("make -C build test", "true"));
 
-    // Exact verification command match
+    // Exact verification command match (including compound verification commands)
     assert!(is_test_command("cargo check", "cargo check"));
     assert!(is_test_command("echo step && cargo check", "cargo check"));
+    assert!(is_test_command(
+        "cargo test && cargo check",
+        "cargo test && cargo check"
+    ));
+    assert!(is_test_command(
+        "./test.sh && ./lint.sh",
+        "./test.sh && ./lint.sh"
+    ));
 
     // Benign commands that must NOT be treated as test commands
     assert!(!is_test_command("npm run build", "true"));
@@ -802,6 +839,7 @@ fn test_is_test_command_unit() {
     assert!(!is_test_command("rm -rf tmp || true", "true"));
     assert!(!is_test_command("echo '{\"valid\": true}'", "true"));
 }
+
 
 
 
