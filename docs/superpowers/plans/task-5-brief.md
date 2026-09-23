@@ -1,100 +1,64 @@
-# Task 5 Brief: REPL /model Selector, Multi-Provider Doctor Audit, & Documentation
-
-## Objective
-Implement the interactive `/model` slash command in `crates/superstate-cli/src/repl.rs`, update `ReplSession` default model to `gemini-3.8-flash`, add multi-provider cloud credential inspection to `superstate doctor`, author integration tests in `crates/superstate-cli/tests/test_repl_model_cmd.rs`, and update `README.md`.
+# Task 5 Brief: End-to-End Verification & Live Eval Re-Run
 
 ## Working Directory
-`/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
+`/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set`
 
-## Detailed Instructions
-1. **Update `crates/superstate-cli/src/repl.rs`**:
-   - In `ReplSession`:
-     Add field: `pub cached_models: Vec<superstate_provider::ModelInfo>`.
-     In `ReplSession::new`:
-     Change fallback model from `"gemini-2.5-flash"` to `"gemini-3.8-flash"`.
-     Initialize `cached_models: Vec::new()`.
-   - In `handle_repl_command`:
-     - Add `/model` command handler:
-       - If `args.is_empty()`:
-         Run `superstate_provider::discover_all_models()`.
-         Clear and populate `session.cached_models`.
-         Format output:
-         ```text
-         Discovering available cloud models...
+## Context
+Tasks 1 through 4 implemented:
+1. `WorkingSet` and `FileSnippet` data structures with Invariant I state partitioning.
+2. Synchronous working set updates in `run.rs` on `read`, `edit`, `write`, and `bash`.
+3. Bounded context assembly in `StateOnly::build` injecting `## Active Working Set` and `## Last Test Failure` while preserving `messages.len() <= 3`.
+4. The loop-breaker guard clause intercepting redundant reads.
 
-         [Google Gemini] (via GEMINI_API_KEY)
-           [1] gemini-3.8-flash (active) - Next-generation multimodal fast model
-           [2] gemini-2.5-flash          - Agentic reasoning model
-           [3] gemini-2.5-pro            - Deep reasoning model
+Task 5 provides:
+1. End-to-end integration tests in `crates/superstate-cli/tests/test_working_set_e2e.rs` verifying REPL `/state` working set display and CLI execution.
+2. Clean workspace test, clippy, and fmt verification.
+3. Live empirical evaluation with `gemini-3.8-flash` on the LRU cache bug in `--context state-only` to measure turns to resolution, token efficiency, and the complete elimination of Stateless Amnesia / ping-pong oscillations.
 
-         [Anthropic Claude] (via ANTHROPIC_API_KEY)
-           [4] claude-3-7-sonnet-latest  - Frontier hybrid reasoning & coding
-           ...
+## Global Constraints
+- Target crates: `crates/superstate-cli`, `crates/superstate-agent`
+- Rust 2021 edition, zero compiler warnings (`cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`)
+- Clean execution on Unix platforms (macOS / Linux)
+- Invariants I, II, and III fully preserved.
+- Conventional commit message with `--no-gpg-sign`.
 
-         [Ollama Cloud] (via OLLAMA_API_KEY at https://ollama.com/api)
-           [5] qwen2.5-coder:32b         - Cloud-hosted coding model
-           ...
+## Files to Create / Modify
+- Create: `crates/superstate-cli/tests/test_working_set_e2e.rs`
+- Modify: `crates/superstate-cli/src/repl.rs` (if `/state` needs formatting for active working set files)
 
-         Active model: gemini-3.8-flash
-         To switch: /model <number> or /model <name> (e.g. /model 1 or /model claude-3-7-sonnet-latest)
-         ```
-         If a provider returned `Err(ProviderError::MissingKey(key))`:
-         Print `[{provider_name}] Not configured (set {key} to discover models)`.
-         If other error: print `[{provider_name}] Discovery error: {err}`.
-       - If `args` is provided:
-         - If `args` parses as a positive integer `idx`:
-           - If `session.cached_models.is_empty()`:
-             Run `discover_all_models()` and populate `session.cached_models`.
-           - If `idx >= 1 && idx <= session.cached_models.len()`:
-             let chosen = &session.cached_models[idx - 1];
-             session.model = chosen.id.clone();
-             writeln!(writer, "Switched active model to: {} ({})", chosen.id, chosen.provider)?;
-           - Else:
-             writeln!(writer, "Invalid model index: {}. Use /model to view available models.", idx)?;
-         - Else (string name, e.g. `/model claude-3-7-sonnet-latest`):
-           let kind = superstate_provider::registry::detect_provider_kind(Some(args));
-           session.model = args.to_string();
-           writeln!(writer, "Switched active model to: {} ({:?})", args, kind)?;
-     - Update `/help`:
-       Add `  /model [name|idx] - Discover and switch active AI model`.
-2. **Update `crates/superstate-cli/src/commands/doctor.rs`**:
-   - Add Step 6 to the handshake:
-     ```rust
-     // Step 6: Multi-Provider Cloud Credential Probe
-     println!("[✓] Step 6: Multi-Provider Cloud Models Verified:");
-     for (provider, res) in superstate_provider::discover_all_models() {
-         match res {
-             Ok(models) => println!("      - {}: Verified ({} models discovered)", provider, models.len()),
-             Err(superstate_provider::ProviderError::MissingKey(k)) => {
-                 println!("      - {}: Not configured (set {})", provider, k);
-             }
-             Err(e) => println!("      - {}: Probe error ({})", provider, e),
-         }
-     }
-     ```
-   - Update handshake header and output messages to reflect 6-Step Verification.
-3. **Integration Tests in `crates/superstate-cli/tests/test_repl_model_cmd.rs`**:
-   - Test `/model` with empty cache and mock/controlled environment:
-     - Verify it lists models and sets `session.cached_models`.
-     - Test switching by numeric index `/model 1`: updates `session.model`.
-     - Test switching by name `/model claude-3-5-sonnet-latest`: updates `session.model`.
-     - Test invalid index reporting: `/model 999`.
-     - Test `/help` includes `/model`.
-4. **Update `README.md`**:
-   - Document cloud provider API keys (`GEMINI_API_KEY` / `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_API_KEY`).
-   - Document `gemini-3.8-flash` as the default model.
-   - Document the interactive `/model` command and switching syntax.
-5. **Verification**:
-   - Run `cargo test -p superstate --test test_repl_model_cmd`.
-   - Run `cargo test -p superstate --test test_repl_commands`.
-   - Run `cargo check --workspace --all-targets`.
-   - Run `cargo clippy --workspace --all-targets -- -D warnings`.
-   - Run `cargo test --workspace`.
-   - Run `cargo fmt --all -- --check`.
-6. **Commit**:
-   - `git add crates/superstate-cli/src/repl.rs crates/superstate-cli/src/commands/doctor.rs crates/superstate-cli/tests/test_repl_model_cmd.rs README.md`
-   - `git commit --no-gpg-sign -m "feat(cli): add REPL /model discovery selector and multi-provider doctor audit"`
-7. **Roborev**:
-   - Run `roborev status; roborev show HEAD`.
-8. **Report**:
-   - Write report to `docs/superpowers/plans/task-5-report.md`.
+## Step-by-Step Instructions
+
+### 1. Write the tests first (TDD RED phase)
+In `crates/superstate-cli/tests/test_working_set_e2e.rs`:
+- Test CLI / REPL display of working set files and last failure under `/state`.
+- Test multi-file coordination where `read`, `edit`, and `bash` update state observable by the runner.
+
+### 2. Run tests and verify
+Run: `cargo test -p superstate --test test_working_set_e2e`
+
+### 3. Check Workspace Quality Gates
+Run:
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo fmt --all -- --check`
+
+### 4. Commit
+```bash
+git add crates/superstate-cli/tests/test_working_set_e2e.rs crates/superstate-cli/src/repl.rs
+git commit --no-gpg-sign -m "test(cli): add end-to-end verification for harness working set"
+roborev status; roborev show HEAD
+```
+
+### 5. Live Eval Re-Run with `gemini-3.8-flash`
+Set up isolated eval in `/tmp/eval-lru-gemini-v2`:
+- Python LRU cache bug with unit tests.
+- Run `superstate run --context state-only "Fix the LRU bug so test_lru.py passes" --verify-cmd "python3 -m unittest test_lru.py"` using `gemini-3.8-flash`.
+- Record:
+  - Turns to resolution
+  - Working set contents across turns
+  - Input & output token counts
+  - Verification pass confirmation
+- Compare directly with baseline (13 turns, ping-pong loops).
+
+### 6. Write report
+Save report to `/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set/docs/superpowers/plans/task-5-report.md`.

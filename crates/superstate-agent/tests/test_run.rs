@@ -569,8 +569,12 @@ fn test_working_set_synchronized_during_run() {
     // Working set must contain the edited file snippet with multi-line updated content without line-number prefixes
     assert_eq!(st.runtime.working_set.files.len(), 1);
     assert_eq!(st.runtime.working_set.files[0].path, "calc.rs");
-    assert!(st.runtime.working_set.files[0].content.contains("let val = 42;"));
-    assert!(!st.runtime.working_set.files[0].content.contains("let val = 0;"));
+    assert!(st.runtime.working_set.files[0]
+        .content
+        .contains("let val = 42;"));
+    assert!(!st.runtime.working_set.files[0]
+        .content
+        .contains("let val = 0;"));
     assert_eq!(st.runtime.working_set.files[0].last_accessed_turn, 2);
     assert!(st.runtime.working_set.last_failure.is_none());
 }
@@ -685,10 +689,7 @@ fn test_working_set_normalizes_leading_dot_slash() {
     let d = repo();
     let p = ScriptedProvider::new(vec![
         calls("read", json!({"path": "./marker"})),
-        calls(
-            "edit",
-            json!({"path": "marker", "old": "0", "new": "99"}),
-        ),
+        calls("edit", json!({"path": "marker", "old": "0", "new": "99"})),
         says("done"),
     ]);
     let mut st = State::new("normalize path", "true");
@@ -704,11 +705,7 @@ fn test_working_set_normalizes_leading_dot_slash() {
 fn test_working_set_multiline_edit_at_eof_with_trailing_newline() {
     // Multi-line edit at EOF with trailing newline matches preserved raw file snippet content.
     let d = repo();
-    std::fs::write(
-        d.path().join("eof.py"),
-        "def main():\n    print('hello')\n",
-    )
-    .unwrap();
+    std::fs::write(d.path().join("eof.py"), "def main():\n    print('hello')\n").unwrap();
 
     let p = ScriptedProvider::new(vec![
         calls("read", json!({"path": "eof.py"})),
@@ -912,11 +909,7 @@ fn test_state_only_runner_injects_working_set_into_llm_prompts() {
     // active file snippets from turn 1 into turn 2's prompt, and test failures from turn 2
     // into turn 3's prompt.
     let d = repo();
-    std::fs::write(
-        d.path().join("lru.py"),
-        "def cache():\n    return 42\n",
-    )
-    .unwrap();
+    std::fs::write(d.path().join("lru.py"), "def cache():\n    return 42\n").unwrap();
 
     let p = ScriptedProvider::new(vec![
         // Turn 1: read file -> gets added to working set
@@ -966,11 +959,7 @@ fn test_loop_breaker_intercepts_redundant_reads() {
     // external working memory (working_set) consecutively, the harness immediately
     // intercepts the call, returns an advisory notice, and does not execute the tool.
     let d = repo();
-    std::fs::write(
-        d.path().join("lru.py"),
-        "def cache():\n    return 1\n",
-    )
-    .unwrap();
+    std::fs::write(d.path().join("lru.py"), "def cache():\n    return 1\n").unwrap();
 
     let p = ScriptedProvider::new(vec![
         // Turn 1: Initial read populates working_set
@@ -1034,7 +1023,9 @@ fn test_loop_breaker_intercepts_redundant_reads() {
     // Verify working set retains the original file snippet and was not corrupted by the guard message
     assert_eq!(st.runtime.working_set.files.len(), 1);
     assert_eq!(st.runtime.working_set.files[0].path, "lru.py");
-    assert!(st.runtime.working_set.files[0].content.contains("def cache():"));
+    assert!(st.runtime.working_set.files[0]
+        .content
+        .contains("def cache():"));
 }
 
 #[test]
@@ -1042,11 +1033,7 @@ fn test_loop_breaker_allows_read_after_edit() {
     // Verifies that an intervening edit on the file resets the loop breaker,
     // allowing the agent to re-read the updated file without interception.
     let d = repo();
-    std::fs::write(
-        d.path().join("lru.py"),
-        "def cache():\n    return 1\n",
-    )
-    .unwrap();
+    std::fs::write(d.path().join("lru.py"), "def cache():\n    return 1\n").unwrap();
 
     let p = ScriptedProvider::new(vec![
         // Turn 1: Read file
@@ -1503,17 +1490,42 @@ fn test_target_matches_path_edge_cases() {
     assert!(target_matches_path("model (L)", "model (L)"));
     assert!(target_matches_path("file (L✓)", "file (L✓)"));
     assert!(target_matches_path("test (L1).rs (L1-L2)", "test (L1).rs"));
-    assert!(target_matches_path("data (Large).json", "data (Large).json"));
+    assert!(target_matches_path(
+        "data (Large).json",
+        "data (Large).json"
+    ));
 
     // Byte annotations
     assert!(target_matches_path(
         "data (Large).json (26 bytes)",
         "data (Large).json"
     ));
-    assert!(target_matches_path("data (sample bytes)", "data (sample bytes)"));
+    assert!(target_matches_path(
+        "data (sample bytes)",
+        "data (sample bytes)"
+    ));
     assert!(!target_matches_path("data (sample bytes)", "data"));
 }
 
+#[test]
+fn test_loop_breaker_intercepts_redundant_bash_inspection() {
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls("bash", json!({"command": "git diff"})),
+        calls("bash", json!({"command": "git diff"})),
+        says("stopping now"),
+    ]);
+    let mut st = State::new("break git diff loop", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
 
-
-
+    assert_eq!(st.runtime.actions.len(), 2);
+    assert_eq!(st.runtime.actions[0].tool, "bash");
+    assert_eq!(st.runtime.actions[0].target, "git diff");
+    assert_eq!(st.runtime.actions[1].tool, "bash");
+    assert_eq!(st.runtime.actions[1].target, "git diff");
+    assert_eq!(
+        st.runtime.actions[1].summary,
+        "intercepted: redundant inspection"
+    );
+}

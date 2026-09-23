@@ -14,7 +14,13 @@ fn test_working_set_add_and_update() {
     assert_eq!(ws.files[0].last_accessed_turn, 1);
 
     // Update existing file on later turn
-    ws.add_or_update("src/main.rs", "fn main() { println!(); }\n", Some(1), Some(1), 3);
+    ws.add_or_update(
+        "src/main.rs",
+        "fn main() { println!(); }\n",
+        Some(1),
+        Some(1),
+        3,
+    );
     assert_eq!(ws.files.len(), 1);
     assert_eq!(ws.files[0].content, "fn main() { println!(); }\n");
     assert_eq!(ws.files[0].last_accessed_turn, 3);
@@ -23,9 +29,20 @@ fn test_working_set_add_and_update() {
 #[test]
 fn test_working_set_apply_edit() {
     let mut ws = WorkingSet::default();
-    ws.add_or_update("lru.py", "def get(self, key):\n    return self.cache[key]\n", None, None, 1);
+    ws.add_or_update(
+        "lru.py",
+        "def get(self, key):\n    return self.cache[key]\n",
+        None,
+        None,
+        1,
+    );
 
-    let edited = ws.apply_edit("lru.py", "return self.cache[key]", "self.cache.move_to_end(key)\n    return self.cache[key]", 2);
+    let edited = ws.apply_edit(
+        "lru.py",
+        "return self.cache[key]",
+        "self.cache.move_to_end(key)\n    return self.cache[key]",
+        2,
+    );
     assert!(edited);
     assert_eq!(ws.files[0].last_accessed_turn, 2);
     assert!(ws.files[0].content.contains("self.cache.move_to_end(key)"));
@@ -92,7 +109,10 @@ fn test_invariant_i_agent_patch_cannot_mutate_working_set() {
         agent: Default::default(),
     };
 
-    state.runtime.working_set.add_or_update("safe.rs", "fn safe() {}", None, None, 1);
+    state
+        .runtime
+        .working_set
+        .add_or_update("safe.rs", "fn safe() {}", None, None, 1);
     state.runtime.working_set.record_failure("test failure");
 
     // Agent attempts to clear working_set or tamper with runtime
@@ -140,7 +160,13 @@ fn test_working_set_failure_distillation() {
 #[test]
 fn test_working_set_apply_edit_edge_cases() {
     let mut ws = WorkingSet::default();
-    ws.add_or_update("edit_target.rs", "fn foo() {\n    line 1\n    line 2\n}\n", Some(1), Some(4), 1);
+    ws.add_or_update(
+        "edit_target.rs",
+        "fn foo() {\n    line 1\n    line 2\n}\n",
+        Some(1),
+        Some(4),
+        1,
+    );
 
     // Empty old string should return false without altering content
     let empty_res = ws.apply_edit("edit_target.rs", "", "injected\n", 2);
@@ -152,28 +178,44 @@ fn test_working_set_apply_edit_edge_cases() {
     assert!(!missing_file_res);
 
     // Substring not present should return false
-    let missing_chunk_res = ws.apply_edit("edit_target.rs", "not present in file", "replacement", 2);
+    let missing_chunk_res =
+        ws.apply_edit("edit_target.rs", "not present in file", "replacement", 2);
     assert!(!missing_chunk_res);
 
     // Replacement that introduces lines should adjust end_line
-    let expansion_res = ws.apply_edit("edit_target.rs", "line 1\n    line 2", "line 1\n    line 1.5\n    line 2", 2);
+    let expansion_res = ws.apply_edit(
+        "edit_target.rs",
+        "line 1\n    line 2",
+        "line 1\n    line 1.5\n    line 2",
+        2,
+    );
     assert!(expansion_res);
     assert_eq!(ws.files[0].end_line, Some(5));
 
     // Large edit expansion should trigger snippet distillation and LRU pruning
     let huge_replacement: String = (1..=150).map(|i| format!("new_line {i}\n")).collect();
-    let huge_res = ws.apply_edit("edit_target.rs", "line 1\n    line 1.5\n    line 2", &huge_replacement, 3);
+    let huge_res = ws.apply_edit(
+        "edit_target.rs",
+        "line 1\n    line 1.5\n    line 2",
+        &huge_replacement,
+        3,
+    );
     assert!(huge_res);
     assert!(ws.files[0].content.contains("[..."));
 
     // EOF fallback: targets suffix rather than earlier occurrences in full-file snippets
     let mut ws2 = WorkingSet::default();
-    ws2.add_or_update("eof_test.rs", "let val = 42; // first\nlet val = 42", None, None, 1);
+    ws2.add_or_update(
+        "eof_test.rs",
+        "let val = 42; // first\nlet val = 42",
+        None,
+        None,
+        1,
+    );
     let eof_res = ws2.apply_edit("eof_test.rs", "let val = 42\n", "let val = 99\n", 2);
     assert!(eof_res);
     assert_eq!(
-        ws2.files[0].content,
-        "let val = 42; // first\nlet val = 99\n",
+        ws2.files[0].content, "let val = 42; // first\nlet val = 99\n",
         "EOF fallback must replace only the suffix, never an earlier occurrence"
     );
 
@@ -205,4 +247,3 @@ fn test_working_set_apply_edit_edge_cases() {
         "Partial read slices must not trigger full-file EOF fallback"
     );
 }
-

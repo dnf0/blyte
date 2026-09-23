@@ -227,13 +227,24 @@ impl<'a> Runner<'a> {
                         signature: call.signature.clone(),
                     });
 
-                    // Intercept redundant file reads before execution using the loop-breaker guard.
+                    // Intercept redundant file reads and redundant read-only inspections before execution
+                    // using the loop-breaker guard.
                     // Also `note` is the loop's, not the tool layer's: it mutates state, and only
                     // the agent region can be reached from here.
                     let outcome = if let Some(guard_msg) = should_intercept_redundant_read(
                         call,
                         &state.runtime.working_set,
                         &state.runtime.actions,
+                    ) {
+                        crate::tools::ToolOutcome {
+                            content: guard_msg,
+                            is_error: false,
+                        }
+                    } else if let Some(guard_msg) = should_intercept_redundant_bash(
+                        call,
+                        &state.runtime.actions,
+                        &state.runtime.working_set,
+                        &state.orchestrator.verification_cmd,
                     ) {
                         crate::tools::ToolOutcome {
                             content: guard_msg,
@@ -297,7 +308,9 @@ impl<'a> Runner<'a> {
                             // Track active file snippet on successful read, stripping line numbers.
                             // If the read was intercepted by the guard, do not overwrite cached file content.
                             if !outcome.is_error
-                                && !outcome.content.starts_with("[Harness Working Memory Guard]")
+                                && !outcome
+                                    .content
+                                    .starts_with("[Harness Working Memory Guard]")
                             {
                                 let raw_path = call
                                     .arguments
@@ -307,14 +320,14 @@ impl<'a> Runner<'a> {
                                 let path = normalize_path(raw_path);
                                 let raw_content = strip_line_number_prefixes(&outcome.content);
                                 let start = call.arguments.get("start_line").and_then(|v| {
-                                    v.as_u64()
-                                        .map(|n| n as usize)
-                                        .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
+                                    v.as_u64().map(|n| n as usize).or_else(|| {
+                                        v.as_str().and_then(|s| s.parse::<usize>().ok())
+                                    })
                                 });
                                 let end = call.arguments.get("end_line").and_then(|v| {
-                                    v.as_u64()
-                                        .map(|n| n as usize)
-                                        .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
+                                    v.as_u64().map(|n| n as usize).or_else(|| {
+                                        v.as_str().and_then(|s| s.parse::<usize>().ok())
+                                    })
                                 });
                                 state.runtime.working_set.add_or_update(
                                     path,
@@ -361,13 +374,10 @@ impl<'a> Runner<'a> {
                                     .get("content")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                state.runtime.working_set.add_or_update(
-                                    path,
-                                    content,
-                                    None,
-                                    None,
-                                    turn,
-                                );
+                                state
+                                    .runtime
+                                    .working_set
+                                    .add_or_update(path, content, None, None, turn);
                             }
                         }
                         "bash" => {
@@ -523,7 +533,12 @@ pub fn should_intercept_redundant_read(
     let is_covered = if has_omitted {
         (req_start, req_end) == (cached_file.start_line, cached_file.end_line)
     } else {
-        match (cached_file.start_line, cached_file.end_line, req_start, req_end) {
+        match (
+            cached_file.start_line,
+            cached_file.end_line,
+            req_start,
+            req_end,
+        ) {
             // Full file cached without bounds: any slice or full file is covered
             (None, None, _, _) => true,
             // Both cached snippet and request have bounds
@@ -566,6 +581,101 @@ pub fn should_intercept_redundant_read(
             "[Harness Working Memory Guard]: `{path}` is already loaded in your Active Working Set above. \
              You do not need to re-read it. Propose your exact edit using `edit` or update your plan in `note`."
         ))
+    } else {
+        None
+    }
+}
+
+/// Evaluates whether a bash inspection command (such as `git diff` or `git status`) is redundant
+/// and should be intercepted by the loop-breaker guard clause.
+///
+/// Prevents the model from entering post-fix amnesiac loops where it repeatedly calls read-only
+/// inspection commands instead of concluding its turn.
+pub fn should_intercept_redundant_bash(
+    call: &ToolCall,
+    actions: &[ActionEntry],
+    working_set: &crate::working_set::WorkingSet,
+    verification_cmd: &str,
+) -> Option<String> {
+    if call.name != "bash" {
+        return None;
+    }
+    let raw_cmd = call.arguments.get("command").and_then(|v| v.as_str())?;
+    let cmd = raw_cmd.trim();
+
+    // Guard 1: Redundant test execution after tests have already passed without file modifications
+    let is_test = is_test_command(cmd, verification_cmd);
+    if is_test && working_set.last_failure.is_none() {
+        let test_passed_since_edit = actions
+            .iter()
+            .rev()
+            .take_while(|a| a.tool != "edit" && a.tool != "write")
+            .any(|a| {
+                a.tool == "bash"
+                    && is_test_command(&a.target, verification_cmd)
+                    && !a.is_error
+                    && !a.summary.starts_with("intercepted")
+            });
+        if test_passed_since_edit {
+            return Some(format!(
+                "[Harness Working Memory Guard]: Unit tests `{cmd}` have already passed and no files were modified since. \
+                 Stop calling tools now to trigger the verification completion gate."
+            ));
+        }
+    }
+
+    let is_readonly_inspection = matches!(
+        cmd,
+        "git diff" | "git status" | "git status -s" | "git diff --stat" | "git diff HEAD"
+    );
+    if !is_readonly_inspection {
+        return None;
+    }
+
+    // Check if the immediately preceding tool call was an identical bash command
+    let last_was_same = actions
+        .last()
+        .map(|a| a.tool == "bash" && a.target.trim() == cmd)
+        .unwrap_or(false);
+
+    // Or executed 2+ times in recent actions without an intervening edit or write
+    let recent_same = actions
+        .iter()
+        .rev()
+        .take(4)
+        .take_while(|a| a.tool != "edit" && a.tool != "write")
+        .filter(|a| {
+            a.tool == "bash" && a.target.trim() == cmd && !a.summary.starts_with("intercepted")
+        })
+        .count();
+
+    let tests_passing = working_set.last_failure.is_none()
+        && actions
+            .iter()
+            .any(|a| a.tool == "edit" || a.tool == "write")
+        && actions.iter().any(|a| {
+            a.tool == "bash"
+                && !a.is_error
+                && !a.summary.starts_with("intercepted")
+                && is_test_command(&a.target, verification_cmd)
+        });
+
+    if last_was_same
+        || recent_same >= 2
+        || (tests_passing && (recent_same >= 1 || is_readonly_inspection))
+    {
+        let advice = if working_set.last_failure.is_none() {
+            format!(
+                "[Harness Working Memory Guard]: `{cmd}` inspection intercepted: unit tests have already passed. \
+                 Stop calling tools now to trigger the verification completion gate."
+            )
+        } else {
+            format!(
+                "[Harness Working Memory Guard]: `{cmd}` was already executed. \
+                 Review your Active Working Set or Last Test Failure above and apply your fix using `edit`."
+            )
+        };
+        Some(advice)
     } else {
         None
     }
@@ -683,6 +793,9 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
 pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String {
     // Check if the tool invocation was intercepted by the working memory guard
     if content.starts_with("[Harness Working Memory Guard]") {
+        if tool == "bash" {
+            return "intercepted: redundant inspection".to_string();
+        }
         return "intercepted: already in working set".to_string();
     }
 
@@ -922,7 +1035,11 @@ pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
                     }
                 }
             }
-            "make" if tokens[idx + 1..].iter().any(|&t| t == "test" || t == "check") => {
+            "make"
+                if tokens[idx + 1..]
+                    .iter()
+                    .any(|&t| t == "test" || t == "check") =>
+            {
                 return true;
             }
             _ => {}
@@ -931,4 +1048,3 @@ pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
 
     false
 }
-
