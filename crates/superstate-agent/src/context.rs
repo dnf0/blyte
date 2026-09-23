@@ -58,6 +58,36 @@ impl ContextStrategy for StateOnly {
             serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
         );
 
+        // External working memory: active file snippets inspected or edited by the worker.
+        // Injects distilled snippets so the agent has continuous visibility across turns without
+        // re-reading unchanged files or bloating conversation history.
+        if !state.runtime.working_set.files.is_empty() {
+            user_prompt.push_str("\n## Active Working Set\n");
+            for file in &state.runtime.working_set.files {
+                // Format line range indicator when partial file slice is cached
+                let lines_info = match (file.start_line, file.end_line) {
+                    (Some(s), Some(e)) => format!(" (lines {s}-{e})"),
+                    _ => String::new(),
+                };
+                user_prompt.push_str(&format!(
+                    "### `{}`{}\n```\n{}\n```\n",
+                    file.path,
+                    lines_info,
+                    file.content.trim_end()
+                ));
+            }
+        }
+
+        // Grounding telemetry: distilled output from the most recent failed test or command.
+        // Provides the failure trace directly in context so the worker does not have to re-run
+        // tests just to recall error lines.
+        if let Some(failure) = &state.runtime.working_set.last_failure {
+            user_prompt.push_str(&format!(
+                "\n## Last Test Failure\n```text\n{}\n```\n",
+                failure.trim_end()
+            ));
+        }
+
         // When actions have been recorded, format the chronological action ledger.
         // Provides episodic memory of tool outcomes without growing conversation history.
         if !state.runtime.actions.is_empty() {

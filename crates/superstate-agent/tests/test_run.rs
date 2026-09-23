@@ -840,6 +840,122 @@ fn test_is_test_command_unit() {
     assert!(!is_test_command("echo '{\"valid\": true}'", "true"));
 }
 
+#[test]
+fn test_state_only_context_renders_working_set_and_preserves_bound() {
+    // Verifies that StateOnly context assembly injects active file snippets and last test failure
+    // into the user prompt while strictly maintaining Invariant II (messages.len() <= 3).
+    let mut state = State::new("solve bug", "pytest");
+    state.runtime.working_set.add_or_update(
+        "lru.py",
+        "def cache():\n    pass",
+        Some(1),
+        Some(2),
+        1,
+    );
+    state
+        .runtime
+        .working_set
+        .record_failure("AssertionError: expected 1 got 2");
 
+    let history = vec![
+        Message::User("initial user message".into()),
+        Message::ToolCall {
+            id: "tc_1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "pytest"}),
+            signature: None,
+        },
+        Message::ToolResult {
+            id: "tc_1".into(),
+            name: "bash".into(),
+            content: "test failure".into(),
+            is_error: true,
+        },
+    ];
 
+    let messages = StateOnly.build(&state, &history);
+    assert!(
+        messages.len() <= 3,
+        "messages.len() must be <= 3 under StateOnly, got {}",
+        messages.len()
+    );
 
+    let Message::User(prompt) = &messages[0] else {
+        panic!("expected first message to be Message::User");
+    };
+    assert!(prompt.contains("## Active Working Set"));
+    assert!(prompt.contains("### `lru.py` (lines 1-2)"));
+    assert!(prompt.contains("def cache():\n    pass"));
+    assert!(prompt.contains("## Last Test Failure"));
+    assert!(prompt.contains("AssertionError: expected 1 got 2"));
+}
+
+#[test]
+fn test_state_only_context_omits_working_set_when_empty() {
+    // When working_set contains no files and no test failure, StateOnly::build must omit
+    // both the working set and failure sections to preserve a clean and minimal prompt.
+    let state = State::new("my goal", "cargo test");
+    let history = vec![];
+    let messages = StateOnly.build(&state, &history);
+    assert_eq!(messages.len(), 1);
+
+    let Message::User(prompt) = &messages[0] else {
+        panic!("expected Message::User");
+    };
+    assert!(!prompt.contains("## Active Working Set"));
+    assert!(!prompt.contains("## Last Test Failure"));
+}
+
+#[test]
+fn test_state_only_runner_injects_working_set_into_llm_prompts() {
+    // End-to-end integration: Runner executing with StateOnly strategy injects
+    // active file snippets from turn 1 into turn 2's prompt, and test failures from turn 2
+    // into turn 3's prompt.
+    let d = repo();
+    std::fs::write(
+        d.path().join("lru.py"),
+        "def cache():\n    return 42\n",
+    )
+    .unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: read file -> gets added to working set
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 2: run failing test -> failure gets recorded in working set
+        calls("bash", json!({"command": "cargo test"})),
+        // Turn 3: finish run
+        says("done"),
+    ]);
+    let mut st = State::new("fix cache", "true");
+    let (outcome, rep) = runner(&p, d.path(), &StateOnly, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+
+    // Turn 1 prompt: working set empty initially
+    let Message::User(prompt1) = &seen[0].messages[0] else {
+        panic!("expected Message::User in turn 1");
+    };
+    assert!(!prompt1.contains("## Active Working Set"));
+    assert!(!prompt1.contains("## Last Test Failure"));
+
+    // Turn 2 prompt: working set contains lru.py snippet, no failure yet
+    let Message::User(prompt2) = &seen[1].messages[0] else {
+        panic!("expected Message::User in turn 2");
+    };
+    assert!(prompt2.contains("## Active Working Set"));
+    assert!(prompt2.contains("### `lru.py`"));
+    assert!(prompt2.contains("def cache():\n    return 42"));
+    assert!(!prompt2.contains("## Last Test Failure"));
+
+    // Turn 3 prompt: working set contains lru.py AND last test failure
+    let Message::User(prompt3) = &seen[2].messages[0] else {
+        panic!("expected Message::User in turn 3");
+    };
+    assert!(prompt3.contains("## Active Working Set"));
+    assert!(prompt3.contains("### `lru.py`"));
+    assert!(prompt3.contains("## Last Test Failure"));
+    assert!(seen[2].messages.len() <= 3);
+}
