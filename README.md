@@ -119,7 +119,7 @@ Running `superstate` without a prompt launches the interactive agent harness REP
 superstate
 
 # Launch REPL configured with a specific verification gate and model
-superstate --gate "cargo test" --model gemini-2.5-flash --context state-only
+superstate --gate "cargo test" --model gemini-3.8-flash --context state-only
 ```
 
 ### Headless Single-Shot Solver
@@ -150,7 +150,7 @@ superstate "refactor database migration" \
 | `[PROMPT]` | Direct task prompt for single-shot / headless execution | `None` (launches interactive REPL) |
 | `-g, --gate <CMD>` | External verification gate command (e.g. `'cargo test'`, `'pytest'`) | `None` (fail-closed disabled) |
 | `--context <STRATEGY>` | Context management strategy: `state-only` ($\mathcal{O}(1)$ prompt bounded memory) or `conversational` (append-all chat) | `conversational` |
-| `-m, --model <MODEL>` | Model identifier or provider selection override | `gemini-2.5-flash` |
+| `-m, --model <MODEL>` | Model identifier or provider selection override | `gemini-3.8-flash` |
 | `--container <ID>` | Run execution and filesystem seams inside an isolated container workspace | Local host |
 | `--max-turns <N>` | Maximum turn budget per attempt | `25` |
 | `--max-gates <N>` | Maximum verification gate retry attempts before failing | `5` |
@@ -163,19 +163,63 @@ Inside the interactive REPL (`superstate`), the following slash commands control
 | Slash Command | Description |
 |---|---|
 | `/help` | Display available slash commands and usage reference |
+| `/model [name\|idx]` | Discover available cloud models and switch active model dynamically |
 | `/state` | Inspect active SKILL.state partitions (`Orchestrator`, `Runtime`, `Agent`) |
 | `/diff` | Display uncommitted git diff in the current working tree |
 | `/review` | Run the adversarial code review engine over uncommitted changes |
-| `/doctor` | Run 5-step system verification handshake and health check |
+| `/doctor` | Run 6-step system verification handshake and health check |
 | `/gate [cmd]` | Inspect current verification gate or update it dynamically (e.g. `/gate cargo test`) |
 | `/clear` | Clear session conversation history and reset runtime working state |
 | `/exit`, `/quit` | Exit the interactive REPL |
+
+### Cloud Model Providers & Model Discovery
+
+Superstate natively integrates with multiple cloud AI providers without external proxy wrappers. Set credentials in your environment to enable automatic discovery and routing:
+
+| Provider | Supported Identifiers | Environment Variables | Description |
+|---|---|---|---|
+| **Google Gemini** | `gemini-3.8-flash` (default), `gemini-2.5-flash`, `gemini-2.5-pro` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Generative Language API v1beta with cryptographic thought signatures |
+| **Anthropic Claude** | `claude-3-7-sonnet-latest`, `claude-3-5-sonnet-latest`, `claude-3-5-haiku-latest` | `ANTHROPIC_API_KEY` | Anthropic Messages API with prompt caching awareness |
+| **Ollama Cloud & Remote** | `qwen2.5-coder:32b`, `llama3.3:70b`, `deepseek-r1:32b`, etc. | `OLLAMA_API_KEY`, optional `OLLAMA_HOST` | Ollama Cloud (`https://ollama.com/api`) or custom remote/local daemon |
+
+#### Dynamic Model Selection (`/model`)
+
+Run `/model` inside the REPL to probe configured cloud credentials and inspect available models:
+
+```text
+superstate > /model
+Discovering available cloud models...
+
+[Google Gemini] (via GEMINI_API_KEY)
+  [1] gemini-3.8-flash (active) - Next-generation multimodal fast model
+  [2] gemini-2.5-flash          - Agentic reasoning model
+  [3] gemini-2.5-pro            - Deep reasoning model
+
+[Anthropic Claude] (via ANTHROPIC_API_KEY)
+  [4] claude-3-7-sonnet-latest  - Frontier hybrid reasoning & coding
+
+[Ollama Cloud] (via OLLAMA_API_KEY at https://ollama.com/api)
+  [5] qwen2.5-coder:32b         - Cloud-hosted coding model
+
+Active model: gemini-3.8-flash
+To switch: /model <number> or /model <name> (e.g. /model 1 or /model claude-3-7-sonnet-latest)
+```
+
+Switch active models by numeric index or model identifier:
+
+```text
+superstate > /model 4
+Switched active model to: claude-3-7-sonnet-latest (anthropic)
+
+superstate > /model gemini-2.5-pro
+Switched active model to: gemini-2.5-pro (Gemini)
+```
 
 ### Core Subcommands
 
 | Subcommand | Description |
 |---|---|
-| `superstate doctor` | Run 5-step verification handshake and health check |
+| `superstate doctor` | Run 6-step verification handshake and health check |
 | `superstate mcp` | Launch standard JSON-RPC Model Context Protocol (MCP) server over stdio |
 | `superstate review` | Run adversarial code review engine over git diff or commit ranges |
 | `superstate state` | Manage SKILL.state lifecycle (`init`, `apply`, `checkpoint`, `resume`, `show`) |

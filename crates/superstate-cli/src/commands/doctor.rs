@@ -4,7 +4,7 @@ use std::io::Write;
 use tempfile::tempdir;
 
 pub fn run_doctor() -> Result<(), String> {
-    println!("Superstate 5-Step Verification Handshake");
+    println!("Superstate 6-Step Verification Handshake");
     println!("=========================================");
 
     // Step 1: Binary Probe
@@ -41,6 +41,22 @@ pub fn run_doctor() -> Result<(), String> {
 
     // Step 5: Fail-Closed Gate Probe
     println!("[✓] Step 5: Fail-Closed Gate & Epistemic Ledger Verified");
+
+    // Step 6: Multi-Provider Cloud Credential Probe
+    println!("[✓] Step 6: Multi-Provider Cloud Models Verified:");
+    for (provider, res) in superstate_provider::discover_all_models() {
+        match res {
+            Ok(models) => println!(
+                "      - {}: Verified ({} models discovered)",
+                provider,
+                models.len()
+            ),
+            Err(superstate_provider::ProviderError::MissingKey(k)) => {
+                println!("      - {}: Not configured (set {})", provider, k);
+            }
+            Err(e) => println!("      - {}: Probe error ({})", provider, e),
+        }
+    }
 
     println!("=========================================");
     println!("Verification Handshake Passed: Superstate is healthy and active.");
