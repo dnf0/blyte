@@ -7,8 +7,8 @@ use superstate_agent::context::{ContextStrategy, Conversational, StateOnly};
 use superstate_agent::fs::LocalFs;
 use superstate_agent::run::{Budget, Outcome, Runner};
 use superstate_agent::shell::{LocalShell, Shell};
-use superstate_agent::state::State;
-use superstate_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
+use superstate_agent::state::{ActionEntry, State};
+use superstate_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
 
 /// Replays a fixed list of responses and records every request it was given.
 struct ScriptedProvider {
@@ -436,4 +436,102 @@ fn test_rollback_appends_action_entry() {
         "Gate failed; working tree reset to verified state"
     );
     assert!(rollback_entry.is_error);
+}
+
+#[test]
+fn test_state_only_context_omits_actions_when_empty() {
+    // When state.runtime.actions is empty, StateOnly::build must omit the action ledger section
+    // to preserve a minimal, clean prompt for the initial turn or until actions occur.
+    let state = State::new("my goal", "cargo test");
+    let history = vec![];
+    let messages = StateOnly.build(&state, &history);
+    assert_eq!(messages.len(), 1);
+
+    let Message::User(prompt) = &messages[0] else {
+        panic!("expected Message::User");
+    };
+    assert!(!prompt.contains("## Actions Taken So Far"));
+}
+
+#[test]
+fn test_state_only_context_formats_action_ledger() {
+    // When actions exist, StateOnly::build formats them chronologically into the initial user prompt,
+    // retaining Invariant II by keeping the total message count bounded (messages.len() <= 3).
+    let mut state = State::new("solve bug", "pytest");
+    state.runtime.actions.push(ActionEntry {
+        turn: 1,
+        tool: "read".into(),
+        target: "src/main.rs (lines 1-20)".into(),
+        summary: "20 lines read".into(),
+        is_error: false,
+    });
+    state.runtime.actions.push(ActionEntry {
+        turn: 2,
+        tool: "bash".into(),
+        target: "cargo test".into(),
+        summary: "exit 101".into(),
+        is_error: true,
+    });
+
+    // Provide history with tool call and result to verify bounded message length.
+    let history = vec![
+        Message::User("initial user message".into()),
+        Message::ToolCall {
+            id: "tc_1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "cargo test"}),
+            signature: None,
+        },
+        Message::ToolResult {
+            id: "tc_1".into(),
+            name: "bash".into(),
+            content: "test failure".into(),
+            is_error: true,
+        },
+    ];
+
+    let messages = StateOnly.build(&state, &history);
+    assert!(
+        messages.len() <= 3,
+        "messages.len() must be <= 3, got {}",
+        messages.len()
+    );
+
+    let Message::User(prompt) = &messages[0] else {
+        panic!("expected first message to be Message::User");
+    };
+    assert!(prompt.contains("## Actions Taken So Far"));
+    assert!(prompt.contains("- Turn 1: `read` `src/main.rs (lines 1-20)` -> 20 lines read"));
+    assert!(prompt.contains("- Turn 2: `bash` `cargo test` -> exit 101"));
+}
+
+#[test]
+fn test_state_only_runner_injects_action_ledger_in_prompts() {
+    // Verifies end-to-end integration: Runner executing with StateOnly strategy injects
+    // actions executed in turn 1 into the turn 2 request prompt.
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls("bash", json!({"command": "echo step1"})),
+        says("done"),
+    ]);
+    let mut st = State::new("step goal", "true");
+    let (outcome, rep) = runner(&p, d.path(), &StateOnly, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+
+    // Turn 1 prompt must not contain actions as none have run yet.
+    let Message::User(first_prompt) = &seen[0].messages[0] else {
+        panic!("expected Message::User in turn 1");
+    };
+    assert!(!first_prompt.contains("## Actions Taken So Far"));
+
+    // Turn 2 prompt must contain the action ledger capturing turn 1's bash invocation.
+    let Message::User(second_prompt) = &seen[1].messages[0] else {
+        panic!("expected Message::User in turn 2");
+    };
+    assert!(second_prompt.contains("## Actions Taken So Far"));
+    assert!(second_prompt.contains("- Turn 1: `bash` `echo step1` -> exit 0"));
 }
