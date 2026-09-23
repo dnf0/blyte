@@ -211,8 +211,10 @@ fn test_working_set_multi_file_coordination_and_context_invariants() {
         budget: Budget {
             max_turns: 10,
             max_gate_attempts: 2,
+            max_duration: None,
         },
         rollback: true,
+        loop_breaker: true,
         on_event: None,
     };
 
@@ -316,8 +318,10 @@ fn test_working_set_guard_intercepts_redundant_read_e2e() {
         budget: Budget {
             max_turns: 5,
             max_gate_attempts: 1,
+            max_duration: None,
         },
         rollback: false,
+        loop_breaker: true,
         on_event: None,
     };
 
@@ -373,8 +377,10 @@ fn test_working_set_multi_file_lru_pruning_e2e() {
         budget: Budget {
             max_turns: 6,
             max_gate_attempts: 1,
+            max_duration: None,
         },
         rollback: false,
+        loop_breaker: true,
         on_event: None,
     };
 
@@ -391,4 +397,132 @@ fn test_working_set_multi_file_lru_pruning_e2e() {
         .map(|f| f.path.as_str())
         .collect();
     assert_eq!(paths, vec!["f2.txt", "f3.txt", "f4.txt"]);
+}
+
+#[test]
+fn test_loop_breaker_serves_an_insisted_read_e2e() {
+    let repo = create_temp_git_repo();
+    let mut state = State::new("Inspect and solve", "true");
+    std::fs::write(
+        repo.path().join("greet.py"),
+        "def greet():\n    return 'hello'\n",
+    )
+    .unwrap();
+
+    // Turn 2 is intercepted. Turn 3 repeats it verbatim: insisting wins, so it is served
+    // rather than refused again (FINDINGS 13.22 / 13.25).
+    let provider = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "greet.py"})),
+        calls("read", json!({"path": "greet.py"})),
+        calls("read", json!({"path": "greet.py"})),
+        says("Done reading."),
+    ]);
+
+    let runner = Runner {
+        provider: &provider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &StateOnly,
+        root: repo.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 6,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        loop_breaker: true,
+        on_event: None,
+    };
+
+    let (outcome, _) = runner.run(&mut state);
+    assert_eq!(outcome, Outcome::Verified);
+    let summaries: Vec<&str> = state
+        .runtime
+        .actions
+        .iter()
+        .map(|a| a.summary.as_str())
+        .collect();
+    assert_eq!(
+        summaries,
+        vec![
+            "2 lines read",
+            "intercepted: already in working set",
+            "2 lines read"
+        ]
+    );
+}
+
+#[test]
+fn test_loop_breaker_off_executes_every_read_e2e() {
+    let repo = create_temp_git_repo();
+    let mut state = State::new("Inspect and solve", "true");
+    std::fs::write(
+        repo.path().join("greet.py"),
+        "def greet():\n    return 'hello'\n",
+    )
+    .unwrap();
+
+    let provider = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "greet.py"})),
+        calls("read", json!({"path": "greet.py"})),
+        says("Done reading."),
+    ]);
+
+    let runner = Runner {
+        provider: &provider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &StateOnly,
+        root: repo.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 5,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        loop_breaker: false,
+        on_event: None,
+    };
+
+    let (outcome, _) = runner.run(&mut state);
+    assert_eq!(outcome, Outcome::Verified);
+    let summaries: Vec<&str> = state
+        .runtime
+        .actions
+        .iter()
+        .map(|a| a.summary.as_str())
+        .collect();
+    assert_eq!(summaries, vec!["2 lines read", "2 lines read"]);
+}
+
+#[test]
+fn test_budget_max_duration_ends_the_run_before_the_next_turn() {
+    let repo = create_temp_git_repo();
+    let mut state = State::new("Inspect and solve", "true");
+
+    let provider = ScriptedProvider::new(vec![calls("read", json!({"path": "greet.py"}))]);
+
+    let runner = Runner {
+        provider: &provider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &StateOnly,
+        root: repo.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 10,
+            max_gate_attempts: 1,
+            max_duration: Some(std::time::Duration::ZERO),
+        },
+        rollback: false,
+        loop_breaker: true,
+        on_event: None,
+    };
+
+    let (outcome, report) = runner.run(&mut state);
+    assert_eq!(outcome, Outcome::BudgetExhausted);
+    assert_eq!(report.outcome_turns, 0);
+    assert!(
+        provider.seen.lock().unwrap().is_empty(),
+        "no model call may start once the deadline has passed"
+    );
 }

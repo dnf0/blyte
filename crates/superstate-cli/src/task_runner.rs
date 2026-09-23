@@ -173,8 +173,10 @@ pub fn run_task_with_state_and_writer<W: Write>(
         budget: superstate_agent::run::Budget {
             max_turns: config.max_turns as u32,
             max_gate_attempts: config.max_gates as u32,
+            max_duration: None,
         },
         rollback: config.rollback,
+        loop_breaker: true,
         on_event: Some(&on_event),
     };
 
