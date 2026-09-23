@@ -102,23 +102,16 @@ pub fn run_task_with_state_and_writer<W: Write>(
     ),
     String,
 > {
-    // 1. Initialize LLM provider from environment credentials.
-    // If the API key is missing, produce an explicit error instructing how to configure it.
-    let provider = match superstate_provider::gemini::Gemini::from_env() {
-        Ok(mut p) => {
-            if let Some(ref m) = config.model {
-                p = p.with_model(m);
-            }
-            p
-        }
+    // 1. Initialize LLM provider from environment credentials or model specification.
+    // If credentials for the detected provider are missing, produce a clear error indicating which key to set.
+    let provider = match superstate_provider::resolve_provider(config.model.as_deref()) {
+        Ok(p) => p,
         Err(superstate_provider::ProviderError::MissingKey(key)) => {
             return Err(format!(
-                "Provider error: no API key: set {key} (or GOOGLE_API_KEY)"
+                "Provider error: no API key: set {key} in environment"
             ));
         }
-        Err(e) => {
-            return Err(format!("Provider error: {e}"));
-        }
+        Err(e) => return Err(format!("Provider error: {e}")),
     };
 
     // 2. Select context assembly strategy.
@@ -172,7 +165,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
 
     // 5. Assemble the autonomous runner and execute until terminal outcome or budget exhaustion.
     let runner = superstate_agent::run::Runner {
-        provider: &provider,
+        provider: provider.as_ref(),
         shell,
         fs,
         context: context_strategy,

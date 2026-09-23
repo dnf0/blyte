@@ -1,149 +1,516 @@
-diff --git a/crates/superstate-agent/src/context.rs b/crates/superstate-agent/src/context.rs
-index 8dca97a..c9de708 100644
---- a/crates/superstate-agent/src/context.rs
-+++ b/crates/superstate-agent/src/context.rs
-@@ -52,11 +52,25 @@ pub struct StateOnly;
- impl ContextStrategy for StateOnly {
-     fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
-         let mut out = Vec::new();
--        out.push(Message::User(format!(
-+        let mut user_prompt = format!(
-             "## Task\n{}\n\n## Your state\n{}\n",
-             state.orchestrator.goal,
-             serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
--        )));
-+        );
-+
-+        // When actions have been recorded, format the chronological action ledger.
-+        // Provides episodic memory of tool outcomes without growing conversation history.
-+        if !state.runtime.actions.is_empty() {
-+            user_prompt.push_str("\n## Actions Taken So Far\n");
-+            for action in &state.runtime.actions {
-+                user_prompt.push_str(&format!(
-+                    "- Turn {}: `{}` `{}` -> {}\n",
-+                    action.turn, action.tool, action.target, action.summary
-+                ));
-+            }
-+        }
-+
-+        out.push(Message::User(user_prompt));
+diff --git a/crates/superstate-cli/src/task_runner.rs b/crates/superstate-cli/src/task_runner.rs
+index f88b5d8..ba7da1d 100644
+--- a/crates/superstate-cli/src/task_runner.rs
++++ b/crates/superstate-cli/src/task_runner.rs
+@@ -102,23 +102,16 @@ pub fn run_task_with_state_and_writer<W: Write>(
+     ),
+     String,
+ > {
+-    // 1. Initialize LLM provider from environment credentials.
+-    // If the API key is missing, produce an explicit error instructing how to configure it.
+-    let provider = match superstate_provider::gemini::Gemini::from_env() {
+-        Ok(mut p) => {
+-            if let Some(ref m) = config.model {
+-                p = p.with_model(m);
+-            }
+-            p
+-        }
++    // 1. Initialize LLM provider from environment credentials or model specification.
++    // If credentials for the detected provider are missing, produce a clear error indicating which key to set.
++    let provider = match superstate_provider::resolve_provider(config.model.as_deref()) {
++        Ok(p) => p,
+         Err(superstate_provider::ProviderError::MissingKey(key)) => {
+             return Err(format!(
+-                "Provider error: no API key: set {key} (or GOOGLE_API_KEY)"
++                "Provider error: no API key: set {key} in environment"
+             ));
+         }
+-        Err(e) => {
+-            return Err(format!("Provider error: {e}"));
+-        }
++        Err(e) => return Err(format!("Provider error: {e}")),
+     };
  
-         // The latest observation, and only that. A tool result the model has already acted on
-         // is not re-sent; if it mattered, it belonged in state.
-diff --git a/crates/superstate-agent/tests/test_run.rs b/crates/superstate-agent/tests/test_run.rs
-index e776f49..4b7e809 100644
---- a/crates/superstate-agent/tests/test_run.rs
-+++ b/crates/superstate-agent/tests/test_run.rs
-@@ -7,8 +7,8 @@ use superstate_agent::context::{ContextStrategy, Conversational, StateOnly};
- use superstate_agent::fs::LocalFs;
- use superstate_agent::run::{Budget, Outcome, Runner};
- use superstate_agent::shell::{LocalShell, Shell};
--use superstate_agent::state::State;
--use superstate_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
-+use superstate_agent::state::{ActionEntry, State};
-+use superstate_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
+     // 2. Select context assembly strategy.
+@@ -172,7 +165,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
  
- /// Replays a fixed list of responses and records every request it was given.
- struct ScriptedProvider {
-@@ -437,3 +437,101 @@ fn test_rollback_appends_action_entry() {
+     // 5. Assemble the autonomous runner and execute until terminal outcome or budget exhaustion.
+     let runner = superstate_agent::run::Runner {
+-        provider: &provider,
++        provider: provider.as_ref(),
+         shell,
+         fs,
+         context: context_strategy,
+diff --git a/crates/superstate-cli/tests/test_task_runner.rs b/crates/superstate-cli/tests/test_task_runner.rs
+index 72928fd..4f0d083 100644
+--- a/crates/superstate-cli/tests/test_task_runner.rs
++++ b/crates/superstate-cli/tests/test_task_runner.rs
+@@ -16,7 +16,7 @@ fn test_task_config_from_cli() {
+         "--context",
+         "state-only",
+         "--model",
+-        "gemini-2.5-flash",
++        "gemini-3.8-flash",
+         "--container",
+         "docker-123",
+         "--max-turns",
+@@ -30,7 +30,7 @@ fn test_task_config_from_cli() {
+     assert_eq!(config.prompt, "solve the bug");
+     assert_eq!(config.gate.as_deref(), Some("cargo test"));
+     assert_eq!(config.context_strategy, "state-only");
+-    assert_eq!(config.model.as_deref(), Some("gemini-2.5-flash"));
++    assert_eq!(config.model.as_deref(), Some("gemini-3.8-flash"));
+     assert_eq!(config.container.as_deref(), Some("docker-123"));
+     assert_eq!(config.max_turns, 42);
+     assert_eq!(config.max_gates, 7);
+@@ -63,9 +63,12 @@ fn test_task_config_defaults() {
+ fn test_run_task_missing_api_key_returns_clear_error() {
+     let _guard = ENV_LOCK.lock().unwrap();
+ 
+-    // Ensure both GEMINI_API_KEY and GOOGLE_API_KEY are unset
++    // Ensure all provider keys are unset for deterministic fallback
+     std::env::remove_var("GEMINI_API_KEY");
+     std::env::remove_var("GOOGLE_API_KEY");
++    std::env::remove_var("ANTHROPIC_API_KEY");
++    std::env::remove_var("OLLAMA_API_KEY");
++    std::env::remove_var("OLLAMA_HOST");
+ 
+     let config = TaskConfig {
+         prompt: "echo hello".to_string(),
+@@ -88,12 +91,60 @@ fn test_run_task_missing_api_key_returns_clear_error() {
      );
-     assert!(rollback_entry.is_error);
  }
-+
+ 
 +#[test]
-+fn test_state_only_context_omits_actions_when_empty() {
-+    // When state.runtime.actions is empty, StateOnly::build must omit the action ledger section
-+    // to preserve a minimal, clean prompt for the initial turn or until actions occur.
-+    let state = State::new("my goal", "cargo test");
-+    let history = vec![];
-+    let messages = StateOnly.build(&state, &history);
-+    assert_eq!(messages.len(), 1);
++fn test_run_task_missing_api_key_for_specified_provider() {
++    let _guard = ENV_LOCK.lock().unwrap();
 +
-+    let Message::User(prompt) = &messages[0] else {
-+        panic!("expected Message::User");
++    std::env::remove_var("ANTHROPIC_API_KEY");
++    std::env::remove_var("OLLAMA_API_KEY");
++    std::env::remove_var("OLLAMA_HOST");
++
++    let anthropic_config = TaskConfig {
++        prompt: "echo hello".to_string(),
++        gate: None,
++        context_strategy: "state-only".to_string(),
++        model: Some("claude-3-7-sonnet".to_string()),
++        container: None,
++        max_turns: 10,
++        max_gates: 2,
++        rollback: true,
++        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
 +    };
-+    assert!(!prompt.contains("## Actions Taken So Far"));
-+}
 +
-+#[test]
-+fn test_state_only_context_formats_action_ledger() {
-+    // When actions exist, StateOnly::build formats them chronologically into the initial user prompt,
-+    // retaining Invariant II by keeping the total message count bounded (messages.len() <= 3).
-+    let mut state = State::new("solve bug", "pytest");
-+    state.runtime.actions.push(ActionEntry {
-+        turn: 1,
-+        tool: "read".into(),
-+        target: "src/main.rs (lines 1-20)".into(),
-+        summary: "20 lines read".into(),
-+        is_error: false,
-+    });
-+    state.runtime.actions.push(ActionEntry {
-+        turn: 2,
-+        tool: "bash".into(),
-+        target: "cargo test".into(),
-+        summary: "exit 101".into(),
-+        is_error: true,
-+    });
-+
-+    // Provide history with tool call and result to verify bounded message length.
-+    let history = vec![
-+        Message::User("initial user message".into()),
-+        Message::ToolCall {
-+            id: "tc_1".into(),
-+            name: "bash".into(),
-+            arguments: json!({"command": "cargo test"}),
-+            signature: None,
-+        },
-+        Message::ToolResult {
-+            id: "tc_1".into(),
-+            name: "bash".into(),
-+            content: "test failure".into(),
-+            is_error: true,
-+        },
-+    ];
-+
-+    let messages = StateOnly.build(&state, &history);
++    let err = run_task(anthropic_config).unwrap_err();
 +    assert!(
-+        messages.len() <= 3,
-+        "messages.len() must be <= 3, got {}",
-+        messages.len()
++        err.contains("ANTHROPIC_API_KEY"),
++        "Error message should mention ANTHROPIC_API_KEY: {err}"
 +    );
 +
-+    let Message::User(prompt) = &messages[0] else {
-+        panic!("expected first message to be Message::User");
++    let ollama_config = TaskConfig {
++        prompt: "echo hello".to_string(),
++        gate: None,
++        context_strategy: "state-only".to_string(),
++        model: Some("qwen2.5-coder:32b".to_string()),
++        container: None,
++        max_turns: 10,
++        max_gates: 2,
++        rollback: true,
++        root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
 +    };
-+    assert!(prompt.contains("## Actions Taken So Far"));
-+    assert!(prompt.contains("- Turn 1: `read` `src/main.rs (lines 1-20)` -> 20 lines read"));
-+    assert!(prompt.contains("- Turn 2: `bash` `cargo test` -> exit 101"));
++
++    let err = run_task(ollama_config).unwrap_err();
++    assert!(
++        err.contains("OLLAMA_API_KEY"),
++        "Error message should mention OLLAMA_API_KEY: {err}"
++    );
++}
++
+ #[test]
+ fn test_run_task_with_state_and_writer_preserves_state() {
+     let _guard = ENV_LOCK.lock().unwrap();
+ 
+     std::env::remove_var("GEMINI_API_KEY");
+     std::env::remove_var("GOOGLE_API_KEY");
++    std::env::remove_var("ANTHROPIC_API_KEY");
++    std::env::remove_var("OLLAMA_API_KEY");
++    std::env::remove_var("OLLAMA_HOST");
+ 
+     let config = TaskConfig {
+         prompt: "task goal".to_string(),
+@@ -122,6 +173,9 @@ fn test_repl_stream_prompt_dispatch() {
+ 
+     std::env::remove_var("GEMINI_API_KEY");
+     std::env::remove_var("GOOGLE_API_KEY");
++    std::env::remove_var("ANTHROPIC_API_KEY");
++    std::env::remove_var("OLLAMA_API_KEY");
++    std::env::remove_var("OLLAMA_HOST");
+ 
+     let config = superstate_cli::repl::ReplConfig::default();
+     let session = superstate_cli::repl::ReplSession::new(&config);
+diff --git a/crates/superstate-provider/src/lib.rs b/crates/superstate-provider/src/lib.rs
+index 4d59eac..1a4e818 100644
+--- a/crates/superstate-provider/src/lib.rs
++++ b/crates/superstate-provider/src/lib.rs
+@@ -21,6 +21,9 @@
+ pub mod anthropic;
+ pub mod gemini;
+ pub mod ollama;
++pub mod registry;
++
++pub use registry::{detect_provider_kind, discover_all_models, resolve_provider, ProviderKind};
+ 
+ use serde::{Deserialize, Serialize};
+ 
+diff --git a/crates/superstate-provider/src/registry.rs b/crates/superstate-provider/src/registry.rs
+new file mode 100644
+index 0000000..bb02be7
+--- /dev/null
++++ b/crates/superstate-provider/src/registry.rs
+@@ -0,0 +1,146 @@
++//! Universal model routing, provider resolution, and multi-provider credential discovery.
++//!
++//! Provides a single entrypoint for mapping user-provided model identifiers or ambient
++//! environment credentials to concrete [`Provider`] implementations, insulating callers
++//! from provider-specific wire schemas and credential conventions.
++
++use crate::{ModelInfo, Provider, ProviderError};
++
++/// Identifies the underlying AI backend provider family.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ProviderKind {
++    /// Google Gemini models (e.g., `gemini-3.8-flash`, `gemini-2.5-pro`).
++    Gemini,
++    /// Anthropic Claude models (e.g., `claude-3-7-sonnet`, `claude-3-5-haiku`).
++    Anthropic,
++    /// Ollama local or Cloud hosted models (e.g., `qwen2.5-coder:32b`, `llama3.3:70b`).
++    Ollama,
++}
++
++/// Detects the target [`ProviderKind`] based on model naming conventions or environment credentials.
++///
++/// Discovers provider kind through explicit namespace prefixes (`anthropic/`, `gemini/`, `ollama/`),
++/// well-known model prefix tags (`claude`, `gemini`), or tag syntax (`:`). If no model is supplied
++/// or the identifier is unrecognized, falls back to inspecting ambient environment variables.
++///
++/// # Parameters
++/// * `model` - Optional model identifier string or prefixed specification.
++///
++/// # Returns
++/// The resolved [`ProviderKind`].
++pub fn detect_provider_kind(model: Option<&str>) -> ProviderKind {
++    // 1. Inspect explicit prefix or well-known model family patterns
++    if let Some(m) = model {
++        if m.starts_with("claude") || m.starts_with("anthropic/") || m == "anthropic" {
++            return ProviderKind::Anthropic;
++        }
++        if m.starts_with("ollama/") || m == "ollama" || m.contains(':') {
++            return ProviderKind::Ollama;
++        }
++        if m.starts_with("gemini") || m.starts_with("gemini/") {
++            return ProviderKind::Gemini;
++        }
++    }
++
++    // 2. Fall back to ambient environment credentials when model is unspecified or ambiguous
++    if std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok() {
++        ProviderKind::Gemini
++    } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
++        ProviderKind::Anthropic
++    } else if std::env::var("OLLAMA_API_KEY").is_ok() || std::env::var("OLLAMA_HOST").is_ok() {
++        ProviderKind::Ollama
++    } else {
++        // Default baseline fallback is Gemini
++        ProviderKind::Gemini
++    }
++}
++
++/// Resolves a model identifier into a heap-allocated [`Provider`] instance configured with credentials.
++///
++/// Strips provider namespace prefixes (`anthropic/`, `gemini/`, `ollama/`) from the model identifier
++/// before configuring the underlying adapter. If credentials for the detected provider are missing
++/// in the environment, returns a descriptive [`ProviderError::MissingKey`].
++///
++/// # Parameters
++/// * `model` - Optional model name or namespaced identifier.
++///
++/// # Returns
++/// Returns a boxed dynamic [`Provider`] ready for completion requests, or a [`ProviderError`].
++pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, ProviderError> {
++    // Determine provider kind first so routing logic is unified
++    let kind = detect_provider_kind(model);
++
++    // Strip provider prefix from model string if present, treating bare provider names as default
++    let clean_model = match model {
++        Some("anthropic") | Some("ollama") | Some("gemini") => None,
++        Some(m) => {
++            let stripped = if let Some(s) = m.strip_prefix("anthropic/") {
++                s
++            } else if let Some(s) = m.strip_prefix("gemini/") {
++                s
++            } else if let Some(s) = m.strip_prefix("ollama/") {
++                s
++            } else {
++                m
++            };
++            if stripped.is_empty() {
++                None
++            } else {
++                Some(stripped)
++            }
++        }
++        None => None,
++    };
++
++    // Instantiate provider adapter and apply stripped model identifier override if provided
++    match kind {
++        ProviderKind::Gemini => {
++            let mut p = crate::gemini::Gemini::from_env()?;
++            if let Some(m) = clean_model {
++                p = p.with_model(m);
++            }
++            Ok(Box::new(p))
++        }
++        ProviderKind::Anthropic => {
++            let mut p = crate::anthropic::Anthropic::from_env()?;
++            if let Some(m) = clean_model {
++                p = p.with_model(m);
++            }
++            Ok(Box::new(p))
++        }
++        ProviderKind::Ollama => {
++            let mut p = crate::ollama::Ollama::from_env()?;
++            if let Some(m) = clean_model {
++                p = p.with_model(m);
++            }
++            Ok(Box::new(p))
++        }
++    }
++}
++
++/// Probes all supported providers in the current environment and lists available models.
++///
++/// Each provider is queried using its environment credentials. Providers with missing keys
++/// or network errors report their individual [`ProviderError`] without halting discovery
++/// of remaining providers.
++///
++/// # Returns
++/// A vector of tuples containing human-friendly provider labels and either the list of
++/// discovered [`ModelInfo`] records or the error encountered while querying.
++pub fn discover_all_models() -> Vec<(String, Result<Vec<ModelInfo>, ProviderError>)> {
++    // Query each provider adapter sequentially, collecting successful models or failure errors
++    vec![
++        match crate::gemini::Gemini::from_env() {
++            Ok(p) => ("Google Gemini".to_string(), p.list_models()),
++            Err(e) => ("Google Gemini".to_string(), Err(e)),
++        },
++        match crate::anthropic::Anthropic::from_env() {
++            Ok(p) => ("Anthropic Claude".to_string(), p.list_models()),
++            Err(e) => ("Anthropic Claude".to_string(), Err(e)),
++        },
++        match crate::ollama::Ollama::from_env() {
++            Ok(p) => ("Ollama Cloud".to_string(), p.list_models()),
++            Err(e) => ("Ollama Cloud".to_string(), Err(e)),
++        },
++    ]
++}
+diff --git a/crates/superstate-provider/tests/test_registry.rs b/crates/superstate-provider/tests/test_registry.rs
+new file mode 100644
+index 0000000..80b95d7
+--- /dev/null
++++ b/crates/superstate-provider/tests/test_registry.rs
+@@ -0,0 +1,194 @@
++//! Tests for universal provider registry, routing, and discovery.
++//!
++//! Validates model identifier prefix detection, ambient environment credential fallback,
++//! provider instantiation, and multi-provider discovery without requiring network calls.
++
++use std::sync::Mutex;
++use superstate_provider::registry::{detect_provider_kind, ProviderKind};
++use superstate_provider::{discover_all_models, resolve_provider, ProviderError};
++
++/// Mutex to serialize tests that mutate process environment variables.
++static ENV_LOCK: Mutex<()> = Mutex::new(());
++
++/// Helper to clear all provider-related environment variables for isolation.
++fn clear_provider_env() {
++    std::env::remove_var("GEMINI_API_KEY");
++    std::env::remove_var("GOOGLE_API_KEY");
++    std::env::remove_var("ANTHROPIC_API_KEY");
++    std::env::remove_var("OLLAMA_API_KEY");
++    std::env::remove_var("OLLAMA_HOST");
++    std::env::remove_var("SUPERSTATE_MODEL");
 +}
 +
 +#[test]
-+fn test_state_only_runner_injects_action_ledger_in_prompts() {
-+    // Verifies end-to-end integration: Runner executing with StateOnly strategy injects
-+    // actions executed in turn 1 into the turn 2 request prompt.
-+    let d = repo();
-+    let p = ScriptedProvider::new(vec![
-+        calls("bash", json!({"command": "echo step1"})),
-+        says("done"),
-+    ]);
-+    let mut st = State::new("step goal", "true");
-+    let (outcome, rep) = runner(&p, d.path(), &StateOnly, false).run(&mut st);
-+    assert_eq!(outcome, Outcome::Verified);
-+    assert_eq!(rep.gate_attempts, 1);
++fn test_detect_provider_kind_by_model_prefix_and_syntax() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    clear_provider_env();
 +
-+    let seen = p.seen.lock().unwrap();
-+    assert_eq!(seen.len(), 2);
++    // Anthropic routing: claude prefix or anthropic/ namespace
++    assert_eq!(
++        detect_provider_kind(Some("claude-3-7-sonnet")),
++        ProviderKind::Anthropic
++    );
++    assert_eq!(
++        detect_provider_kind(Some("claude-3-5-haiku")),
++        ProviderKind::Anthropic
++    );
++    assert_eq!(
++        detect_provider_kind(Some("anthropic/claude-3-5-haiku")),
++        ProviderKind::Anthropic
++    );
 +
-+    // Turn 1 prompt must not contain actions as none have run yet.
-+    let Message::User(first_prompt) = &seen[0].messages[0] else {
-+        panic!("expected Message::User in turn 1");
-+    };
-+    assert!(!first_prompt.contains("## Actions Taken So Far"));
++    // Gemini routing: gemini prefix or gemini/ namespace
++    assert_eq!(
++        detect_provider_kind(Some("gemini-3.8-flash")),
++        ProviderKind::Gemini
++    );
++    assert_eq!(
++        detect_provider_kind(Some("gemini-2.5-pro")),
++        ProviderKind::Gemini
++    );
++    assert_eq!(
++        detect_provider_kind(Some("gemini/gemini-2.5-pro")),
++        ProviderKind::Gemini
++    );
 +
-+    // Turn 2 prompt must contain the action ledger capturing turn 1's bash invocation.
-+    let Message::User(second_prompt) = &seen[1].messages[0] else {
-+        panic!("expected Message::User in turn 2");
-+    };
-+    assert!(second_prompt.contains("## Actions Taken So Far"));
-+    assert!(second_prompt.contains("- Turn 1: `bash` `echo step1` -> exit 0"));
++    // Ollama routing: colon tag notation or ollama/ namespace or literal "ollama"
++    assert_eq!(
++        detect_provider_kind(Some("qwen2.5-coder:32b")),
++        ProviderKind::Ollama
++    );
++    assert_eq!(
++        detect_provider_kind(Some("llama3.1:8b")),
++        ProviderKind::Ollama
++    );
++    assert_eq!(
++        detect_provider_kind(Some("ollama/llama3.3:70b")),
++        ProviderKind::Ollama
++    );
++    assert_eq!(detect_provider_kind(Some("ollama")), ProviderKind::Ollama);
++}
++
++#[test]
++fn test_detect_provider_kind_fallback_to_environment_credentials() {
++    let _guard = ENV_LOCK.lock().unwrap();
++
++    // 1. With GEMINI_API_KEY set, Gemini is preferred for unspecified models
++    clear_provider_env();
++    std::env::set_var("GEMINI_API_KEY", "mock-gemini-key");
++    assert_eq!(detect_provider_kind(None), ProviderKind::Gemini);
++    assert_eq!(
++        detect_provider_kind(Some("custom-model")),
++        ProviderKind::Gemini
++    );
++
++    // 2. With GOOGLE_API_KEY set, Gemini is preferred
++    clear_provider_env();
++    std::env::set_var("GOOGLE_API_KEY", "mock-google-key");
++    assert_eq!(detect_provider_kind(None), ProviderKind::Gemini);
++
++    // 3. With only ANTHROPIC_API_KEY set, Anthropic is preferred
++    clear_provider_env();
++    std::env::set_var("ANTHROPIC_API_KEY", "mock-anthropic-key");
++    assert_eq!(detect_provider_kind(None), ProviderKind::Anthropic);
++    assert_eq!(
++        detect_provider_kind(Some("custom-model")),
++        ProviderKind::Anthropic
++    );
++
++    // 4. With only OLLAMA_API_KEY or OLLAMA_HOST set, Ollama is preferred
++    clear_provider_env();
++    std::env::set_var("OLLAMA_API_KEY", "mock-ollama-key");
++    assert_eq!(detect_provider_kind(None), ProviderKind::Ollama);
++
++    clear_provider_env();
++    std::env::set_var("OLLAMA_HOST", "http://localhost:11434");
++    assert_eq!(detect_provider_kind(None), ProviderKind::Ollama);
++
++    // 5. Default fallback when no credentials exist in environment is Gemini
++    clear_provider_env();
++    assert_eq!(detect_provider_kind(None), ProviderKind::Gemini);
++}
++
++#[test]
++fn test_resolve_provider_missing_api_keys() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    clear_provider_env();
++
++    // When keys are missing, resolve_provider propagates the provider-specific MissingKey error
++    match resolve_provider(Some("anthropic/claude-3-7-sonnet")) {
++        Err(ProviderError::MissingKey(key)) => assert_eq!(key, "ANTHROPIC_API_KEY"),
++        Ok(_) => panic!("expected MissingKey(ANTHROPIC_API_KEY), got Ok"),
++        Err(e) => panic!("expected MissingKey(ANTHROPIC_API_KEY), got other error: {e}"),
++    }
++
++    match resolve_provider(Some("gemini/gemini-3.8-flash")) {
++        Err(ProviderError::MissingKey(key)) => assert_eq!(key, "GEMINI_API_KEY"),
++        Ok(_) => panic!("expected MissingKey(GEMINI_API_KEY), got Ok"),
++        Err(e) => panic!("expected MissingKey(GEMINI_API_KEY), got other error: {e}"),
++    }
++
++    match resolve_provider(Some("ollama/qwen2.5-coder:32b")) {
++        Err(ProviderError::MissingKey(key)) => assert_eq!(key, "OLLAMA_API_KEY"),
++        Ok(_) => panic!("expected MissingKey(OLLAMA_API_KEY), got Ok"),
++        Err(e) => panic!("expected MissingKey(OLLAMA_API_KEY), got other error: {e}"),
++    }
++
++    // Default with no keys returns Gemini MissingKey
++    match resolve_provider(None) {
++        Err(ProviderError::MissingKey(key)) => assert_eq!(key, "GEMINI_API_KEY"),
++        Ok(_) => panic!("expected MissingKey(GEMINI_API_KEY), got Ok"),
++        Err(e) => panic!("expected MissingKey(GEMINI_API_KEY), got other error: {e}"),
++    }
++}
++
++#[test]
++fn test_resolve_provider_with_credentials_and_prefix_stripping() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    clear_provider_env();
++    std::env::set_var("ANTHROPIC_API_KEY", "mock-key");
++    std::env::set_var("GEMINI_API_KEY", "mock-key");
++    std::env::set_var("OLLAMA_API_KEY", "mock-key");
++
++    // Strips anthropic/ prefix and configures Anthropic provider
++    let anthropic = resolve_provider(Some("anthropic/claude-3-7-sonnet")).unwrap();
++    assert_eq!(anthropic.model_id(), "anthropic/claude-3-7-sonnet");
++
++    // Strips gemini/ prefix and configures Gemini provider
++    let gemini = resolve_provider(Some("gemini/gemini-3.8-flash")).unwrap();
++    assert_eq!(gemini.model_id(), "gemini/gemini-3.8-flash");
++
++    // Strips ollama/ prefix and configures Ollama provider
++    let ollama = resolve_provider(Some("ollama/qwen2.5-coder:32b")).unwrap();
++    assert_eq!(ollama.model_id(), "ollama/qwen2.5-coder:32b");
++
++    // Bare model names retain full identifier
++    let bare_claude = resolve_provider(Some("claude-3-5-haiku")).unwrap();
++    assert_eq!(bare_claude.model_id(), "anthropic/claude-3-5-haiku");
++
++    let bare_ollama = resolve_provider(Some("llama3.3:70b")).unwrap();
++    assert_eq!(bare_ollama.model_id(), "ollama/llama3.3:70b");
++}
++
++#[test]
++fn test_discover_all_models_enumerates_providers() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    clear_provider_env();
++
++    // Without credentials, discovery should report all 3 providers with missing key errors
++    let results = discover_all_models();
++    assert_eq!(results.len(), 3);
++
++    let provider_names: Vec<&str> = results.iter().map(|(name, _)| name.as_str()).collect();
++    assert_eq!(
++        provider_names,
++        vec!["Google Gemini", "Anthropic Claude", "Ollama Cloud"]
++    );
++
++    for (name, res) in results {
++        match res {
++            Err(ProviderError::MissingKey(_)) => {}
++            other => panic!("expected MissingKey for {name}, got: {other:?}"),
++        }
++    }
 +}

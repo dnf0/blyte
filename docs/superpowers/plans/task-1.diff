@@ -1,110 +1,245 @@
-diff --git a/crates/superstate-agent/src/state.rs b/crates/superstate-agent/src/state.rs
-index 2ee2d68..09103d1 100644
---- a/crates/superstate-agent/src/state.rs
-+++ b/crates/superstate-agent/src/state.rs
-@@ -33,6 +33,21 @@ pub struct Orchestrator {
-     pub verification_cmd: String,
+diff --git a/crates/superstate-provider/src/gemini.rs b/crates/superstate-provider/src/gemini.rs
+index 0b28435..5a17dcd 100644
+--- a/crates/superstate-provider/src/gemini.rs
++++ b/crates/superstate-provider/src/gemini.rs
+@@ -6,9 +6,9 @@
+ 
+ use serde_json::{json, Value};
+ 
+-use crate::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
++use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
+ 
+-const DEFAULT_MODEL: &str = "gemini-2.5-flash";
++const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+ 
+ /// Deadlines on the HTTP call itself.
+ ///
+@@ -173,6 +173,68 @@ impl Gemini {
+         }
+         Ok(out)
+     }
++
++    /// Parse a models list response body from Google GenAI `models.list`.
++    ///
++    /// # Parameters
++    /// - `v`: The parsed JSON response object from the models endpoint.
++    ///
++    /// # Returns
++    /// A vector of [`ModelInfo`] describing models that support `generateContent`.
++    ///
++    /// # Errors
++    /// Returns [`ProviderError::Parse`] if the payload cannot be processed.
++    pub fn parse_models_list(v: &Value) -> Result<Vec<ModelInfo>, ProviderError> {
++        let mut out = Vec::new();
++        // The models endpoint returns an array under the "models" key.
++        if let Some(models) = v.get("models").and_then(|m| m.as_array()) {
++            for m in models {
++                // Models advertise supported operations; filter out models without content generation (e.g. embedContent only).
++                let supports_generation = m
++                    .get("supportedGenerationMethods")
++                    .and_then(|g| g.as_array())
++                    .map(|arr| {
++                        arr.iter()
++                            .any(|method| method.as_str() == Some("generateContent"))
++                    })
++                    .unwrap_or(false);
++
++                if !supports_generation {
++                    continue;
++                }
++
++                // Google prefixes model resource names with "models/"; strip it to yield the canonical model identifier.
++                let raw_name = m.get("name").and_then(|n| n.as_str()).unwrap_or_default();
++                let id = raw_name
++                    .strip_prefix("models/")
++                    .unwrap_or(raw_name)
++                    .to_string();
++                if id.is_empty() {
++                    continue;
++                }
++
++                // Use the human-readable displayName if provided; fallback to the model identifier.
++                let display_name = m
++                    .get("displayName")
++                    .and_then(|d| d.as_str())
++                    .map(String::from)
++                    .unwrap_or_else(|| id.clone());
++
++                let description = m
++                    .get("description")
++                    .and_then(|d| d.as_str())
++                    .map(String::from);
++
++                out.push(ModelInfo {
++                    id,
++                    display_name,
++                    description,
++                    provider: "gemini".to_string(),
++                });
++            }
++        }
++        Ok(out)
++    }
  }
  
-+/// A single action observed and summarized objectively by the harness.
+ impl Provider for Gemini {
+@@ -206,4 +268,30 @@ impl Provider for Gemini {
+     fn model_id(&self) -> String {
+         format!("gemini/{}", self.model)
+     }
++
++    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
++        let url = API_ROOT;
++        // Build an agent with bounded connection and read timeouts.
++        let agent = ureq::AgentBuilder::new()
++            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
++            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
++            .build();
++        // Query Google GenAI models list endpoint using AI Studio API key header.
++        let resp = agent.get(url).set("x-goog-api-key", &self.api_key).call();
++
++        match resp {
++            Ok(r) => {
++                // Parse JSON payload and delegate model filtering/extraction.
++                let v: Value = r
++                    .into_json()
++                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
++                Self::parse_models_list(&v)
++            }
++            Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
++                status,
++                body: r.into_string().unwrap_or_default(),
++            }),
++            Err(e) => Err(ProviderError::Transport(e.to_string())),
++        }
++    }
+ }
+diff --git a/crates/superstate-provider/src/lib.rs b/crates/superstate-provider/src/lib.rs
+index a7ff6fa..0106fe8 100644
+--- a/crates/superstate-provider/src/lib.rs
++++ b/crates/superstate-provider/src/lib.rs
+@@ -116,9 +116,26 @@ pub struct Usage {
+     pub thinking: u64,
+ }
+ 
++/// Metadata describing a model supported by a provider.
 +#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-+pub struct ActionEntry {
-+    /// Turn number when this action occurred.
-+    pub turn: u32,
-+    /// Name of the tool invoked (e.g. "read", "write", "edit", "bash", "glob", "grep", "note", "rollback").
-+    pub tool: String,
-+    /// Canonical target or command (e.g. "stats.py (lines 1-30)", "cargo test", "pattern 'mean'").
-+    pub target: String,
-+    /// Short 1-line summary of the outcome (e.g. "22 lines read", "exit 1: ZeroDivisionError", "replaced 3 lines").
-+    pub summary: String,
-+    /// Whether the action resulted in an error or non-zero exit code.
-+    pub is_error: bool,
++pub struct ModelInfo {
++    /// Identifier passed to the provider or config (e.g. `gemini-3.8-flash`).
++    pub id: String,
++    /// Human-friendly display name (e.g. `Gemini 3.8 Flash`).
++    pub display_name: String,
++    /// Optional description of the model's capabilities or purpose.
++    pub description: Option<String>,
++    /// Provider identifier (e.g. `gemini`).
++    pub provider: String,
 +}
 +
- /// Facts the harness observed. Not opinions, and not reported by the worker.
- #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
- pub struct Runtime {
-@@ -42,6 +57,9 @@ pub struct Runtime {
-     pub rollbacks: u32,
-     /// Files the harness saw written, in order of first write.
-     pub files_written: Vec<String>,
-+    /// Chronological log of all actions executed in this session.
-+    #[serde(default)]
-+    pub actions: Vec<ActionEntry>,
+ pub trait Provider {
+     /// One blocking model call.
+     fn complete(&self, req: &Request) -> Result<Response, ProviderError>;
+-    /// Identifier recorded in telemetry, e.g. `gemini/gemini-2.5-flash`.
++    /// Identifier recorded in telemetry, e.g. `gemini/gemini-3.8-flash`.
+     fn model_id(&self) -> String;
++    /// Lists available models supported by this provider for the configured credentials.
++    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
++        Ok(Vec::new())
++    }
  }
- 
- /// The worker's own scratch space. Free-form on purpose.
-diff --git a/crates/superstate-agent/tests/test_state.rs b/crates/superstate-agent/tests/test_state.rs
+diff --git a/crates/superstate-provider/tests/test_gemini_models.rs b/crates/superstate-provider/tests/test_gemini_models.rs
 new file mode 100644
-index 0000000..f8f40b6
+index 0000000..5b1a709
 --- /dev/null
-+++ b/crates/superstate-agent/tests/test_state.rs
-@@ -0,0 +1,68 @@
-+//! Verification of state serialization and runtime action logging invariants.
-+//!
-+//! Validates that `ActionEntry` serializes and deserializes accurately,
-+//! that legacy runtime states omitting `actions` deserialize cleanly via defaults,
-+//! and that agent patches cannot tamper with or mutate the observed actions ledger.
++++ b/crates/superstate-provider/tests/test_gemini_models.rs
+@@ -0,0 +1,91 @@
++//! Tests for Gemini model discovery and Provider trait model listing.
 +
 +use serde_json::json;
-+use superstate_agent::state::{ActionEntry, Runtime, State};
++use superstate_provider::gemini::Gemini;
++use superstate_provider::{ModelInfo, Provider, ProviderError, Request, Response};
 +
-+/// Verifies that an ActionEntry round-trips through JSON serialization without loss.
 +#[test]
-+fn test_action_entry_serialization() {
-+    // Construct an action entry with representative tool execution metadata.
-+    let entry = ActionEntry {
-+        turn: 1,
-+        tool: "read".to_string(),
-+        target: "src/main.rs (lines 1-10)".to_string(),
-+        summary: "10 lines read".to_string(),
-+        is_error: false,
-+    };
-+
-+    // Serialize to JSON and parse back to verify round-trip fidelity.
-+    let serialized = serde_json::to_string(&entry).expect("serialization should succeed");
-+    let deserialized: ActionEntry =
-+        serde_json::from_str(&serialized).expect("deserialization should succeed");
-+
-+    assert_eq!(entry, deserialized);
-+}
-+
-+/// Verifies backward compatibility when deserializing Runtime instances that lack the `actions` field.
-+#[test]
-+fn test_runtime_actions_default_backward_compatibility() {
-+    // JSON payload representing state written by an earlier version without the actions ledger.
-+    let legacy_json = r#"{"attempts":1,"failures":[],"rollbacks":0,"files_written":[]}"#;
-+
-+    // Deserialization must succeed, using #[serde(default)] to supply an empty vector.
-+    let runtime: Runtime =
-+        serde_json::from_str(legacy_json).expect("deserializing legacy JSON should succeed");
-+
-+    assert!(runtime.actions.is_empty());
-+}
-+
-+/// Verifies that agent patches cannot overwrite or corrupt the runtime actions ledger.
-+#[test]
-+fn test_agent_patch_cannot_mutate_runtime_actions() {
-+    // Initialize state with an observed action entry in the runtime ledger.
-+    let mut state = State::new("implement feature", "cargo test");
-+    let initial_entry = ActionEntry {
-+        turn: 1,
-+        tool: "bash".to_string(),
-+        target: "cargo test".to_string(),
-+        summary: "exit 1: test failure".to_string(),
-+        is_error: true,
-+    };
-+    state.runtime.actions.push(initial_entry.clone());
-+
-+    // Agent attempts to clear or overwrite the runtime actions ledger via patch.
-+    state.apply_agent_patch(&json!({"actions": []}));
++fn parse_models_list_filters_generate_content_and_strips_prefix() {
++    let v = json!({
++        "models": [
++            {
++                "name": "models/gemini-3.8-flash",
++                "displayName": "Gemini 3.8 Flash",
++                "description": "Next generation multimodal model",
++                "supportedGenerationMethods": ["generateContent", "countTokens"]
++            },
++            {
++                "name": "models/text-embedding-004",
++                "displayName": "Text Embedding 004",
++                "description": "Embedding model",
++                "supportedGenerationMethods": ["embedContent"]
++            }
++        ]
++    });
++    let models = Gemini::parse_models_list(&v).expect("parsing should succeed");
++    assert_eq!(models.len(), 1);
 +    assert_eq!(
-+        state.runtime.actions.len(),
-+        1,
-+        "runtime actions ledger must be immutable to agent patches"
++        models[0],
++        ModelInfo {
++            id: "gemini-3.8-flash".into(),
++            display_name: "Gemini 3.8 Flash".into(),
++            description: Some("Next generation multimodal model".into()),
++            provider: "gemini".into(),
++        }
 +    );
-+    assert_eq!(state.runtime.actions[0], initial_entry);
++}
 +
-+    // Ensure poisoned key lands inertly in the agent region without altering runtime.
-+    assert_eq!(state.agent.fields["actions"], json!([]));
++#[test]
++fn parse_models_list_handles_missing_display_name_or_description() {
++    let v = json!({
++        "models": [
++            {
++                "name": "models/gemini-pro-custom",
++                "supportedGenerationMethods": ["generateContent"]
++            }
++        ]
++    });
++    let models = Gemini::parse_models_list(&v).expect("parsing should succeed");
++    assert_eq!(models.len(), 1);
++    assert_eq!(
++        models[0],
++        ModelInfo {
++            id: "gemini-pro-custom".into(),
++            display_name: "gemini-pro-custom".into(),
++            description: None,
++            provider: "gemini".into(),
++        }
++    );
++}
++
++#[test]
++fn parse_models_list_handles_empty_or_missing_models() {
++    let empty = json!({"models": []});
++    assert_eq!(Gemini::parse_models_list(&empty).unwrap(), Vec::new());
++
++    let missing = json!({});
++    assert_eq!(Gemini::parse_models_list(&missing).unwrap(), Vec::new());
++}
++
++#[test]
++fn default_model_is_gemini_3_8_flash() {
++    std::env::remove_var("SUPERSTATE_MODEL");
++    std::env::set_var("GEMINI_API_KEY", "test-key");
++    let g = Gemini::from_env().expect("Gemini::from_env should succeed");
++    assert_eq!(g.model_id(), "gemini/gemini-3.8-flash");
++}
++
++#[test]
++fn default_provider_trait_list_models_returns_empty_vec() {
++    struct DummyProvider;
++    impl Provider for DummyProvider {
++        fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
++            unimplemented!()
++        }
++        fn model_id(&self) -> String {
++            "dummy".into()
++        }
++    }
++    let dummy = DummyProvider;
++    assert_eq!(dummy.list_models().unwrap(), Vec::new());
 +}

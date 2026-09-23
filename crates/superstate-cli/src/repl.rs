@@ -34,6 +34,7 @@ pub struct ReplSession {
     pub repo_root: PathBuf,
     pub gate: Option<String>,
     pub model: String,
+    pub cached_models: Vec<superstate_provider::ModelInfo>,
     pub context_strategy: String,
     pub container: Option<String>,
     pub max_turns: usize,
@@ -56,7 +57,8 @@ impl ReplSession {
             model: config
                 .model
                 .clone()
-                .unwrap_or_else(|| "gemini-2.5-flash".to_string()),
+                .unwrap_or_else(|| "gemini-3.8-flash".to_string()),
+            cached_models: Vec::new(),
             context_strategy: config.context_strategy.clone(),
             container: config.container.clone(),
             max_turns: config.max_turns,
@@ -225,6 +227,11 @@ pub fn handle_repl_command<W: Write>(
                     .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
+                    "  /model [name|idx] - Discover and switch active AI model"
+                )
+                .map_err(|e| e.to_string())?;
+                writeln!(
+                    writer,
                     "  /state        - Inspect SKILL.state (Orchestrator, Runtime, Agent)"
                 )
                 .map_err(|e| e.to_string())?;
@@ -240,7 +247,7 @@ pub fn handle_repl_command<W: Write>(
                 .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
-                    "  /doctor       - Run 5-step system verification handshake"
+                    "  /doctor       - Run 6-step system verification handshake"
                 )
                 .map_err(|e| e.to_string())?;
                 writeln!(
@@ -255,6 +262,126 @@ pub fn handle_repl_command<W: Write>(
                 .map_err(|e| e.to_string())?;
                 writeln!(writer, "  /exit, /quit  - Exit the interactive REPL")
                     .map_err(|e| e.to_string())?;
+                Ok(ReplControl::Handled)
+            }
+            "/model" => {
+                let args = args.trim();
+                if args.is_empty() {
+                    // Discover and display all models supported by configured providers
+                    writeln!(writer, "Discovering available cloud models...")
+                        .map_err(|e| e.to_string())?;
+                    session.cached_models.clear();
+                    let discovered = superstate_provider::discover_all_models();
+                    for (provider_name, res) in discovered {
+                        match res {
+                            Ok(models) => {
+                                let via_info = match provider_name.as_str() {
+                                    "Google Gemini" => " (via GEMINI_API_KEY)",
+                                    "Anthropic Claude" => " (via ANTHROPIC_API_KEY)",
+                                    "Ollama Cloud" => "",
+                                    _ => "",
+                                };
+                                let header = if provider_name == "Ollama Cloud" {
+                                    let host = std::env::var("OLLAMA_HOST")
+                                        .unwrap_or_else(|_| "https://ollama.com/api".to_string());
+                                    format!("[Ollama Cloud] (via OLLAMA_API_KEY at {})", host)
+                                } else {
+                                    format!("[{}]{}", provider_name, via_info)
+                                };
+                                writeln!(writer, "\n{}", header).map_err(|e| e.to_string())?;
+
+                                for m in models {
+                                    session.cached_models.push(m.clone());
+                                    let idx = session.cached_models.len();
+                                    let is_active = session.model == m.id
+                                        || session.model.ends_with(&format!("/{}", m.id));
+                                    let active_tag = if is_active { " (active)" } else { "" };
+                                    let id_with_active = format!("{}{}", m.id, active_tag);
+
+                                    if let Some(ref desc) = m.description {
+                                        if id_with_active.len() < 25 {
+                                            writeln!(
+                                                writer,
+                                                "  [{}] {:<25} - {}",
+                                                idx, id_with_active, desc
+                                            )
+                                            .map_err(|e| e.to_string())?;
+                                        } else {
+                                            writeln!(
+                                                writer,
+                                                "  [{}] {} - {}",
+                                                idx, id_with_active, desc
+                                            )
+                                            .map_err(|e| e.to_string())?;
+                                        }
+                                    } else {
+                                        writeln!(writer, "  [{}] {}", idx, id_with_active)
+                                            .map_err(|e| e.to_string())?;
+                                    }
+                                }
+                            }
+                            Err(superstate_provider::ProviderError::MissingKey(key)) => {
+                                writeln!(
+                                    writer,
+                                    "\n[{}] Not configured (set {} to discover models)",
+                                    provider_name, key
+                                )
+                                .map_err(|e| e.to_string())?;
+                            }
+                            Err(err) => {
+                                writeln!(writer, "\n[{}] Discovery error: {}", provider_name, err)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    writeln!(writer, "\nActive model: {}", session.model)
+                        .map_err(|e| e.to_string())?;
+                    writeln!(
+                        writer,
+                        "To switch: /model <number> or /model <name> (e.g. /model 1 or /model claude-3-7-sonnet-latest)"
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else if let Ok(idx) = args.parse::<usize>() {
+                    // Populate model cache on-demand if user immediately specifies numeric index
+                    if session.cached_models.is_empty() {
+                        let discovered = superstate_provider::discover_all_models();
+                        for (_, res) in discovered {
+                            if let Ok(models) = res {
+                                session.cached_models.extend(models);
+                            }
+                        }
+                    }
+                    if idx >= 1 && idx <= session.cached_models.len() {
+                        let chosen = &session.cached_models[idx - 1];
+                        session.model = chosen.id.clone();
+                        writeln!(
+                            writer,
+                            "Switched active model to: {} ({})",
+                            chosen.id, chosen.provider
+                        )
+                        .map_err(|e| e.to_string())?;
+                    } else {
+                        writeln!(
+                            writer,
+                            "Invalid model index: {}. Use /model to view available models.",
+                            idx
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                } else if let Ok(idx) = args.parse::<i64>() {
+                    writeln!(
+                        writer,
+                        "Invalid model index: {}. Use /model to view available models.",
+                        idx
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else {
+                    // Switch model by explicit identifier or provider-namespaced tag
+                    let kind = superstate_provider::registry::detect_provider_kind(Some(args));
+                    session.model = args.to_string();
+                    writeln!(writer, "Switched active model to: {} ({:?})", args, kind)
+                        .map_err(|e| e.to_string())?;
+                }
                 Ok(ReplControl::Handled)
             }
             "/state" => {

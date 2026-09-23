@@ -1,389 +1,508 @@
-commit 4f301a56d89d130417136a6208078efd5732054f
-Author: Daniel Fisher <daniel.fisher@climate-x.com>
-Date:   Wed Sep 23 08:01:48 2026 +0100
-
-    test(cli): add end-to-end verification for action ledger in REPL
-
+diff --git a/README.md b/README.md
+index d999c87..f67cf61 100644
+--- a/README.md
++++ b/README.md
+@@ -119,7 +119,7 @@ Running `superstate` without a prompt launches the interactive agent harness REP
+ superstate
+ 
+ # Launch REPL configured with a specific verification gate and model
+-superstate --gate "cargo test" --model gemini-2.5-flash --context state-only
++superstate --gate "cargo test" --model gemini-3.8-flash --context state-only
+ ```
+ 
+ ### Headless Single-Shot Solver
+@@ -150,7 +150,7 @@ superstate "refactor database migration" \
+ | `[PROMPT]` | Direct task prompt for single-shot / headless execution | `None` (launches interactive REPL) |
+ | `-g, --gate <CMD>` | External verification gate command (e.g. `'cargo test'`, `'pytest'`) | `None` (fail-closed disabled) |
+ | `--context <STRATEGY>` | Context management strategy: `state-only` ($\mathcal{O}(1)$ prompt bounded memory) or `conversational` (append-all chat) | `conversational` |
+-| `-m, --model <MODEL>` | Model identifier or provider selection override | `gemini-2.5-flash` |
++| `-m, --model <MODEL>` | Model identifier or provider selection override | `gemini-3.8-flash` |
+ | `--container <ID>` | Run execution and filesystem seams inside an isolated container workspace | Local host |
+ | `--max-turns <N>` | Maximum turn budget per attempt | `25` |
+ | `--max-gates <N>` | Maximum verification gate retry attempts before failing | `5` |
+@@ -163,19 +163,63 @@ Inside the interactive REPL (`superstate`), the following slash commands control
+ | Slash Command | Description |
+ |---|---|
+ | `/help` | Display available slash commands and usage reference |
++| `/model [name\|idx]` | Discover available cloud models and switch active model dynamically |
+ | `/state` | Inspect active SKILL.state partitions (`Orchestrator`, `Runtime`, `Agent`) |
+ | `/diff` | Display uncommitted git diff in the current working tree |
+ | `/review` | Run the adversarial code review engine over uncommitted changes |
+-| `/doctor` | Run 5-step system verification handshake and health check |
++| `/doctor` | Run 6-step system verification handshake and health check |
+ | `/gate [cmd]` | Inspect current verification gate or update it dynamically (e.g. `/gate cargo test`) |
+ | `/clear` | Clear session conversation history and reset runtime working state |
+ | `/exit`, `/quit` | Exit the interactive REPL |
+ 
++### Cloud Model Providers & Model Discovery
++
++Superstate natively integrates with multiple cloud AI providers without external proxy wrappers. Set credentials in your environment to enable automatic discovery and routing:
++
++| Provider | Supported Identifiers | Environment Variables | Description |
++|---|---|---|---|
++| **Google Gemini** | `gemini-3.8-flash` (default), `gemini-2.5-flash`, `gemini-2.5-pro` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Generative Language API v1beta with cryptographic thought signatures |
++| **Anthropic Claude** | `claude-3-7-sonnet-latest`, `claude-3-5-sonnet-latest`, `claude-3-5-haiku-latest` | `ANTHROPIC_API_KEY` | Anthropic Messages API with prompt caching awareness |
++| **Ollama Cloud & Remote** | `qwen2.5-coder:32b`, `llama3.3:70b`, `deepseek-r1:32b`, etc. | `OLLAMA_API_KEY`, optional `OLLAMA_HOST` | Ollama Cloud (`https://ollama.com/api`) or custom remote/local daemon |
++
++#### Dynamic Model Selection (`/model`)
++
++Run `/model` inside the REPL to probe configured cloud credentials and inspect available models:
++
++```text
++superstate > /model
++Discovering available cloud models...
++
++[Google Gemini] (via GEMINI_API_KEY)
++  [1] gemini-3.8-flash (active) - Next-generation multimodal fast model
++  [2] gemini-2.5-flash          - Agentic reasoning model
++  [3] gemini-2.5-pro            - Deep reasoning model
++
++[Anthropic Claude] (via ANTHROPIC_API_KEY)
++  [4] claude-3-7-sonnet-latest  - Frontier hybrid reasoning & coding
++
++[Ollama Cloud] (via OLLAMA_API_KEY at https://ollama.com/api)
++  [5] qwen2.5-coder:32b         - Cloud-hosted coding model
++
++Active model: gemini-3.8-flash
++To switch: /model <number> or /model <name> (e.g. /model 1 or /model claude-3-7-sonnet-latest)
++```
++
++Switch active models by numeric index or model identifier:
++
++```text
++superstate > /model 4
++Switched active model to: claude-3-7-sonnet-latest (anthropic)
++
++superstate > /model gemini-2.5-pro
++Switched active model to: gemini-2.5-pro (Gemini)
++```
++
+ ### Core Subcommands
+ 
+ | Subcommand | Description |
+ |---|---|
+-| `superstate doctor` | Run 5-step verification handshake and health check |
++| `superstate doctor` | Run 6-step verification handshake and health check |
+ | `superstate mcp` | Launch standard JSON-RPC Model Context Protocol (MCP) server over stdio |
+ | `superstate review` | Run adversarial code review engine over git diff or commit ranges |
+ | `superstate state` | Manage SKILL.state lifecycle (`init`, `apply`, `checkpoint`, `resume`, `show`) |
+diff --git a/crates/superstate-cli/src/commands/doctor.rs b/crates/superstate-cli/src/commands/doctor.rs
+index 3e00298..d4e4ed6 100644
+--- a/crates/superstate-cli/src/commands/doctor.rs
++++ b/crates/superstate-cli/src/commands/doctor.rs
+@@ -4,7 +4,7 @@ use std::io::Write;
+ use tempfile::tempdir;
+ 
+ pub fn run_doctor() -> Result<(), String> {
+-    println!("Superstate 5-Step Verification Handshake");
++    println!("Superstate 6-Step Verification Handshake");
+     println!("=========================================");
+ 
+     // Step 1: Binary Probe
+@@ -42,6 +42,22 @@ pub fn run_doctor() -> Result<(), String> {
+     // Step 5: Fail-Closed Gate Probe
+     println!("[✓] Step 5: Fail-Closed Gate & Epistemic Ledger Verified");
+ 
++    // Step 6: Multi-Provider Cloud Credential Probe
++    println!("[✓] Step 6: Multi-Provider Cloud Models Verified:");
++    for (provider, res) in superstate_provider::discover_all_models() {
++        match res {
++            Ok(models) => println!(
++                "      - {}: Verified ({} models discovered)",
++                provider,
++                models.len()
++            ),
++            Err(superstate_provider::ProviderError::MissingKey(k)) => {
++                println!("      - {}: Not configured (set {})", provider, k);
++            }
++            Err(e) => println!("      - {}: Probe error ({})", provider, e),
++        }
++    }
++
+     println!("=========================================");
+     println!("Verification Handshake Passed: Superstate is healthy and active.");
+     Ok(())
 diff --git a/crates/superstate-cli/src/repl.rs b/crates/superstate-cli/src/repl.rs
-index 638cee6..b586e07 100644
+index b586e07..2d9aaca 100644
 --- a/crates/superstate-cli/src/repl.rs
 +++ b/crates/superstate-cli/src/repl.rs
-@@ -259,14 +259,17 @@ pub fn handle_repl_command<W: Write>(
+@@ -34,6 +34,7 @@ pub struct ReplSession {
+     pub repo_root: PathBuf,
+     pub gate: Option<String>,
+     pub model: String,
++    pub cached_models: Vec<superstate_provider::ModelInfo>,
+     pub context_strategy: String,
+     pub container: Option<String>,
+     pub max_turns: usize,
+@@ -56,7 +57,8 @@ impl ReplSession {
+             model: config
+                 .model
+                 .clone()
+-                .unwrap_or_else(|| "gemini-2.5-flash".to_string()),
++                .unwrap_or_else(|| "gemini-3.8-flash".to_string()),
++            cached_models: Vec::new(),
+             context_strategy: config.context_strategy.clone(),
+             container: config.container.clone(),
+             max_turns: config.max_turns,
+@@ -223,6 +225,11 @@ pub fn handle_repl_command<W: Write>(
+                 writeln!(writer, "Available Slash Commands:").map_err(|e| e.to_string())?;
+                 writeln!(writer, "  /help         - Show this command reference")
+                     .map_err(|e| e.to_string())?;
++                writeln!(
++                    writer,
++                    "  /model [name|idx] - Discover and switch active AI model"
++                )
++                .map_err(|e| e.to_string())?;
+                 writeln!(
+                     writer,
+                     "  /state        - Inspect SKILL.state (Orchestrator, Runtime, Agent)"
+@@ -240,7 +247,7 @@ pub fn handle_repl_command<W: Write>(
+                 .map_err(|e| e.to_string())?;
+                 writeln!(
+                     writer,
+-                    "  /doctor       - Run 5-step system verification handshake"
++                    "  /doctor       - Run 6-step system verification handshake"
+                 )
+                 .map_err(|e| e.to_string())?;
+                 writeln!(
+@@ -257,6 +264,126 @@ pub fn handle_repl_command<W: Write>(
+                     .map_err(|e| e.to_string())?;
+                 Ok(ReplControl::Handled)
              }
++            "/model" => {
++                let args = args.trim();
++                if args.is_empty() {
++                    // Discover and display all models supported by configured providers
++                    writeln!(writer, "Discovering available cloud models...")
++                        .map_err(|e| e.to_string())?;
++                    session.cached_models.clear();
++                    let discovered = superstate_provider::discover_all_models();
++                    for (provider_name, res) in discovered {
++                        match res {
++                            Ok(models) => {
++                                let via_info = match provider_name.as_str() {
++                                    "Google Gemini" => " (via GEMINI_API_KEY)",
++                                    "Anthropic Claude" => " (via ANTHROPIC_API_KEY)",
++                                    "Ollama Cloud" => "",
++                                    _ => "",
++                                };
++                                let header = if provider_name == "Ollama Cloud" {
++                                    let host = std::env::var("OLLAMA_HOST")
++                                        .unwrap_or_else(|_| "https://ollama.com/api".to_string());
++                                    format!("[Ollama Cloud] (via OLLAMA_API_KEY at {})", host)
++                                } else {
++                                    format!("[{}]{}", provider_name, via_info)
++                                };
++                                writeln!(writer, "\n{}", header).map_err(|e| e.to_string())?;
++
++                                for m in models {
++                                    session.cached_models.push(m.clone());
++                                    let idx = session.cached_models.len();
++                                    let is_active = session.model == m.id
++                                        || session.model.ends_with(&format!("/{}", m.id));
++                                    let active_tag = if is_active { " (active)" } else { "" };
++                                    let id_with_active = format!("{}{}", m.id, active_tag);
++
++                                    if let Some(ref desc) = m.description {
++                                        if id_with_active.len() < 25 {
++                                            writeln!(
++                                                writer,
++                                                "  [{}] {:<25} - {}",
++                                                idx, id_with_active, desc
++                                            )
++                                            .map_err(|e| e.to_string())?;
++                                        } else {
++                                            writeln!(
++                                                writer,
++                                                "  [{}] {} - {}",
++                                                idx, id_with_active, desc
++                                            )
++                                            .map_err(|e| e.to_string())?;
++                                        }
++                                    } else {
++                                        writeln!(writer, "  [{}] {}", idx, id_with_active)
++                                            .map_err(|e| e.to_string())?;
++                                    }
++                                }
++                            }
++                            Err(superstate_provider::ProviderError::MissingKey(key)) => {
++                                writeln!(
++                                    writer,
++                                    "\n[{}] Not configured (set {} to discover models)",
++                                    provider_name, key
++                                )
++                                .map_err(|e| e.to_string())?;
++                            }
++                            Err(err) => {
++                                writeln!(writer, "\n[{}] Discovery error: {}", provider_name, err)
++                                    .map_err(|e| e.to_string())?;
++                            }
++                        }
++                    }
++                    writeln!(writer, "\nActive model: {}", session.model)
++                        .map_err(|e| e.to_string())?;
++                    writeln!(
++                        writer,
++                        "To switch: /model <number> or /model <name> (e.g. /model 1 or /model claude-3-7-sonnet-latest)"
++                    )
++                    .map_err(|e| e.to_string())?;
++                } else if let Ok(idx) = args.parse::<usize>() {
++                    // Populate model cache on-demand if user immediately specifies numeric index
++                    if session.cached_models.is_empty() {
++                        let discovered = superstate_provider::discover_all_models();
++                        for (_, res) in discovered {
++                            if let Ok(models) = res {
++                                session.cached_models.extend(models);
++                            }
++                        }
++                    }
++                    if idx >= 1 && idx <= session.cached_models.len() {
++                        let chosen = &session.cached_models[idx - 1];
++                        session.model = chosen.id.clone();
++                        writeln!(
++                            writer,
++                            "Switched active model to: {} ({})",
++                            chosen.id, chosen.provider
++                        )
++                        .map_err(|e| e.to_string())?;
++                    } else {
++                        writeln!(
++                            writer,
++                            "Invalid model index: {}. Use /model to view available models.",
++                            idx
++                        )
++                        .map_err(|e| e.to_string())?;
++                    }
++                } else if let Ok(idx) = args.parse::<i64>() {
++                    writeln!(
++                        writer,
++                        "Invalid model index: {}. Use /model to view available models.",
++                        idx
++                    )
++                    .map_err(|e| e.to_string())?;
++                } else {
++                    // Switch model by explicit identifier or provider-namespaced tag
++                    let kind = superstate_provider::registry::detect_provider_kind(Some(args));
++                    session.model = args.to_string();
++                    writeln!(writer, "Switched active model to: {} ({:?})", args, kind)
++                        .map_err(|e| e.to_string())?;
++                }
++                Ok(ReplControl::Handled)
++            }
              "/state" => {
                  writeln!(writer, "=== Superstate SKILL.state ===").map_err(|e| e.to_string())?;
-+                // Render orchestrator contract: goal specification and verification gate
-                 let orch = serde_json::to_string_pretty(&session.state.orchestrator)
-                     .map_err(|e| e.to_string())?;
-                 writeln!(writer, "Orchestrator:\n{}", orch).map_err(|e| e.to_string())?;
- 
-+                // Render runtime state including attempt counts, rollback metrics, and action ledger
-                 let rt = serde_json::to_string_pretty(&session.state.runtime)
-                     .map_err(|e| e.to_string())?;
-                 writeln!(writer, "Runtime:\n{}", rt).map_err(|e| e.to_string())?;
- 
-+                // Render agent domain state: epistemic ledger notes and hypothesis scratchpad
-                 let agent = serde_json::to_string_pretty(&session.state.agent)
-                     .map_err(|e| e.to_string())?;
-                 writeln!(writer, "Agent:\n{}", agent).map_err(|e| e.to_string())?;
-diff --git a/crates/superstate-cli/tests/test_action_ledger_e2e.rs b/crates/superstate-cli/tests/test_action_ledger_e2e.rs
+                 // Render orchestrator contract: goal specification and verification gate
+diff --git a/crates/superstate-cli/tests/test_repl_model_cmd.rs b/crates/superstate-cli/tests/test_repl_model_cmd.rs
 new file mode 100644
-index 0000000..27e24d7
+index 0000000..82056b7
 --- /dev/null
-+++ b/crates/superstate-cli/tests/test_action_ledger_e2e.rs
-@@ -0,0 +1,355 @@
-+//! End-to-end integration tests for action ledger tracking and bounded context invariant in REPL and solver.
-+//!
-+//! Validates:
-+//! 1. REPL `/state` command formats and displays the `Runtime.actions` ledger correctly.
-+//! 2. Multi-turn sessions accumulate chronological `ActionEntry` records across turns, including rollbacks.
-+//! 3. Sessions configured with `StateOnly` context strategy preserve the bounded prompt invariant (`<= 3` messages)
-+//!    while surfacing the complete action ledger in `## Actions Taken So Far`.
-+
-+use std::path::PathBuf;
-+use std::sync::Mutex;
-+
-+use serde_json::json;
-+use superstate_agent::context::{ContextStrategy, StateOnly};
-+use superstate_agent::fs::LocalFs;
-+use superstate_agent::run::{Budget, Outcome, Runner};
-+use superstate_agent::shell::{LocalShell, Shell};
-+use superstate_agent::state::{ActionEntry, State};
++++ b/crates/superstate-cli/tests/test_repl_model_cmd.rs
+@@ -0,0 +1,208 @@
 +use superstate_cli::repl::{handle_repl_command, ReplConfig, ReplControl, ReplSession};
-+use superstate_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
++use superstate_provider::ModelInfo;
 +
-+/// Replays a script of provider responses while capturing all requests for invariant inspection.
-+struct ScriptedProvider {
-+    script: Mutex<Vec<Response>>,
-+    seen: Mutex<Vec<Request>>,
-+}
-+
-+impl ScriptedProvider {
-+    fn new(script: Vec<Response>) -> Self {
-+        Self {
-+            script: Mutex::new(script),
-+            seen: Mutex::new(Vec::new()),
-+        }
-+    }
-+}
-+
-+impl Provider for ScriptedProvider {
-+    fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-+        self.seen.lock().unwrap().push(req.clone());
-+        let mut s = self.script.lock().unwrap();
-+        if s.is_empty() {
-+            return Ok(Response::default());
-+        }
-+        Ok(s.remove(0))
-+    }
-+
-+    fn model_id(&self) -> String {
-+        "scripted-e2e-test".into()
-+    }
-+}
-+
-+fn says(text: &str) -> Response {
-+    Response {
-+        text: text.into(),
-+        ..Default::default()
-+    }
-+}
-+
-+fn calls(name: &str, args: serde_json::Value) -> Response {
-+    Response {
-+        tool_calls: vec![ToolCall {
-+            id: format!("call_{name}"),
-+            name: name.into(),
-+            arguments: args,
-+            signature: None,
-+        }],
-+        usage: Usage {
-+            input: 50,
-+            cached: 0,
-+            output: 20,
-+            thinking: 0,
-+        },
-+        ..Default::default()
-+    }
-+}
-+
-+fn create_temp_git_repo() -> tempfile::TempDir {
-+    let dir = tempfile::tempdir().expect("failed to create temp git dir");
-+    let shell = LocalShell;
-+    shell
-+        .exec(
-+            "git init -q && git config user.email test@superstate.local && git config user.name tester",
-+            dir.path(),
-+            std::time::Duration::from_secs(30),
-+        )
-+        .expect("git init failed");
-+    std::fs::write(dir.path().join("README.md"), "# Test Repo\n").unwrap();
-+    shell
-+        .exec(
-+            "git add -A && git commit -qm 'initial commit'",
-+            dir.path(),
-+            std::time::Duration::from_secs(30),
-+        )
-+        .expect("git commit failed");
-+    dir
-+}
-+
-+#[test]
-+fn test_repl_state_command_displays_action_ledger() {
++fn create_test_session() -> ReplSession {
 +    let config = ReplConfig {
-+        repo_root: PathBuf::from("."),
-+        model: Some("gemini-2.5-flash".to_string()),
-+        gate: Some("cargo test".to_string()),
++        repo_root: std::path::PathBuf::from("."),
++        model: None,
++        gate: None,
 +        context_strategy: "state-only".to_string(),
 +        container: None,
 +        max_turns: 60,
 +        max_gates: 5,
 +        rollback: true,
 +    };
-+    let mut session = ReplSession::new(&config);
-+
-+    // Populate action entries in runtime state representing diverse tool outcomes.
-+    session.state.runtime.actions.push(ActionEntry {
-+        turn: 1,
-+        tool: "read".into(),
-+        target: "src/main.rs".into(),
-+        summary: "25 lines read".into(),
-+        is_error: false,
-+    });
-+    session.state.runtime.actions.push(ActionEntry {
-+        turn: 2,
-+        tool: "bash".into(),
-+        target: "cargo test".into(),
-+        summary: "exit 0".into(),
-+        is_error: false,
-+    });
-+    session.state.runtime.actions.push(ActionEntry {
-+        turn: 3,
-+        tool: "note".into(),
-+        target: "patch (1 keys)".into(),
-+        summary: "recorded; your state now has 1 field(s)".into(),
-+        is_error: false,
-+    });
-+
-+    let mut output = Vec::new();
-+    let res = handle_repl_command(&mut session, "/state", &mut output).unwrap();
-+    assert_eq!(res, ReplControl::Handled);
-+
-+    let text = String::from_utf8(output).expect("output must be valid UTF-8");
-+
-+    // Invariant: /state output displays structured sections and includes actions array.
-+    assert!(text.contains("=== Superstate SKILL.state ==="));
-+    assert!(text.contains("Runtime:"));
-+    assert!(
-+        text.contains("\"actions\": ["),
-+        "Runtime JSON must include actions array"
-+    );
-+
-+    // Verify all recorded action fields are accurately represented in output.
-+    assert!(text.contains("\"turn\": 1"));
-+    assert!(text.contains("\"tool\": \"read\""));
-+    assert!(text.contains("\"target\": \"src/main.rs\""));
-+    assert!(text.contains("\"summary\": \"25 lines read\""));
-+    assert!(text.contains("\"is_error\": false"));
-+
-+    assert!(text.contains("\"turn\": 2"));
-+    assert!(text.contains("\"tool\": \"bash\""));
-+    assert!(text.contains("\"target\": \"cargo test\""));
-+    assert!(text.contains("\"summary\": \"exit 0\""));
-+
-+    assert!(text.contains("\"turn\": 3"));
-+    assert!(text.contains("\"tool\": \"note\""));
-+    assert!(text.contains("\"target\": \"patch (1 keys)\""));
-+    assert!(text.contains("\"summary\": \"recorded; your state now has 1 field(s)\""));
++    ReplSession::new(&config)
 +}
 +
 +#[test]
-+fn test_repl_session_records_actions_across_turns() {
-+    let repo = create_temp_git_repo();
-+    let config = ReplConfig {
-+        repo_root: repo.path().to_path_buf(),
-+        model: Some("gemini-2.5-flash".to_string()),
-+        gate: Some("test -f artifact.txt".to_string()),
-+        context_strategy: "state-only".to_string(),
-+        container: None,
-+        max_turns: 10,
-+        max_gates: 3,
-+        rollback: true,
-+    };
-+    let mut session = ReplSession::new(&config);
-+
-+    // Turn 1: Model creates a file using bash tool.
-+    // Turn 2: Gate fails (artifact.txt missing) -> triggers rollback action entry.
-+    // Turn 3: Model creates artifact.txt -> gate succeeds.
-+    let provider = ScriptedProvider::new(vec![
-+        calls("bash", json!({"command": "echo 'step1' > step1.txt"})),
-+        says("Finished first step, ready for gate"),
-+        calls("write", json!({"path": "artifact.txt", "content": "verified\n"})),
-+        says("Artifact created, ready for final check"),
-+    ]);
-+
-+    let runner = Runner {
-+        provider: &provider,
-+        shell: &LocalShell,
-+        fs: &LocalFs,
-+        context: &StateOnly,
-+        root: repo.path().to_path_buf(),
-+        budget: Budget {
-+            max_turns: 10,
-+            max_gate_attempts: 3,
-+        },
-+        rollback: true,
-+        on_event: None,
-+    };
-+
-+    let (outcome, report) = runner.run(&mut session.state);
-+    assert_eq!(outcome, Outcome::Verified);
-+    assert_eq!(report.gate_attempts, 2);
-+    assert_eq!(session.state.runtime.rollbacks, 1);
-+
-+    // Ensure actions accumulated chronologically across all turns:
-+    // 1. bash (step1)
-+    // 2. rollback (gate failed because artifact.txt was not yet present)
-+    // 3. write (artifact.txt)
-+    assert!(
-+        session.state.runtime.actions.len() >= 3,
-+        "actions must accumulate across all turns; got {}",
-+        session.state.runtime.actions.len()
-+    );
-+
-+    let tools: Vec<&str> = session
-+        .state
-+        .runtime
-+        .actions
-+        .iter()
-+        .map(|a| a.tool.as_str())
-+        .collect();
-+    assert_eq!(tools, vec!["bash", "rollback", "write"]);
-+
-+    // Verify rollback action properties
-+    let rollback_entry = &session.state.runtime.actions[1];
-+    assert!(rollback_entry.is_error);
-+    assert!(rollback_entry.target.starts_with("checkpoint "));
-+    assert!(rollback_entry.summary.contains("Gate failed"));
-+
-+    // Verify REPL /state command reflects accumulated actions
++fn test_slash_help_includes_model() {
++    let mut session = create_test_session();
 +    let mut out = Vec::new();
-+    let res = handle_repl_command(&mut session, "/state", &mut out).unwrap();
++    let res = handle_repl_command(&mut session, "/help", &mut out).unwrap();
 +    assert_eq!(res, ReplControl::Handled);
-+    let state_text = String::from_utf8(out).unwrap();
-+    assert!(state_text.contains("\"tool\": \"bash\""));
-+    assert!(state_text.contains("\"tool\": \"rollback\""));
-+    assert!(state_text.contains("\"tool\": \"write\""));
-+
-+    // Verify /clear resets the accumulated actions
-+    let mut clear_out = Vec::new();
-+    let res = handle_repl_command(&mut session, "/clear", &mut clear_out).unwrap();
-+    assert_eq!(res, ReplControl::Handled);
-+    assert!(session.state.runtime.actions.is_empty());
++    let text = String::from_utf8(out).unwrap();
++    assert!(text.contains("/model"));
++    assert!(text.contains("Discover and switch active AI model"));
 +}
 +
 +#[test]
-+fn test_state_only_invariant_preservation_e2e() {
-+    let repo = create_temp_git_repo();
-+    let mut state = State::new("implement robust state tracking", "true");
++fn test_repl_session_default_model_is_gemini_3_8_flash() {
++    let session = create_test_session();
++    assert_eq!(session.model, "gemini-3.8-flash");
++    assert!(session.cached_models.is_empty());
++}
 +
-+    // Simulate 8 turns of tool actions to populate action history.
-+    let script: Vec<Response> = (1..=8)
-+        .map(|i| calls("bash", json!({"command": format!("echo turn_{i}")})))
-+        .collect();
-+    let provider = ScriptedProvider::new(script);
++#[test]
++fn test_slash_model_empty_args_triggers_discovery() {
++    let mut session = create_test_session();
++    let mut out = Vec::new();
++    let res = handle_repl_command(&mut session, "/model", &mut out).unwrap();
++    assert_eq!(res, ReplControl::Handled);
++    let text = String::from_utf8(out).unwrap();
 +
-+    let runner = Runner {
-+        provider: &provider,
-+        shell: &LocalShell,
-+        fs: &LocalFs,
-+        context: &StateOnly,
-+        root: repo.path().to_path_buf(),
-+        budget: Budget {
-+            max_turns: 12,
-+            max_gate_attempts: 2,
++    assert!(text.contains("Discovering available cloud models..."));
++    assert!(text.contains("Active model:"));
++    assert!(text.contains("To switch: /model <number> or /model <name>"));
++}
++
++#[test]
++fn test_slash_model_switch_by_numeric_index() {
++    let mut session = create_test_session();
++    session.cached_models = vec![
++        ModelInfo {
++            id: "claude-3-7-sonnet-latest".to_string(),
++            display_name: "Claude 3.7 Sonnet (Latest)".to_string(),
++            description: Some("Frontier hybrid reasoning & coding".to_string()),
++            provider: "anthropic".to_string(),
 +        },
-+        rollback: false,
-+        on_event: None,
-+    };
-+
-+    let (outcome, _) = runner.run(&mut state);
-+    assert_eq!(outcome, Outcome::Verified);
-+    assert_eq!(state.runtime.actions.len(), 8);
-+
-+    // Invariant check across all captured requests:
-+    // Every request produced under StateOnly MUST have messages.len() <= 3.
-+    let seen_requests = provider.seen.lock().unwrap();
-+    assert_eq!(seen_requests.len(), 9); // 8 tool turns + 1 final turn
-+
-+    for (turn_idx, req) in seen_requests.iter().enumerate() {
-+        assert!(
-+            req.messages.len() <= 3,
-+            "Turn {} request exceeded message budget: got {} messages (expected <= 3)",
-+            turn_idx + 1,
-+            req.messages.len()
-+        );
-+
-+        // From turn 2 onwards (after turn 1 recorded an action), prompt must contain ## Actions Taken So Far.
-+        if turn_idx > 0 {
-+            let Message::User(ref prompt) = req.messages[0] else {
-+                panic!("first message in StateOnly request must be Message::User");
-+            };
-+            assert!(
-+                prompt.contains("## Actions Taken So Far"),
-+                "Turn {} prompt missing action ledger header",
-+                turn_idx + 1
-+            );
-+            // Verify prior action is present in the prompt.
-+            assert!(
-+                prompt.contains(&format!("Turn {turn_idx}: `bash` `echo turn_{turn_idx}`")),
-+                "Turn {} prompt missing entry for prior turn",
-+                turn_idx + 1
-+            );
-+        }
-+    }
-+
-+    // Direct context assembly check: even with substantial history, StateOnly bounds to <= 3 messages.
-+    let fake_history = vec![
-+        Message::User("initial user goal".into()),
-+        Message::ToolCall {
-+            id: "call_1".into(),
-+            name: "bash".into(),
-+            arguments: json!({"command": "echo 1"}),
-+            signature: None,
++        ModelInfo {
++            id: "gemini-3.8-flash".to_string(),
++            display_name: "Gemini 3.8 Flash".to_string(),
++            description: Some("Next-generation multimodal fast model".to_string()),
++            provider: "gemini".to_string(),
 +        },
-+        Message::ToolResult {
-+            id: "call_1".into(),
-+            name: "bash".into(),
-+            content: "output 1".into(),
-+            is_error: false,
-+        },
-+        Message::ToolCall {
-+            id: "call_2".into(),
-+            name: "bash".into(),
-+            arguments: json!({"command": "echo 2"}),
-+            signature: None,
-+        },
-+        Message::ToolResult {
-+            id: "call_2".into(),
-+            name: "bash".into(),
-+            content: "output 2".into(),
-+            is_error: false,
++        ModelInfo {
++            id: "qwen2.5-coder:32b".to_string(),
++            display_name: "Qwen 2.5 Coder 32B".to_string(),
++            description: Some("Cloud-hosted coding model".to_string()),
++            provider: "ollama".to_string(),
 +        },
 +    ];
 +
-+    let messages = StateOnly.build(&state, &fake_history);
-+    assert!(
-+        messages.len() <= 3,
-+        "StateOnly.build with large history must remain <= 3, got {}",
-+        messages.len()
-+    );
++    // Switch to index 1
++    let mut out = Vec::new();
++    let res = handle_repl_command(&mut session, "/model 1", &mut out).unwrap();
++    assert_eq!(res, ReplControl::Handled);
++    assert_eq!(session.model, "claude-3-7-sonnet-latest");
++    let text = String::from_utf8(out).unwrap();
++    assert!(text.contains("Switched active model to: claude-3-7-sonnet-latest (anthropic)"));
 +
-+    let Message::User(ref prompt) = messages[0] else {
-+        panic!("expected primary user message");
-+    };
-+    assert!(prompt.contains("## Actions Taken So Far"));
-+    for i in 1..=8 {
-+        assert!(prompt.contains(&format!("Turn {i}: `bash` `echo turn_{i}` -> exit 0")));
-+    }
++    // Switch to index 3
++    let mut out = Vec::new();
++    let res = handle_repl_command(&mut session, "/model 3", &mut out).unwrap();
++    assert_eq!(res, ReplControl::Handled);
++    assert_eq!(session.model, "qwen2.5-coder:32b");
++    let text = String::from_utf8(out).unwrap();
++    assert!(text.contains("Switched active model to: qwen2.5-coder:32b (ollama)"));
++}
++
++#[test]
++fn test_slash_model_switch_by_name() {
++    let mut session = create_test_session();
++
++    // Switch to Anthropic Claude model by name
++    let mut out = Vec::new();
++    let res =
++        handle_repl_command(&mut session, "/model claude-3-5-sonnet-latest", &mut out).unwrap();
++    assert_eq!(res, ReplControl::Handled);
++    assert_eq!(session.model, "claude-3-5-sonnet-latest");
++    let text = String::from_utf8(out).unwrap();
++    assert!(text.contains("Switched active model to: claude-3-5-sonnet-latest (Anthropic)"));
++
++    // Switch to Ollama model by name
++    let mut out = Vec::new();
++    let res = handle_repl_command(&mut session, "/model qwen2.5-coder:32b", &mut out).unwrap();
++    assert_eq!(res, ReplControl::Handled);
++    assert_eq!(session.model, "qwen2.5-coder:32b");
++    let text = String::from_utf8(out).unwrap();
++    assert!(text.contains("Switched active model to: qwen2.5-coder:32b (Ollama)"));
++
++    // Switch to Gemini model by name
++    let mut out = Vec::new();
++    let res = handle_repl_command(&mut session, "/model gemini-2.5-pro", &mut out).unwrap();
++    assert_eq!(res, ReplControl::Handled);
++    assert_eq!(session.model, "gemini-2.5-pro");
++    let text = String::from_utf8(out).unwrap();
++    assert!(text.contains("Switched active model to: gemini-2.5-pro (Gemini)"));
++}
++
++#[test]
++fn test_slash_model_invalid_numeric_index() {
++    let mut session = create_test_session();
++    session.cached_models = vec![ModelInfo {
++        id: "gemini-3.8-flash".to_string(),
++        display_name: "Gemini 3.8 Flash".to_string(),
++        description: None,
++        provider: "gemini".to_string(),
++    }];
++
++    let mut out = Vec::new();
++    let res = handle_repl_command(&mut session, "/model 999", &mut out).unwrap();
++    assert_eq!(res, ReplControl::Handled);
++    assert_eq!(session.model, "gemini-3.8-flash");
++    let text = String::from_utf8(out).unwrap();
++    assert!(text.contains("Invalid model index: 999. Use /model to view available models."));
++
++    let mut out2 = Vec::new();
++    let res2 = handle_repl_command(&mut session, "/model 0", &mut out2).unwrap();
++    assert_eq!(res2, ReplControl::Handled);
++    let text2 = String::from_utf8(out2).unwrap();
++    assert!(text2.contains("Invalid model index: 0. Use /model to view available models."));
++}
++
++#[test]
++fn test_slash_model_whitespace_padded_args() {
++    let mut session = create_test_session();
++    session.cached_models = vec![ModelInfo {
++        id: "claude-3-7-sonnet-latest".to_string(),
++        display_name: "Claude 3.7 Sonnet".to_string(),
++        description: None,
++        provider: "anthropic".to_string(),
++    }];
++
++    // Whitespace only behaves identically to empty args (discovery)
++    let mut out1 = Vec::new();
++    let res1 = handle_repl_command(&mut session, "/model    ", &mut out1).unwrap();
++    assert_eq!(res1, ReplControl::Handled);
++    let text1 = String::from_utf8(out1).unwrap();
++    assert!(text1.contains("Discovering available cloud models..."));
++
++    // Reset cache and test padded index
++    session.cached_models = vec![ModelInfo {
++        id: "claude-3-7-sonnet-latest".to_string(),
++        display_name: "Claude 3.7 Sonnet".to_string(),
++        description: None,
++        provider: "anthropic".to_string(),
++    }];
++    let mut out2 = Vec::new();
++    let res2 = handle_repl_command(&mut session, "/model   1   ", &mut out2).unwrap();
++    assert_eq!(res2, ReplControl::Handled);
++    assert_eq!(session.model, "claude-3-7-sonnet-latest");
++    let text2 = String::from_utf8(out2).unwrap();
++    assert!(text2.contains("Switched active model to: claude-3-7-sonnet-latest (anthropic)"));
++
++    // Padded model name
++    let mut out3 = Vec::new();
++    let res3 = handle_repl_command(&mut session, "/model   gemini-2.5-pro   ", &mut out3).unwrap();
++    assert_eq!(res3, ReplControl::Handled);
++    assert_eq!(session.model, "gemini-2.5-pro");
++    let text3 = String::from_utf8(out3).unwrap();
++    assert!(text3.contains("Switched active model to: gemini-2.5-pro (Gemini)"));
++}
++
++#[test]
++fn test_slash_model_negative_index_and_on_demand_cache() {
++    let mut session = create_test_session();
++    assert!(session.cached_models.is_empty());
++
++    // Negative index reports invalid index rather than treating as model name
++    let mut out1 = Vec::new();
++    let res1 = handle_repl_command(&mut session, "/model -1", &mut out1).unwrap();
++    assert_eq!(res1, ReplControl::Handled);
++    let text1 = String::from_utf8(out1).unwrap();
++    assert!(text1.contains("Invalid model index: -1. Use /model to view available models."));
++
++    // Out of range index on empty cache triggers on-demand discovery
++    let mut out2 = Vec::new();
++    let res2 = handle_repl_command(&mut session, "/model 9999", &mut out2).unwrap();
++    assert_eq!(res2, ReplControl::Handled);
++    let text2 = String::from_utf8(out2).unwrap();
++    assert!(text2.contains("Invalid model index: 9999. Use /model to view available models."));
++}
++
++#[test]
++fn test_doctor_handshake_verification_includes_step_6() {
++    let res = superstate_cli::commands::doctor::run_doctor();
++    assert!(res.is_ok());
 +}

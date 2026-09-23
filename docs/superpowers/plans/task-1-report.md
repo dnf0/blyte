@@ -1,44 +1,42 @@
-# Task 1 Completion Report: Add ActionEntry and Runtime.actions
+# Task 1 Implementation Report: Provider Trait Extension & Gemini Discovery
 
 ## Summary
-Successfully implemented `ActionEntry` and the `actions` ledger in `Runtime` within `crates/superstate-agent/src/state.rs`, following strict Test-Driven Development (TDD).
+- **Status:** DONE
+- **Commit:** `e71d9f2` ("feat(provider): add ModelInfo and Gemini list_models discovery with gemini-3.8-flash default")
+- **Worktree:** `/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
 
-## Implemented Changes
+## Changes Implemented
 
-1. **`crates/superstate-agent/src/state.rs`**:
-   - Defined `ActionEntry`:
-     ```rust
-     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-     pub struct ActionEntry {
-         pub turn: u32,
-         pub tool: String,
-         pub target: String,
-         pub summary: String,
-         pub is_error: bool,
-     }
-     ```
-   - Added `actions: Vec<ActionEntry>` with `#[serde(default)]` to `Runtime`.
-   - Verified that `Runtime.actions` is in the `Runtime` region and immutable to agent patches via `apply_agent_patch`.
+1. **`crates/superstate-provider/src/lib.rs`**:
+   - Added `ModelInfo` struct with `id`, `display_name`, `description`, and `provider` fields, deriving `Debug`, `Clone`, `Serialize`, `Deserialize`, `PartialEq`, `Eq`.
+   - Extended `pub trait Provider` with default method `fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>` returning `Ok(Vec::new())`.
+   - Updated doc comments to reference `gemini/gemini-3.8-flash`.
 
-2. **`crates/superstate-agent/tests/test_state.rs`**:
-   - `test_action_entry_serialization`: Tests JSON round-trip serialization and deserialization for `ActionEntry`.
-   - `test_runtime_actions_default_backward_compatibility`: Validates that legacy JSON omitting `"actions"` deserializes with an empty actions vector.
-   - `test_agent_patch_cannot_mutate_runtime_actions`: Asserts that an agent patch naming `"actions"` cannot mutate `state.runtime.actions` (authority isolation).
+2. **`crates/superstate-provider/src/gemini.rs`**:
+   - Updated `DEFAULT_MODEL` constant from `"gemini-2.5-flash"` to `"gemini-3.8-flash"`.
+   - Implemented `Gemini::parse_models_list(&Value) -> Result<Vec<ModelInfo>, ProviderError>`:
+     - Iterates over models array at `v["models"]`.
+     - Filters for models having `"generateContent"` in `supportedGenerationMethods`.
+     - Strips `"models/"` prefix from `name` to produce the canonical model `id`.
+     - Extracts `displayName` (fallback to `id`) and `description`.
+     - Sets provider to `"gemini"`.
+   - Implemented `Provider::list_models` for `Gemini`:
+     - Queries `API_ROOT` (`https://generativelanguage.googleapis.com/v1beta/models`) with connection and read timeouts.
+     - Sets `x-goog-api-key` header with the configured API key.
+     - Parses the JSON response and delegates to `parse_models_list`.
 
-## TDD Verification
+3. **`crates/superstate-provider/tests/test_gemini_models.rs`**:
+   - Followed strict TDD (RED phase first, observed compilation failure for missing types/methods).
+   - Added 5 unit tests:
+     - `parse_models_list_filters_generate_content_and_strips_prefix`
+     - `parse_models_list_handles_missing_display_name_or_description`
+     - `parse_models_list_handles_empty_or_missing_models`
+     - `default_model_is_gemini_3_8_flash`
+     - `default_provider_trait_list_models_returns_empty_vec`
 
-1. **RED Phase**:
-   - Executed `cargo test -p superstate-agent --test test_state`.
-   - Observed expected compiler errors: unresolved import `ActionEntry` and missing field `actions` on `Runtime`.
-2. **GREEN Phase**:
-   - Implemented `ActionEntry` and `Runtime.actions`.
-   - Executed `cargo test -p superstate-agent --test test_state`: 3 passed, 0 failed.
-   - Executed full crate test suite `cargo test -p superstate-agent`: 54 passed across all test binaries.
-   - Executed `cargo check -p superstate-agent` and `cargo clippy -p superstate-agent`: cleanly passed with 0 errors/warnings.
-
-## Commit
-- Commit: `53a58e0b08b5fe67b0eb4a4342a0f94a847a08e6`
-- Message: `feat(agent): add ActionEntry and actions ledger to Runtime state`
-
-## Status
-DONE
+## Verification Evidence
+- `cargo test -p superstate-provider --test test_gemini_models`: 5 passed, 0 failed.
+- `cargo clippy -p superstate-provider --all-targets -- -D warnings`: Clean, 0 warnings.
+- `cargo check --workspace --all-targets`: Clean, 0 errors.
+- `cargo test --workspace`: All tests passed across all crates.
+- `roborev status; roborev show HEAD`: Executed.
