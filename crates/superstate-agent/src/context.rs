@@ -58,6 +58,63 @@ impl ContextStrategy for StateOnly {
             serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
         );
 
+        // External working memory: active file snippets inspected or edited by the worker.
+        // Injects distilled snippets so the agent has continuous visibility across turns without
+        // re-reading unchanged files or bloating conversation history.
+        if !state.runtime.working_set.files.is_empty() {
+            user_prompt.push_str("\n## Active Working Set\n");
+            for file in &state.runtime.working_set.files {
+                // Format line range indicator when partial file slice is cached
+                let lines_info = match (file.start_line, file.end_line) {
+                    (Some(s), Some(e)) => format!(" (lines {s}-{e})"),
+                    _ => String::new(),
+                };
+                user_prompt.push_str(&format!(
+                    "### `{}`{}\n```\n{}\n```\n",
+                    file.path,
+                    lines_info,
+                    file.content.trim_end()
+                ));
+            }
+        }
+
+        // Grounding telemetry: distilled output from the most recent failed test or command.
+        // Provides the failure trace directly in context so the worker does not have to re-run
+        // tests just to recall error lines.
+        if let Some(failure) = &state.runtime.working_set.last_failure {
+            user_prompt.push_str(&format!(
+                "\n## Last Test Failure\n```text\n{}\n```\n",
+                failure.trim_end()
+            ));
+        } else {
+            // When tests have run and are currently passing following code edits, inform the worker
+            // that its tests are passing so it stops calling tools instead of spinning on inspections.
+            let has_edit = state
+                .runtime
+                .actions
+                .iter()
+                .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
+            let tests_passing = has_edit
+                && state
+                    .runtime
+                    .actions
+                    .iter()
+                    .rev()
+                    .take_while(|a| a.tool != "edit" && a.tool != "write")
+                    .any(|a| {
+                        a.tool == "bash"
+                            && !a.is_error
+                            && !a.summary.starts_with("intercepted")
+                            && crate::run::is_test_command(
+                                &a.target,
+                                &state.orchestrator.verification_cmd,
+                            )
+                    });
+            if tests_passing {
+                user_prompt.push_str("\n## Verification Status\nUnit tests are passing. If your changes are complete, stop calling tools now to submit your work for verification.\n");
+            }
+        }
+
         // When actions have been recorded, format the chronological action ledger.
         // Provides episodic memory of tool outcomes without growing conversation history.
         if !state.runtime.actions.is_empty() {
