@@ -1,105 +1,87 @@
-# Task 3 Brief: Ollama Cloud Provider Adapter
-
-## Objective
-Implement the `Ollama` provider adapter in `crates/superstate-provider/src/ollama.rs` supporting Ollama Cloud (`https://ollama.com/api`) and custom `$OLLAMA_HOST` endpoints with Bearer token authentication, chat completions with function calling, and model discovery via `GET /api/tags`.
+# Task 3 Brief: Context Assembly in `StateOnly::build`
 
 ## Working Directory
-`/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
+`/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set`
 
-## Detailed Instructions
-1. **Expose Module in `crates/superstate-provider/src/lib.rs`**:
-   - Add `pub mod ollama;`.
-2. **Implement `crates/superstate-provider/src/ollama.rs`**:
-   - Constants:
-     ```rust
-     const DEFAULT_MODEL: &str = "qwen2.5-coder:32b";
-     const DEFAULT_API_ROOT: &str = "https://ollama.com/api";
-     const CONNECT_TIMEOUT_SECS: u64 = 20;
-     const READ_TIMEOUT_SECS: u64 = 300;
-     ```
-   - Struct:
-     ```rust
-     pub struct Ollama {
-         api_key: Option<String>,
-         api_root: String,
-         model: String,
-     }
-     ```
-   - Constructors:
-     - `from_env() -> Result<Self, ProviderError>`:
-       Reads `OLLAMA_API_KEY` (as `Option<String>`).
-       Reads `OLLAMA_HOST`, normalizes trailing slashes. If unset, uses `DEFAULT_API_ROOT`.
-       If neither `OLLAMA_API_KEY` nor `OLLAMA_HOST` is set, return `ProviderError::MissingKey("OLLAMA_API_KEY")`.
-       Reads `SUPERSTATE_MODEL` if set, else `DEFAULT_MODEL`.
-     - `with_model(mut self, model: impl Into<String>) -> Self`.
-     - `with_api_root(mut self, api_root: impl Into<String>) -> Self`.
-     - `with_api_key(mut self, key: impl Into<String>) -> Self`.
-   - Request serialization:
-     - `pub fn body(&self, req: &Request) -> Value`:
-       - Construct `messages: Vec<Value>`:
-         - If `!req.system.trim().is_empty()`: `{"role": "system", "content": req.system}`
-         - `Message::User(t)` -> `{"role": "user", "content": t}`
-         - `Message::Assistant(t)` -> `{"role": "assistant", "content": t}`
-         - `Message::ToolCall { id, name, arguments, .. }` ->
-           `{"role": "assistant", "content": "", "tool_calls": [{"id": id, "type": "function", "function": {"name": name, "arguments": arguments}}]}`
-         - `Message::ToolResult { id, content, .. }` ->
-           `{"role": "tool", "content": content}`
-       - Top-level JSON:
-         - `"model": self.model`
-         - `"stream": false`
-         - `"messages": messages`
-         - If `!req.tools.is_empty()`:
-           `"tools"`: array of `{"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}`
-   - Response parsing:
-     - `pub fn parse(v: &Value) -> Result<Response, ProviderError>`:
-       - Checks for error in `v["error"]`.
-       - Extracts `message` object at `v["message"]`.
-       - `out.text`: string at `message["content"]`.
-       - `out.tool_calls`: parse array at `message["tool_calls"]`:
-         For each item:
-         - Extract `function["name"]`
-         - Extract `function["arguments"]`: if string, parse as JSON; if object, use directly; fallback `{}`
-         - Extract `id` (or fallback `format!("call_{i}")`)
-         - `signature: None`
-       - `out.finish_reason`: string at `v["done_reason"]`.
-       - `out.usage`:
-         - `input`: `v.get("prompt_eval_count").and_then(|x| x.as_u64()).unwrap_or(0)`
-         - `cached`: 0
-         - `output`: `v.get("eval_count").and_then(|x| x.as_u64()).unwrap_or(0)`
-         - `thinking`: 0
-   - Model listing parsing:
-     - `pub fn parse_models_list(v: &Value) -> Result<Vec<ModelInfo>, ProviderError>`:
-       - Parses `v["models"]` array.
-       - Each entry:
-         - `name`: string as `id` (e.g. `"qwen2.5-coder:32b"`)
-         - `display_name`: `name`
-         - `description`: format details if present (e.g. `details.parameter_size` and `details.quantization_level`)
-         - `provider: "ollama".to_string()`
-   - `Provider` trait implementation for `Ollama`:
-     - `complete(&self, req: &Request) -> Result<Response, ProviderError>`:
-       POST `{api_root}/chat`
-       Header `Authorization: Bearer <key>` if `self.api_key` is Some.
-       Header `content-type: application/json`.
-       Bounded connect (20s) and read (300s) timeouts.
-     - `model_id(&self) -> String`:
-       `format!("ollama/{}", self.model)`
-     - `list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>`:
-       GET `{api_root}/tags`
-       Header `Authorization: Bearer <key>` if `self.api_key` is Some.
-       Bounded timeouts.
-3. **Write Unit Tests in `crates/superstate-provider/tests/test_ollama_wire.rs`**:
-   - Test request body formatting (system prompt, user, assistant, tool_calls, tool results, tools schema).
-   - Test response body parsing (text extraction, tool_calls with function arguments, done_reason, token usage).
-   - Test model listing parsing from `/tags`.
-   - Test environment constructors with `OLLAMA_API_KEY` and `OLLAMA_HOST`.
-4. **Verification**:
-   - Run `cargo test -p superstate-provider --test test_ollama_wire`.
-   - Run `cargo check --workspace --all-targets`.
-   - Run `cargo clippy -p superstate-provider --all-targets -- -D warnings`.
-5. **Commit**:
-   - `git add crates/superstate-provider/src/lib.rs crates/superstate-provider/src/ollama.rs crates/superstate-provider/tests/test_ollama_wire.rs`
-   - `git commit --no-gpg-sign -m "feat(provider): implement Ollama Cloud provider adapter with Bearer auth and discovery"`
-6. **Roborev**:
-   - Run `roborev status; roborev show HEAD`.
-7. **Report**:
-   - Write report to `docs/superpowers/plans/task-3-report.md`.
+## Context
+Tasks 1 & 2 defined and synchronized `WorkingSet` in `Runtime` (R).
+Task 3 wires this working set into the prompt assembly in `crates/superstate-agent/src/context.rs` (`StateOnly::build`).
+This makes active file snippets and recent test failures visible to the agent across turns in `StateOnly` mode while strictly preserving Invariant II (`messages.len() <= 3`).
+
+## Global Constraints
+- Target crate: `crates/superstate-agent`
+- Rust 2021 edition, zero compiler warnings (`cargo check -p superstate-agent`, `cargo clippy -p superstate-agent --all-targets -- -D warnings`)
+- Clean execution on Unix platforms (macOS / Linux)
+- Invariant II (Strict Prompt Bounding): `messages.len() <= 3` strictly preserved under `StateOnly::build`.
+- Sections are omitted completely when empty.
+- Conventional commit message with `--no-gpg-sign`.
+
+## Files to Modify / Create
+- Modify: `crates/superstate-agent/src/context.rs`
+- Modify: `crates/superstate-agent/tests/test_run.rs`
+
+## Step-by-Step Instructions
+
+### 1. Write the failing tests first (TDD RED phase)
+In `crates/superstate-agent/tests/test_run.rs`:
+- Add `test_state_only_context_renders_working_set_and_preserves_bound`:
+  Populate `state.runtime.working_set` with a file snippet and a test failure. Call `StateOnly.build(&state, &history)`.
+  Assert:
+  - `msgs.len() <= 3`
+  - `prompt` contains `## Active Working Set`
+  - `prompt` contains `### \`lru.py\`` and the file content
+  - `prompt` contains `## Last Test Failure` and the error message
+- Add `test_state_only_context_omits_working_set_when_empty`:
+  When `state.runtime.working_set` is default/empty, assert that neither `## Active Working Set` nor `## Last Test Failure` appears in the prompt.
+- Add `test_state_only_runner_injects_working_set_into_llm_prompts`:
+  Verify full runner prompt injection using `MockProvider`.
+
+### 2. Run tests to verify they fail
+Run: `cargo test -p superstate-agent --test test_run test_state_only_context_renders_working_set`
+Observe failure.
+
+### 3. Implement minimal code (GREEN phase)
+In `crates/superstate-agent/src/context.rs` (`StateOnly::build`):
+Before `Actions Taken So Far`:
+```rust
+        // Inject Active Working Set if non-empty
+        if !state.runtime.working_set.files.is_empty() {
+            user_prompt.push_str("\n## Active Working Set\n");
+            for file in &state.runtime.working_set.files {
+                let lines_info = match (file.start_line, file.end_line) {
+                    (Some(s), Some(e)) => format!(" (lines {s}-{e})"),
+                    _ => String::new(),
+                };
+                user_prompt.push_str(&format!(
+                    "### `{}`{}\n```\n{}\n```\n",
+                    file.path,
+                    lines_info,
+                    file.content.trim_end()
+                ));
+            }
+        }
+
+        // Inject Last Test Failure if present
+        if let Some(failure) = &state.runtime.working_set.last_failure {
+            user_prompt.push_str(&format!(
+                "\n## Last Test Failure\n```text\n{}\n```\n",
+                failure.trim_end()
+            ));
+        }
+```
+
+### 4. Run tests and linter
+Run:
+- `cargo test -p superstate-agent --test test_run`
+- `cargo check -p superstate-agent --all-targets`
+- `cargo clippy -p superstate-agent --all-targets -- -D warnings`
+
+### 5. Commit
+```bash
+git add crates/superstate-agent/src/context.rs crates/superstate-agent/tests/test_run.rs
+git commit --no-gpg-sign -m "feat(agent): inject Active Working Set and Last Test Failure into StateOnly prompt"
+roborev status; roborev show HEAD
+```
+
+### 6. Write report
+Save report to `/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set/docs/superpowers/plans/task-3-report.md`.
