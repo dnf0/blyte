@@ -280,6 +280,76 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
 
+                    // Synchronize working set on read, edit, and bash tool calls.
+                    // Maintains external working memory in Runtime (Invariant I) without LLM intervention.
+                    match call.name.as_str() {
+                        "read" => {
+                            // Track active file snippet on successful read
+                            if !outcome.is_error {
+                                let path = call
+                                    .arguments
+                                    .get("path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let start = call.arguments.get("start_line").and_then(|v| {
+                                    v.as_u64()
+                                        .map(|n| n as usize)
+                                        .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
+                                });
+                                let end = call.arguments.get("end_line").and_then(|v| {
+                                    v.as_u64()
+                                        .map(|n| n as usize)
+                                        .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
+                                });
+                                state.runtime.working_set.add_or_update(
+                                    path,
+                                    &outcome.content,
+                                    start,
+                                    end,
+                                    turn,
+                                );
+                            }
+                        }
+                        "edit" => {
+                            // Apply exact replacement chunk to working set cache
+                            if !outcome.is_error {
+                                let path = call
+                                    .arguments
+                                    .get("path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let old = call
+                                    .arguments
+                                    .get("old")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let new = call
+                                    .arguments
+                                    .get("new")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                state.runtime.working_set.apply_edit(path, old, new, turn);
+                            }
+                        }
+                        "bash" => {
+                            // Track or clear test failures based on test command exit code
+                            let cmd = call
+                                .arguments
+                                .get("command")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let is_test_cmd = cmd.contains("test")
+                                || cmd.contains("pytest")
+                                || cmd.contains("unittest");
+                            if outcome.is_error && is_test_cmd {
+                                state.runtime.working_set.record_failure(&outcome.content);
+                            } else if !outcome.is_error && is_test_cmd {
+                                state.runtime.working_set.clear_failure();
+                            }
+                        }
+                        _ => {}
+                    }
+
                     history.push(Message::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),

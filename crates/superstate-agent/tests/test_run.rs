@@ -535,3 +535,89 @@ fn test_state_only_runner_injects_action_ledger_in_prompts() {
     assert!(second_prompt.contains("## Actions Taken So Far"));
     assert!(second_prompt.contains("- Turn 1: `bash` `echo step1` -> exit 0"));
 }
+
+#[test]
+fn test_working_set_synchronized_during_run() {
+    // Verifies that during a run, calling read tracks the file snippet, calling edit updates
+    // the cached content in memory, and running a passing test leaves last_failure clear.
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "marker"})),
+        calls(
+            "edit",
+            json!({"path": "marker", "old": "0", "new": "1"}),
+        ),
+        calls("bash", json!({"command": "echo 'test passed' && exit 0"})),
+        says("done"),
+    ]);
+    let mut st = State::new("sync working set", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    // Working set must contain the edited file snippet with updated content
+    assert_eq!(st.runtime.working_set.files.len(), 1);
+    assert_eq!(st.runtime.working_set.files[0].path, "marker");
+    assert!(st.runtime.working_set.files[0].content.contains("1"));
+    assert!(!st.runtime.working_set.files[0].content.contains("0"));
+    assert_eq!(st.runtime.working_set.files[0].last_accessed_turn, 2);
+    assert!(st.runtime.working_set.last_failure.is_none());
+}
+
+#[test]
+fn test_working_set_tracks_test_failure() {
+    // When a bash command executing tests fails, the harness automatically captures
+    // and distills the failure output into state.runtime.working_set.last_failure.
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls(
+            "bash",
+            json!({"command": "echo 'pytest test_suite failed: assertion error' && exit 1"}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("track failure", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    let failure = st
+        .runtime
+        .working_set
+        .last_failure
+        .as_deref()
+        .expect("last_failure should be populated");
+    assert!(failure.contains("pytest test_suite failed: assertion error"));
+    assert!(failure.contains("exit 1"));
+}
+
+#[test]
+fn test_working_set_clears_test_failure_on_pass() {
+    // A subsequent passing test execution clears the previously recorded failure
+    // from external working memory.
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls(
+            "bash",
+            json!({"command": "echo 'pytest test_suite failed: error' && exit 1"}),
+        ),
+        calls(
+            "bash",
+            json!({"command": "echo 'pytest test_suite passed: ok' && exit 0"}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("clear failure", "true");
+    st.runtime
+        .working_set
+        .record_failure("initial failure to clear");
+    assert!(st.runtime.working_set.last_failure.is_some());
+
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    assert!(
+        st.runtime.working_set.last_failure.is_none(),
+        "passing test command must clear last_failure"
+    );
+}
+
