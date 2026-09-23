@@ -1,96 +1,111 @@
-# Task 4 Brief: Universal Provider Registry & Discovery Engine
-
-## Objective
-Implement universal model routing, provider resolution, and multi-provider credential discovery in `crates/superstate-provider/src/registry.rs`, and wire `crates/superstate-cli/src/task_runner.rs` to use universal provider resolution.
+# Task 4 Brief: Loop-Breaker Interceptor (Guard Clause)
 
 ## Working Directory
-`/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
+`/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set`
 
-## Detailed Instructions
-1. **Implement `crates/superstate-provider/src/registry.rs`**:
-   - Expose `pub mod registry;` in `crates/superstate-provider/src/lib.rs`.
-   - Re-export `resolve_provider` and `discover_all_models` from `crates/superstate-provider/src/lib.rs` for convenience.
-   - Define:
-     ```rust
-     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-     pub enum ProviderKind {
-         Gemini,
-         Anthropic,
-         Ollama,
-     }
-     ```
-   - Implement `pub fn detect_provider_kind(model: Option<&str>) -> ProviderKind`:
-     - If `model` starts with `"claude"` or starts with `"anthropic/"`: `ProviderKind::Anthropic`
-     - If `model` starts with `"ollama/"` or `model == Some("ollama")` or contains `":"` (Ollama tag convention like `qwen2.5-coder:32b`, `llama3.3:70b`, `gemma4:31b`): `ProviderKind::Ollama`
-     - If `model` starts with `"gemini"` or starts with `"gemini/"`: `ProviderKind::Gemini`
-     - If `model` is `None` (or unrecognized name without prefix):
-       - If `std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok()`: `ProviderKind::Gemini`
-       - Else if `std::env::var("ANTHROPIC_API_KEY").is_ok()`: `ProviderKind::Anthropic`
-       - Else if `std::env::var("OLLAMA_API_KEY").is_ok() || std::env::var("OLLAMA_HOST").is_ok()`: `ProviderKind::Ollama`
-       - Else fallback to `ProviderKind::Gemini`
-   - Implement `pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, ProviderError>`:
-     - Strips any provider prefix (e.g. `"anthropic/claude-3-7-sonnet"` -> `"claude-3-7-sonnet"`, `"gemini/gemini-3.8-flash"` -> `"gemini-3.8-flash"`, `"ollama/qwen2.5-coder:32b"` -> `"qwen2.5-coder:32b"`).
-     - Resolves the provider:
-       - `ProviderKind::Gemini`:
-         let mut p = crate::gemini::Gemini::from_env()?;
-         if let Some(m) = clean_model { p = p.with_model(m); }
-         Ok(Box::new(p))
-       - `ProviderKind::Anthropic`:
-         let mut p = crate::anthropic::Anthropic::from_env()?;
-         if let Some(m) = clean_model { p = p.with_model(m); }
-         Ok(Box::new(p))
-       - `ProviderKind::Ollama`:
-         let mut p = crate::ollama::Ollama::from_env()?;
-         if let Some(m) = clean_model { p = p.with_model(m); }
-         Ok(Box::new(p))
-   - Implement `pub fn discover_all_models() -> Vec<(String, Result<Vec<ModelInfo>, ProviderError>)>`:
-     - Checks Gemini:
-       match crate::gemini::Gemini::from_env() {
-           Ok(p) => ("Google Gemini".to_string(), p.list_models()),
-           Err(e) => ("Google Gemini".to_string(), Err(e)),
-       }
-     - Checks Anthropic:
-       match crate::anthropic::Anthropic::from_env() {
-           Ok(p) => ("Anthropic Claude".to_string(), p.list_models()),
-           Err(e) => ("Anthropic Claude".to_string(), Err(e)),
-       }
-     - Checks Ollama Cloud:
-       match crate::ollama::Ollama::from_env() {
-           Ok(p) => ("Ollama Cloud".to_string(), p.list_models()),
-           Err(e) => ("Ollama Cloud".to_string(), Err(e)),
-       }
-2. **Update `crates/superstate-cli/src/task_runner.rs`**:
-   - In `run_task_with_state_and_writer`:
-     Replace hardcoded `Gemini::from_env()` with:
-     ```rust
-     let provider = match superstate_provider::resolve_provider(config.model.as_deref()) {
-         Ok(p) => p,
-         Err(superstate_provider::ProviderError::MissingKey(key)) => {
-             return Err(format!(
-                 "Provider error: no API key: set {key} in environment"
-             ));
-         }
-         Err(e) => return Err(format!("Provider error: {e}")),
-     };
-     ```
-   - Update `Runner` call to pass `provider: provider.as_ref()`.
-3. **Update `crates/superstate-cli/tests/test_task_runner.rs`**:
-   - Update tests where default model is asserted (e.g. `test_task_config_defaults`): change `"gemini-2.5-flash"` to `"gemini-3.8-flash"`.
-4. **Author Unit Tests in `crates/superstate-provider/tests/test_registry.rs`**:
-   - Test `detect_provider_kind`:
-     - `"claude-3-7-sonnet"`, `"anthropic/claude-3-5-haiku"` -> Anthropic
-     - `"gemini-3.8-flash"`, `"gemini/gemini-2.5-pro"` -> Gemini
-     - `"qwen2.5-coder:32b"`, `"ollama/llama3.3:70b"`, `"llama3.1:8b"` -> Ollama
-   - Test `resolve_provider` error handling when API keys are absent (returns corresponding `MissingKey`).
-5. **Verification**:
-   - Run `cargo test -p superstate-provider --test test_registry`.
-   - Run `cargo test -p superstate --test test_task_runner`.
-   - Run `cargo check --workspace --all-targets`.
-   - Run `cargo clippy --workspace --all-targets -- -D warnings`.
-6. **Commit**:
-   - `git add crates/superstate-provider/src/lib.rs crates/superstate-provider/src/registry.rs crates/superstate-provider/tests/test_registry.rs crates/superstate-cli/src/task_runner.rs crates/superstate-cli/tests/test_task_runner.rs`
-   - `git commit --no-gpg-sign -m "feat(provider): add universal provider resolver and multi-provider discovery engine"`
-7. **Roborev**:
-   - Run `roborev status; roborev show HEAD`.
-8. **Report**:
-   - Write report to `docs/superpowers/plans/task-4-report.md`.
+## Context
+In live evaluations under `--context state-only`, we observed that models can get trapped in repetitive reading loops (e.g. oscillating between reading `lru.py` and `test_lru.py` 10+ times without taking action).
+Task 4 implements a deterministic loop-breaker guard clause in `crates/superstate-agent/src/run.rs`.
+If the agent requests a redundant read for a file already resident in `state.runtime.working_set`, the harness intercepts the execution and immediately returns an advisory guidance notice reminding the agent that the file is already in its Active Working Set.
+
+## Global Constraints
+- Target crate: `crates/superstate-agent`
+- Rust 2021 edition, zero compiler warnings (`cargo check -p superstate-agent`, `cargo clippy -p superstate-agent --all-targets -- -D warnings`)
+- Clean execution on Unix platforms (macOS / Linux)
+- Invariant III: In-memory string operations, zero latency. Zero shell or filesystem execution on intercepted reads.
+- Conventional commit message with `--no-gpg-sign`.
+
+## Files to Modify / Create
+- Modify: `crates/superstate-agent/src/run.rs`
+- Modify: `crates/superstate-agent/tests/test_run.rs`
+
+## Step-by-Step Instructions
+
+### 1. Write the failing tests first (TDD RED phase)
+In `crates/superstate-agent/tests/test_run.rs`:
+- Add `test_loop_breaker_intercepts_redundant_reads`:
+  Simulate a run where the model calls `read lru.py`, and then on the very next turn calls `read lru.py` again.
+  Assert that on the second turn, the tool outcome contains `[Harness Working Memory Guard]: \`lru.py\` is already loaded in your Active Working Set above`.
+  Assert that the action ledger records this guard interception.
+- Add `test_loop_breaker_allows_read_after_edit`:
+  Simulate a run where the model calls `read lru.py`, then `edit lru.py`, and then reads `lru.py` again. Assert that because an edit intervened, the read is not blocked.
+
+### 2. Run tests to verify they fail
+Run: `cargo test -p superstate-agent --test test_run test_loop_breaker`
+Observe failure.
+
+### 3. Implement minimal code (GREEN phase)
+In `crates/superstate-agent/src/run.rs`:
+Implement a helper function:
+```rust
+fn should_intercept_redundant_read(
+    call: &superstate_provider::ToolCall,
+    working_set: &crate::working_set::WorkingSet,
+    actions: &[ActionEntry],
+) -> Option<String> {
+    if call.name != "read" {
+        return None;
+    }
+    let raw_path = call.arguments.get("path").and_then(|v| v.as_str())?;
+    let path = normalize_path(raw_path);
+    let is_cached = working_set.files.iter().any(|f| f.path == path);
+    if !is_cached {
+        return None;
+    }
+
+    // Check if the immediately preceding tool call was also read on this path
+    let last_was_same_read = actions
+        .last()
+        .map(|a| a.tool == "read" && a.target.contains(path))
+        .unwrap_or(false);
+
+    // Or read this path 2+ times in the last 4 actions without an intervening edit
+    let recent_same_reads = actions
+        .iter()
+        .rev()
+        .take(4)
+        .take_while(|a| a.tool != "edit")
+        .filter(|a| a.tool == "read" && a.target.contains(path))
+        .count();
+
+    if last_was_same_read || recent_same_reads >= 2 {
+        Some(format!(
+            "[Harness Working Memory Guard]: `{path}` is already loaded in your Active Working Set above. \
+             You do not need to re-read it. Propose your exact edit using `edit` or update your plan in `note`."
+        ))
+    } else {
+        None
+    }
+}
+```
+
+In `Runner::run`, check `should_intercept_redundant_read` before delegating to `tools::execute`:
+```rust
+let outcome = if let Some(guard_msg) = should_intercept_redundant_read(call, &state.runtime.working_set, &state.runtime.actions) {
+    crate::tools::ToolOutcome {
+        content: guard_msg,
+        is_error: false,
+    }
+} else if call.name == "note" {
+    // note handling
+    ...
+} else {
+    tools::execute(...)
+};
+```
+
+### 4. Run tests and linter
+Run:
+- `cargo test -p superstate-agent --test test_run`
+- `cargo check -p superstate-agent --all-targets`
+- `cargo clippy -p superstate-agent --all-targets -- -D warnings`
+
+### 5. Commit
+```bash
+git add crates/superstate-agent/src/run.rs crates/superstate-agent/tests/test_run.rs
+git commit --no-gpg-sign -m "feat(agent): intercept redundant reads with harness working memory guard"
+roborev status; roborev show HEAD
+```
+
+### 6. Write report
+Save report to `/Users/danielfisher/repos/superstate/.wt/feat-harness-observed-working-set/docs/superpowers/plans/task-4-report.md`.
