@@ -1375,35 +1375,53 @@ fn test_loop_breaker_does_not_reset_on_unrelated_file_edit() {
 
 #[test]
 fn test_loop_breaker_supports_paths_with_parentheses() {
-    // Verifies that paths containing parentheses (e.g. data (copy).json) are correctly
-    // matched by target_matches_path even when write annotations (e.g. (26 bytes)) are attached.
+    // Verifies that paths containing parentheses, and specifically containing " (L"
+    // (e.g. "data (Large).json" and "test (L1).rs"), are correctly matched by target_matches_path
+    // under both write (byte-annotated) and read (line-annotated) action formats.
     let d = repo();
-    let filename = "data (copy).json";
-    std::fs::write(d.path().join(filename), "{\"a\": 1}\n").unwrap();
+    let write_file = "data (Large).json";
+    let read_file = "test (L1).rs";
+    std::fs::write(d.path().join(write_file), "{\"a\": 1}\n").unwrap();
+    std::fs::write(
+        d.path().join(read_file),
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    )
+    .unwrap();
     std::fs::write(d.path().join("other.py"), "def other(): return 2\n").unwrap();
 
     let p = ScriptedProvider::new(vec![
-        // Turn 1: Read file
-        calls("read", json!({"path": filename})),
+        // Turn 1: Read write_file
+        calls("read", json!({"path": write_file})),
         // Turn 2: Read other.py
         calls("read", json!({"path": "other.py"})),
-        // Turn 3: Read file 2nd time
-        calls("read", json!({"path": filename})),
-        // Turn 4: Write to file (target will be formatted as "data (copy).json (13 bytes)")
+        // Turn 3: Read write_file 2nd time
+        calls("read", json!({"path": write_file})),
+        // Turn 4: Write to write_file (target formatted as "data (Large).json (13 bytes)")
         calls(
             "write",
-            json!({"path": filename, "content": "{\"a\": 99}\n"}),
+            json!({"path": write_file, "content": "{\"a\": 99}\n"}),
         ),
-        // Turn 5: Read file after write (must not be intercepted!)
-        calls("read", json!({"path": filename})),
+        // Turn 5: Read write_file after write (must not be intercepted!)
+        calls("read", json!({"path": write_file})),
+        // Turn 6: Read bounded line range on read_file (target formatted as "test (L1).rs (L1-L2)")
+        calls(
+            "read",
+            json!({"path": read_file, "start_line": 1, "end_line": 2}),
+        ),
+        // Turn 7: Redundant read with exact same line range on read_file -> must be intercepted!
+        calls(
+            "read",
+            json!({"path": read_file, "start_line": 1, "end_line": 2}),
+        ),
         says("done"),
     ]);
-    let mut st = State::new("parentheses in path test", "true");
+    let mut st = State::new("parentheses and (L in path test", "true");
     let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
     assert_eq!(outcome, Outcome::Verified);
     assert_eq!(rep.gate_attempts, 1);
 
     let seen = p.seen.lock().unwrap();
+    // Turn 5 (index 10): write_file read after write must not be intercepted
     let Message::ToolResult {
         content: content5, ..
     } = &seen[5].messages[10]
@@ -1412,6 +1430,16 @@ fn test_loop_breaker_supports_paths_with_parentheses() {
     };
     assert!(!content5.contains("[Harness Working Memory Guard]"));
     assert!(content5.contains("99"));
+
+    // Turn 7 (index 14): duplicate read on read_file must be intercepted
+    let Message::ToolResult {
+        content: content7, ..
+    } = &seen[7].messages[14]
+    else {
+        panic!("expected ToolResult at index 14");
+    };
+    assert!(content7.contains("[Harness Working Memory Guard]"));
+    assert!(content7.contains("test (L1).rs"));
 }
 
 #[test]

@@ -452,14 +452,21 @@ impl<'a> Runner<'a> {
 
 /// Helper to determine if an action target matches a normalized file path.
 /// Handles raw paths, leading `./`, line range annotations like `lru.py (L1-L20)`,
-/// and byte count annotations like `lru.py (26 bytes)`, even when paths contain parentheses.
+/// and byte count annotations like `lru.py (26 bytes)`, even when paths contain parentheses or " (L".
 pub fn target_matches_path(target: &str, path: &str) -> bool {
     let mut raw = target;
-    if target.ends_with(')') {
-        if let Some(idx) = target.rfind(" (L") {
+    if target.ends_with(" bytes)") {
+        if let Some(idx) = target.rfind(" (") {
             raw = &target[..idx];
-        } else if target.ends_with(" bytes)") {
-            if let Some(idx) = target.rfind(" (") {
+        }
+    } else if target.ends_with(')') {
+        if let Some(idx) = target.rfind(" (L") {
+            let inside = &target[idx + 4..target.len() - 1];
+            if !inside.is_empty()
+                && inside
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '+' || c == 'L')
+            {
                 raw = &target[..idx];
             }
         }
