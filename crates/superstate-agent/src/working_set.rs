@@ -123,11 +123,16 @@ impl WorkingSet {
         if let Some(existing) = self.files.iter_mut().find(|f| f.path == path) {
             let replaced = if existing.content.contains(old) {
                 Some(existing.content.replacen(old, new, 1))
-            } else if old.ends_with('\n') && existing.content.ends_with(old.trim_end_matches('\n')) {
-                // If the cached snippet was from a read tool call without trailing newline,
-                // allow matching an EOF edit whose search string included a trailing newline.
-                let trimmed_old = old.trim_end_matches('\n');
-                Some(existing.content.replacen(trimmed_old, new, 1))
+            } else if let Some(trimmed_old) = old.strip_suffix('\n') {
+                if !trimmed_old.is_empty()
+                    && existing.end_line.is_none()
+                    && existing.content.ends_with(trimmed_old)
+                {
+                    let prefix = &existing.content[..existing.content.len() - trimmed_old.len()];
+                    Some(format!("{prefix}{new}"))
+                } else {
+                    None
+                }
             } else {
                 None
             };

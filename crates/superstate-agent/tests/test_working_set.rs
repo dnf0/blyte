@@ -165,4 +165,32 @@ fn test_working_set_apply_edit_edge_cases() {
     let huge_res = ws.apply_edit("edit_target.rs", "line 1\n    line 1.5\n    line 2", &huge_replacement, 3);
     assert!(huge_res);
     assert!(ws.files[0].content.contains("[..."));
+
+    // EOF fallback: targets suffix rather than earlier occurrences in full-file snippets
+    let mut ws2 = WorkingSet::default();
+    ws2.add_or_update("eof_test.rs", "let val = 42; // first\nlet val = 42", None, None, 1);
+    let eof_res = ws2.apply_edit("eof_test.rs", "let val = 42\n", "let val = 99\n", 2);
+    assert!(eof_res);
+    assert_eq!(
+        ws2.files[0].content,
+        "let val = 42; // first\nlet val = 99\n",
+        "EOF fallback must replace only the suffix, never an earlier occurrence"
+    );
+
+    // Newline-only old string must not match via EOF fallback or prepend
+    let newline_only_res = ws2.apply_edit("eof_test.rs", "\n", "prepended\n", 3);
+    assert!(
+        !newline_only_res || !ws2.files[0].content.starts_with("prepended"),
+        "Newline-only string must not prepend to content"
+    );
+
+    // Partial read slices (end_line is Some) must NOT trigger the EOF fallback
+    let mut ws3 = WorkingSet::default();
+    ws3.add_or_update("partial.rs", "line 1\nline 2", Some(1), Some(2), 1);
+    let partial_eof_res = ws3.apply_edit("partial.rs", "line 2\n", "line 2 modified\n", 2);
+    assert!(
+        !partial_eof_res,
+        "Partial read slices must not trigger full-file EOF fallback"
+    );
 }
+
