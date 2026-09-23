@@ -1,52 +1,45 @@
-# Task 5 Completion Report: End-to-End CLI Verification and Invariant Checks
+# Task 5 Implementation Report: REPL /model Selector, Multi-Provider Doctor Audit, & Documentation
 
 ## Summary
-Successfully implemented and executed comprehensive end-to-end integration tests in `crates/superstate-cli/tests/test_action_ledger_e2e.rs`, validating action ledger accumulation, REPL `/state` inspection, and bounded context preservation under the `StateOnly` context strategy. All workspace verification gates (`cargo check`, `cargo clippy`, and `cargo test`) passed cleanly, and Roborev automated review completed with no issues found.
+- **Status:** DONE
+- **Commit:** `8bcdbe4` ("feat(cli): add REPL /model discovery selector and multi-provider doctor audit")
+- **Worktree:** `/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
 
-## Implemented Changes
+## Changes Implemented
 
-1. **`crates/superstate-cli/tests/test_action_ledger_e2e.rs`**:
-   - `test_repl_state_command_displays_action_ledger`:
-     - Creates a `ReplSession` and adds `ActionEntry` records (representing `read`, `bash`, and `note` operations).
-     - Dispatches `/state` slash command to `handle_repl_command`.
-     - Asserts that the rendered output includes `"actions": [` and accurately displays turn, tool, target, summary, and error flags.
-   - `test_repl_session_records_actions_across_turns`:
-     - Sets up an isolated git repository and executes a multi-turn autonomous `Runner` task with simulated gate failure and rollback.
-     - Confirms that actions accumulate chronologically across turns (`bash`, `rollback`, `write`).
-     - Verifies that rollback records checkpoint target and error status.
-     - Confirms that `/state` displays all accumulated actions.
-     - Confirms that `/clear` resets `session.state.runtime.actions` cleanly.
-   - `test_state_only_invariant_preservation_e2e`:
-     - Executes an 8-turn sequence under `StateOnly` strategy.
-     - Enforces Invariant II across all captured requests: prompt message vector length strictly bounded (`messages.len() <= 3`).
-     - Verifies that turns subsequent to turn 1 format preceding actions into `## Actions Taken So Far` with exact tool names, targets, and exit summaries.
-     - Confirms that even when given large simulated conversation histories, `StateOnly.build` keeps prompt length bounded (`<= 3`).
+1. **`crates/superstate-cli/src/repl.rs`**:
+   - Added `pub cached_models: Vec<superstate_provider::ModelInfo>` field to `ReplSession`.
+   - Updated `ReplSession::new` to initialize `cached_models: Vec::new()` and updated fallback model default from `gemini-2.5-flash` to `gemini-3.8-flash`.
+   - Updated `/help` slash command output to include `/model [name|idx] - Discover and switch active AI model` and updated `/doctor` reference to 6-step handshake.
+   - Added interactive `/model` command handler:
+     - Empty arguments (`/model`): calls `superstate_provider::discover_all_models()`, updates `session.cached_models`, and prints formatted model listings grouped by provider with provider configuration status (`(via GEMINI_API_KEY)`, `(via ANTHROPIC_API_KEY)`, `(via OLLAMA_API_KEY at {host})`), unconfigured warnings, active model highlight, model descriptions, and switching instructions.
+     - Numeric index (`/model <number>`): on-demand discovers models if cache is empty, indexes into `session.cached_models[idx - 1]`, updates `session.model`, and confirms switch (`Switched active model to: {id} ({provider})`). Validates index bounds and reports informative error if out-of-range (`Invalid model index: {idx}. Use /model to view available models.`).
+     - Model identifier (`/model <name>`): detects provider kind using `superstate_provider::registry::detect_provider_kind`, updates `session.model`, and confirms switch (`Switched active model to: {name} ({kind:?})`).
 
-2. **`crates/superstate-cli/src/repl.rs`**:
-   - Added descriptive inline documentation detailing the role of the `/state` handler in rendering the orchestrator contract, runtime state (including attempt counts, rollback metrics, and action ledger), and agent domain state.
+2. **`crates/superstate-cli/src/commands/doctor.rs`**:
+   - Updated handshake header to `Superstate 6-Step Verification Handshake`.
+   - Added Step 6 Multi-Provider Cloud Credential Probe querying `superstate_provider::discover_all_models()` and reporting verification status, discovered model count, unconfigured API keys, or probe errors for Google Gemini, Anthropic Claude, and Ollama Cloud.
 
-## Verification & Test Results
+3. **`README.md`**:
+   - Updated default model references and CLI options from `gemini-2.5-flash` to `gemini-3.8-flash`.
+   - Updated `/doctor` descriptions in slash command table and subcommands table to 6-step verification handshake.
+   - Added `/model` slash command documentation to Interactive REPL Slash Commands table.
+   - Added dedicated "Cloud Model Providers & Model Discovery" section documenting `GEMINI_API_KEY` / `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_API_KEY` / `OLLAMA_HOST`, and dynamic `/model` switching examples.
 
-1. **Test Execution**:
-   - `cargo test -p superstate --test test_action_ledger_e2e`:
-     - `test_repl_state_command_displays_action_ledger ... ok`
-     - `test_repl_session_records_actions_across_turns ... ok`
-     - `test_state_only_invariant_preservation_e2e ... ok`
-     - 3 passed; 0 failed.
+4. **`crates/superstate-cli/tests/test_repl_model_cmd.rs`**:
+   - Authored TDD test suite covering:
+     - `test_slash_help_includes_model`
+     - `test_repl_session_default_model_is_gemini_3_8_flash`
+     - `test_slash_model_empty_args_triggers_discovery`
+     - `test_slash_model_switch_by_numeric_index`
+     - `test_slash_model_switch_by_name`
+     - `test_slash_model_invalid_numeric_index`
 
-2. **Workspace-Wide Verification**:
-   - `cargo check --workspace --all-targets`: Passed with 0 errors.
-   - `cargo clippy --workspace --all-targets -- -D warnings`: Passed with 0 warnings.
-   - `cargo test --workspace`: All unit tests, integration tests, and doc-tests passed across all crates in the workspace.
-
-## Commit
-- Commit: `4f301a5`
-- Message: `test(cli): add end-to-end verification for action ledger in REPL`
-
-## Roborev Review
-- Job: 5153
-- Target Commit: `4f301a5`
-- Verdict: Pass ("No issues found.")
-
-## Status
-DONE
+## Verification Evidence
+- `cargo test -p superstate --test test_repl_model_cmd`: 6 passed, 0 failed.
+- `cargo test -p superstate --test test_repl_commands`: 7 passed, 0 failed.
+- `cargo check --workspace --all-targets`: Clean, 0 errors.
+- `cargo clippy --workspace --all-targets -- -D warnings`: Clean, 0 warnings.
+- `cargo test --workspace`: 70+ tests passed across all crates, 0 failed.
+- `cargo fmt --all -- --check`: Clean formatting verified across workspace.
+- `roborev status; roborev show HEAD`: Reviewed.

@@ -1,63 +1,73 @@
-# Task 3 Completion Report: Wire Action Ledger Logging and Rollback Tracking into Runner::run
+# Task 3 Implementation Report: Ollama Cloud Provider Adapter
 
 ## Summary
-Successfully wired action ledger logging and rollback tracking into `Runner::run` within `crates/superstate-agent/src/run.rs`, following strict Test-Driven Development (TDD).
+- **Status:** DONE
+- **Commit:** `0219ac3` ("feat(provider): implement Ollama Cloud provider adapter with Bearer auth and discovery")
+- **Worktree:** `/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
 
-## Implemented Changes
+## Changes Implemented
 
-1. **`crates/superstate-agent/src/run.rs`**:
-   - **Tool Call Action Logging**: In `Runner::run`, inside the tool call execution loop, each executed tool call (whether a built-in tool or `"note"`) computes its canonical target via `extract_action_target` and deterministic summary via `extract_action_summary`, and appends an `ActionEntry` to `state.runtime.actions`:
-     ```rust
-     let action_target = extract_action_target(&call.name, &call.arguments);
-     let action_summary =
-         extract_action_summary(&call.name, &outcome.content, outcome.is_error);
-     state.runtime.actions.push(crate::state::ActionEntry {
-         turn,
-         tool: call.name.clone(),
-         target: action_target,
-         summary: action_summary,
-         is_error: outcome.is_error,
-     });
-     ```
-   - **Rollback Action Logging**: In `Runner::run`, when verification fails with rollback enabled, working tree reset appends a corresponding rollback `ActionEntry` to `state.runtime.actions`:
-     ```rust
-     state.runtime.actions.push(crate::state::ActionEntry {
-         turn,
-         tool: "rollback".into(),
-         target: format!("checkpoint {short_sha}"),
-         summary: "Gate failed; working tree reset to verified state".into(),
-         is_error: true,
-     });
-     ```
+1. **`crates/superstate-provider/src/lib.rs`**:
+   - Registered and exposed `pub mod ollama;`.
 
-2. **`crates/superstate-agent/tests/test_run.rs`**:
-   - `test_actions_recorded_during_run`: Verifies that tool executions (`bash`, `read`, `note`) append chronological `ActionEntry` records to `state.runtime.actions` with accurate `turn`, `tool`, `target`, `summary`, and `is_error` values.
-   - `test_rollback_appends_action_entry`: Verifies that a gate failure triggering git rollback appends an `ActionEntry` with `tool == "rollback"`, target starting with `"checkpoint "`, summary indicating gate failure and tree reset, and `is_error == true`.
+2. **`crates/superstate-provider/src/ollama.rs`**:
+   - Implemented `Ollama` adapter struct with `api_key` (`Option<String>`), `api_root` (`String`), and `model` (`String`).
+   - Defined protocol constants:
+     - `DEFAULT_MODEL`: `"qwen2.5-coder:32b"`
+     - `DEFAULT_API_ROOT`: `"https://ollama.com/api"`
+     - `CONNECT_TIMEOUT_SECS`: 20s
+     - `READ_TIMEOUT_SECS`: 300s
+   - Added constructors and builders:
+     - `from_env() -> Result<Self, ProviderError>`: Reads `OLLAMA_API_KEY` and `OLLAMA_HOST`. If neither is configured, returns `ProviderError::MissingKey("OLLAMA_API_KEY")`. Normalizes trailing slashes on custom hosts, defaulting to `DEFAULT_API_ROOT`. Reads `SUPERSTATE_MODEL` if present or defaults to `DEFAULT_MODEL` (stripping optional `ollama/` prefix).
+     - `with_model(mut self, model: impl Into<String>) -> Self`.
+     - `with_api_root(mut self, api_root: impl Into<String>) -> Self`.
+     - `with_api_key(mut self, key: impl Into<String>) -> Self`.
+     - Accessors `api_root()`, `api_key()`, and `model()`.
+   - Implemented request body serialization `pub fn body(&self, req: &Request) -> Value`:
+     - Embeds system prompt into `messages` as `{"role": "system", "content": ...}` when non-empty.
+     - Serializes `Message::User` and `Message::Assistant` into role/content messages.
+     - Serializes `Message::ToolCall` into `assistant` message with `tool_calls: [{"id": ..., "type": "function", "function": {"name": ..., "arguments": ...}}]`.
+     - Serializes `Message::ToolResult` into `tool` role message with `content`.
+     - Attaches OpenAI-compatible `tools` array with function declarations if tools are provided (omitted if empty).
+     - Configures `"stream": false` and `"model": self.model`.
+   - Implemented response parser `pub fn parse(v: &Value) -> Result<Response, ProviderError>`:
+     - Checks for `error` field in JSON response and fails fast.
+     - Extracts text from `message.content`.
+     - Parses `message.tool_calls` handling both pre-parsed JSON objects and serialized string arguments with fallback IDs (`call_{i}`).
+     - Maps `done_reason` into `finish_reason`.
+     - Normalizes usage metrics from `prompt_eval_count` and `eval_count`.
+   - Implemented model listing parser `pub fn parse_models_list(v: &Value) -> Result<Vec<ModelInfo>, ProviderError>`:
+     - Parses `models` array from `GET /tags`.
+     - Extracts model tag name as `id` and `display_name`.
+     - Formats details (e.g. `parameter_size` and `quantization_level`) into `description`.
+     - Sets `provider: "ollama"`.
+   - Implemented `Provider` trait for `Ollama`:
+     - `complete(&self, req: &Request)`: POST to `{api_root}/chat` with Bearer auth header (if `api_key` present) and bounded timeouts.
+     - `model_id(&self)`: Returns `ollama/{model}`.
+     - `list_models(&self)`: GET to `{api_root}/tags` with Bearer auth header (if `api_key` present) and bounded timeouts.
 
-## TDD Verification
+3. **`crates/superstate-provider/tests/test_ollama_wire.rs`**:
+   - Followed strict TDD (RED phase verified compilation failure before implementing adapter).
+   - Added 14 unit tests verifying offline wire behavior:
+     - `system_instruction_is_placed_in_messages_array_when_present`
+     - `empty_system_instruction_is_omitted_from_messages`
+     - `user_and_assistant_messages_wire_formatting`
+     - `tool_call_and_tool_result_wire_shape`
+     - `tools_omitted_when_empty`
+     - `parses_text_response_and_usage`
+     - `parses_tool_calls_with_object_arguments`
+     - `parses_tool_calls_with_string_arguments_and_fallback_id`
+     - `parses_error_response_fails`
+     - `parse_models_list_extracts_models_and_details`
+     - `parse_models_list_handles_empty_or_missing_models`
+     - `from_env_requires_api_key_or_host`
+     - `from_env_honors_superstate_model`
+     - `builder_methods_work`
 
-1. **RED Phase**:
-   - Authored `test_actions_recorded_during_run` and `test_rollback_appends_action_entry` in `tests/test_run.rs`.
-   - Executed `cargo test -p superstate-agent --test test_run`.
-   - Observed expected test failures:
-     - `test_actions_recorded_during_run`: assertion failed `left: 0, right: 3`.
-     - `test_rollback_appends_action_entry`: assertion failed `rollback action entry must be recorded in runtime.actions`.
-2. **GREEN Phase**:
-   - Implemented tool call and rollback action recording in `crates/superstate-agent/src/run.rs`.
-   - Executed `cargo test -p superstate-agent --test test_run`: all 15 tests passed.
-3. **Quality & Regression Checks**:
-   - Executed `cargo test -p superstate-agent`: all 69 tests passed across all unit and integration test binaries.
-   - Executed `cargo check -p superstate-agent`: cleanly passed.
-   - Executed `cargo clippy -p superstate-agent --all-targets -- -D warnings`: cleanly passed with 0 warnings.
-
-## Commit
-- Commit: `78b8778`
-- Message: `feat(agent): record tool calls and rollbacks into state.runtime.actions`
-## Roborev Code Review
-- Job: 5151
-- Target Commit: `78b8778`
-- Verdict: Pass ("No issues found.")
-
-## Status
-DONE
-
+## Verification Evidence
+- `cargo test -p superstate-provider --test test_ollama_wire`: 14 passed, 0 failed.
+- `cargo clippy -p superstate-provider --all-targets -- -D warnings`: Clean, 0 warnings.
+- `cargo check --workspace --all-targets`: Clean, 0 errors.
+- `cargo fmt --all -- --check`: Clean formatting verified.
+- `cargo test --workspace`: All workspace tests passing.
+- `roborev status; roborev show HEAD`: Executed.

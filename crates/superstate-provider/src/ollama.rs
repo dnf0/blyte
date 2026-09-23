@@ -30,6 +30,17 @@ const CONNECT_TIMEOUT_SECS: u64 = 20;
 /// Long conversations or local model generation runs on large models can take several minutes.
 const READ_TIMEOUT_SECS: u64 = 300;
 
+/// Normalizes the API root URL so that trailing slashes are removed and the `/api` prefix
+/// is consistently present (e.g. `http://localhost:11434` -> `http://localhost:11434/api`).
+fn normalize_api_root(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.ends_with("/api") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/api")
+    }
+}
+
 /// Ollama Cloud and local/remote endpoint provider adapter.
 pub struct Ollama {
     api_key: Option<String>,
@@ -67,7 +78,7 @@ impl Ollama {
 
         // Default to Ollama Cloud API root when no host override is specified.
         let api_root = host
-            .map(|h| h.trim_end_matches('/').to_string())
+            .map(|h| normalize_api_root(&h))
             .unwrap_or_else(|| DEFAULT_API_ROOT.to_string());
 
         // Strip any provider prefix to keep wire requests clean while accepting uniform IDs.
@@ -100,7 +111,8 @@ impl Ollama {
 
     /// Sets the API root URL for Ollama requests.
     ///
-    /// Trailing slashes are stripped to maintain consistent URL composition.
+    /// Ensures trailing slashes are stripped and standard `/api` suffix is present
+    /// (e.g. `http://localhost:11434` -> `http://localhost:11434/api`).
     ///
     /// # Parameters
     /// - `api_root`: Base URL string (e.g. `https://ollama.com/api` or `http://localhost:11434`).
@@ -108,7 +120,7 @@ impl Ollama {
     /// # Returns
     /// The updated [`Ollama`] instance.
     pub fn with_api_root(mut self, api_root: impl Into<String>) -> Self {
-        self.api_root = api_root.into().trim_end_matches('/').to_string();
+        self.api_root = normalize_api_root(&api_root.into());
         self
     }
 
@@ -192,10 +204,11 @@ impl Ollama {
                         }]
                     }));
                 }
-                Message::ToolResult { content, .. } => {
-                    // Tool execution results are returned with role "tool".
+                Message::ToolResult { id, content, .. } => {
+                    // Tool execution results are returned with role "tool" and tool_call_id.
                     messages.push(json!({
                         "role": "tool",
+                        "tool_call_id": id,
                         "content": content,
                     }));
                 }

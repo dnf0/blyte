@@ -89,25 +89,41 @@ impl Anthropic {
     pub fn body(&self, req: &Request) -> Value {
         // Convert messages into Anthropic's role and content block structures.
         let mut messages: Vec<Value> = Vec::new();
-        for m in &req.messages {
-            match m {
+
+        let mut push_block = |role: &str, block: Value| {
+            if let Some(last) = messages.last_mut() {
+                if last.get("role").and_then(|r| r.as_str()) == Some(role) {
+                    if let Some(content) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        content.push(block);
+                        return;
+                    }
+                }
+            }
+            messages.push(json!({
+                "role": role,
+                "content": [block],
+            }));
+        };
+
+        for msg in &req.messages {
+            match msg {
                 Message::User(text) => {
-                    messages.push(json!({
-                        "role": "user",
-                        "content": [{
+                    push_block(
+                        "user",
+                        json!({
                             "type": "text",
                             "text": text,
-                        }]
-                    }));
+                        }),
+                    );
                 }
                 Message::Assistant(text) => {
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": [{
+                    push_block(
+                        "assistant",
+                        json!({
                             "type": "text",
                             "text": text,
-                        }]
-                    }));
+                        }),
+                    );
                 }
                 Message::ToolCall {
                     id,
@@ -116,15 +132,15 @@ impl Anthropic {
                     ..
                 } => {
                     // Assistant tool invocations are represented as tool_use content blocks.
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": [{
+                    push_block(
+                        "assistant",
+                        json!({
                             "type": "tool_use",
                             "id": id,
                             "name": name,
                             "input": arguments,
-                        }]
-                    }));
+                        }),
+                    );
                 }
                 Message::ToolResult {
                     id,
@@ -133,15 +149,15 @@ impl Anthropic {
                     ..
                 } => {
                     // Tool results must be returned as user turns containing tool_result content blocks.
-                    messages.push(json!({
-                        "role": "user",
-                        "content": [{
+                    push_block(
+                        "user",
+                        json!({
                             "type": "tool_result",
                             "tool_use_id": id,
                             "content": content,
                             "is_error": is_error,
-                        }]
-                    }));
+                        }),
+                    );
                 }
             }
         }
@@ -232,13 +248,14 @@ impl Anthropic {
             }
         }
 
-        // Account for token usage, deducting cached tokens to isolate fresh token consumption.
+        // Account for token usage. In Anthropic's Messages API, input_tokens already captures
+        // non-cached fresh tokens, while cache_read_input_tokens captures prompt cache reads.
         if let Some(u) = v.get("usage") {
             let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
             let input_tokens = n("input_tokens");
             let cache_read = n("cache_read_input_tokens");
             out.usage = Usage {
-                input: input_tokens.saturating_sub(cache_read),
+                input: input_tokens,
                 cached: cache_read,
                 output: n("output_tokens"),
                 thinking: 0,

@@ -178,12 +178,42 @@ fn parses_text_and_tool_use_response() {
     assert_eq!(
         r.usage,
         Usage {
-            input: 800,
+            input: 1200,
             cached: 400,
             output: 80,
             thinking: 0,
         }
     );
+}
+
+#[test]
+fn consecutive_assistant_messages_coalesced_into_single_turn() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let req = Request {
+        messages: vec![
+            Message::User("inspect file".into()),
+            Message::Assistant("I am inspecting the file now.".into()),
+            Message::ToolCall {
+                id: "toolu_456".into(),
+                name: "read_file".into(),
+                arguments: json!({"path": "lib.rs"}),
+                signature: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let b = anthropic().body(&req);
+    let msgs = b["messages"].as_array().unwrap();
+    // Must coalesce into exactly 2 turns: 1 user, 1 assistant (with 2 content blocks)
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[1]["role"], "assistant");
+    let content = msgs[1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "I am inspecting the file now.");
+    assert_eq!(content[1]["type"], "tool_use");
+    assert_eq!(content[1]["id"], "toolu_456");
 }
 
 #[test]

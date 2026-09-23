@@ -1,160 +1,810 @@
-diff --git a/crates/superstate-agent/src/run.rs b/crates/superstate-agent/src/run.rs
-index 9fa21a4..a25340f 100644
---- a/crates/superstate-agent/src/run.rs
-+++ b/crates/superstate-agent/src/run.rs
-@@ -265,6 +265,21 @@ impl<'a> Runner<'a> {
-                         summary,
-                         is_error: outcome.is_error,
-                     });
+diff --git a/crates/superstate-provider/src/lib.rs b/crates/superstate-provider/src/lib.rs
+index 5500589..4d59eac 100644
+--- a/crates/superstate-provider/src/lib.rs
++++ b/crates/superstate-provider/src/lib.rs
+@@ -20,6 +20,7 @@
+ 
+ pub mod anthropic;
+ pub mod gemini;
++pub mod ollama;
+ 
+ use serde::{Deserialize, Serialize};
+ 
+diff --git a/crates/superstate-provider/src/ollama.rs b/crates/superstate-provider/src/ollama.rs
+new file mode 100644
+index 0000000..9549aa5
+--- /dev/null
++++ b/crates/superstate-provider/src/ollama.rs
+@@ -0,0 +1,447 @@
++//! Ollama Cloud and custom endpoint provider adapter (`POST /chat` and `GET /tags`).
++//!
++//! # Protocol and Wire Format
++//!
++//! Ollama provides OpenAI-compatible chat endpoints with streaming, tool-calling, and model tag inspection.
++//! This adapter supports both Ollama Cloud (`https://ollama.com/api`) with Bearer token authentication and
++//! custom local/remote `$OLLAMA_HOST` endpoints:
++//! - An assistant turn issues tool calls via `{"role": "assistant", "tool_calls": [{"id": "...", "type": "function", "function": {"name": "...", "arguments": {...}}}]}`.
++//! - A tool response is sent via `{"role": "tool", "content": "..."}`.
++//! - The system prompt is passed as an initial message with `{"role": "system", "content": "..."}` within the messages array.
++//! - Model discovery is performed via `GET /api/tags` parsing the `models` array and details.
 +
-+                    // Record tool invocation in the chronological action ledger.
-+                    // Captures deterministic targets and outcome summaries so that episodic memory
-+                    // retains an accurate, bounded audit trail of all agent actions.
-+                    let action_target = extract_action_target(&call.name, &call.arguments);
-+                    let action_summary =
-+                        extract_action_summary(&call.name, &outcome.content, outcome.is_error);
-+                    state.runtime.actions.push(crate::state::ActionEntry {
-+                        turn,
-+                        tool: call.name.clone(),
-+                        target: action_target,
-+                        summary: action_summary,
-+                        is_error: outcome.is_error,
-+                    });
++use serde_json::{json, Value};
 +
-                     history.push(Message::ToolResult {
-                         id: call.id.clone(),
-                         name: call.name.clone(),
-@@ -293,8 +308,16 @@ impl<'a> Runner<'a> {
-                 if let Some(base) = &baseline {
-                     self.reset_to(base);
-                     state.runtime.rollbacks += 1;
--                    self.emit(Event::RolledBack {
--                        to: &base[..base.len().min(8)],
-+                    let short_sha = &base[..base.len().min(8)];
-+                    self.emit(Event::RolledBack { to: short_sha });
-+                    // Record rollback in the action ledger to ensure the worker and orchestrator
-+                    // observe workspace resets explicitly within episodic action history.
-+                    state.runtime.actions.push(crate::state::ActionEntry {
-+                        turn,
-+                        tool: "rollback".into(),
-+                        target: format!("checkpoint {short_sha}"),
-+                        summary: "Gate failed; working tree reset to verified state".into(),
-+                        is_error: true,
-                     });
-                 }
-             }
-@@ -440,7 +463,11 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
-             // Distinguish successful replacements from rejection/failure reasons.
-             if is_error {
-                 let first = content.lines().next().unwrap_or("edit failed");
--                let first = if first.is_empty() { "edit failed" } else { first };
-+                let first = if first.is_empty() {
-+                    "edit failed"
++use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
++
++/// Default model identifier when `SUPERSTATE_MODEL` is not specified in the environment.
++const DEFAULT_MODEL: &str = "qwen2.5-coder:32b";
++
++/// Default base URL for Ollama Cloud API.
++const DEFAULT_API_ROOT: &str = "https://ollama.com/api";
++
++/// Connection timeout in seconds.
++///
++/// Bounded to prevent silent indefinite hanging if the network or gateway is unresponsive.
++const CONNECT_TIMEOUT_SECS: u64 = 20;
++
++/// Read timeout in seconds.
++///
++/// Long conversations or local model generation runs on large models can take several minutes.
++const READ_TIMEOUT_SECS: u64 = 300;
++
++/// Ollama Cloud and local/remote endpoint provider adapter.
++pub struct Ollama {
++    api_key: Option<String>,
++    api_root: String,
++    model: String,
++}
++
++impl Ollama {
++    /// Constructs an Ollama provider instance from environment variables.
++    ///
++    /// Reads `OLLAMA_API_KEY` (optional for local hosts, required for Ollama Cloud),
++    /// `OLLAMA_HOST` (optional, defaults to `https://ollama.com/api`), and `SUPERSTATE_MODEL`
++    /// (optional, defaults to `qwen2.5-coder:32b`).
++    ///
++    /// # Returns
++    /// An initialized [`Ollama`] instance on success.
++    ///
++    /// # Errors
++    /// Returns [`ProviderError::MissingKey`] if neither `OLLAMA_API_KEY` nor `OLLAMA_HOST` is set.
++    pub fn from_env() -> Result<Self, ProviderError> {
++        // Read optional API key, treating whitespace-only values as unset.
++        let api_key = std::env::var("OLLAMA_API_KEY")
++            .ok()
++            .filter(|k| !k.trim().is_empty());
++
++        // Read optional custom host root, stripping trailing slashes for clean path joining.
++        let host = std::env::var("OLLAMA_HOST")
++            .ok()
++            .filter(|h| !h.trim().is_empty());
++
++        // Require at least one configuration vector so callers receive clear diagnostics.
++        if api_key.is_none() && host.is_none() {
++            return Err(ProviderError::MissingKey("OLLAMA_API_KEY"));
++        }
++
++        // Default to Ollama Cloud API root when no host override is specified.
++        let api_root = host
++            .map(|h| h.trim_end_matches('/').to_string())
++            .unwrap_or_else(|| DEFAULT_API_ROOT.to_string());
++
++        // Strip any provider prefix to keep wire requests clean while accepting uniform IDs.
++        let raw_model =
++            std::env::var("SUPERSTATE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
++        let model = raw_model
++            .strip_prefix("ollama/")
++            .unwrap_or(&raw_model)
++            .to_string();
++
++        Ok(Self {
++            api_key,
++            api_root,
++            model,
++        })
++    }
++
++    /// Sets the model identifier to use for completion requests.
++    ///
++    /// # Parameters
++    /// - `model`: A model identifier string or tag name.
++    ///
++    /// # Returns
++    /// The updated [`Ollama`] instance.
++    pub fn with_model(mut self, model: impl Into<String>) -> Self {
++        let m = model.into();
++        self.model = m.strip_prefix("ollama/").unwrap_or(&m).to_string();
++        self
++    }
++
++    /// Sets the API root URL for Ollama requests.
++    ///
++    /// Trailing slashes are stripped to maintain consistent URL composition.
++    ///
++    /// # Parameters
++    /// - `api_root`: Base URL string (e.g. `https://ollama.com/api` or `http://localhost:11434`).
++    ///
++    /// # Returns
++    /// The updated [`Ollama`] instance.
++    pub fn with_api_root(mut self, api_root: impl Into<String>) -> Self {
++        self.api_root = api_root.into().trim_end_matches('/').to_string();
++        self
++    }
++
++    /// Sets or overrides the API key for Bearer authentication.
++    ///
++    /// # Parameters
++    /// - `key`: API token string.
++    ///
++    /// # Returns
++    /// The updated [`Ollama`] instance.
++    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
++        self.api_key = Some(key.into());
++        self
++    }
++
++    /// Returns the configured API root base URL.
++    pub fn api_root(&self) -> &str {
++        &self.api_root
++    }
++
++    /// Returns the configured API key if one was provided.
++    pub fn api_key(&self) -> Option<&str> {
++        self.api_key.as_deref()
++    }
++
++    /// Returns the active model identifier without provider prefix.
++    pub fn model(&self) -> &str {
++        &self.model
++    }
++
++    /// Serializes a normalised [`Request`] into Ollama's `POST /chat` JSON body.
++    ///
++    /// # Parameters
++    /// - `req`: The generic turn request containing conversation messages, system prompt, and tools.
++    ///
++    /// # Returns
++    /// A [`Value`] JSON object adhering to Ollama's chat completion schema.
++    pub fn body(&self, req: &Request) -> Value {
++        let mut messages: Vec<Value> = Vec::new();
++
++        // System prompt is passed as the first message with role "system" when non-empty.
++        if !req.system.trim().is_empty() {
++            messages.push(json!({
++                "role": "system",
++                "content": req.system,
++            }));
++        }
++
++        // Map conversation turns into Ollama wire message objects.
++        for m in &req.messages {
++            match m {
++                Message::User(text) => {
++                    messages.push(json!({
++                        "role": "user",
++                        "content": text,
++                    }));
++                }
++                Message::Assistant(text) => {
++                    messages.push(json!({
++                        "role": "assistant",
++                        "content": text,
++                    }));
++                }
++                Message::ToolCall {
++                    id,
++                    name,
++                    arguments,
++                    ..
++                } => {
++                    // Assistant tool invocations are represented with role "assistant" and tool_calls array.
++                    messages.push(json!({
++                        "role": "assistant",
++                        "content": "",
++                        "tool_calls": [{
++                            "id": id,
++                            "type": "function",
++                            "function": {
++                                "name": name,
++                                "arguments": arguments,
++                            }
++                        }]
++                    }));
++                }
++                Message::ToolResult { content, .. } => {
++                    // Tool execution results are returned with role "tool".
++                    messages.push(json!({
++                        "role": "tool",
++                        "content": content,
++                    }));
++                }
++            }
++        }
++
++        let mut body = json!({
++            "model": self.model,
++            "stream": false,
++            "messages": messages,
++        });
++
++        // Tools schema is attached under "tools" using standard OpenAI-compatible function descriptors.
++        if !req.tools.is_empty() {
++            let tools_json: Vec<Value> = req
++                .tools
++                .iter()
++                .map(|t| {
++                    json!({
++                        "type": "function",
++                        "function": {
++                            "name": t.name,
++                            "description": t.description,
++                            "parameters": t.parameters,
++                        }
++                    })
++                })
++                .collect();
++            body["tools"] = json!(tools_json);
++        }
++
++        body
++    }
++
++    /// Parses an Ollama `POST /chat` response JSON payload into a normalised [`Response`].
++    ///
++    /// # Parameters
++    /// - `v`: The JSON response payload returned by the chat completion endpoint.
++    ///
++    /// # Returns
++    /// A normalised [`Response`] containing text output, tool invocations, and token usage.
++    ///
++    /// # Errors
++    /// Returns [`ProviderError::Parse`] if the payload reports an error or lacks a valid `message` object.
++    pub fn parse(v: &Value) -> Result<Response, ProviderError> {
++        // Intercept provider error messages in the body and fail fast.
++        if let Some(err) = v.get("error") {
++            if !err.is_null() {
++                let msg = if let Some(s) = err.as_str() {
++                    s.to_string()
++                } else if let Some(s) = err.get("message").and_then(|m| m.as_str()) {
++                    s.to_string()
 +                } else {
-+                    first
++                    err.to_string()
 +                };
-                 format!("failed: {first}")
-             } else {
-                 "string replaced".to_string()
-@@ -486,4 +513,3 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
-         }
-     }
- }
--
-diff --git a/crates/superstate-agent/tests/test_run.rs b/crates/superstate-agent/tests/test_run.rs
-index fd803f6..e776f49 100644
---- a/crates/superstate-agent/tests/test_run.rs
-+++ b/crates/superstate-agent/tests/test_run.rs
-@@ -348,3 +348,92 @@ fn the_turn_budget_bounds_a_model_that_never_stops() {
-     assert_eq!(outcome, Outcome::BudgetExhausted);
-     assert_eq!(rep.outcome_turns, 12);
- }
++                return Err(ProviderError::Parse(msg));
++            }
++        }
 +
-+#[test]
-+fn test_actions_recorded_during_run() {
-+    // Verifies that Runner records ActionEntry objects chronologically into state.runtime.actions
-+    // for all invoked tools (bash, read, note), preserving action targets, summaries, and error flags.
-+    let d = repo();
-+    // Create a known file on disk so the 'read' tool succeeds with predictable line counts.
-+    std::fs::write(d.path().join("sample.txt"), "first line\nsecond line\n").unwrap();
++        // Ensure the assistant message object is present in the response.
++        let message = v
++            .get("message")
++            .and_then(|m| m.as_object())
++            .ok_or_else(|| ProviderError::Parse(format!("no message object in response: {v}")))?;
 +
-+    let p = ScriptedProvider::new(vec![
-+        calls("bash", json!({"command": "echo hello"})),
-+        calls("read", json!({"path": "sample.txt"})),
-+        calls("note", json!({"patch": {"analysis": "verified"}})),
-+        says("done"),
-+    ]);
-+    let mut st = State::new("test action ledger", "true");
-+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
-+    assert_eq!(outcome, Outcome::Verified);
-+    assert_eq!(rep.tool_calls, 3);
++        // Extract primary textual output if available.
++        let text = message
++            .get("content")
++            .and_then(|c| c.as_str())
++            .unwrap_or_default()
++            .to_string();
 +
-+    // Ensure three action entries were captured in exact invocation sequence.
-+    assert_eq!(st.runtime.actions.len(), 3);
++        // Parse tool calls from message.tool_calls array.
++        let mut tool_calls = Vec::new();
++        if let Some(calls) = message.get("tool_calls").and_then(|c| c.as_array()) {
++            for (i, call) in calls.iter().enumerate() {
++                let function = call.get("function");
++                let name = function
++                    .and_then(|f| f.get("name"))
++                    .and_then(|n| n.as_str())
++                    .unwrap_or_default()
++                    .to_string();
 +
-+    // 1. Validate bash command action entry details.
-+    let bash_action = &st.runtime.actions[0];
-+    assert_eq!(bash_action.turn, 1);
-+    assert_eq!(bash_action.tool, "bash");
-+    assert_eq!(bash_action.target, "echo hello");
-+    assert_eq!(bash_action.summary, "exit 0");
-+    assert!(!bash_action.is_error);
++                // Ollama tool call arguments can arrive as pre-parsed JSON objects or serialized strings.
++                let arguments = match function.and_then(|f| f.get("arguments")) {
++                    Some(Value::Object(map)) => Value::Object(map.clone()),
++                    Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
++                    _ => json!({}),
++                };
 +
-+    // 2. Validate file read action entry details.
-+    let read_action = &st.runtime.actions[1];
-+    assert_eq!(read_action.turn, 2);
-+    assert_eq!(read_action.tool, "read");
-+    assert_eq!(read_action.target, "sample.txt");
-+    assert_eq!(read_action.summary, "2 lines read");
-+    assert!(!read_action.is_error);
++                // Fall back to synthetic call ID if the provider did not supply one.
++                let id = call
++                    .get("id")
++                    .and_then(|id_val| id_val.as_str())
++                    .map(String::from)
++                    .unwrap_or_else(|| format!("call_{i}"));
 +
-+    // 3. Validate state note action entry details.
-+    let note_action = &st.runtime.actions[2];
-+    assert_eq!(note_action.turn, 3);
-+    assert_eq!(note_action.tool, "note");
-+    assert_eq!(note_action.target, "patch (1 keys)");
-+    assert_eq!(
-+        note_action.summary,
-+        "recorded; your state now has 1 field(s)"
-+    );
-+    assert!(!note_action.is_error);
++                tool_calls.push(ToolCall {
++                    id,
++                    name,
++                    arguments,
++                    signature: None,
++                });
++            }
++        }
++
++        // Finish reason is extracted from done_reason if present.
++        let finish_reason = v
++            .get("done_reason")
++            .and_then(|r| r.as_str())
++            .map(String::from);
++
++        // Usage statistics from prompt_eval_count and eval_count.
++        let usage = Usage {
++            input: v
++                .get("prompt_eval_count")
++                .and_then(|x| x.as_u64())
++                .unwrap_or(0),
++            cached: 0,
++            output: v.get("eval_count").and_then(|x| x.as_u64()).unwrap_or(0),
++            thinking: 0,
++        };
++
++        Ok(Response {
++            text,
++            tool_calls,
++            usage,
++            finish_reason,
++        })
++    }
++
++    /// Parses a model listing JSON payload from `GET /tags`.
++    ///
++    /// # Parameters
++    /// - `v`: The JSON response payload returned by the tags endpoint.
++    ///
++    /// # Returns
++    /// A vector of [`ModelInfo`] describing available models and their quantization/parameter details.
++    ///
++    /// # Errors
++    /// Returns [`ProviderError::Parse`] if the payload cannot be parsed.
++    pub fn parse_models_list(v: &Value) -> Result<Vec<ModelInfo>, ProviderError> {
++        let mut out = Vec::new();
++
++        // Ollama returns models in an array under the "models" key.
++        if let Some(models) = v.get("models").and_then(|m| m.as_array()) {
++            for m in models {
++                let name = m.get("name").and_then(|n| n.as_str()).unwrap_or_default();
++                if name.is_empty() {
++                    continue;
++                }
++
++                // Format model details (parameter size and quantization level) into a concise description.
++                let description = m.get("details").and_then(|d| {
++                    let param_size = d.get("parameter_size").and_then(|s| s.as_str());
++                    let quant = d.get("quantization_level").and_then(|q| q.as_str());
++                    match (param_size, quant) {
++                        (Some(p), Some(q)) => Some(format!("{p}, {q}")),
++                        (Some(p), None) => Some(p.to_string()),
++                        (None, Some(q)) => Some(q.to_string()),
++                        (None, None) => None,
++                    }
++                });
++
++                out.push(ModelInfo {
++                    id: name.to_string(),
++                    display_name: name.to_string(),
++                    description,
++                    provider: "ollama".to_string(),
++                });
++            }
++        }
++
++        Ok(out)
++    }
++}
++
++impl Provider for Ollama {
++    /// Executes a synchronous completion request to Ollama's `POST /chat` endpoint.
++    ///
++    /// Attaches Bearer authentication header when `api_key` is present.
++    fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
++        let url = format!("{}/chat", self.api_root);
++        let agent = ureq::AgentBuilder::new()
++            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
++            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
++            .build();
++        let mut req_builder = agent.post(&url).set("content-type", "application/json");
++
++        // Attach Authorization header if credentials are configured.
++        if let Some(ref key) = self.api_key {
++            req_builder = req_builder.set("Authorization", &format!("Bearer {key}"));
++        }
++
++        let resp = req_builder.send_json(self.body(req));
++
++        match resp {
++            Ok(r) => {
++                let v: Value = r
++                    .into_json()
++                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
++                Self::parse(&v)
++            }
++            Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
++                status,
++                body: r.into_string().unwrap_or_default(),
++            }),
++            Err(e) => Err(ProviderError::Transport(e.to_string())),
++        }
++    }
++
++    /// Returns the provider telemetry identifier (e.g. `ollama/qwen2.5-coder:32b`).
++    fn model_id(&self) -> String {
++        format!("ollama/{}", self.model)
++    }
++
++    /// Discovers available models by querying `GET /tags`.
++    ///
++    /// Attaches Bearer authentication header when `api_key` is present.
++    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
++        let url = format!("{}/tags", self.api_root);
++        let agent = ureq::AgentBuilder::new()
++            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
++            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
++            .build();
++        let mut req_builder = agent.get(&url);
++
++        // Attach Authorization header if credentials are configured.
++        if let Some(ref key) = self.api_key {
++            req_builder = req_builder.set("Authorization", &format!("Bearer {key}"));
++        }
++
++        let resp = req_builder.call();
++
++        match resp {
++            Ok(r) => {
++                let v: Value = r
++                    .into_json()
++                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
++                Self::parse_models_list(&v)
++            }
++            Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
++                status,
++                body: r.into_string().unwrap_or_default(),
++            }),
++            Err(e) => Err(ProviderError::Transport(e.to_string())),
++        }
++    }
++}
+diff --git a/crates/superstate-provider/tests/test_ollama_wire.rs b/crates/superstate-provider/tests/test_ollama_wire.rs
+new file mode 100644
+index 0000000..a591dc1
+--- /dev/null
++++ b/crates/superstate-provider/tests/test_ollama_wire.rs
+@@ -0,0 +1,339 @@
++//! The Ollama Cloud / custom host request/response wire mapping and model discovery, tested without a network.
++//!
++//! Wire translations are tested offline to verify formatting, role mappings, tool handling,
++//! token usage accounting, and model listing without requiring live credentials or network access.
++
++use std::sync::Mutex;
++
++use serde_json::json;
++use superstate_provider::ollama::Ollama;
++use superstate_provider::{Message, Provider, ProviderError, Request, ToolSpec, Usage};
++
++/// Lock to serialize tests modifying process-wide environment variables.
++static ENV_LOCK: Mutex<()> = Mutex::new(());
++
++fn ollama_cloud() -> Ollama {
++    std::env::set_var("OLLAMA_API_KEY", "test-key-not-real");
++    std::env::remove_var("OLLAMA_HOST");
++    Ollama::from_env().unwrap()
++}
++
++fn tool() -> ToolSpec {
++    ToolSpec {
++        name: "bash".into(),
++        description: "Run a bash command".into(),
++        parameters: json!({"type":"object","properties":{"cmd":{"type":"string"}}}),
++    }
 +}
 +
 +#[test]
-+fn test_rollback_appends_action_entry() {
-+    // Verifies that when a verification gate fails with rollback enabled, an ActionEntry
-+    // is recorded in state.runtime.actions documenting the rollback event and checkpoint target.
-+    let d = repo();
-+    // The verification command checks for existence of 'target.txt'.
-+    // On the first gate attempt, target.txt is missing -> gate fails and rollback occurs.
-+    // On the second attempt, the model writes target.txt -> gate passes.
-+    let p = ScriptedProvider::new(vec![
-+        calls("bash", json!({"command": "echo attempt1"})),
-+        says("done with attempt 1"),
-+        calls(
-+            "write",
-+            json!({"path": "target.txt", "content": "passed\n"}),
-+        ),
-+        says("done with attempt 2"),
-+    ]);
-+    let mut st = State::new("create target file", "test -f target.txt");
-+    let (outcome, rep) = runner(&p, d.path(), &Conversational, true).run(&mut st);
-+    assert_eq!(outcome, Outcome::Verified);
-+    assert_eq!(rep.gate_attempts, 2);
-+    assert_eq!(st.runtime.rollbacks, 1);
++fn system_instruction_is_placed_in_messages_array_when_present() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    let req = Request {
++        system: "You are a helpful coding assistant.".into(),
++        messages: vec![Message::User("hi".into())],
++        ..Default::default()
++    };
++    let b = ollama_cloud().body(&req);
++    let msgs = b["messages"].as_array().expect("messages must be an array");
++    assert_eq!(msgs.len(), 2);
++    assert_eq!(msgs[0]["role"], "system");
++    assert_eq!(msgs[0]["content"], "You are a helpful coding assistant.");
++    assert_eq!(msgs[1]["role"], "user");
++    assert_eq!(msgs[1]["content"], "hi");
++    assert_eq!(b["model"], "qwen2.5-coder:32b");
++    assert_eq!(b["stream"], false);
++}
 +
-+    // Identify the rollback entry in the recorded action history.
-+    let rollback_entry = st
-+        .runtime
-+        .actions
-+        .iter()
-+        .find(|a| a.tool == "rollback")
-+        .expect("rollback action entry must be recorded in runtime.actions");
++#[test]
++fn empty_system_instruction_is_omitted_from_messages() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    let req = Request {
++        system: "   ".into(),
++        messages: vec![Message::User("hi".into())],
++        ..Default::default()
++    };
++    let b = ollama_cloud().body(&req);
++    let msgs = b["messages"].as_array().expect("messages must be an array");
++    assert_eq!(msgs.len(), 1);
++    assert_eq!(msgs[0]["role"], "user");
++    assert_eq!(msgs[0]["content"], "hi");
++}
 +
-+    assert!(rollback_entry.target.starts_with("checkpoint "));
++#[test]
++fn user_and_assistant_messages_wire_formatting() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    let req = Request {
++        messages: vec![
++            Message::User("hello".into()),
++            Message::Assistant("world".into()),
++        ],
++        ..Default::default()
++    };
++    let b = ollama_cloud().body(&req);
++    let msgs = b["messages"].as_array().unwrap();
++    assert_eq!(msgs[0]["role"], "user");
++    assert_eq!(msgs[0]["content"], "hello");
++    assert_eq!(msgs[1]["role"], "assistant");
++    assert_eq!(msgs[1]["content"], "world");
++}
++
++#[test]
++fn tool_call_and_tool_result_wire_shape() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    let req = Request {
++        messages: vec![
++            Message::User("run ls".into()),
++            Message::ToolCall {
++                id: "call_123".into(),
++                name: "bash".into(),
++                arguments: json!({"cmd": "ls -la"}),
++                signature: None,
++            },
++            Message::ToolResult {
++                id: "call_123".into(),
++                name: "bash".into(),
++                content: "Cargo.toml\nsrc\n".into(),
++                is_error: false,
++            },
++        ],
++        tools: vec![tool()],
++        ..Default::default()
++    };
++    let b = ollama_cloud().body(&req);
++
++    // Assistant tool_calls message
++    let msgs = b["messages"].as_array().unwrap();
++    assert_eq!(msgs[1]["role"], "assistant");
++    assert_eq!(msgs[1]["content"], "");
++    let tool_calls = msgs[1]["tool_calls"].as_array().unwrap();
++    assert_eq!(tool_calls.len(), 1);
++    assert_eq!(tool_calls[0]["id"], "call_123");
++    assert_eq!(tool_calls[0]["type"], "function");
++    assert_eq!(tool_calls[0]["function"]["name"], "bash");
 +    assert_eq!(
-+        rollback_entry.summary,
-+        "Gate failed; working tree reset to verified state"
++        tool_calls[0]["function"]["arguments"],
++        json!({"cmd": "ls -la"})
 +    );
-+    assert!(rollback_entry.is_error);
++
++    // Tool result message
++    assert_eq!(msgs[2]["role"], "tool");
++    assert_eq!(msgs[2]["content"], "Cargo.toml\nsrc\n");
++
++    // Tools schema
++    let tools = b["tools"].as_array().expect("tools must be present");
++    assert_eq!(tools.len(), 1);
++    assert_eq!(tools[0]["type"], "function");
++    assert_eq!(tools[0]["function"]["name"], "bash");
++    assert_eq!(tools[0]["function"]["description"], "Run a bash command");
++    assert_eq!(
++        tools[0]["function"]["parameters"],
++        json!({"type":"object","properties":{"cmd":{"type":"string"}}})
++    );
++}
++
++#[test]
++fn tools_omitted_when_empty() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    let b = ollama_cloud().body(&Request {
++        messages: vec![Message::User("hi".into())],
++        ..Default::default()
++    });
++    assert!(b.get("tools").is_none());
++}
++
++#[test]
++fn parses_text_response_and_usage() {
++    let v = json!({
++        "model": "qwen2.5-coder:32b",
++        "created_at": "2026-09-23T10:00:00Z",
++        "message": {
++            "role": "assistant",
++            "content": "Hello! I can help you code."
++        },
++        "done": true,
++        "done_reason": "stop",
++        "prompt_eval_count": 42,
++        "eval_count": 18
++    });
++    let r = Ollama::parse(&v).expect("parsing response should succeed");
++    assert_eq!(r.text, "Hello! I can help you code.");
++    assert!(r.tool_calls.is_empty());
++    assert_eq!(r.finish_reason.as_deref(), Some("stop"));
++    assert_eq!(
++        r.usage,
++        Usage {
++            input: 42,
++            cached: 0,
++            output: 18,
++            thinking: 0,
++        }
++    );
++}
++
++#[test]
++fn parses_tool_calls_with_object_arguments() {
++    let v = json!({
++        "model": "qwen2.5-coder:32b",
++        "message": {
++            "role": "assistant",
++            "content": "",
++            "tool_calls": [
++                {
++                    "id": "call_abc",
++                    "type": "function",
++                    "function": {
++                        "name": "bash",
++                        "arguments": {
++                            "cmd": "git status"
++                        }
++                    }
++                }
++            ]
++        },
++        "done": true,
++        "done_reason": "stop"
++    });
++    let r = Ollama::parse(&v).expect("should parse tool calls");
++    assert_eq!(r.tool_calls.len(), 1);
++    assert_eq!(r.tool_calls[0].id, "call_abc");
++    assert_eq!(r.tool_calls[0].name, "bash");
++    assert_eq!(r.tool_calls[0].arguments, json!({"cmd": "git status"}));
++    assert_eq!(r.tool_calls[0].signature, None);
++}
++
++#[test]
++fn parses_tool_calls_with_string_arguments_and_fallback_id() {
++    let v = json!({
++        "model": "qwen2.5-coder:32b",
++        "message": {
++            "role": "assistant",
++            "content": "Running command...",
++            "tool_calls": [
++                {
++                    "function": {
++                        "name": "bash",
++                        "arguments": "{\"cmd\":\"cargo test\"}"
++                    }
++                }
++            ]
++        },
++        "done": true,
++        "done_reason": "stop"
++    });
++    let r = Ollama::parse(&v).expect("should parse string-encoded arguments");
++    assert_eq!(r.text, "Running command...");
++    assert_eq!(r.tool_calls.len(), 1);
++    assert_eq!(r.tool_calls[0].id, "call_0");
++    assert_eq!(r.tool_calls[0].name, "bash");
++    assert_eq!(r.tool_calls[0].arguments, json!({"cmd": "cargo test"}));
++}
++
++#[test]
++fn parses_error_response_fails() {
++    let v = json!({
++        "error": "model 'nonexistent-model' not found"
++    });
++    let err = Ollama::parse(&v);
++    assert!(err.is_err(), "response with error field must fail parsing");
++}
++
++#[test]
++fn parse_models_list_extracts_models_and_details() {
++    let v = json!({
++        "models": [
++            {
++                "name": "qwen2.5-coder:32b",
++                "model": "qwen2.5-coder:32b",
++                "modified_at": "2026-09-20T00:00:00Z",
++                "size": 19284093,
++                "details": {
++                    "format": "gguf",
++                    "family": "qwen2",
++                    "parameter_size": "32B",
++                    "quantization_level": "Q4_K_M"
++                }
++            },
++            {
++                "name": "llama3.3:70b",
++                "model": "llama3.3:70b",
++                "details": {
++                    "parameter_size": "70B"
++                }
++            }
++        ]
++    });
++    let models = Ollama::parse_models_list(&v).expect("parsing models list should succeed");
++    assert_eq!(models.len(), 2);
++
++    assert_eq!(models[0].id, "qwen2.5-coder:32b");
++    assert_eq!(models[0].display_name, "qwen2.5-coder:32b");
++    assert_eq!(models[0].provider, "ollama");
++    assert_eq!(models[0].description.as_deref(), Some("32B, Q4_K_M"));
++
++    assert_eq!(models[1].id, "llama3.3:70b");
++    assert_eq!(models[1].display_name, "llama3.3:70b");
++    assert_eq!(models[1].provider, "ollama");
++    assert_eq!(models[1].description.as_deref(), Some("70B"));
++}
++
++#[test]
++fn parse_models_list_handles_empty_or_missing_models() {
++    let empty = json!({"models": []});
++    let models = Ollama::parse_models_list(&empty).expect("empty models array should succeed");
++    assert!(models.is_empty());
++
++    let missing = json!({});
++    let models = Ollama::parse_models_list(&missing).expect("missing models key should succeed");
++    assert!(models.is_empty());
++}
++
++#[test]
++fn from_env_requires_api_key_or_host() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    std::env::remove_var("OLLAMA_API_KEY");
++    std::env::remove_var("OLLAMA_HOST");
++    assert!(matches!(
++        Ollama::from_env(),
++        Err(ProviderError::MissingKey("OLLAMA_API_KEY"))
++    ));
++
++    std::env::set_var("OLLAMA_API_KEY", "test-key");
++    let o = Ollama::from_env().expect("succeeds with API key");
++    assert_eq!(o.api_root(), "https://ollama.com/api");
++    assert_eq!(o.api_key(), Some("test-key"));
++    assert_eq!(o.model_id(), "ollama/qwen2.5-coder:32b");
++
++    std::env::remove_var("OLLAMA_API_KEY");
++    std::env::set_var("OLLAMA_HOST", "http://localhost:11434/");
++    let o2 = Ollama::from_env().expect("succeeds with host even if key unset");
++    assert_eq!(o2.api_root(), "http://localhost:11434");
++    assert_eq!(o2.api_key(), None);
++
++    std::env::remove_var("OLLAMA_HOST");
++}
++
++#[test]
++fn from_env_honors_superstate_model() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    std::env::set_var("OLLAMA_API_KEY", "test-key");
++    std::env::set_var("SUPERSTATE_MODEL", "deepseek-coder:33b");
++    let o = Ollama::from_env().expect("from_env should succeed");
++    assert_eq!(o.model_id(), "ollama/deepseek-coder:33b");
++
++    std::env::remove_var("SUPERSTATE_MODEL");
++    let o_default = Ollama::from_env().expect("from_env defaults to qwen2.5-coder:32b");
++    assert_eq!(o_default.model_id(), "ollama/qwen2.5-coder:32b");
++}
++
++#[test]
++fn builder_methods_work() {
++    let _guard = ENV_LOCK.lock().unwrap();
++    let o = ollama_cloud()
++        .with_model("llama3.1:8b")
++        .with_api_root("https://custom.ollama.local/api/")
++        .with_api_key("custom-key");
++    assert_eq!(o.model_id(), "ollama/llama3.1:8b");
++    assert_eq!(o.api_root(), "https://custom.ollama.local/api");
++    assert_eq!(o.api_key(), Some("custom-key"));
 +}

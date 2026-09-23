@@ -118,6 +118,7 @@ fn tool_call_and_tool_result_wire_shape() {
 
     // Tool result message
     assert_eq!(msgs[2]["role"], "tool");
+    assert_eq!(msgs[2]["tool_call_id"], "call_123");
     assert_eq!(msgs[2]["content"], "Cargo.toml\nsrc\n");
 
     // Tools schema
@@ -307,7 +308,7 @@ fn from_env_requires_api_key_or_host() {
     std::env::remove_var("OLLAMA_API_KEY");
     std::env::set_var("OLLAMA_HOST", "http://localhost:11434/");
     let o2 = Ollama::from_env().expect("succeeds with host even if key unset");
-    assert_eq!(o2.api_root(), "http://localhost:11434");
+    assert_eq!(o2.api_root(), "http://localhost:11434/api");
     assert_eq!(o2.api_key(), None);
 
     std::env::remove_var("OLLAMA_HOST");

@@ -1,77 +1,86 @@
-# Task 2: Deterministic Target and Outcome Extraction Helpers in run.rs
+# Task 2 Brief: Anthropic Claude Provider Adapter
 
-Working Directory: `/Users/danielfisher/repos/superstate/.wt/feat-superstate-interactive-harness`
+## Objective
+Implement the `Anthropic` provider adapter in `crates/superstate-provider/src/anthropic.rs` supporting the Messages API (`POST /v1/messages`), model listing (`GET /v1/models`), and bidirectional tool calling.
 
-## What to Implement
+## Working Directory
+`/Users/danielfisher/repos/superstate/.wt/feat-multi-provider-model-discovery`
 
-In `crates/superstate-agent/src/run.rs`:
-Implement two extraction helper functions:
-```rust
-pub(crate) fn extract_action_target(tool: &str, args: &serde_json::Value) -> String;
-pub(crate) fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String;
-```
-
-### Extraction Specifications:
-
-#### `extract_action_target`:
-- `"read"`:
-  - Extract `"path"`. If `"start_line"` and `"end_line"` are present, return `format!("{path} (L{start_line}-L{end_line})")`.
-  - If only `"path"` is present, return `path.to_string()`.
-- `"write"`:
-  - Extract `"path"` and `"content"`. Return `format!("{path} ({} bytes)", content.len())`. If content missing, return `path.to_string()`.
-- `"edit"`:
-  - Extract `"path"`. Return `path.to_string()`.
-- `"bash"`:
-  - Extract `"command"`. If length > 60 characters, return first 57 characters + `"..."`.
-- `"glob"`:
-  - Extract `"pattern"`. Return `pattern.to_string()`.
-- `"grep"`:
-  - Extract `"pattern"`. If `"path"` is provided, return `format!("pattern '{pattern}' in {path}")`. Otherwise return `format!("pattern '{pattern}'")`.
-- `"note"`:
-  - Extract `"patch"`. If it's a JSON object, return `format!("patch ({} keys)", patch.as_object().map_or(0, |o| o.len()))`.
-- Fallback / Unknown tool:
-  - Return first string argument value found or tool name.
-
-#### `extract_action_summary`:
-- `"read"`:
-  - Return `format!("{} lines read", content.lines().count())`.
-- `"write"`:
-  - Return `"file written".to_string()`.
-- `"edit"`:
-  - If `is_error`: return `format!("failed: {}", content.lines().next().unwrap_or("edit failed"))`.
-  - Else: return `"string replaced".to_string()`.
-- `"bash"`:
-  - If `!is_error`: return `"exit 0".to_string()`.
-  - Else: find the last non-empty line of `content`, clamped to 80 chars, and return `format!("failed: {}", last_line)`.
-- `"glob"`:
-  - Count non-empty lines in `content`: `format!("{} files matched", count)`.
-- `"grep"`:
-  - Count non-empty lines in `content`: `format!("{} matches found", count)`.
-- `"note"`:
-  - Return `content.lines().next().unwrap_or("recorded").to_string()`.
-- Fallback:
-  - First line of `content` clamped to 80 chars.
-
----
-
-## Testing Requirements (TDD)
-
-Create `crates/superstate-agent/tests/test_action_extraction.rs`:
-Test extraction for:
-1. `read`: with and without line numbers.
-2. `write`: target includes bytes, summary is "file written".
-3. `edit`: success ("string replaced") and failure ("failed: string not found").
-4. `bash`: short command and long command truncation (>60 chars); success ("exit 0") and failure (last non-empty line extracted).
-5. `glob`: file count matching.
-6. `grep`: pattern and path, match count.
-7. `note`: key count, status string.
-
-## Execution Steps
-1. Write tests in `crates/superstate-agent/tests/test_action_extraction.rs`.
-2. Run `cargo test -p superstate-agent --test test_action_extraction` to observe failure.
-3. Implement `extract_action_target` and `extract_action_summary` in `crates/superstate-agent/src/run.rs`.
-4. Run `cargo test -p superstate-agent --test test_action_extraction` to verify all tests pass.
-5. Verify `cargo check -p superstate-agent` and `cargo clippy -p superstate-agent`.
-6. Commit: `git add crates/superstate-agent/src/run.rs crates/superstate-agent/tests/test_action_extraction.rs && git commit --no-gpg-sign -m "feat(agent): implement deterministic action target and outcome summarizers"`
-7. Run `roborev status; roborev show HEAD`.
-8. Write your completion report to `docs/superpowers/plans/task-2-report.md`.
+## Detailed Instructions
+1. **Expose Module in `crates/superstate-provider/src/lib.rs`**:
+   - Add `pub mod anthropic;`.
+2. **Implement `crates/superstate-provider/src/anthropic.rs`**:
+   - Constants:
+     ```rust
+     const DEFAULT_MODEL: &str = "claude-3-7-sonnet-latest";
+     const API_ROOT: &str = "https://api.anthropic.com/v1";
+     const ANTHROPIC_VERSION: &str = "2023-06-01";
+     const CONNECT_TIMEOUT_SECS: u64 = 20;
+     const READ_TIMEOUT_SECS: u64 = 300;
+     ```
+   - Struct:
+     ```rust
+     pub struct Anthropic {
+         api_key: String,
+         model: String,
+     }
+     ```
+   - Constructors:
+     - `from_env() -> Result<Self, ProviderError>`:
+       Reads `ANTHROPIC_API_KEY`, returns `ProviderError::MissingKey("ANTHROPIC_API_KEY")` if absent.
+       Reads `SUPERSTATE_MODEL` if set, else `DEFAULT_MODEL`.
+     - `with_model(mut self, model: impl Into<String>) -> Self`.
+   - Request serialization:
+     - `pub fn body(&self, req: &Request) -> Value`:
+       - `model`: `self.model`
+       - `max_tokens`: `req.max_output_tokens.unwrap_or(8192)`
+       - If `!req.system.is_empty()`: `"system": req.system`
+       - `"messages"`: Vec of converted messages:
+         - `Message::User(t)` -> `{"role": "user", "content": [{"type": "text", "text": t}]}`
+         - `Message::Assistant(t)` -> `{"role": "assistant", "content": [{"type": "text", "text": t}]}`
+         - `Message::ToolCall { id, name, arguments, .. }` ->
+           `{"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": name, "input": arguments}]}`
+         - `Message::ToolResult { id, content, is_error }` ->
+           `{"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error}]}`
+       - If `!req.tools.is_empty()`:
+         `"tools"`: array of `{"name": t.name, "description": t.description, "input_schema": t.parameters}`.
+   - Response parsing:
+     - `pub fn parse(v: &Value) -> Result<Response, ProviderError>`:
+       - `finish_reason`: `v.get("stop_reason").and_then(|s| s.as_str()).map(String::from)`
+       - `content`: array of blocks:
+         - `type == "text"`: append string to `out.text`
+         - `type == "tool_use"`: `out.tool_calls.push(ToolCall { id, name, arguments: input, signature: None })`
+       - `usage`:
+         - `input`: `input_tokens.saturating_sub(cache_read_input_tokens)`
+         - `cached`: `cache_read_input_tokens`
+         - `output`: `output_tokens`
+         - `thinking`: 0
+   - Model listing parsing:
+     - `pub fn parse_models_list(v: &Value) -> Result<Vec<ModelInfo>, ProviderError>`:
+       - Parses `v["data"]` array of model objects (`id`, `display_name`).
+       - If `v["data"]` is empty or missing, or to ensure convenience aliases are always selectable, include standard aliases (`claude-3-7-sonnet-latest`, `claude-3-5-sonnet-latest`, `claude-3-5-haiku-latest`) if not already present.
+       - Sets `provider: "anthropic".to_string()`.
+   - `Provider` trait implementation for `Anthropic`:
+     - `complete(&self, req: &Request) -> Result<Response, ProviderError>`:
+       POST `{API_ROOT}/messages`
+       Headers: `x-api-key: self.api_key`, `anthropic-version: ANTHROPIC_VERSION`, `content-type: application/json`.
+     - `model_id(&self) -> String`:
+       `format!("anthropic/{}", self.model)`
+     - `list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>`:
+       GET `{API_ROOT}/models`
+       Headers: `x-api-key: self.api_key`, `anthropic-version: ANTHROPIC_VERSION`.
+3. **Write Unit Tests in `crates/superstate-provider/tests/test_anthropic_wire.rs`**:
+   - Test request body formatting (text messages, system prompt, tool definitions, tool_use, tool_result).
+   - Test response body parsing (text extraction, tool_use blocks, token usage, stop reason).
+   - Test model list parsing.
+4. **Verification**:
+   - Run `cargo test -p superstate-provider --test test_anthropic_wire`.
+   - Run `cargo check --workspace --all-targets`.
+   - Run `cargo clippy -p superstate-provider --all-targets -- -D warnings`.
+5. **Commit**:
+   - `git add crates/superstate-provider/src/lib.rs crates/superstate-provider/src/anthropic.rs crates/superstate-provider/tests/test_anthropic_wire.rs`
+   - `git commit --no-gpg-sign -m "feat(provider): implement Anthropic Claude provider adapter and model discovery"`
+6. **Roborev**:
+   - Run `roborev status; roborev show HEAD`.
+7. **Report**:
+   - Write report to `docs/superpowers/plans/task-2-report.md`.
