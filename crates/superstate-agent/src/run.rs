@@ -451,9 +451,10 @@ impl<'a> Runner<'a> {
 }
 
 /// Helper to determine if an action target matches a normalized file path.
-/// Handles raw paths, leading `./`, and line range annotations like `lru.py (L1-L20)`.
+/// Handles raw paths, leading `./`, line range annotations like `lru.py (L1-L20)`,
+/// and byte count annotations like `lru.py (26 bytes)`.
 pub fn target_matches_path(target: &str, path: &str) -> bool {
-    let raw = target.split(" (L").next().unwrap_or(target).trim();
+    let raw = target.split(" (").next().unwrap_or(target).trim();
     normalize_path(raw) == path || target == path
 }
 
@@ -467,7 +468,7 @@ pub fn target_matches_path(target: &str, path: &str) -> bool {
 /// 1. Tool is `read`, and
 /// 2. Target path is already cached in `working_set.files`, and
 /// 3. The requested line range is fully covered by the cached snippet, and
-/// 4. EITHER the immediately preceding action was also an un-intercepted `read` on this path,
+/// 4. EITHER the immediately preceding action was also a `read` on this path,
 ///    OR the agent has read this path 2+ times in the last 4 actions without an intervening `edit` or `write` on this file.
 pub fn should_intercept_redundant_read(
     call: &ToolCall,
@@ -495,8 +496,10 @@ pub fn should_intercept_redundant_read(
 
     // Check if the requested range is already fully covered by the cached snippet
     let is_covered = match (cached_file.start_line, cached_file.end_line, req_start, req_end) {
-        // Whole file was read and cached without line constraints
-        (None, None, _, _) => true,
+        // Full file cached and request wants full file
+        (None, None, None, None) => true,
+        // Full file cached without bounds: slice is covered only if file was not distilled/truncated
+        (None, None, _, _) => !cached_file.content.contains("lines omitted"),
         // Both cached snippet and request have bounds
         (Some(c_s), Some(c_e), Some(r_s), Some(r_e)) => r_s >= c_s && r_e <= c_e,
         (Some(c_s), None, Some(r_s), Some(_)) => r_s >= c_s,
@@ -510,14 +513,10 @@ pub fn should_intercept_redundant_read(
         return None;
     }
 
-    // Check if the immediately preceding tool call was also an un-intercepted read on this path
+    // Check if the immediately preceding tool call was also a read on this path
     let last_was_same_read = actions
         .last()
-        .map(|a| {
-            a.tool == "read"
-                && target_matches_path(&a.target, path)
-                && !a.summary.starts_with("intercepted")
-        })
+        .map(|a| a.tool == "read" && target_matches_path(&a.target, path))
         .unwrap_or(false);
 
     // Or read this path 2+ times in the last 4 actions without an intervening edit or write to this file

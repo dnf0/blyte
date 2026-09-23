@@ -1184,16 +1184,24 @@ fn test_loop_breaker_allows_paged_line_range_reads() {
 #[test]
 fn test_loop_breaker_resets_on_write() {
     // Verifies that a write to the target file resets the loop breaker,
-    // allowing the agent to read the newly written content.
+    // allowing the agent to read the newly written content even after 2 prior reads.
     let d = repo();
     std::fs::write(d.path().join("lru.py"), "def cache(): return 1\n").unwrap();
+    std::fs::write(d.path().join("other.py"), "def other(): return 2\n").unwrap();
 
     let p = ScriptedProvider::new(vec![
+        // Turn 1: Read lru.py
         calls("read", json!({"path": "lru.py"})),
+        // Turn 2: Read other.py
+        calls("read", json!({"path": "other.py"})),
+        // Turn 3: Read lru.py (2nd time in last 4 actions)
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 4: Write to lru.py (target includes byte count annotation, e.g. "lru.py (26 bytes)")
         calls(
             "write",
             json!({"path": "lru.py", "content": "def cache(): return 99\n"}),
         ),
+        // Turn 5: Read lru.py after write (must not be intercepted!)
         calls("read", json!({"path": "lru.py"})),
         says("done"),
     ]);
@@ -1204,13 +1212,88 @@ fn test_loop_breaker_resets_on_write() {
 
     let seen = p.seen.lock().unwrap();
     let Message::ToolResult {
+        content: content5, ..
+    } = &seen[5].messages[10]
+    else {
+        panic!("expected ToolResult at index 10");
+    };
+    assert!(!content5.contains("[Harness Working Memory Guard]"));
+    assert!(content5.contains("return 99"));
+}
+
+#[test]
+fn test_loop_breaker_remains_intercepted_on_consecutive_attempts() {
+    // Verifies that consecutive read attempts on the same cached path remain
+    // intercepted, rather than alternating back to disk execution.
+    let d = repo();
+    std::fs::write(d.path().join("lru.py"), "def cache(): return 1\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "lru.py"})),
+        calls("read", json!({"path": "lru.py"})),
+        calls("read", json!({"path": "lru.py"})),
+        says("done"),
+    ]);
+    let mut st = State::new("consecutive intercepted reads", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    let seen = p.seen.lock().unwrap();
+    let Message::ToolResult {
+        content: content2, ..
+    } = &seen[2].messages[4]
+    else {
+        panic!("expected ToolResult at index 4");
+    };
+    let Message::ToolResult {
         content: content3, ..
     } = &seen[3].messages[6]
     else {
         panic!("expected ToolResult at index 6");
     };
-    assert!(!content3.contains("[Harness Working Memory Guard]"));
-    assert!(content3.contains("return 99"));
+    assert!(content2.contains("[Harness Working Memory Guard]"));
+    assert!(content3.contains("[Harness Working Memory Guard]"));
+}
+
+#[test]
+fn test_loop_breaker_allows_slice_read_on_distilled_file() {
+    // Verifies that requesting a slice from a large file whose middle lines were omitted
+    // during working set distillation is NOT intercepted.
+    let d = repo();
+    let content = (1..=200)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(d.path().join("distilled.py"), &content).unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Read full file (distilled to first 50 and last 50 lines)
+        calls("read", json!({"path": "distilled.py"})),
+        // Turn 2: Read omitted middle slice (lines 80-120) - must NOT be intercepted!
+        calls(
+            "read",
+            json!({"path": "distilled.py", "start_line": 80, "end_line": 120}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("distilled file slice", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    let Message::ToolResult {
+        content: content2,
+        is_error: err2,
+        ..
+    } = &seen[2].messages[4]
+    else {
+        panic!("expected ToolResult at index 4");
+    };
+    assert!(!err2);
+    assert!(!content2.contains("[Harness Working Memory Guard]"));
+    assert!(content2.contains("line 80"));
+    assert!(content2.contains("line 120"));
 }
 
 #[test]
