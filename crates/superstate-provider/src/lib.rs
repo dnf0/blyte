@@ -116,9 +116,26 @@ pub struct Usage {
     pub thinking: u64,
 }
 
+/// Metadata describing a model supported by a provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelInfo {
+    /// Identifier passed to the provider or config (e.g. `gemini-3.8-flash`).
+    pub id: String,
+    /// Human-friendly display name (e.g. `Gemini 3.8 Flash`).
+    pub display_name: String,
+    /// Optional description of the model's capabilities or purpose.
+    pub description: Option<String>,
+    /// Provider identifier (e.g. `gemini`).
+    pub provider: String,
+}
+
 pub trait Provider {
     /// One blocking model call.
     fn complete(&self, req: &Request) -> Result<Response, ProviderError>;
-    /// Identifier recorded in telemetry, e.g. `gemini/gemini-2.5-flash`.
+    /// Identifier recorded in telemetry, e.g. `gemini/gemini-3.8-flash`.
     fn model_id(&self) -> String;
+    /// Lists available models supported by this provider for the configured credentials.
+    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(Vec::new())
+    }
 }

@@ -6,9 +6,9 @@
 
 use serde_json::{json, Value};
 
-use crate::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
 
-const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 
 /// Deadlines on the HTTP call itself.
 ///
@@ -173,6 +173,68 @@ impl Gemini {
         }
         Ok(out)
     }
+
+    /// Parse a models list response body from Google GenAI `models.list`.
+    ///
+    /// # Parameters
+    /// - `v`: The parsed JSON response object from the models endpoint.
+    ///
+    /// # Returns
+    /// A vector of [`ModelInfo`] describing models that support `generateContent`.
+    ///
+    /// # Errors
+    /// Returns [`ProviderError::Parse`] if the payload cannot be processed.
+    pub fn parse_models_list(v: &Value) -> Result<Vec<ModelInfo>, ProviderError> {
+        let mut out = Vec::new();
+        // The models endpoint returns an array under the "models" key.
+        if let Some(models) = v.get("models").and_then(|m| m.as_array()) {
+            for m in models {
+                // Models advertise supported operations; filter out models without content generation (e.g. embedContent only).
+                let supports_generation = m
+                    .get("supportedGenerationMethods")
+                    .and_then(|g| g.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .any(|method| method.as_str() == Some("generateContent"))
+                    })
+                    .unwrap_or(false);
+
+                if !supports_generation {
+                    continue;
+                }
+
+                // Google prefixes model resource names with "models/"; strip it to yield the canonical model identifier.
+                let raw_name = m.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                let id = raw_name
+                    .strip_prefix("models/")
+                    .unwrap_or(raw_name)
+                    .to_string();
+                if id.is_empty() {
+                    continue;
+                }
+
+                // Use the human-readable displayName if provided; fallback to the model identifier.
+                let display_name = m
+                    .get("displayName")
+                    .and_then(|d| d.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| id.clone());
+
+                let description = m
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(String::from);
+
+                out.push(ModelInfo {
+                    id,
+                    display_name,
+                    description,
+                    provider: "gemini".to_string(),
+                });
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl Provider for Gemini {
@@ -205,5 +267,31 @@ impl Provider for Gemini {
 
     fn model_id(&self) -> String {
         format!("gemini/{}", self.model)
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        let url = API_ROOT;
+        // Build an agent with bounded connection and read timeouts.
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
+            .build();
+        // Query Google GenAI models list endpoint using AI Studio API key header.
+        let resp = agent.get(url).set("x-goog-api-key", &self.api_key).call();
+
+        match resp {
+            Ok(r) => {
+                // Parse JSON payload and delegate model filtering/extraction.
+                let v: Value = r
+                    .into_json()
+                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
+                Self::parse_models_list(&v)
+            }
+            Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
+                status,
+                body: r.into_string().unwrap_or_default(),
+            }),
+            Err(e) => Err(ProviderError::Transport(e.to_string())),
+        }
     }
 }
