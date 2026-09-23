@@ -700,4 +700,108 @@ fn test_working_set_normalizes_leading_dot_slash() {
     assert!(st.runtime.working_set.files[0].content.contains("99"));
 }
 
+#[test]
+fn test_working_set_multiline_edit_at_eof_with_trailing_newline() {
+    // Multi-line edit at EOF with trailing newline matches preserved raw file snippet content.
+    let d = repo();
+    std::fs::write(
+        d.path().join("eof.py"),
+        "def main():\n    print('hello')\n",
+    )
+    .unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "eof.py"})),
+        calls(
+            "edit",
+            json!({
+                "path": "eof.py",
+                "old": "    print('hello')\n",
+                "new": "    print('goodbye')\n"
+            }),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("eof edit", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    assert_eq!(st.runtime.working_set.files.len(), 1);
+    assert_eq!(
+        st.runtime.working_set.files[0].content,
+        "def main():\n    print('goodbye')\n"
+    );
+}
+
+#[test]
+fn test_package_manager_and_flagged_test_commands() {
+    // Verifies that:
+    // 1. `npm run build` does NOT clear or record test failures
+    // 2. `cargo -q test` (flags before subcommand) IS detected as a test command
+    // 3. Benign commands containing 'true' (e.g. `rm -rf tmp || true`) do NOT clear failures
+    //    even when verification_cmd is "true".
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        // Command with 'true' substring should not clear failure when verification_cmd is "true"
+        calls("bash", json!({"command": "rm -rf nonexistent_dir || true"})),
+        // npm run build is not a test runner
+        calls("bash", json!({"command": "echo 'build ok' && exit 0"})),
+        // cargo with flag before test subcommand is a test runner and clears failure
+        calls("bash", json!({"command": "cargo -q test --help"})),
+        says("done"),
+    ]);
+    let mut st = State::new("pkg manager test", "true");
+    st.runtime
+        .working_set
+        .record_failure("initial compiler test failure");
+
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    assert!(
+        st.runtime.working_set.last_failure.is_none(),
+        "cargo -q test --help must clear test failure"
+    );
+}
+
+#[test]
+fn test_is_test_command_unit() {
+    use superstate_agent::run::is_test_command;
+
+    // Direct runners
+    assert!(is_test_command("pytest", "true"));
+    assert!(is_test_command("pytest tests/test_foo.py", "true"));
+    assert!(is_test_command("./venv/bin/pytest", "true"));
+    assert!(is_test_command("jest", "true"));
+    assert!(is_test_command("vitest", "true"));
+
+    // Subcommands with flags
+    assert!(is_test_command("cargo test", "true"));
+    assert!(is_test_command("cargo -q test", "true"));
+    assert!(is_test_command("cargo +nightly test --all", "true"));
+    assert!(is_test_command("go test ./...", "true"));
+    assert!(is_test_command("npm test", "true"));
+    assert!(is_test_command("npm run test", "true"));
+    assert!(is_test_command("yarn run --silent test", "true"));
+    assert!(is_test_command("python -m unittest", "true"));
+    assert!(is_test_command("python3 -m pytest", "true"));
+    assert!(is_test_command("make -C build test", "true"));
+
+    // Exact verification command match
+    assert!(is_test_command("cargo check", "cargo check"));
+    assert!(is_test_command("echo step && cargo check", "cargo check"));
+
+    // Benign commands that must NOT be treated as test commands
+    assert!(!is_test_command("npm run build", "true"));
+    assert!(!is_test_command("npm run lint", "true"));
+    assert!(!is_test_command("yarn start", "true"));
+    assert!(!is_test_command("ls tests/", "true"));
+    assert!(!is_test_command("cat tests/foo.py", "true"));
+    assert!(!is_test_command("git checkout test-branch", "true"));
+    assert!(!is_test_command("grep 'test' marker", "true"));
+    assert!(!is_test_command("rm -rf tmp || true", "true"));
+    assert!(!is_test_command("echo '{\"valid\": true}'", "true"));
+}
+
+
 

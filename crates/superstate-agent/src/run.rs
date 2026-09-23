@@ -659,38 +659,58 @@ pub fn normalize_path(path: &str) -> &str {
 ///
 /// Ensures the raw file snippet content is stored in memory so that subsequent
 /// `apply_edit` string replacements match accurately across single-line and
-/// multi-line blocks.
+/// multi-line blocks, preserving trailing newlines if present.
 pub fn strip_line_number_prefixes(content: &str) -> String {
-    content
+    let mut res = content
         .lines()
         .map(|line| {
             if let Some((num, rest)) = line.split_once('\t') {
-                if num.trim().chars().all(|c| c.is_ascii_digit()) {
+                let num_trimmed = num.trim();
+                // Ensure num is non-empty digits so lines beginning with tabs are not stripped
+                if !num_trimmed.is_empty() && num_trimmed.chars().all(|c| c.is_ascii_digit()) {
                     return rest;
                 }
             }
             line
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+
+    // Preserve trailing newline to match write and support edits at EOF
+    if !res.is_empty() && !res.ends_with('\n') {
+        res.push('\n');
+    }
+    res
 }
 
 /// Determines if a shell command represents a test execution.
 ///
 /// Distinguishes test runners (`cargo test`, `pytest`, `jest`, etc.) and the
 /// orchestrator verification command from benign filesystem or VCS operations
-/// (e.g. `cat tests/foo`, `ls tests/`, `git checkout test-branch`, `grep "test"`).
+/// (e.g. `cat tests/foo`, `ls tests/`, `git checkout test-branch`, `grep "test"`,
+/// `npm run build`, `rm -rf tmp || true`).
 pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
     let trimmed = cmd.trim();
-    if !verification_cmd.is_empty()
-        && (trimmed == verification_cmd.trim() || trimmed.contains(verification_cmd))
-    {
-        return true;
-    }
+    let trimmed_verif = verification_cmd.trim();
 
     // Split compound commands / pipelines into subcommands
     for part in trimmed.split(&[';', '&', '|'][..]) {
-        let tokens: Vec<&str> = part.split_whitespace().collect();
+        let part_trimmed = part.trim();
+        if part_trimmed.is_empty() {
+            continue;
+        }
+
+        // Exact match against orchestrator verification command for each subcommand
+        // (ignoring trivial shell dummies like "true" or "false" which are defaults in test fixtures)
+        if !trimmed_verif.is_empty()
+            && trimmed_verif != "true"
+            && trimmed_verif != "false"
+            && part_trimmed == trimmed_verif
+        {
+            return true;
+        }
+
+        let tokens: Vec<&str> = part_trimmed.split_whitespace().collect();
         if tokens.is_empty() {
             continue;
         }
@@ -704,22 +724,46 @@ pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
             continue;
         }
 
+        // Helper to find the first non-flag argument after a given token index
+        let find_sub = |start_idx: usize| -> Option<(usize, &str)> {
+            let mut i = start_idx;
+            while i < tokens.len() && (tokens[i].starts_with('-') || tokens[i].starts_with('+')) {
+                i += 1;
+            }
+            tokens.get(i).copied().map(|s| (i, s))
+        };
+
         // Extract the executable name without directory path (e.g. `./venv/bin/pytest` -> `pytest`)
         let exe = tokens[idx].rsplit('/').next().unwrap_or(tokens[idx]);
         match exe {
             "pytest" | "jest" | "vitest" | "rspec" | "ctest" | "nosetests" | "tox" => return true,
-            "cargo" if tokens.get(idx + 1).is_some_and(|&sub| sub == "test" || sub == "t") => {
-                return true;
+            "cargo" => {
+                if let Some((_, sub)) = find_sub(idx + 1) {
+                    if sub == "test" || sub == "t" {
+                        return true;
+                    }
+                }
             }
-            "go" if tokens.get(idx + 1).is_some_and(|&sub| sub == "test") => {
-                return true;
+            "go" => {
+                if let Some((_, sub)) = find_sub(idx + 1) {
+                    if sub == "test" {
+                        return true;
+                    }
+                }
             }
-            "npm" | "yarn" | "pnpm" | "bun"
-                if tokens
-                    .get(idx + 1)
-                    .is_some_and(|&sub| sub == "test" || sub == "t" || sub == "run") =>
-            {
-                return true;
+            "npm" | "yarn" | "pnpm" | "bun" => {
+                if let Some((sub_idx, sub)) = find_sub(idx + 1) {
+                    if sub == "test" || sub == "t" {
+                        return true;
+                    }
+                    if sub == "run" {
+                        if let Some((_, run_sub)) = find_sub(sub_idx + 1) {
+                            if run_sub == "test" || run_sub == "t" {
+                                return true;
+                            }
+                        }
+                    }
+                }
             }
             "python" | "python3" => {
                 for w in &tokens[idx + 1..] {
@@ -728,11 +772,7 @@ pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
                     }
                 }
             }
-            "make"
-                if tokens
-                    .get(idx + 1)
-                    .is_some_and(|&sub| sub == "test" || sub == "check") =>
-            {
+            "make" if tokens[idx + 1..].iter().any(|&t| t == "test" || t == "check") => {
                 return true;
             }
             _ => {}
