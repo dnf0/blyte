@@ -141,3 +141,80 @@ impl ContextStrategy for StateOnly {
         "state-only"
     }
 }
+
+/// `state-only` plus the last few tool results.
+///
+/// `StateOnly` sends only the latest tool call and result, on the theory that anything worth
+/// keeping belongs in state. In practice the worker rarely writes state, so every search result
+/// lived for one turn and was run again: the same grep 14 times on build-cython-ext, six files
+/// re-read 101 times on scc (superstate-eval FINDINGS 13.33). This keeps recent results in view
+/// and stays bounded in session length: at most `1 + 2 * results + 1` messages.
+#[derive(Debug, Clone)]
+pub struct StateWindow {
+    /// How many of the most recent tool call/result pairs to carry.
+    pub results: usize,
+    /// Each carried result is cut to this many lines with `tools::distil`.
+    pub lines_per_result: usize,
+}
+
+impl Default for StateWindow {
+    fn default() -> Self {
+        Self {
+            results: 8,
+            lines_per_result: 60,
+        }
+    }
+}
+
+impl ContextStrategy for StateWindow {
+    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
+        // The state prompt, exactly as `state-only` builds it with nothing carried.
+        let mut out = StateOnly.build(state, &[]);
+
+        // Walk back collecting call/result pairs. The call is carried with its result because
+        // providers reject a functionResponse with no matching functionCall.
+        let mut pairs: Vec<(Message, Message)> = Vec::new();
+        for i in (1..history.len()).rev() {
+            if pairs.len() == self.results {
+                break;
+            }
+            if let (
+                Message::ToolCall { .. },
+                Message::ToolResult {
+                    id,
+                    name,
+                    content,
+                    is_error,
+                },
+            ) = (&history[i - 1], &history[i])
+            {
+                pairs.push((
+                    history[i - 1].clone(),
+                    Message::ToolResult {
+                        id: id.clone(),
+                        name: name.clone(),
+                        content: crate::tools::distil(content, self.lines_per_result),
+                        is_error: *is_error,
+                    },
+                ));
+            }
+        }
+        for (call, result) in pairs.into_iter().rev() {
+            out.push(call);
+            out.push(result);
+        }
+
+        // Whatever came after the last result (gate feedback, or the opening message on the
+        // first turn) is the newest thing the worker must see.
+        if let Some(last) = history.last() {
+            if !matches!(last, Message::ToolResult { .. }) {
+                out.push(last.clone());
+            }
+        }
+        out
+    }
+
+    fn name(&self) -> &'static str {
+        "state-window"
+    }
+}

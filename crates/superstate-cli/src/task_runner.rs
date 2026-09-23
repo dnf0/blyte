@@ -177,12 +177,13 @@ pub fn run_task_with_state_and_writer<W: Write>(
     // "state-only" discards prior conversational turns and keeps only structured state O(1),
     // whereas "conversational" accumulates full turn history.
     let state_only = superstate_agent::context::StateOnly;
+    let state_window = superstate_agent::context::StateWindow::default();
     let conversational = superstate_agent::context::Conversational;
     let context_strategy: &dyn superstate_agent::context::ContextStrategy =
-        if config.context_strategy == "state-only" {
-            &state_only
-        } else {
-            &conversational
+        match config.context_strategy.as_str() {
+            "state-only" => &state_only,
+            "state-window" => &state_window,
+            _ => &conversational,
         };
 
     // 3. Select execution shell and filesystem target.
