@@ -323,22 +323,6 @@ impl<'a> Runner<'a> {
                                     end,
                                     turn,
                                 );
-                            } else if !outcome.is_error {
-                                let raw_path = call
-                                    .arguments
-                                    .get("path")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let path = normalize_path(raw_path);
-                                if let Some(file) = state
-                                    .runtime
-                                    .working_set
-                                    .files
-                                    .iter_mut()
-                                    .find(|f| f.path == path)
-                                {
-                                    file.last_accessed_turn = turn;
-                                }
                             }
                         }
                         "edit" => {
@@ -482,8 +466,9 @@ pub fn target_matches_path(target: &str, path: &str) -> bool {
 /// Interception triggers if:
 /// 1. Tool is `read`, and
 /// 2. Target path is already cached in `working_set.files`, and
-/// 3. EITHER the immediately preceding action was also a `read` on this path,
-///    OR the agent has read this path 2+ times in the last 4 actions without an intervening `edit`.
+/// 3. The requested line range is fully covered by the cached snippet, and
+/// 4. EITHER the immediately preceding action was also an un-intercepted `read` on this path,
+///    OR the agent has read this path 2+ times in the last 4 actions without an intervening `edit` or `write` on this file.
 pub fn should_intercept_redundant_read(
     call: &ToolCall,
     working_set: &crate::working_set::WorkingSet,
@@ -494,24 +479,61 @@ pub fn should_intercept_redundant_read(
     }
     let raw_path = call.arguments.get("path").and_then(|v| v.as_str())?;
     let path = normalize_path(raw_path);
-    let is_cached = working_set.files.iter().any(|f| f.path == path);
-    if !is_cached {
+    let cached_file = working_set.files.iter().find(|f| f.path == path)?;
+
+    // Parse requested line range
+    let req_start = call.arguments.get("start_line").and_then(|v| {
+        v.as_u64()
+            .map(|n| n as usize)
+            .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
+    });
+    let req_end = call.arguments.get("end_line").and_then(|v| {
+        v.as_u64()
+            .map(|n| n as usize)
+            .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
+    });
+
+    // Check if the requested range is already fully covered by the cached snippet
+    let is_covered = match (cached_file.start_line, cached_file.end_line, req_start, req_end) {
+        // Whole file was read and cached without line constraints
+        (None, None, _, _) => true,
+        // Both cached snippet and request have bounds
+        (Some(c_s), Some(c_e), Some(r_s), Some(r_e)) => r_s >= c_s && r_e <= c_e,
+        (Some(c_s), None, Some(r_s), Some(_)) => r_s >= c_s,
+        (None, Some(c_e), Some(_), Some(r_e)) => r_e <= c_e,
+        (Some(c_s), None, Some(r_s), None) => r_s >= c_s,
+        (None, Some(c_e), None, Some(r_e)) => r_e <= c_e,
+        // Request wants whole file (None, None) or extends outside cached bounds
+        _ => false,
+    };
+    if !is_covered {
         return None;
     }
 
-    // Check if the immediately preceding tool call was also read on this path
+    // Check if the immediately preceding tool call was also an un-intercepted read on this path
     let last_was_same_read = actions
         .last()
-        .map(|a| a.tool == "read" && target_matches_path(&a.target, path))
+        .map(|a| {
+            a.tool == "read"
+                && target_matches_path(&a.target, path)
+                && !a.summary.starts_with("intercepted")
+        })
         .unwrap_or(false);
 
-    // Or read this path 2+ times in the last 4 actions without an intervening edit
+    // Or read this path 2+ times in the last 4 actions without an intervening edit or write to this file
+    let file_modified_since = |a: &ActionEntry| {
+        (a.tool == "edit" || a.tool == "write") && target_matches_path(&a.target, path)
+    };
     let recent_same_reads = actions
         .iter()
         .rev()
         .take(4)
-        .take_while(|a| a.tool != "edit")
-        .filter(|a| a.tool == "read" && target_matches_path(&a.target, path))
+        .take_while(|a| !file_modified_since(a))
+        .filter(|a| {
+            a.tool == "read"
+                && target_matches_path(&a.target, path)
+                && !a.summary.starts_with("intercepted")
+        })
         .count();
 
     if last_was_same_read || recent_same_reads >= 2 {

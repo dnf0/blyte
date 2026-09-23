@@ -1134,3 +1134,160 @@ fn test_loop_breaker_intercepts_oscillating_reads() {
     ));
 }
 
+#[test]
+fn test_loop_breaker_allows_paged_line_range_reads() {
+    // Verifies that consecutive reads on different line slices of the same file
+    // (such as paging through a file) are NOT intercepted.
+    let d = repo();
+    let content = (1..=20)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(d.path().join("large.py"), &content).unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Read lines 1-5
+        calls(
+            "read",
+            json!({"path": "large.py", "start_line": 1, "end_line": 5}),
+        ),
+        // Turn 2: Read lines 6-10 (different slice - should NOT be intercepted)
+        calls(
+            "read",
+            json!({"path": "large.py", "start_line": 6, "end_line": 10}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("paged read test", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+
+    // Turn 2 tool result must be the actual lines 6-10, NOT the guard message
+    let Message::ToolResult {
+        content: content2,
+        is_error: err2,
+        ..
+    } = &seen[2].messages[4]
+    else {
+        panic!("expected ToolResult at index 4");
+    };
+    assert!(!err2);
+    assert!(!content2.contains("[Harness Working Memory Guard]"));
+    assert!(content2.contains("line 6"));
+    assert!(content2.contains("line 10"));
+}
+
+#[test]
+fn test_loop_breaker_resets_on_write() {
+    // Verifies that a write to the target file resets the loop breaker,
+    // allowing the agent to read the newly written content.
+    let d = repo();
+    std::fs::write(d.path().join("lru.py"), "def cache(): return 1\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        calls("read", json!({"path": "lru.py"})),
+        calls(
+            "write",
+            json!({"path": "lru.py", "content": "def cache(): return 99\n"}),
+        ),
+        calls("read", json!({"path": "lru.py"})),
+        says("done"),
+    ]);
+    let mut st = State::new("write resets read guard", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    let Message::ToolResult {
+        content: content3, ..
+    } = &seen[3].messages[6]
+    else {
+        panic!("expected ToolResult at index 6");
+    };
+    assert!(!content3.contains("[Harness Working Memory Guard]"));
+    assert!(content3.contains("return 99"));
+}
+
+#[test]
+fn test_loop_breaker_does_not_count_intercepted_reads_as_actions() {
+    // Verifies that intercepted reads do not inflate the consecutive read counter,
+    // preventing an un-recoverable loop when following the guard's prompt to use note.
+    let d = repo();
+    std::fs::write(d.path().join("lru.py"), "def cache(): return 1\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Read file
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 2: Redundant read -> intercepted
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 3: Follow advice, update plan with note
+        calls("note", json!({"patch": {"plan": "proceed to edit"}})),
+        // Turn 4: Edit file
+        calls(
+            "edit",
+            json!({"path": "lru.py", "old": "return 1", "new": "return 2"}),
+        ),
+        // Turn 5: Read file after edit -> should NOT be blocked
+        calls("read", json!({"path": "lru.py"})),
+        says("done"),
+    ]);
+    let mut st = State::new("intercepted read recovery", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    let Message::ToolResult {
+        content: content5, ..
+    } = &seen[5].messages[10]
+    else {
+        panic!("expected ToolResult at index 10");
+    };
+    assert!(!content5.contains("[Harness Working Memory Guard]"));
+    assert!(content5.contains("return 2"));
+}
+
+#[test]
+fn test_loop_breaker_does_not_reset_on_unrelated_file_edit() {
+    // Verifies that an edit to an UNRELATED file (e.g. other.py) does not reset
+    // the loop breaker on lru.py.
+    let d = repo();
+    std::fs::write(d.path().join("lru.py"), "def cache(): return 1\n").unwrap();
+    std::fs::write(d.path().join("other.py"), "def helper(): return 2\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Read lru.py
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 2: Edit other.py
+        calls(
+            "edit",
+            json!({"path": "other.py", "old": "return 2", "new": "return 3"}),
+        ),
+        // Turn 3: Read lru.py again
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 4: Read lru.py 3rd time (2nd read in last 4 actions without editing lru.py) -> intercepted!
+        calls("read", json!({"path": "lru.py"})),
+        says("done"),
+    ]);
+    let mut st = State::new("unrelated edit guard", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    let seen = p.seen.lock().unwrap();
+    let Message::ToolResult {
+        content: content4, ..
+    } = &seen[4].messages[8]
+    else {
+        panic!("expected ToolResult at index 8");
+    };
+    assert!(content4.contains(
+        "[Harness Working Memory Guard]: `lru.py` is already loaded in your Active Working Set above"
+    ));
+}
+
+
