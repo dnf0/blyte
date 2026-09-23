@@ -1373,4 +1373,90 @@ fn test_loop_breaker_does_not_reset_on_unrelated_file_edit() {
     ));
 }
 
+#[test]
+fn test_loop_breaker_supports_paths_with_parentheses() {
+    // Verifies that paths containing parentheses (e.g. data (copy).json) are correctly
+    // matched by target_matches_path even when write annotations (e.g. (26 bytes)) are attached.
+    let d = repo();
+    let filename = "data (copy).json";
+    std::fs::write(d.path().join(filename), "{\"a\": 1}\n").unwrap();
+    std::fs::write(d.path().join("other.py"), "def other(): return 2\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Read file
+        calls("read", json!({"path": filename})),
+        // Turn 2: Read other.py
+        calls("read", json!({"path": "other.py"})),
+        // Turn 3: Read file 2nd time
+        calls("read", json!({"path": filename})),
+        // Turn 4: Write to file (target will be formatted as "data (copy).json (13 bytes)")
+        calls(
+            "write",
+            json!({"path": filename, "content": "{\"a\": 99}\n"}),
+        ),
+        // Turn 5: Read file after write (must not be intercepted!)
+        calls("read", json!({"path": filename})),
+        says("done"),
+    ]);
+    let mut st = State::new("parentheses in path test", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    let Message::ToolResult {
+        content: content5, ..
+    } = &seen[5].messages[10]
+    else {
+        panic!("expected ToolResult at index 10");
+    };
+    assert!(!content5.contains("[Harness Working Memory Guard]"));
+    assert!(content5.contains("99"));
+}
+
+#[test]
+fn test_loop_breaker_allows_subslice_on_distilled_bounded_snippet() {
+    // Verifies that when a bounded read (lines 1-300) exceeds MAX_FILE_LINES and gets distilled
+    // with middle lines omitted, requesting a sub-slice within the omitted section is NOT intercepted.
+    let d = repo();
+    let content = (1..=400)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(d.path().join("huge.py"), &content).unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Read large slice 1-300 (distilled by WorkingSet::add_or_update)
+        calls(
+            "read",
+            json!({"path": "huge.py", "start_line": 1, "end_line": 300}),
+        ),
+        // Turn 2: Read sub-slice lines 100-150 in the omitted portion - must NOT be intercepted!
+        calls(
+            "read",
+            json!({"path": "huge.py", "start_line": 100, "end_line": 150}),
+        ),
+        says("done"),
+    ]);
+    let mut st = State::new("bounded distilled subslice test", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    let Message::ToolResult {
+        content: content2,
+        is_error: err2,
+        ..
+    } = &seen[2].messages[4]
+    else {
+        panic!("expected ToolResult at index 4");
+    };
+    assert!(!err2);
+    assert!(!content2.contains("[Harness Working Memory Guard]"));
+    assert!(content2.contains("line 100"));
+    assert!(content2.contains("line 150"));
+}
+
+
 

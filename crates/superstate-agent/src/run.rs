@@ -452,9 +452,18 @@ impl<'a> Runner<'a> {
 
 /// Helper to determine if an action target matches a normalized file path.
 /// Handles raw paths, leading `./`, line range annotations like `lru.py (L1-L20)`,
-/// and byte count annotations like `lru.py (26 bytes)`.
+/// and byte count annotations like `lru.py (26 bytes)`, even when paths contain parentheses.
 pub fn target_matches_path(target: &str, path: &str) -> bool {
-    let raw = target.split(" (").next().unwrap_or(target).trim();
+    let mut raw = target;
+    if target.ends_with(')') {
+        if let Some(idx) = target.rfind(" (L") {
+            raw = &target[..idx];
+        } else if target.ends_with(" bytes)") {
+            if let Some(idx) = target.rfind(" (") {
+                raw = &target[..idx];
+            }
+        }
+    }
     normalize_path(raw) == path || target == path
 }
 
@@ -494,20 +503,24 @@ pub fn should_intercept_redundant_read(
             .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
     });
 
-    // Check if the requested range is already fully covered by the cached snippet
-    let is_covered = match (cached_file.start_line, cached_file.end_line, req_start, req_end) {
-        // Full file cached and request wants full file
-        (None, None, None, None) => true,
-        // Full file cached without bounds: slice is covered only if file was not distilled/truncated
-        (None, None, _, _) => !cached_file.content.contains("lines omitted"),
-        // Both cached snippet and request have bounds
-        (Some(c_s), Some(c_e), Some(r_s), Some(r_e)) => r_s >= c_s && r_e <= c_e,
-        (Some(c_s), None, Some(r_s), Some(_)) => r_s >= c_s,
-        (None, Some(c_e), Some(_), Some(r_e)) => r_e <= c_e,
-        (Some(c_s), None, Some(r_s), None) => r_s >= c_s,
-        (None, Some(c_e), None, Some(r_e)) => r_e <= c_e,
-        // Request wants whole file (None, None) or extends outside cached bounds
-        _ => false,
+    // Check if the requested range is already fully covered by the cached snippet.
+    // If the cached content was distilled with middle lines omitted, only an identical
+    // request is guaranteed to be redundant; sub-slices might target omitted lines.
+    let has_omitted = cached_file.content.contains("lines omitted");
+    let is_covered = if has_omitted {
+        (req_start, req_end) == (cached_file.start_line, cached_file.end_line)
+    } else {
+        match (cached_file.start_line, cached_file.end_line, req_start, req_end) {
+            // Full file cached without bounds: any slice or full file is covered
+            (None, None, _, _) => true,
+            // Both cached snippet and request have bounds
+            (Some(c_s), Some(c_e), Some(r_s), Some(r_e)) => r_s >= c_s && r_e <= c_e,
+            (Some(c_s), None, Some(r_s), Some(_)) => r_s >= c_s,
+            (None, Some(c_e), Some(_), Some(r_e)) => r_e <= c_e,
+            (Some(c_s), None, Some(r_s), None) => r_s >= c_s,
+            (None, Some(c_e), None, Some(r_e)) => r_e <= c_e,
+            _ => false,
+        }
     };
     if !is_covered {
         return None;
