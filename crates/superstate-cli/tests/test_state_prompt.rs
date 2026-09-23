@@ -124,11 +124,7 @@ fn superstate_exposes_state_commands() {
             .args(["state", cmd, "--help"])
             .output()
             .unwrap();
-        assert!(
-            out.status.success(),
-            "`superstate state {}` missing",
-            cmd
-        );
+        assert!(out.status.success(), "`superstate state {}` missing", cmd);
     }
 }
 

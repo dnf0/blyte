@@ -13,21 +13,16 @@ fn test_read_target_and_summary() {
     );
     assert_eq!(target_with_lines, "src/main.rs (L10-L25)");
 
-    let target_with_start_only = extract_action_target(
-        "read",
-        &json!({"path": "src/main.rs", "start_line": 10}),
-    );
+    let target_with_start_only =
+        extract_action_target("read", &json!({"path": "src/main.rs", "start_line": 10}));
     assert_eq!(target_with_start_only, "src/main.rs (L10+)");
 
-    let target_with_end_only = extract_action_target(
-        "read",
-        &json!({"path": "src/main.rs", "end_line": 25}),
-    );
+    let target_with_end_only =
+        extract_action_target("read", &json!({"path": "src/main.rs", "end_line": 25}));
     assert_eq!(target_with_end_only, "src/main.rs (L1-L25)");
 
     // read summary: line count on success, failed message on error
-    let summary_lines =
-        extract_action_summary("read", "line 1\nline 2\nline 3\n", false);
+    let summary_lines = extract_action_summary("read", "line 1\nline 2\nline 3\n", false);
     assert_eq!(summary_lines, "3 lines read");
 
     let summary_empty = extract_action_summary("read", "", false);
@@ -49,8 +44,7 @@ fn test_write_target_and_summary() {
     );
     assert_eq!(target_with_content, "config.json (11 bytes)");
 
-    let target_missing_content =
-        extract_action_target("write", &json!({"path": "config.json"}));
+    let target_missing_content = extract_action_target("write", &json!({"path": "config.json"}));
     assert_eq!(target_missing_content, "config.json");
 
     let summary_ok = extract_action_summary("write", "wrote config.json", false);
@@ -101,7 +95,8 @@ fn test_bash_target_and_summary() {
     let target_60 = extract_action_target("bash", &json!({"command": exact_60}));
     assert_eq!(target_60, exact_60);
 
-    let long_cmd = "cargo test --workspace --all-targets --all-features --no-fail-fast -- --nocapture";
+    let long_cmd =
+        "cargo test --workspace --all-targets --all-features --no-fail-fast -- --nocapture";
     assert!(long_cmd.chars().count() > 60);
     let expected_truncated = format!("{}...", &long_cmd[..57]);
     let target_long = extract_action_target("bash", &json!({"command": long_cmd}));
@@ -127,11 +122,7 @@ fn test_bash_target_and_summary() {
 
     // Bash summary failure clamped to 80 chars
     let long_err_line = "x".repeat(100);
-    let summary_clamped = extract_action_summary(
-        "bash",
-        &format!("exit 1\n{long_err_line}"),
-        true,
-    );
+    let summary_clamped = extract_action_summary("bash", &format!("exit 1\n{long_err_line}"), true);
     assert_eq!(summary_clamped, format!("failed: {}", "x".repeat(80)));
 
     let summary_err_empty = extract_action_summary("bash", "", true);
@@ -144,11 +135,7 @@ fn test_glob_target_and_summary() {
     let target = extract_action_target("glob", &json!({"pattern": "**/*.rs"}));
     assert_eq!(target, "**/*.rs");
 
-    let summary = extract_action_summary(
-        "glob",
-        "src/lib.rs\nsrc/main.rs\nsrc/run.rs\n",
-        false,
-    );
+    let summary = extract_action_summary("glob", "src/lib.rs\nsrc/main.rs\nsrc/run.rs\n", false);
     assert_eq!(summary, "3 files matched");
 
     let summary_empty = extract_action_summary("glob", "", false);
@@ -168,15 +155,10 @@ fn test_grep_target_and_summary() {
         extract_action_target("grep", &json!({"pattern": "TODO", "path": "src"}));
     assert_eq!(target_with_path, "pattern 'TODO' in src");
 
-    let target_without_path =
-        extract_action_target("grep", &json!({"pattern": "TODO"}));
+    let target_without_path = extract_action_target("grep", &json!({"pattern": "TODO"}));
     assert_eq!(target_without_path, "pattern 'TODO'");
 
-    let summary = extract_action_summary(
-        "grep",
-        "src/lib.rs:1:TODO\nsrc/run.rs:10:TODO\n",
-        false,
-    );
+    let summary = extract_action_summary("grep", "src/lib.rs:1:TODO\nsrc/run.rs:10:TODO\n", false);
     assert_eq!(summary, "2 matches found");
 
     let summary_empty = extract_action_summary("grep", "", false);
@@ -215,23 +197,18 @@ fn test_note_target_and_summary() {
 #[test]
 fn test_fallback_target_and_summary() {
     // Fallback target: first string argument value found or tool name
-    let target_string_arg =
-        extract_action_target("custom_tool", &json!({"query": "SELECT 1"}));
+    let target_string_arg = extract_action_target("custom_tool", &json!({"query": "SELECT 1"}));
     assert_eq!(target_string_arg, "SELECT 1");
 
-    let target_no_string_arg =
-        extract_action_target("custom_tool", &json!({"count": 42}));
+    let target_no_string_arg = extract_action_target("custom_tool", &json!({"count": 42}));
     assert_eq!(target_no_string_arg, "custom_tool");
 
     let target_null_arg = extract_action_target("custom_tool", &json!(null));
     assert_eq!(target_null_arg, "custom_tool");
 
     // Fallback summary: first line clamped to 80 chars
-    let summary_first_line = extract_action_summary(
-        "custom_tool",
-        "first line of result\nsecond line",
-        false,
-    );
+    let summary_first_line =
+        extract_action_summary("custom_tool", "first line of result\nsecond line", false);
     assert_eq!(summary_first_line, "first line of result");
 
     let long_line = "a".repeat(120);

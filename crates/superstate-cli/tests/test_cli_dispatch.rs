@@ -1,7 +1,7 @@
 use clap::Parser;
+use std::path::PathBuf;
 use superstate_cli::cli::{Cli, Commands};
 use superstate_cli::state_cli::{InitArgs, StateCommands};
-use std::path::PathBuf;
 
 #[test]
 fn test_parse_no_args_launches_interactive() {
@@ -59,29 +59,37 @@ fn test_parse_custom_execution_flags() {
 
 #[test]
 fn test_parse_rollback_disabled() {
-    let cli_eq = Cli::try_parse_from(["superstate", "task", "--rollback=false"]).expect("should parse");
+    let cli_eq =
+        Cli::try_parse_from(["superstate", "task", "--rollback=false"]).expect("should parse");
     assert!(!cli_eq.rollback);
 
-    let cli_preceding = Cli::try_parse_from(["superstate", "--rollback=false", "task"]).expect("should parse");
+    let cli_preceding =
+        Cli::try_parse_from(["superstate", "--rollback=false", "task"]).expect("should parse");
     assert!(!cli_preceding.rollback);
     assert_eq!(cli_preceding.prompt.as_deref(), Some("task"));
 
-    let cli_true = Cli::try_parse_from(["superstate", "--rollback=true", "task"]).expect("should parse");
+    let cli_true =
+        Cli::try_parse_from(["superstate", "--rollback=true", "task"]).expect("should parse");
     assert!(cli_true.rollback);
     assert_eq!(cli_true.prompt.as_deref(), Some("task"));
 
-    let cli_flag_preceding = Cli::try_parse_from(["superstate", "--rollback", "task"]).expect("should parse");
+    let cli_flag_preceding =
+        Cli::try_parse_from(["superstate", "--rollback", "task"]).expect("should parse");
     assert!(cli_flag_preceding.rollback);
     assert_eq!(cli_flag_preceding.prompt.as_deref(), Some("task"));
 }
 
 #[test]
 fn test_context_validation() {
-    let cli = Cli::try_parse_from(["superstate", "task", "--context", "state-only"]).expect("should parse");
+    let cli = Cli::try_parse_from(["superstate", "task", "--context", "state-only"])
+        .expect("should parse");
     assert_eq!(cli.context, "state-only");
 
     let invalid = Cli::try_parse_from(["superstate", "task", "--context", "invalid-strategy"]);
-    assert!(invalid.is_err(), "invalid context strategy must be rejected");
+    assert!(
+        invalid.is_err(),
+        "invalid context strategy must be rejected"
+    );
 }
 
 #[test]
@@ -100,7 +108,8 @@ fn test_parse_subcommand_mcp() {
 
 #[test]
 fn test_parse_subcommand_state_init() {
-    let cli = Cli::try_parse_from(["superstate", "state", "init", "--plan", "plan.md"]).expect("should parse");
+    let cli = Cli::try_parse_from(["superstate", "state", "init", "--plan", "plan.md"])
+        .expect("should parse");
     assert_eq!(cli.prompt, None);
     let expected = Commands::State {
         cmd: StateCommands::Init(InitArgs {

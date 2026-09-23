@@ -65,7 +65,13 @@ impl From<&crate::cli::Cli> for TaskConfig {
 /// or an `Err(String)` describing initialization failure.
 pub fn run_task(
     config: TaskConfig,
-) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String> {
+) -> Result<
+    (
+        superstate_agent::run::Outcome,
+        superstate_agent::run::RunReport,
+    ),
+    String,
+> {
     let verification_cmd = config.gate.as_deref().unwrap_or("");
     let mut state = superstate_agent::state::State::new(&config.prompt, verification_cmd);
     let mut stdout = std::io::stdout();
@@ -89,7 +95,13 @@ pub fn run_task_with_state_and_writer<W: Write>(
     config: &TaskConfig,
     state: &mut superstate_agent::state::State,
     writer: &mut W,
-) -> Result<(superstate_agent::run::Outcome, superstate_agent::run::RunReport), String> {
+) -> Result<
+    (
+        superstate_agent::run::Outcome,
+        superstate_agent::run::RunReport,
+    ),
+    String,
+> {
     // 1. Initialize LLM provider from environment credentials.
     // If the API key is missing, produce an explicit error instructing how to configure it.
     let provider = match superstate_provider::gemini::Gemini::from_env() {
@@ -126,13 +138,14 @@ pub fn run_task_with_state_and_writer<W: Write>(
     // at `/workspace` so host environment is unaffected.
     let local_shell = superstate_agent::shell::LocalShell;
     let local_fs = superstate_agent::fs::LocalFs;
-    let container_shell = config
-        .container
-        .as_ref()
-        .map(|cid| superstate_agent::shell::ContainerShell {
-            container_id: cid.clone(),
-            workdir: PathBuf::from("/workspace"),
-        });
+    let container_shell =
+        config
+            .container
+            .as_ref()
+            .map(|cid| superstate_agent::shell::ContainerShell {
+                container_id: cid.clone(),
+                workdir: PathBuf::from("/workspace"),
+            });
     let container_fs = config
         .container
         .as_ref()

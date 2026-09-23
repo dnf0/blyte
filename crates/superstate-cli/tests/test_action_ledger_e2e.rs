@@ -184,7 +184,10 @@ fn test_repl_session_records_actions_across_turns() {
     let provider = ScriptedProvider::new(vec![
         calls("bash", json!({"command": "echo 'step1' > step1.txt"})),
         says("Finished first step, ready for gate"),
-        calls("write", json!({"path": "artifact.txt", "content": "verified\n"})),
+        calls(
+            "write",
+            json!({"path": "artifact.txt", "content": "verified\n"}),
+        ),
         says("Artifact created, ready for final check"),
     ]);
 
