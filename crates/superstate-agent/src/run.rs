@@ -22,12 +22,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use superstate_provider::{Message, Provider, Request, Usage};
+use superstate_provider::{Message, Provider, Request, ToolCall, Usage};
 
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
 use crate::shell::Shell;
-use crate::state::State;
+use crate::state::{ActionEntry, State};
 use crate::tools;
 
 /// How a run ended.
@@ -227,9 +227,19 @@ impl<'a> Runner<'a> {
                         signature: call.signature.clone(),
                     });
 
-                    // `note` is the loop's, not the tool layer's: it mutates state, and only
+                    // Intercept redundant file reads before execution using the loop-breaker guard.
+                    // Also `note` is the loop's, not the tool layer's: it mutates state, and only
                     // the agent region can be reached from here.
-                    let outcome = if call.name == "note" {
+                    let outcome = if let Some(guard_msg) = should_intercept_redundant_read(
+                        call,
+                        &state.runtime.working_set,
+                        &state.runtime.actions,
+                    ) {
+                        crate::tools::ToolOutcome {
+                            content: guard_msg,
+                            is_error: false,
+                        }
+                    } else if call.name == "note" {
                         let patch = call.arguments.get("patch").cloned().unwrap_or_default();
                         state.apply_agent_patch(&patch);
                         crate::tools::ToolOutcome {
@@ -284,8 +294,11 @@ impl<'a> Runner<'a> {
                     // Maintains external working memory in Runtime (Invariant I) without LLM intervention.
                     match call.name.as_str() {
                         "read" => {
-                            // Track active file snippet on successful read, stripping line numbers
-                            if !outcome.is_error {
+                            // Track active file snippet on successful read, stripping line numbers.
+                            // If the read was intercepted by the guard, do not overwrite cached file content.
+                            if !outcome.is_error
+                                && !outcome.content.starts_with("[Harness Working Memory Guard]")
+                            {
                                 let raw_path = call
                                     .arguments
                                     .get("path")
@@ -310,6 +323,22 @@ impl<'a> Runner<'a> {
                                     end,
                                     turn,
                                 );
+                            } else if !outcome.is_error {
+                                let raw_path = call
+                                    .arguments
+                                    .get("path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let path = normalize_path(raw_path);
+                                if let Some(file) = state
+                                    .runtime
+                                    .working_set
+                                    .files
+                                    .iter_mut()
+                                    .find(|f| f.path == path)
+                                {
+                                    file.last_accessed_turn = turn;
+                                }
                             }
                         }
                         "edit" => {
@@ -437,6 +466,64 @@ impl<'a> Runner<'a> {
     }
 }
 
+/// Helper to determine if an action target matches a normalized file path.
+/// Handles raw paths, leading `./`, and line range annotations like `lru.py (L1-L20)`.
+pub fn target_matches_path(target: &str, path: &str) -> bool {
+    let raw = target.split(" (L").next().unwrap_or(target).trim();
+    normalize_path(raw) == path || target == path
+}
+
+/// Evaluates whether a requested tool call is a redundant file read that should
+/// be intercepted by the loop-breaker guard clause.
+///
+/// Deterministic and zero-latency (Invariant III): operates purely on in-memory
+/// working set cache and action history without shelling out or touching disk.
+///
+/// Interception triggers if:
+/// 1. Tool is `read`, and
+/// 2. Target path is already cached in `working_set.files`, and
+/// 3. EITHER the immediately preceding action was also a `read` on this path,
+///    OR the agent has read this path 2+ times in the last 4 actions without an intervening `edit`.
+pub fn should_intercept_redundant_read(
+    call: &ToolCall,
+    working_set: &crate::working_set::WorkingSet,
+    actions: &[ActionEntry],
+) -> Option<String> {
+    if call.name != "read" {
+        return None;
+    }
+    let raw_path = call.arguments.get("path").and_then(|v| v.as_str())?;
+    let path = normalize_path(raw_path);
+    let is_cached = working_set.files.iter().any(|f| f.path == path);
+    if !is_cached {
+        return None;
+    }
+
+    // Check if the immediately preceding tool call was also read on this path
+    let last_was_same_read = actions
+        .last()
+        .map(|a| a.tool == "read" && target_matches_path(&a.target, path))
+        .unwrap_or(false);
+
+    // Or read this path 2+ times in the last 4 actions without an intervening edit
+    let recent_same_reads = actions
+        .iter()
+        .rev()
+        .take(4)
+        .take_while(|a| a.tool != "edit")
+        .filter(|a| a.tool == "read" && target_matches_path(&a.target, path))
+        .count();
+
+    if last_was_same_read || recent_same_reads >= 2 {
+        Some(format!(
+            "[Harness Working Memory Guard]: `{path}` is already loaded in your Active Working Set above. \
+             You do not need to re-read it. Propose your exact edit using `edit` or update your plan in `note`."
+        ))
+    } else {
+        None
+    }
+}
+
 /// Extracts a concise, human-readable target descriptor from a tool call's arguments.
 ///
 /// Deterministic and zero-latency: formats tool targets without LLM invocation to
@@ -547,6 +634,11 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
 /// # Returns
 /// A single-line summary string describing the outcome.
 pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String {
+    // Check if the tool invocation was intercepted by the working memory guard
+    if content.starts_with("[Harness Working Memory Guard]") {
+        return "intercepted: already in working set".to_string();
+    }
+
     // Produce deterministic, bounded status summaries per tool category.
     match tool {
         "read" => {

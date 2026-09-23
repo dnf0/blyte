@@ -959,3 +959,178 @@ fn test_state_only_runner_injects_working_set_into_llm_prompts() {
     assert!(prompt3.contains("## Last Test Failure"));
     assert!(seen[2].messages.len() <= 3);
 }
+
+#[test]
+fn test_loop_breaker_intercepts_redundant_reads() {
+    // Verifies that when an agent calls 'read' on a file that is already loaded in
+    // external working memory (working_set) consecutively, the harness immediately
+    // intercepts the call, returns an advisory notice, and does not execute the tool.
+    let d = repo();
+    std::fs::write(
+        d.path().join("lru.py"),
+        "def cache():\n    return 1\n",
+    )
+    .unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Initial read populates working_set
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 2: Redundant read on the same file in consecutive turns
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 3: Complete run
+        says("done"),
+    ]);
+    let mut st = State::new("loop breaker test", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    // Inspect request messages seen by provider
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+
+    // Turn 1 result was a normal successful read
+    let Message::ToolResult {
+        content: content1,
+        is_error: err1,
+        ..
+    } = &seen[2].messages[2]
+    else {
+        panic!("expected ToolResult at index 2");
+    };
+    assert!(!err1);
+    assert!(!content1.contains("[Harness Working Memory Guard]"));
+    assert!(content1.contains("def cache():"));
+
+    // Turn 2 result was intercepted by the working memory guard
+    let Message::ToolResult {
+        content: content2,
+        is_error: err2,
+        ..
+    } = &seen[2].messages[4]
+    else {
+        panic!("expected ToolResult at index 4");
+    };
+    assert!(!err2);
+    assert!(
+        content2.contains("[Harness Working Memory Guard]: `lru.py` is already loaded in your Active Working Set above"),
+        "unexpected intercepted content: {content2}"
+    );
+
+    // Verify action ledger records the guard interception
+    assert_eq!(st.runtime.actions.len(), 2);
+    assert_eq!(st.runtime.actions[0].tool, "read");
+    assert_eq!(st.runtime.actions[0].target, "lru.py");
+    assert_eq!(st.runtime.actions[1].tool, "read");
+    assert_eq!(st.runtime.actions[1].target, "lru.py");
+    assert!(
+        st.runtime.actions[1].summary.contains("intercepted")
+            || st.runtime.actions[1].summary.contains("working set")
+            || st.runtime.actions[1].summary.contains("Guard"),
+        "unexpected action summary: {}",
+        st.runtime.actions[1].summary
+    );
+
+    // Verify working set retains the original file snippet and was not corrupted by the guard message
+    assert_eq!(st.runtime.working_set.files.len(), 1);
+    assert_eq!(st.runtime.working_set.files[0].path, "lru.py");
+    assert!(st.runtime.working_set.files[0].content.contains("def cache():"));
+}
+
+#[test]
+fn test_loop_breaker_allows_read_after_edit() {
+    // Verifies that an intervening edit on the file resets the loop breaker,
+    // allowing the agent to re-read the updated file without interception.
+    let d = repo();
+    std::fs::write(
+        d.path().join("lru.py"),
+        "def cache():\n    return 1\n",
+    )
+    .unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: Read file
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 2: Edit file
+        calls(
+            "edit",
+            json!({
+                "path": "lru.py",
+                "old": "    return 1\n",
+                "new": "    return 42\n"
+            }),
+        ),
+        // Turn 3: Read file again after edit
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 4: Complete run
+        says("done"),
+    ]);
+    let mut st = State::new("allow read after edit", "true");
+    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(rep.gate_attempts, 1);
+
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+
+    // Turn 3 read (index 6 in conversational history) must NOT be intercepted
+    let Message::ToolResult {
+        content: content3,
+        is_error: err3,
+        ..
+    } = &seen[3].messages[6]
+    else {
+        panic!("expected ToolResult at index 6");
+    };
+    assert!(!err3);
+    assert!(!content3.contains("[Harness Working Memory Guard]"));
+    assert!(content3.contains("return 42"));
+
+    // Verify action ledger shows real read, edit, real read
+    assert_eq!(st.runtime.actions.len(), 3);
+    assert_eq!(st.runtime.actions[0].tool, "read");
+    assert_eq!(st.runtime.actions[1].tool, "edit");
+    assert_eq!(st.runtime.actions[2].tool, "read");
+    assert_eq!(st.runtime.actions[2].target, "lru.py");
+    assert!(st.runtime.actions[2].summary.contains("lines read"));
+}
+
+#[test]
+fn test_loop_breaker_intercepts_oscillating_reads() {
+    // Verifies that oscillating between reading two files (e.g. lru.py and test_lru.py)
+    // without taking action triggers the loop-breaker once a file has been read 2+ times
+    // in the last 4 actions without an intervening edit.
+    let d = repo();
+    std::fs::write(d.path().join("lru.py"), "def cache(): pass\n").unwrap();
+    std::fs::write(d.path().join("test_lru.py"), "def test(): pass\n").unwrap();
+
+    let p = ScriptedProvider::new(vec![
+        // Turn 1: read lru.py
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 2: read test_lru.py
+        calls("read", json!({"path": "test_lru.py"})),
+        // Turn 3: read lru.py again
+        calls("read", json!({"path": "lru.py"})),
+        // Turn 4: read test_lru.py again
+        calls("read", json!({"path": "test_lru.py"})),
+        // Turn 5: read lru.py 3rd time (2nd time in last 4 actions) -> intercepted!
+        calls("read", json!({"path": "lru.py"})),
+        says("done"),
+    ]);
+    let mut st = State::new("oscillating read guard", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    let seen = p.seen.lock().unwrap();
+    // Turn 5 read result is at index 10 in conversational history
+    let Message::ToolResult {
+        content: content5, ..
+    } = &seen[5].messages[10]
+    else {
+        panic!("expected ToolResult at index 10");
+    };
+    assert!(content5.contains(
+        "[Harness Working Memory Guard]: `lru.py` is already loaded in your Active Working Set above"
+    ));
+}
+
