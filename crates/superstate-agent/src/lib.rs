@@ -17,3 +17,4 @@ pub mod run;
 pub mod shell;
 pub mod state;
 pub mod tools;
+pub mod working_set;

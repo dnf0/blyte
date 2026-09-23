@@ -19,6 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::working_set::WorkingSet;
+
 /// What the orchestrator decided. The worker reads this and can never change it.
 ///
 /// There is deliberately no `&mut` accessor and no setter. Superstate previously asserted
@@ -60,6 +62,9 @@ pub struct Runtime {
     /// Chronological log of all actions executed in this session.
     #[serde(default)]
     pub actions: Vec<ActionEntry>,
+    /// Harness-observed working set containing active file snippets and failure output.
+    #[serde(default)]
+    pub working_set: WorkingSet,
 }
 
 /// The worker's own scratch space. Free-form on purpose.
