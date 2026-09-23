@@ -1528,4 +1528,58 @@ fn test_loop_breaker_intercepts_redundant_bash_inspection() {
         st.runtime.actions[1].summary,
         "intercepted: redundant inspection"
     );
+
+    // Verify advice did NOT falsely claim unit tests passed when no tests or edits have occurred
+    let guard_msg = superstate_agent::run::should_intercept_redundant_bash(
+        &calls("bash", json!({"command": "git diff"})).tool_calls[0],
+        &st.runtime.actions,
+        &st.runtime.working_set,
+        &st.orchestrator.verification_cmd,
+    )
+    .expect("should intercept");
+    assert!(
+        guard_msg.contains("Review your Active Working Set or Last Test Failure"),
+        "expected edit reminder, got: {guard_msg}"
+    );
+    assert!(!guard_msg.contains("unit tests have already passed"));
+}
+
+#[test]
+fn test_loop_breaker_post_pass_advice_resets_on_new_edit() {
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        calls(
+            "edit",
+            json!({"path": "calc.rs", "old": "let val = 0;", "new": "let val = 1;"}),
+        ),
+        calls("bash", json!({"command": "cargo test"})),
+        // Tests passed! git diff should be intercepted with pass notice
+        calls("bash", json!({"command": "git diff"})),
+        // Now a new edit occurs!
+        calls(
+            "edit",
+            json!({"path": "calc.rs", "old": "let val = 1;", "new": "let val = 2;"}),
+        ),
+        // git diff now should NOT say tests are passing because new unverified edits occurred
+        calls("bash", json!({"command": "git diff"})),
+        says("stopping now"),
+    ]);
+    let mut st = State::new("test pass reset", "true");
+    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+
+    // After the second edit, checking bash guard for git diff should not claim tests passed
+    let guard_msg = superstate_agent::run::should_intercept_redundant_bash(
+        &calls("bash", json!({"command": "git diff"})).tool_calls[0],
+        &st.runtime.actions,
+        &st.runtime.working_set,
+        &st.orchestrator.verification_cmd,
+    );
+    // Since only one git diff was run since the second edit, it is not intercepted as passing
+    assert!(
+        guard_msg.is_none()
+            || !guard_msg
+                .unwrap()
+                .contains("unit tests have already passed")
+    );
 }

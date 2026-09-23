@@ -649,22 +649,24 @@ pub fn should_intercept_redundant_bash(
         })
         .count();
 
-    let tests_passing = working_set.last_failure.is_none()
+    let has_edit = actions
+        .iter()
+        .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
+    let tests_passing = has_edit
+        && working_set.last_failure.is_none()
         && actions
             .iter()
-            .any(|a| a.tool == "edit" || a.tool == "write")
-        && actions.iter().any(|a| {
-            a.tool == "bash"
-                && !a.is_error
-                && !a.summary.starts_with("intercepted")
-                && is_test_command(&a.target, verification_cmd)
-        });
+            .rev()
+            .take_while(|a| a.tool != "edit" && a.tool != "write")
+            .any(|a| {
+                a.tool == "bash"
+                    && !a.is_error
+                    && !a.summary.starts_with("intercepted")
+                    && is_test_command(&a.target, verification_cmd)
+            });
 
-    if last_was_same
-        || recent_same >= 2
-        || (tests_passing && (recent_same >= 1 || is_readonly_inspection))
-    {
-        let advice = if working_set.last_failure.is_none() {
+    if last_was_same || recent_same >= 2 || tests_passing {
+        let advice = if tests_passing {
             format!(
                 "[Harness Working Memory Guard]: `{cmd}` inspection intercepted: unit tests have already passed. \
                  Stop calling tools now to trigger the verification completion gate."

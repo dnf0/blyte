@@ -89,20 +89,27 @@ impl ContextStrategy for StateOnly {
         } else {
             // When tests have run and are currently passing following code edits, inform the worker
             // that its tests are passing so it stops calling tools instead of spinning on inspections.
-            let tests_passing = state
+            let has_edit = state
                 .runtime
                 .actions
                 .iter()
-                .any(|a| a.tool == "edit" || a.tool == "write")
-                && state.runtime.actions.iter().any(|a| {
-                    a.tool == "bash"
-                        && !a.is_error
-                        && !a.summary.starts_with("intercepted")
-                        && crate::run::is_test_command(
-                            &a.target,
-                            &state.orchestrator.verification_cmd,
-                        )
-                });
+                .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
+            let tests_passing = has_edit
+                && state
+                    .runtime
+                    .actions
+                    .iter()
+                    .rev()
+                    .take_while(|a| a.tool != "edit" && a.tool != "write")
+                    .any(|a| {
+                        a.tool == "bash"
+                            && !a.is_error
+                            && !a.summary.starts_with("intercepted")
+                            && crate::run::is_test_command(
+                                &a.target,
+                                &state.orchestrator.verification_cmd,
+                            )
+                    });
             if tests_passing {
                 user_prompt.push_str("\n## Verification Status\nUnit tests are passing. If your changes are complete, stop calling tools now to submit your work for verification.\n");
             }
