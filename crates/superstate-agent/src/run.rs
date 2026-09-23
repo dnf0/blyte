@@ -102,6 +102,44 @@ pub enum Event<'e> {
     },
 }
 
+/// The action-ledger tool name `run_phases` writes when a phase begins. Loop-breaker inferences
+/// look no further back than the latest marker: what passed in RED says nothing about GREEN.
+pub const PHASE_MARKER_TOOL: &str = "phase";
+
+/// Actions since the current phase began, or all of them when the run has no phases.
+pub fn current_phase_actions(actions: &[ActionEntry]) -> &[ActionEntry] {
+    match actions.iter().rposition(|a| a.tool == PHASE_MARKER_TOOL) {
+        Some(i) => &actions[i + 1..],
+        None => actions,
+    }
+}
+
+/// Whether, in the current phase and since its last edit, the worker ran the verification
+/// command itself and it exited 0. That is the only exit code that predicts the gate. Another
+/// test-like command passing (a compile-only `go test -run '^$'`, a single test) says nothing
+/// about it. Treating it as if it did told a GREEN worker its failing test was passing.
+pub fn verification_passed_since_edit(actions: &[ActionEntry], verification_cmd: &str) -> bool {
+    let v = verification_cmd.trim();
+    if v.is_empty() || v == "true" || v == "false" {
+        return false;
+    }
+    let phase = current_phase_actions(actions);
+    let edited = phase
+        .iter()
+        .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
+    edited
+        && phase
+            .iter()
+            .rev()
+            .take_while(|a| a.tool != "edit" && a.tool != "write")
+            .any(|a| {
+                a.tool == "bash"
+                    && !a.is_error
+                    && !a.summary.starts_with("intercepted")
+                    && a.target.trim() == v
+            })
+}
+
 /// One stage of a multi-phase run, with its own instruction and verification command.
 ///
 /// Phases belong to the runtime, not the worker. The harness derives them (for example from the
@@ -276,6 +314,13 @@ impl<'a> Runner<'a> {
                 phase.instruction
             );
             state.orchestrator.verification_cmd = phase.gate(&start);
+            state.runtime.actions.push(ActionEntry {
+                turn: 0,
+                tool: PHASE_MARKER_TOOL.into(),
+                target: phase.id.clone(),
+                summary: format!("phase {}/{} started", i + 1, phases.len()),
+                is_error: false,
+            });
             let (outcome, report) = self.run_until(state, deadline);
             total.outcome_turns += report.outcome_turns;
             total.usage.input += report.usage.input;
@@ -555,9 +600,12 @@ impl<'a> Runner<'a> {
                             let is_test_cmd =
                                 is_test_command(cmd, &state.orchestrator.verification_cmd);
                             if outcome.is_error && is_test_cmd {
-                                state.runtime.working_set.record_failure(&outcome.content);
+                                state
+                                    .runtime
+                                    .working_set
+                                    .record_failure_for(cmd, &outcome.content);
                             } else if !outcome.is_error && is_test_cmd {
-                                state.runtime.working_set.clear_failure();
+                                state.runtime.working_set.clear_failure_for(cmd);
                             }
                         }
                         _ => {}
@@ -770,7 +818,7 @@ pub fn should_intercept_redundant_read(
 pub fn should_intercept_redundant_bash(
     call: &ToolCall,
     actions: &[ActionEntry],
-    working_set: &crate::working_set::WorkingSet,
+    _working_set: &crate::working_set::WorkingSet,
     verification_cmd: &str,
 ) -> Option<String> {
     if call.name != "bash" {
@@ -779,23 +827,29 @@ pub fn should_intercept_redundant_bash(
     let raw_cmd = call.arguments.get("command").and_then(|v| v.as_str())?;
     let cmd = raw_cmd.trim();
 
-    // Guard 1: Redundant test execution after tests have already passed without file modifications
-    let is_test = is_test_command(cmd, verification_cmd);
-    if is_test && working_set.last_failure.is_none() {
-        let test_passed_since_edit = actions
-            .iter()
-            .rev()
-            .take_while(|a| a.tool != "edit" && a.tool != "write")
-            .any(|a| {
-                a.tool == "bash"
-                    && is_test_command(&a.target, verification_cmd)
-                    && !a.is_error
-                    && !a.summary.starts_with("intercepted")
-            });
-        if test_passed_since_edit {
+    // Guard 1: re-running a command that already exited 0, with no edit since, cannot tell the
+    // worker anything new. Only the IDENTICAL command counts: a different test command passing
+    // says nothing about this one. A target the ledger truncated cannot be compared, so it runs.
+    // Truncation is judged by length, not by a trailing `...`: Go's `./...` ends that way too.
+    if is_test_command(cmd, verification_cmd) {
+        let target = extract_action_target("bash", &call.arguments);
+        let truncated = raw_cmd.replace('\n', " ").chars().count() > 60;
+        let already_passed = !truncated
+            && current_phase_actions(actions)
+                .iter()
+                .rev()
+                .take_while(|a| a.tool != "edit" && a.tool != "write")
+                .any(|a| {
+                    a.tool == "bash"
+                        && a.target == target
+                        && !a.is_error
+                        && !a.summary.starts_with("intercepted")
+                });
+        if already_passed {
             return Some(format!(
-                "[Harness Working Memory Guard]: Unit tests `{cmd}` have already passed and no files were modified since. \
-                 Stop calling tools now to trigger the verification completion gate."
+                "[Harness Working Memory Guard]: `{cmd}` already exited 0 and no file has changed since, \
+                 so it would exit 0 again. If your change is complete, stop calling tools to submit it \
+                 for verification."
             ));
         }
     }
@@ -825,27 +879,14 @@ pub fn should_intercept_redundant_bash(
         })
         .count();
 
-    let has_edit = actions
-        .iter()
-        .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
-    let tests_passing = has_edit
-        && working_set.last_failure.is_none()
-        && actions
-            .iter()
-            .rev()
-            .take_while(|a| a.tool != "edit" && a.tool != "write")
-            .any(|a| {
-                a.tool == "bash"
-                    && !a.is_error
-                    && !a.summary.starts_with("intercepted")
-                    && is_test_command(&a.target, verification_cmd)
-            });
-
-    if last_was_same || recent_same >= 2 || tests_passing {
-        let advice = if tests_passing {
+    let verified = verification_passed_since_edit(actions, verification_cmd);
+    if last_was_same || recent_same >= 2 || verified {
+        let advice = if verified {
             format!(
-                "[Harness Working Memory Guard]: `{cmd}` inspection intercepted: unit tests have already passed. \
-                 Stop calling tools now to trigger the verification completion gate."
+                "[Harness Working Memory Guard]: `{cmd}` inspection intercepted: the verification \
+                 command `{}` exited 0 after your last edit. If your change is complete, stop calling \
+                 tools to submit it.",
+                verification_cmd.trim()
             )
         } else {
             format!(

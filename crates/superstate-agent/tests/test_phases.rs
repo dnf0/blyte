@@ -307,3 +307,31 @@ fn phases_need_a_git_repository() {
     }
     assert!(phases.is_empty());
 }
+
+#[test]
+fn each_phase_start_is_marked_in_the_action_ledger() {
+    let d = repo();
+    let p = ScriptedProvider::new(vec![
+        write("a.txt", "a\n"),
+        done(),
+        write("b.txt", "b\n"),
+        done(),
+    ]);
+    let mut st = State::new("two steps", "");
+    let (outcome, _, _) = runner(&p, d.path(), budget(2)).run_phases(
+        &mut st,
+        &[
+            phase("first", "test -f a.txt"),
+            phase("second", "test -f b.txt"),
+        ],
+    );
+    assert_eq!(outcome, Outcome::Verified);
+    let markers: Vec<&str> = st
+        .runtime
+        .actions
+        .iter()
+        .filter(|a| a.tool == superstate_agent::run::PHASE_MARKER_TOOL)
+        .map(|a| a.target.as_str())
+        .collect();
+    assert_eq!(markers, vec!["first", "second"]);
+}

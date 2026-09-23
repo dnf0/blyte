@@ -38,6 +38,10 @@ pub struct WorkingSet {
     pub files: Vec<FileSnippet>,
     /// Distilled output of the most recent failed gate or command execution.
     pub last_failure: Option<String>,
+    /// The command whose failure `last_failure` holds. Only that command passing clears it:
+    /// a compile-only check exiting 0 must not erase a real test failure from the prompt.
+    #[serde(default)]
+    pub last_failure_cmd: Option<String>,
 }
 
 /// Distills snippet text if line count exceeds `MAX_FILE_LINES`.
@@ -187,6 +191,25 @@ impl WorkingSet {
     /// Clear test failure output on passing execution.
     pub fn clear_failure(&mut self) {
         self.last_failure = None;
+        self.last_failure_cmd = None;
+    }
+
+    /// Record a failure together with the command that produced it.
+    pub fn record_failure_for(&mut self, cmd: &str, output: &str) {
+        self.record_failure(output);
+        self.last_failure_cmd = Some(cmd.trim().to_string());
+    }
+
+    /// Clear the recorded failure only if `cmd` is the command that produced it. A failure
+    /// recorded without a command (older state) is cleared by any passing test command, as before.
+    pub fn clear_failure_for(&mut self, cmd: &str) {
+        let same = match &self.last_failure_cmd {
+            None => true,
+            Some(c) => c == cmd.trim(),
+        };
+        if same {
+            self.clear_failure();
+        }
     }
 
     /// Evict least-recently-accessed files when exceeding file count or line budget.

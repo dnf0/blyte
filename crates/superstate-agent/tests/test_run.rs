@@ -606,11 +606,11 @@ fn test_working_set_tracks_test_failure() {
 
 #[test]
 fn test_working_set_clears_test_failure_on_pass() {
-    // A subsequent passing test execution clears the previously recorded failure
-    // from external working memory.
+    // A failure recorded without its command (older state) is cleared by any passing test
+    // command. A failure recorded WITH its command is cleared only by that command passing:
+    // `cargo test --help` exiting 0 says nothing about `cargo test` (test_loop_breaker_honesty).
     let d = repo();
     let p = ScriptedProvider::new(vec![
-        calls("bash", json!({"command": "cargo test"})),
         calls("bash", json!({"command": "cargo test --help"})),
         says("done"),
     ]);
