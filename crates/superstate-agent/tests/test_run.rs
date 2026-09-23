@@ -502,7 +502,7 @@ fn test_state_only_context_formats_action_ledger() {
     };
     assert!(prompt.contains("## Actions Taken So Far"));
     assert!(prompt.contains("- Turn 1: `read` `src/main.rs (lines 1-20)` -> 20 lines read"));
-    assert!(prompt.contains("- Turn 2: `bash` `cargo test` -> exit 101"));
+    assert!(prompt.contains("- Turn 2: `bash` `cargo test` -> exit 101 [ERROR]"));
 }
 
 #[test]

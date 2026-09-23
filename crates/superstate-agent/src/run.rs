@@ -370,10 +370,12 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
                         .or_else(|| v.as_str().map(|s| s.to_string()))
                 });
                 // When line bounds are specified, annotate the path with 1-indexed line boundaries.
-                if let (Some(s), Some(e)) = (start, end) {
-                    return format!("{path} (L{s}-L{e})");
+                match (start, end) {
+                    (Some(s), Some(e)) => return format!("{path} (L{s}-L{e})"),
+                    (Some(s), None) => return format!("{path} (L{s}+)"),
+                    (None, Some(e)) => return format!("{path} (L1-L{e})"),
+                    (None, None) => return path.to_string(),
                 }
-                return path.to_string();
             }
         }
         "write" => {
@@ -393,12 +395,14 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
         }
         "bash" => {
             // Bash commands are bounded at 60 characters so long pipelines do not dominate context.
+            // Newlines are sanitized to spaces to preserve single-line formatting in the action ledger.
             if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                if cmd.chars().count() > 60 {
-                    let prefix: String = cmd.chars().take(57).collect();
+                let single_line = cmd.replace('\n', " ");
+                if single_line.chars().count() > 60 {
+                    let prefix: String = single_line.chars().take(57).collect();
                     return format!("{prefix}...");
                 }
-                return cmd.to_string();
+                return single_line;
             }
         }
         "glob" => {
@@ -451,24 +455,41 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
     // Produce deterministic, bounded status summaries per tool category.
     match tool {
         "read" => {
-            // Count lines returned to indicate the volume read without including full content.
-            let count = content.lines().count();
-            format!("{count} lines read")
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("read failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Count lines returned to indicate the volume read without including full content.
+                let count = content.lines().count();
+                format!("{count} lines read")
+            }
         }
         "write" => {
-            // Static confirmation of file write completion.
-            "file written".to_string()
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("write failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Static confirmation of file write completion.
+                "file written".to_string()
+            }
         }
         "edit" => {
             // Distinguish successful replacements from rejection/failure reasons.
             if is_error {
-                let first = content.lines().next().unwrap_or("edit failed");
-                let first = if first.is_empty() {
-                    "edit failed"
-                } else {
-                    first
-                };
-                format!("failed: {first}")
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("edit failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
             } else {
                 "string replaced".to_string()
             }
@@ -488,14 +509,32 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
             }
         }
         "glob" => {
-            // Count matching file entries in the glob output.
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("{count} files matched")
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("glob failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Count matching file entries in the glob output.
+                let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+                format!("{count} files matched")
+            }
         }
         "grep" => {
-            // Count matching occurrences found in content search.
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("{count} matches found")
+            if is_error {
+                let first = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("grep failed");
+                let clamped: String = first.chars().take(80).collect();
+                format!("failed: {clamped}")
+            } else {
+                // Count matching occurrences found in content search.
+                let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+                format!("{count} matches found")
+            }
         }
         "note" => {
             // Surface the first line of the note confirmation message.

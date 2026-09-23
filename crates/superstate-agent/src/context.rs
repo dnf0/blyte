@@ -63,9 +63,10 @@ impl ContextStrategy for StateOnly {
         if !state.runtime.actions.is_empty() {
             user_prompt.push_str("\n## Actions Taken So Far\n");
             for action in &state.runtime.actions {
+                let status_indicator = if action.is_error { " [ERROR]" } else { "" };
                 user_prompt.push_str(&format!(
-                    "- Turn {}: `{}` `{}` -> {}\n",
-                    action.turn, action.tool, action.target, action.summary
+                    "- Turn {}: `{}` `{}` -> {}{}\n",
+                    action.turn, action.tool, action.target, action.summary, status_indicator
                 ));
             }
         }

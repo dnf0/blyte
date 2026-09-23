@@ -13,18 +13,36 @@ fn test_read_target_and_summary() {
     );
     assert_eq!(target_with_lines, "src/main.rs (L10-L25)");
 
-    // read summary: line count
+    let target_with_start_only = extract_action_target(
+        "read",
+        &json!({"path": "src/main.rs", "start_line": 10}),
+    );
+    assert_eq!(target_with_start_only, "src/main.rs (L10+)");
+
+    let target_with_end_only = extract_action_target(
+        "read",
+        &json!({"path": "src/main.rs", "end_line": 25}),
+    );
+    assert_eq!(target_with_end_only, "src/main.rs (L1-L25)");
+
+    // read summary: line count on success, failed message on error
     let summary_lines =
         extract_action_summary("read", "line 1\nline 2\nline 3\n", false);
     assert_eq!(summary_lines, "3 lines read");
 
     let summary_empty = extract_action_summary("read", "", false);
     assert_eq!(summary_empty, "0 lines read");
+
+    let summary_err = extract_action_summary("read", "file not found\nerror line 2", true);
+    assert_eq!(summary_err, "failed: file not found");
+
+    let summary_err_empty = extract_action_summary("read", "", true);
+    assert_eq!(summary_err_empty, "failed: read failed");
 }
 
 #[test]
 fn test_write_target_and_summary() {
-    // 2. write: target includes bytes, summary is "file written"
+    // 2. write: target includes bytes, summary is "file written" or "failed: ..."
     let target_with_content = extract_action_target(
         "write",
         &json!({"path": "config.json", "content": "hello world"}),
@@ -39,7 +57,10 @@ fn test_write_target_and_summary() {
     assert_eq!(summary_ok, "file written");
 
     let summary_err = extract_action_summary("write", "failed to write", true);
-    assert_eq!(summary_err, "file written");
+    assert_eq!(summary_err, "failed: failed to write");
+
+    let summary_err_empty = extract_action_summary("write", "", true);
+    assert_eq!(summary_err_empty, "failed: write failed");
 }
 
 #[test]
@@ -86,6 +107,12 @@ fn test_bash_target_and_summary() {
     let target_long = extract_action_target("bash", &json!({"command": long_cmd}));
     assert_eq!(target_long, expected_truncated);
 
+    // Multiline command sanitized to single line
+    let multiline_cmd = "python3 -c '\nx = 1\nprint(x)\n'";
+    let target_multiline = extract_action_target("bash", &json!({"command": multiline_cmd}));
+    assert!(!target_multiline.contains('\n'));
+    assert_eq!(target_multiline, "python3 -c ' x = 1 print(x) '");
+
     // Bash summary success
     let summary_ok = extract_action_summary("bash", "exit 0\nEverything is fine", false);
     assert_eq!(summary_ok, "exit 0");
@@ -113,7 +140,7 @@ fn test_bash_target_and_summary() {
 
 #[test]
 fn test_glob_target_and_summary() {
-    // 5. glob: file count matching
+    // 5. glob: file count matching or failure
     let target = extract_action_target("glob", &json!({"pattern": "**/*.rs"}));
     assert_eq!(target, "**/*.rs");
 
@@ -126,11 +153,17 @@ fn test_glob_target_and_summary() {
 
     let summary_empty = extract_action_summary("glob", "", false);
     assert_eq!(summary_empty, "0 files matched");
+
+    let summary_err = extract_action_summary("glob", "invalid glob pattern\nmore details", true);
+    assert_eq!(summary_err, "failed: invalid glob pattern");
+
+    let summary_err_empty = extract_action_summary("glob", "", true);
+    assert_eq!(summary_err_empty, "failed: glob failed");
 }
 
 #[test]
 fn test_grep_target_and_summary() {
-    // 6. grep: pattern and path, match count
+    // 6. grep: pattern and path, match count or failure
     let target_with_path =
         extract_action_target("grep", &json!({"pattern": "TODO", "path": "src"}));
     assert_eq!(target_with_path, "pattern 'TODO' in src");
@@ -148,6 +181,12 @@ fn test_grep_target_and_summary() {
 
     let summary_empty = extract_action_summary("grep", "", false);
     assert_eq!(summary_empty, "0 matches found");
+
+    let summary_err = extract_action_summary("grep", "invalid regex syntax\nstack trace", true);
+    assert_eq!(summary_err, "failed: invalid regex syntax");
+
+    let summary_err_empty = extract_action_summary("grep", "", true);
+    assert_eq!(summary_err_empty, "failed: grep failed");
 }
 
 #[test]
