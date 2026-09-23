@@ -71,6 +71,11 @@ pub struct Cli {
     #[arg(long)]
     pub report: Option<PathBuf>,
 
+    /// Gate by autonomous TDD: derive a RED (failing reproduction test) then GREEN (fix) phase
+    /// from the repository's own test runner. Fails closed on an unrecognised repository
+    #[arg(long, conflicts_with = "gate")]
+    pub tdd: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

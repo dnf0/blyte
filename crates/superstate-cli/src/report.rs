@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde::Serialize;
-use superstate_agent::run::{Outcome, RunReport};
+use superstate_agent::run::{Outcome, PhaseResult, RunReport};
 use superstate_agent::state::{ActionEntry, State};
 
 use crate::task_runner::TaskConfig;
@@ -29,6 +29,24 @@ pub struct Interceptions {
     pub bash: u32,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PhaseRecord {
+    pub id: String,
+    pub outcome: String,
+    pub turns: u32,
+    pub gate_attempts: u32,
+}
+
+/// The report's name for an outcome, and its error message if it carries one.
+fn outcome_name(outcome: &Outcome) -> (&'static str, Option<String>) {
+    match outcome {
+        Outcome::Verified => ("verified", None),
+        Outcome::BudgetExhausted => ("budget_exhausted", None),
+        Outcome::GateFailed => ("gate_failed", None),
+        Outcome::Error(e) => ("error", Some(e.clone())),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RunRecord {
     pub schema_version: u32,
@@ -39,6 +57,10 @@ pub struct RunRecord {
     pub context: String,
     pub loop_breaker: bool,
     pub gated: bool,
+    /// Where the gate came from: `none` (ungated), `user` (`--gate`) or `tdd` (`--tdd`).
+    pub gate_source: String,
+    /// Per-phase results for a multi-phase run; empty otherwise.
+    pub phases: Vec<PhaseRecord>,
     pub container: Option<String>,
     pub container_workdir: String,
     pub duration_seconds: f64,
@@ -63,7 +85,16 @@ impl RunRecord {
             model_id: None,
             context: config.context_strategy.clone(),
             loop_breaker: config.loop_breaker,
-            gated: config.gate.as_deref().is_some_and(|g| !g.trim().is_empty()),
+            gated: config.tdd || config.gate.as_deref().is_some_and(|g| !g.trim().is_empty()),
+            gate_source: if config.tdd {
+                "tdd"
+            } else if config.gate.as_deref().is_some_and(|g| !g.trim().is_empty()) {
+                "user"
+            } else {
+                "none"
+            }
+            .into(),
+            phases: Vec::new(),
             container: config.container.clone(),
             container_workdir: config.container_workdir.clone(),
             duration_seconds: elapsed.as_secs_f64(),
@@ -96,12 +127,7 @@ impl RunRecord {
         state: &State,
         elapsed: Duration,
     ) -> Self {
-        let (outcome_name, error) = match outcome {
-            Outcome::Verified => ("verified", None),
-            Outcome::BudgetExhausted => ("budget_exhausted", None),
-            Outcome::GateFailed => ("gate_failed", None),
-            Outcome::Error(e) => ("error", Some(e.clone())),
-        };
+        let (outcome_name, error) = outcome_name(outcome);
         let mut agent_note_keys: Vec<String> = state.agent.fields.keys().cloned().collect();
         agent_note_keys.sort();
         Self {
@@ -124,6 +150,20 @@ impl RunRecord {
             agent_note_keys,
             ..Self::base(config, elapsed)
         }
+    }
+
+    /// Attach per-phase results, in the order the phases ran.
+    pub fn with_phases(mut self, results: &[PhaseResult]) -> Self {
+        self.phases = results
+            .iter()
+            .map(|r| PhaseRecord {
+                id: r.id.clone(),
+                outcome: outcome_name(&r.outcome).0.into(),
+                turns: r.turns,
+                gate_attempts: r.gate_attempts,
+            })
+            .collect();
+        self
     }
 }
 

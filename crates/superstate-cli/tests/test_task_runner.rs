@@ -84,6 +84,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
+        tdd: false,
     };
 
     let result = run_task(config);
@@ -117,6 +118,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
+        tdd: false,
     };
 
     let err = run_task(anthropic_config).unwrap_err();
@@ -139,6 +141,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
+        tdd: false,
     };
 
     let err = run_task(ollama_config).unwrap_err();
@@ -172,6 +175,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
+        tdd: false,
     };
 
     let mut state = superstate_agent::state::State::new("custom goal", "echo 1");
