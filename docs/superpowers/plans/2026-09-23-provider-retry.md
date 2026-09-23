@@ -247,6 +247,8 @@ pub fn retry_delay(attempt: u32) -> Duration {
             };
 ```
 
+- [ ] **Step 4b: Sum it across phases.** In `Runner::run_phases`, directly after the line `total.gate_attempts += report.gate_attempts;`, add `total.provider_retries += report.provider_retries;`.
+
 - [ ] **Step 5: Carry it in the report.** In `crates/superstate-cli/src/report.rs`:
   1. In `struct RunRecord`, add `pub provider_retries: u32,` directly after `pub rollbacks: u32,`.
   2. In `RunRecord::base`, add `provider_retries: 0,` directly after `rollbacks: 0,`.
