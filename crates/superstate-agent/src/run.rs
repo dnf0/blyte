@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use superstate_provider::{Message, Provider, Request, ToolCall, Usage};
+use superstate_provider::{Message, Provider, ProviderError, Request, ToolCall, Usage};
 
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
@@ -71,6 +71,8 @@ pub struct RunReport {
     pub empty_turns: u32,
     pub tool_calls: u32,
     pub gate_attempts: u32,
+    /// Transient provider failures (rate limits, overload) waited out during the run.
+    pub provider_retries: u32,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -187,6 +189,25 @@ pub struct PhaseResult {
     pub outcome: Outcome,
     pub turns: u32,
     pub gate_attempts: u32,
+}
+
+/// Retries allowed for one model call before a transient failure ends the run.
+pub const MAX_PROVIDER_RETRIES: u32 = 6;
+
+/// Transient provider failures worth waiting out: rate limits, overload, server errors and
+/// dropped connections. Anything else (a malformed request, a bad key) fails the run at once.
+pub fn is_transient(e: &ProviderError) -> bool {
+    match e {
+        ProviderError::Api { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
+        ProviderError::Transport(_) => true,
+        _ => false,
+    }
+}
+
+/// Wait before retry `attempt` (1-based): 2, 4, 8, 16, 32, then 60 seconds.
+pub fn retry_delay(attempt: u32) -> Duration {
+    let exp = attempt.saturating_sub(1).min(5);
+    Duration::from_secs((2u64 << exp).min(60))
 }
 
 pub struct Runner<'a> {
@@ -330,6 +351,7 @@ impl<'a> Runner<'a> {
             total.empty_turns += report.empty_turns;
             total.tool_calls += report.tool_calls;
             total.gate_attempts += report.gate_attempts;
+            total.provider_retries += report.provider_retries;
             results.push(PhaseResult {
                 id: phase.id.clone(),
                 outcome: outcome.clone(),
@@ -394,9 +416,27 @@ impl<'a> Runner<'a> {
                 tools: specs.clone(),
                 max_output_tokens: None,
             };
-            let resp = match self.provider.complete(&req) {
-                Ok(r) => r,
-                Err(e) => return (Outcome::Error(e.to_string()), report),
+            // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
+            // waited out, but never past the deadline: a run that cannot finish in time reports.
+            let mut attempt = 0;
+            let resp = loop {
+                match self.provider.complete(&req) {
+                    Ok(r) => break r,
+                    Err(e) if is_transient(&e) && attempt < MAX_PROVIDER_RETRIES => {
+                        attempt += 1;
+                        let wait = retry_delay(attempt);
+                        if deadline.is_some_and(|d| std::time::Instant::now() + wait >= d) {
+                            return (Outcome::Error(e.to_string()), report);
+                        }
+                        report.provider_retries += 1;
+                        eprintln!(
+                            "provider: {e}; retrying in {}s ({attempt}/{MAX_PROVIDER_RETRIES})",
+                            wait.as_secs()
+                        );
+                        std::thread::sleep(wait);
+                    }
+                    Err(e) => return (Outcome::Error(e.to_string()), report),
+                }
             };
             report.usage.input += resp.usage.input;
             report.usage.cached += resp.usage.cached;
