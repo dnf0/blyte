@@ -890,14 +890,24 @@ impl<'a> Runner<'a> {
                         .chars()
                         .take(90)
                         .collect::<String>();
-                    let input = call
-                        .arguments
-                        .get("command")
-                        .or_else(|| call.arguments.get("pattern"))
-                        .or_else(|| call.arguments.get("path"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.chars().take(70).collect::<String>())
-                        .unwrap_or_else(|| call.arguments.to_string().chars().take(70).collect());
+                    // A read's line range is part of what it did: paging through a file and
+                    // re-reading it look identical without it (superstate-eval 13.43).
+                    let input = if call.name == "read" {
+                        extract_action_target(&call.name, &call.arguments)
+                            .chars()
+                            .take(100)
+                            .collect()
+                    } else {
+                        call.arguments
+                            .get("command")
+                            .or_else(|| call.arguments.get("pattern"))
+                            .or_else(|| call.arguments.get("path"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.chars().take(70).collect::<String>())
+                            .unwrap_or_else(|| {
+                                call.arguments.to_string().chars().take(70).collect()
+                            })
+                    };
                     self.emit(Event::Tool {
                         name: &call.name,
                         input,
