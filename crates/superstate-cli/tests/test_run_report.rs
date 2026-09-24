@@ -33,6 +33,7 @@ fn config() -> TaskConfig {
         max_cost_usd: None,
         journal: None,
         resume: None,
+        fold_budget: None,
     }
 }
 
@@ -138,6 +139,7 @@ fn a_completed_run_maps_every_field() {
         review_rejections: 0,
         fold_notes: 0,
         fold_note_failures: 0,
+        turn_usage: Vec::new(),
     };
     let r = RunRecord::from_run(
         &config(),
