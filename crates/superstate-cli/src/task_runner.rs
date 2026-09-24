@@ -48,6 +48,8 @@ pub struct TaskConfig {
     pub journal: Option<PathBuf>,
     /// A journal to resume from (`--resume`).
     pub resume: Option<PathBuf>,
+    /// Fold budget in approximate tokens (`--fold-budget`).
+    pub fold_budget: Option<usize>,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -76,6 +78,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             max_cost_usd: cli.max_cost_usd,
             journal: cli.journal.clone(),
             resume: cli.resume.clone(),
+            fold_budget: cli.fold_budget,
         }
     }
 }
@@ -204,8 +207,17 @@ pub fn run_task_with_state_and_writer<W: Write>(
     // whereas "conversational" accumulates full turn history.
     let state_only = superstate_agent::context::StateOnly;
     let state_window = superstate_agent::context::StateWindow::default();
-    let folded = superstate_agent::context::Folded::default();
-    let compact = superstate_agent::context::Compact::default();
+    let folded = superstate_agent::context::Folded {
+        budget_tokens: config
+            .fold_budget
+            .unwrap_or(superstate_agent::context::Folded::default().budget_tokens),
+    };
+    let compact = superstate_agent::context::Compact {
+        budget_tokens: config
+            .fold_budget
+            .unwrap_or(superstate_agent::context::Compact::default().budget_tokens),
+        ..superstate_agent::context::Compact::default()
+    };
     let conversational = superstate_agent::context::Conversational;
     let context_strategy: &dyn superstate_agent::context::ContextStrategy =
         match config.context_strategy.as_str() {

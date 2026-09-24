@@ -580,6 +580,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     max_cost_usd: None,
                     journal: None,
                     resume: None,
+                    fold_budget: None,
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer

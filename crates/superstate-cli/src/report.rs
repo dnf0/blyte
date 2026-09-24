@@ -76,6 +76,10 @@ pub struct RunRecord {
     pub fold_note_failures: u32,
     /// List-price cost in USD, when the model's price is known.
     pub cost_usd: Option<f64>,
+    /// Fold budget given with `--fold-budget`, if any.
+    pub fold_budget: Option<usize>,
+    /// Per-call usage (see `superstate_agent::run::TurnUsage`).
+    pub turn_usage: Vec<superstate_agent::run::TurnUsage>,
     pub usage: UsageRecord,
     pub interceptions: Interceptions,
     pub insists: u32,
@@ -116,6 +120,8 @@ impl RunRecord {
             fold_notes: 0,
             fold_note_failures: 0,
             cost_usd: None,
+            fold_budget: config.fold_budget,
+            turn_usage: Vec::new(),
             usage: UsageRecord::default(),
             interceptions: Interceptions::default(),
             insists: 0,
@@ -158,6 +164,7 @@ impl RunRecord {
             fold_notes: report.fold_notes,
             fold_note_failures: report.fold_note_failures,
             cost_usd: superstate_provider::pricing(model_id).map(|p| p.cost(&report.usage)),
+            turn_usage: report.turn_usage.clone(),
             usage: UsageRecord {
                 input: report.usage.input,
                 cached: report.usage.cached,

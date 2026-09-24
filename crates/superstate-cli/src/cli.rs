@@ -98,6 +98,11 @@ pub struct Cli {
     #[arg(long, conflicts_with = "tdd")]
     pub resume: Option<PathBuf>,
 
+    /// Approximate token budget for the verbatim tail before folding (folded and compact
+    /// contexts; default 48000)
+    #[arg(long)]
+    pub fold_budget: Option<usize>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

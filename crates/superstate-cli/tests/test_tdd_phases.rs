@@ -30,6 +30,7 @@ fn config() -> TaskConfig {
         max_cost_usd: None,
         journal: None,
         resume: None,
+        fold_budget: None,
     }
 }
 

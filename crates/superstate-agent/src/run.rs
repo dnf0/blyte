@@ -66,6 +66,31 @@ impl Default for Budget {
     }
 }
 
+/// One call of the main loop: what it cost, and how its prompt related to the previous call's.
+/// `appended` means the prompt was the previous one plus `new_chars` of new messages, the only
+/// case where a prefix cache can serve everything but the new part. Fresh input far above
+/// `new_chars / 4` on an appended call is a cache miss; on a rewritten one (a fold) it is expected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TurnUsage {
+    pub turn: u32,
+    pub input: u64,
+    pub cached: u64,
+    pub output: u64,
+    pub thinking: u64,
+    pub prompt_messages: usize,
+    pub appended: bool,
+    pub new_chars: usize,
+}
+
+/// Characters a message contributes to a prompt, as the context strategies size them.
+fn message_chars(m: &Message) -> usize {
+    match m {
+        Message::User(t) | Message::Assistant(t) => t.len(),
+        Message::ToolCall { arguments, .. } => arguments.to_string().len(),
+        Message::ToolResult { content, .. } => content.len(),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunReport {
     pub outcome_turns: u32,
@@ -84,6 +109,8 @@ pub struct RunReport {
     /// Fold notes recorded, and fold-note requests that failed (the fold kept the harness digest).
     pub fold_notes: u32,
     pub fold_note_failures: u32,
+    /// One entry per main-loop model call, in order.
+    pub turn_usage: Vec<TurnUsage>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -728,6 +755,18 @@ impl<'a> Runner<'a> {
                 tools: specs.clone(),
                 max_output_tokens: None,
             };
+            let (appended, new_chars) = match &last_sent {
+                Some((prev, _))
+                    if req.messages.len() >= prev.len()
+                        && req.messages[..prev.len()] == prev[..] =>
+                {
+                    (
+                        true,
+                        req.messages[prev.len()..].iter().map(message_chars).sum(),
+                    )
+                }
+                _ => (false, req.messages.iter().map(message_chars).sum()),
+            };
             last_sent = Some((req.messages.clone(), history.len()));
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.
@@ -755,6 +794,16 @@ impl<'a> Runner<'a> {
             report.usage.cached += resp.usage.cached;
             report.usage.output += resp.usage.output;
             report.usage.thinking += resp.usage.thinking;
+            report.turn_usage.push(TurnUsage {
+                turn,
+                input: resp.usage.input,
+                cached: resp.usage.cached,
+                output: resp.usage.output,
+                thinking: resp.usage.thinking,
+                prompt_messages: req.messages.len(),
+                appended,
+                new_chars,
+            });
 
             if resp.text.trim().is_empty() && resp.tool_calls.is_empty() {
                 report.empty_turns += 1;
