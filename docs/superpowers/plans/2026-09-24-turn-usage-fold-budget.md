@@ -31,7 +31,7 @@ That decides whether explicit Gemini caching is worth building. The fold budget 
 - Modify (literals only, Step 6): `crates/superstate-cli/tests/test_run_report.rs`, `crates/superstate-cli/tests/test_task_runner.rs`, `crates/superstate-cli/tests/test_tdd_phases.rs`
 - Test: `crates/superstate-agent/tests/test_turn_usage.rs`, `crates/superstate-cli/tests/test_fold_budget.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 Create `crates/superstate-agent/tests/test_turn_usage.rs`:
 
@@ -225,9 +225,9 @@ fn the_fold_budget_defaults_to_unset() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_turn_usage` and `cargo test -p superstate --test test_fold_budget`. Expected: compile errors, because `turn_usage`, `TurnUsage` and `fold_budget` do not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_turn_usage` and `cargo test -p superstate --test test_fold_budget`. Expected: compile errors, because `turn_usage`, `TurnUsage` and `fold_budget` do not exist.
 
-- [ ] **Step 3: The runner.** In `crates/superstate-agent/src/run.rs`:
+- [x] **Step 3: The runner.** In `crates/superstate-agent/src/run.rs`:
   1. Directly above `pub struct RunReport`, add:
 
 ```rust
@@ -296,7 +296,7 @@ fn message_chars(m: &Message) -> usize {
             });
 ```
 
-- [ ] **Step 4: `--fold-budget`.**
+- [x] **Step 4: `--fold-budget`.**
   1. `crates/superstate-cli/src/cli.rs`, after the `resume` field:
 
 ```rust
@@ -326,20 +326,20 @@ fn message_chars(m: &Message) -> usize {
 
   3. `crates/superstate-cli/src/repl.rs`: in its `TaskConfig { ... }` literal, add `fold_budget: None,` after `resume: None,`.
 
-- [ ] **Step 5: The report.** In `crates/superstate-cli/src/report.rs`, in `RunRecord`:
+- [x] **Step 5: The report.** In `crates/superstate-cli/src/report.rs`, in `RunRecord`:
   - After `cost_usd`, add `/// Fold budget given with `--fold-budget`, if any.`, `pub fold_budget: Option<usize>,`, then `/// Per-call usage (see `superstate_agent::run::TurnUsage`).` and `pub turn_usage: Vec<superstate_agent::run::TurnUsage>,`.
   - In `base`, add `fold_budget: config.fold_budget,` and `turn_usage: Vec::new(),`.
   - In `from_run`, add `turn_usage: report.turn_usage.clone(),`.
 
-- [ ] **Step 6: Literal additions in existing tests (mechanical).**
+- [x] **Step 6: Literal additions in existing tests (mechanical).**
   - `crates/superstate-cli/tests/test_task_runner.rs` (4), `test_run_report.rs` (1), `test_tdd_phases.rs` (1): in each `TaskConfig { ... }` literal, add `fold_budget: None,` after `resume: None,`.
   - `crates/superstate-cli/tests/test_run_report.rs`: in the `RunReport { ... }` literal, add `turn_usage: Vec::new(),` as the last field.
 
-- [ ] **Step 7: Run the new tests.** Run: `cargo test -p superstate-agent --test test_turn_usage --test test_fold_notes --test test_resilience` and `cargo test -p superstate --test test_fold_budget --test test_run_report`. Expected: all pass (4 new).
+- [x] **Step 7: Run the new tests.** Run: `cargo test -p superstate-agent --test test_turn_usage --test test_fold_notes --test test_resilience` and `cargo test -p superstate --test test_fold_budget --test test_run_report`. Expected: all pass (4 new).
 
-- [ ] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 9: Commit.**
+- [x] **Step 9: Commit.**
 
 ```bash
 git add crates/
