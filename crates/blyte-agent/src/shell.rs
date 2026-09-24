@@ -19,9 +19,12 @@
 //! executor, so a container deployment reports what is reachable inside the container rather
 //! than what happens to be installed on the host.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
@@ -41,6 +44,13 @@ impl Output {
 pub trait Shell: Send + Sync {
     /// Run a command to completion. Blocking by contract -- see `tools` for why.
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String>;
+
+    /// Run a command the **model** issued. Where the executor keeps a persistent session, its
+    /// `cd` and `export` carry over to the model's next command, as in a terminal. The default
+    /// is `exec`: a fresh process in `cwd`.
+    fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
 
     /// Human-readable description of where commands land, for the system prompt.
     /// A worker that knows it is inside a container does not go looking for the host.
@@ -213,5 +223,438 @@ impl Shell for ContainerShell {
              installed there, not on the host.",
             self.workdir.display()
         )
+    }
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 with padding: how commands and outputs cross a session, so no quoting or
+/// framing can break the protocol.
+pub fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        out.push(B64[((n >> 18) & 63) as usize] as char);
+        out.push(B64[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            B64[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode standard base64, ignoring whitespace. `None` if malformed.
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for q in bytes.chunks(4) {
+        let pad = q.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 {
+            return None;
+        }
+        let mut n = 0u32;
+        for (i, &c) in q.iter().enumerate() {
+            let v = if i >= 4 - pad { 0 } else { val(c)? };
+            n = (n << 6) | v;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Single-quote for a POSIX shell.
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// How to start a session's shell: a login shell, as `bash -lc` gives today.
+#[derive(Debug, Clone)]
+pub enum Launcher {
+    /// `bash -l` on this machine, starting in `root`.
+    Local { root: PathBuf },
+    /// `bash -l` inside a running container, starting in `workdir`.
+    Container {
+        container_id: String,
+        workdir: PathBuf,
+    },
+}
+
+impl Launcher {
+    fn command(&self) -> Command {
+        match self {
+            Launcher::Local { root } => {
+                let mut c = Command::new("bash");
+                c.arg("-l").current_dir(root);
+                c
+            }
+            Launcher::Container {
+                container_id,
+                workdir,
+            } => {
+                let mut c = Command::new("docker");
+                c.args(["exec", "-i", "-w"])
+                    .arg(workdir)
+                    .arg(container_id)
+                    .args(["bash", "-l"]);
+                c
+            }
+        }
+    }
+
+    /// The process-per-command executor this launcher replaces, used whenever a session
+    /// cannot start.
+    fn fallback(&self) -> Box<dyn Shell> {
+        match self {
+            Launcher::Local { .. } => Box::new(LocalShell),
+            Launcher::Container {
+                container_id,
+                workdir,
+            } => Box::new(ContainerShell {
+                container_id: container_id.clone(),
+                workdir: workdir.clone(),
+            }),
+        }
+    }
+}
+
+/// How a session command ended.
+pub enum RunResult {
+    Done(Output),
+    /// The deadline passed; the session must be killed. Paths hold what the command wrote.
+    TimedOut {
+        out: String,
+        err: String,
+    },
+    /// The shell ended before reporting (e.g. the command ran `exit`).
+    Died {
+        out: String,
+        err: String,
+    },
+}
+
+/// One long-lived `bash -l`. Each command's stdout and stderr go to their own files and come
+/// back base64-encoded on one marker line, so neither quoting nor background jobs can break
+/// the framing.
+pub struct Session {
+    child: Child,
+    stdin: ChildStdin,
+    lines: Receiver<String>,
+    tmp: String,
+    next: u64,
+}
+
+const READY: &str = "__BLYTE_READY__ ";
+
+impl Session {
+    pub fn start(launcher: &Launcher) -> Result<Session, String> {
+        let mut cmd = launcher.command();
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("cannot start a shell session: {e}"))?;
+        let stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut s = Session {
+            child,
+            stdin,
+            lines: rx,
+            tmp: String::new(),
+            next: 0,
+        };
+        s.send(
+            "__blyte_t=$(mktemp -d 2>/dev/null || { mkdir -p /tmp/blyte.$$ && echo /tmp/blyte.$$; }); \
+             if command -v base64 >/dev/null 2>&1; then echo \"__BLYTE_READY__ $__blyte_t\"; \
+             else echo __BLYTE_NO_BASE64__; fi\n",
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match s
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(l) if l.starts_with(READY) => {
+                    s.tmp = l[READY.len()..].trim().to_string();
+                    return Ok(s);
+                }
+                Ok(l) if l.starts_with("__BLYTE_NO_BASE64__") => {
+                    s.kill();
+                    return Err("no base64 in the execution environment".into());
+                }
+                Ok(_) => continue, // profile output on stdout
+                Err(_) => {
+                    s.kill();
+                    return Err("the shell session did not start".into());
+                }
+            }
+        }
+    }
+
+    fn send(&mut self, script: &str) -> Result<(), String> {
+        self.stdin
+            .write_all(script.as_bytes())
+            .and_then(|_| self.stdin.flush())
+            .map_err(|e| format!("the shell session closed: {e}"))
+    }
+
+    /// Kill the session and everything it started.
+    pub fn kill(&mut self) {
+        #[cfg(unix)]
+        {
+            let pgid = self.child.id() as i32;
+            if pgid > 0 {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Run `command` to completion. `cwd: Some(dir)` runs it in a subshell in `dir`, so nothing
+    /// it does persists; `None` runs it in the session itself, so `cd` and `export` carry over.
+    pub fn run(&mut self, command: &str, cwd: Option<&Path>, timeout: Duration) -> RunResult {
+        let id = self.next;
+        self.next += 1;
+        let (out, err) = (
+            format!("{}/{id}.o", self.tmp),
+            format!("{}/{id}.e", self.tmp),
+        );
+        let decoded = format!(
+            "\"$(printf %s {} | base64 -d)\"",
+            b64_encode(command.as_bytes())
+        );
+        let body = match cwd {
+            Some(d) => format!("( cd {} && eval {decoded} )", quote(&d.to_string_lossy())),
+            None => format!("eval {decoded}"),
+        };
+        let (qo, qe) = (quote(&out), quote(&err));
+        let script = format!(
+            "{body} </dev/null >{qo} 2>{qe}; __blyte_r=$?; \
+             printf '__BLYTE_{id}__ %s %s %s\\n' \"$__blyte_r\" \
+             \"$(base64 < {qo} | tr -d '\\n')\" \"$(base64 < {qe} | tr -d '\\n')\"; \
+             rm -f {qo} {qe}\n"
+        );
+        if self.send(&script).is_err() {
+            return RunResult::Died { out, err };
+        }
+        let marker = format!("__BLYTE_{id}__ ");
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(l) => {
+                    let Some(rest) = l.strip_prefix(&marker) else {
+                        continue;
+                    };
+                    let mut f = rest.splitn(3, ' ');
+                    let exit_code = f.next().and_then(|x| x.trim().parse().ok()).unwrap_or(-1);
+                    let dec = |x: Option<&str>| {
+                        x.and_then(b64_decode)
+                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                            .unwrap_or_default()
+                    };
+                    let stdout = dec(f.next());
+                    let stderr = dec(f.next());
+                    return RunResult::Done(Output {
+                        stdout,
+                        stderr,
+                        exit_code,
+                    });
+                }
+                Err(RecvTimeoutError::Timeout) => return RunResult::TimedOut { out, err },
+                Err(RecvTimeoutError::Disconnected) => return RunResult::Died { out, err },
+            }
+        }
+    }
+
+    /// Remove the session's scratch directory, then end it.
+    fn close(&mut self) {
+        let _ = self.send(&format!("rm -rf {}; exit 0\n", quote(&self.tmp)));
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.kill();
+    }
+}
+
+/// Commands through persistent sessions instead of a process each: one session for the
+/// harness's own commands (each in a fresh subshell in the directory asked for, never affected
+/// by the model's) and one for the model's `bash` (its `cd` and `export` carry over). Falls back
+/// to a process per command, exactly as [`LocalShell`] / [`ContainerShell`], when a session
+/// cannot start.
+///
+/// A `docker exec` per call cost 60-110 ms and a container `edit` about 300 ms; a session round
+/// trip costs a few milliseconds (harness_bench, 2026-09-24).
+pub struct PersistentShell {
+    launcher: Launcher,
+    harness: Mutex<Option<Session>>,
+    user: Mutex<Option<Session>>,
+    fallback: Box<dyn Shell>,
+}
+
+impl PersistentShell {
+    pub fn new(launcher: Launcher) -> Self {
+        let fallback = launcher.fallback();
+        Self {
+            launcher,
+            harness: Mutex::new(None),
+            user: Mutex::new(None),
+            fallback,
+        }
+    }
+
+    pub fn local(root: PathBuf) -> Self {
+        Self::new(Launcher::Local { root })
+    }
+
+    pub fn container(container_id: String, workdir: PathBuf) -> Self {
+        Self::new(Launcher::Container {
+            container_id,
+            workdir,
+        })
+    }
+
+    /// Whether the harness session is (or can be) running. False means every call falls back.
+    pub fn is_persistent(&self) -> bool {
+        let mut g = self.harness.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            *g = Session::start(&self.launcher).ok();
+        }
+        g.is_some()
+    }
+
+    /// Run through `slot`'s session, starting it if needed. `None` when no session can start.
+    fn run(
+        &self,
+        slot: &Mutex<Option<Session>>,
+        command: &str,
+        cwd: Option<&Path>,
+        timeout: Duration,
+    ) -> Option<Result<Output, String>> {
+        let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            *g = Session::start(&self.launcher).ok();
+        }
+        let session = g.as_mut()?;
+        let (out, err, note, code) = match session.run(command, cwd, timeout) {
+            RunResult::Done(o) => return Some(Ok(o)),
+            RunResult::TimedOut { out, err } => (
+                out,
+                err,
+                format!("\n[killed by blyte after {}s]", timeout.as_secs()),
+                124,
+            ),
+            RunResult::Died { out, err } => (
+                out,
+                err,
+                "[the shell exited; the next command starts a fresh shell in the workspace root]"
+                    .to_string(),
+                1,
+            ),
+        };
+        session.kill();
+        *g = None;
+        drop(g);
+        // What the command wrote before it was cut short, read through a fresh process.
+        let cat = |p: &str| {
+            self.fallback
+                .exec(
+                    &format!("cat -- {q} 2>/dev/null; rm -f -- {q}", q = quote(p)),
+                    Path::new("/"),
+                    Duration::from_secs(30),
+                )
+                .map(|o| o.stdout)
+                .unwrap_or_default()
+        };
+        let (stdout, stderr) = (cat(&out), cat(&err));
+        Some(Ok(Output {
+            stdout,
+            stderr: format!("{stderr}{note}"),
+            exit_code: code,
+        }))
+    }
+}
+
+impl Shell for PersistentShell {
+    fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.run(&self.harness, command, Some(cwd), timeout)
+            .unwrap_or_else(|| self.fallback.exec(command, cwd, timeout))
+    }
+
+    fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.run(&self.user, command, None, timeout)
+            .unwrap_or_else(|| self.fallback.exec(command, cwd, timeout))
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} Your `bash` commands share one shell session: `cd` and `export` carry over to \
+             later commands. File tools always resolve paths from the workspace root.",
+            self.fallback.describe()
+        )
+    }
+}
+
+impl Drop for PersistentShell {
+    fn drop(&mut self) {
+        for slot in [&self.harness, &self.user] {
+            if let Some(mut s) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                s.close();
+            }
+        }
     }
 }
