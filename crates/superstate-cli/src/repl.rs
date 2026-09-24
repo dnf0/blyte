@@ -577,6 +577,9 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     tdd: false,
                     review: false,
                     fold_notes: false,
+                    max_cost_usd: None,
+                    journal: None,
+                    resume: None,
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer

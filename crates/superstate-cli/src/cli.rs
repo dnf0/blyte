@@ -86,6 +86,18 @@ pub struct Cli {
     #[arg(long)]
     pub fold_notes: bool,
 
+    /// Stop the run once it has cost this many US dollars at list price (needs a priced model)
+    #[arg(long)]
+    pub max_cost_usd: Option<f64>,
+
+    /// Save the run before every model call to this file, so it can be resumed
+    #[arg(long)]
+    pub journal: Option<PathBuf>,
+
+    /// Resume a run from a journal written by --journal (a fresh budget; the prompt is optional)
+    #[arg(long, conflicts_with = "tdd")]
+    pub resume: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

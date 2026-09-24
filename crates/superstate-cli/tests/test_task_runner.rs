@@ -87,6 +87,9 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         tdd: false,
         review: false,
         fold_notes: false,
+        max_cost_usd: None,
+        journal: None,
+        resume: None,
     };
 
     let result = run_task(config);
@@ -123,6 +126,9 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         tdd: false,
         review: false,
         fold_notes: false,
+        max_cost_usd: None,
+        journal: None,
+        resume: None,
     };
 
     let err = run_task(anthropic_config).unwrap_err();
@@ -148,6 +154,9 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         tdd: false,
         review: false,
         fold_notes: false,
+        max_cost_usd: None,
+        journal: None,
+        resume: None,
     };
 
     let err = run_task(ollama_config).unwrap_err();
@@ -184,6 +193,9 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         tdd: false,
         review: false,
         fold_notes: false,
+        max_cost_usd: None,
+        journal: None,
+        resume: None,
     };
 
     let mut state = superstate_agent::state::State::new("custom goal", "echo 1");

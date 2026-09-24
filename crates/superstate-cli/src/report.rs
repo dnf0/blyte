@@ -74,6 +74,8 @@ pub struct RunRecord {
     pub review_rejections: u32,
     pub fold_notes: u32,
     pub fold_note_failures: u32,
+    /// List-price cost in USD, when the model's price is known.
+    pub cost_usd: Option<f64>,
     pub usage: UsageRecord,
     pub interceptions: Interceptions,
     pub insists: u32,
@@ -113,6 +115,7 @@ impl RunRecord {
             review_rejections: 0,
             fold_notes: 0,
             fold_note_failures: 0,
+            cost_usd: None,
             usage: UsageRecord::default(),
             interceptions: Interceptions::default(),
             insists: 0,
@@ -154,6 +157,7 @@ impl RunRecord {
             review_rejections: report.review_rejections,
             fold_notes: report.fold_notes,
             fold_note_failures: report.fold_note_failures,
+            cost_usd: superstate_provider::pricing(model_id).map(|p| p.cost(&report.usage)),
             usage: UsageRecord {
                 input: report.usage.input,
                 cached: report.usage.cached,
