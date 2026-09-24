@@ -22,7 +22,7 @@ pub struct Cli {
     /// Context strategy: 'state-only' (O(1) prompt, latest result only), 'state-window' (O(1) prompt plus the last 8 results) or 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
     #[arg(
         long,
-        default_value = "conversational",
+        default_value = "folded",
         value_parser = ["state-only", "state-window", "conversational", "folded"]
     )]
     pub context: String,

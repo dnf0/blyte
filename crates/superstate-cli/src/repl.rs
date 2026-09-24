@@ -20,7 +20,7 @@ impl Default for ReplConfig {
             repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             model: None,
             gate: None,
-            context_strategy: "state-only".to_string(),
+            context_strategy: "folded".to_string(),
             container: None,
             max_turns: 60,
             max_gates: 5,

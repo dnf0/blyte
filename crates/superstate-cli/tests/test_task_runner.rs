@@ -47,7 +47,7 @@ fn test_task_config_defaults() {
     let config = TaskConfig::from(&cli);
     assert_eq!(config.prompt, "");
     assert_eq!(config.gate, None);
-    assert_eq!(config.context_strategy, "conversational");
+    assert_eq!(config.context_strategy, "folded");
     assert_eq!(config.model, None);
     assert_eq!(config.container, None);
     assert_eq!(config.max_turns, 25);
