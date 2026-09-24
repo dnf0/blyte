@@ -43,7 +43,7 @@
 - Modify: `crates/blyte-agent/src/shell.rs`, `crates/blyte-agent/src/fs.rs`
 - Test: `crates/blyte-agent/tests/test_persistent_shell.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.** Create `crates/blyte-agent/tests/test_persistent_shell.rs`:
+- [x] **Step 1: Write the failing tests.** Create `crates/blyte-agent/tests/test_persistent_shell.rs`:
 
 ```rust
 //! Persistent sessions: the harness's commands match a fresh process exactly, the model's shell
@@ -177,9 +177,9 @@ fn session_files_write_and_read_exact_bytes() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_persistent_shell`. Expected: compile errors, because `PersistentShell`, `exec_user` and `SessionFs` do not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_persistent_shell`. Expected: compile errors, because `PersistentShell`, `exec_user` and `SessionFs` do not exist.
 
-- [ ] **Step 3: The session machinery.** In `crates/blyte-agent/src/shell.rs`:
+- [x] **Step 3: The session machinery.** In `crates/blyte-agent/src/shell.rs`:
   1. Change the imports to:
 
 ```rust
@@ -631,7 +631,7 @@ impl Drop for PersistentShell {
 }
 ```
 
-- [ ] **Step 4: `SessionFs`.** In `crates/blyte-agent/src/fs.rs`, add at the end:
+- [x] **Step 4: `SessionFs`.** In `crates/blyte-agent/src/fs.rs`, add at the end:
 
 ```rust
 /// Files reached through a persistent session: the container counterpart of [`LocalFs`] at a
@@ -721,11 +721,11 @@ impl Fs for SessionFs {
 }
 ```
 
-- [ ] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_persistent_shell`. Expected: 8 passed. If `harness_commands_match_a_fresh_process_exactly` fails on a specific command, report the command and both outputs verbatim and stop. Do not change the test.
+- [x] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_persistent_shell`. Expected: 8 passed. If `harness_commands_match_a_fresh_process_exactly` fails on a specific command, report the command and both outputs verbatim and stop. Do not change the test.
 
-- [ ] **Step 6: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 6: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```bash
 git add crates/
@@ -741,7 +741,7 @@ git commit --no-gpg-sign -m "feat(agent): persistent shell sessions and session-
 - Create: `crates/blyte-agent/src/search.rs`
 - Test: `crates/blyte-agent/tests/test_native_grep.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.** Create `crates/blyte-agent/tests/test_native_grep.rs`:
+- [x] **Step 1: Write the failing tests.** Create `crates/blyte-agent/tests/test_native_grep.rs`:
 
 ```rust
 //! `grep` on a local workspace runs ripgrep's own libraries in-process: rg's line format and
@@ -844,9 +844,9 @@ fn sd_and_tokei_are_accelerators_and_pretty_printers_are_not() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_native_grep`. Expected: compile errors, because `blyte_agent::search` does not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_native_grep`. Expected: compile errors, because `blyte_agent::search` does not exist.
 
-- [ ] **Step 3: Dependencies.** In the root `Cargo.toml` `[workspace.dependencies]`, add:
+- [x] **Step 3: Dependencies.** In the root `Cargo.toml` `[workspace.dependencies]`, add:
 
 ```toml
 grep-searcher = "0.1.17"
@@ -857,7 +857,7 @@ ignore = "0.4.33"
 
   In `crates/blyte-agent/Cargo.toml` `[dependencies]`, add `grep-searcher.workspace = true`, `grep-regex.workspace = true`, `grep-matcher.workspace = true` and `ignore.workspace = true`.
 
-- [ ] **Step 4: The search module.** Create `crates/blyte-agent/src/search.rs`:
+- [x] **Step 4: The search module.** Create `crates/blyte-agent/src/search.rs`:
 
 ```rust
 //! `grep` in-process, with ripgrep's own libraries: rg's regex engine and semantics, `.gitignore`
@@ -940,7 +940,7 @@ pub fn grep_lines(
 
   Add `pub mod search;` to `crates/blyte-agent/src/lib.rs` (keep the list alphabetical).
 
-- [ ] **Step 5: `Fs::is_local`.** In `crates/blyte-agent/src/fs.rs`, in `pub trait Fs`, add:
+- [x] **Step 5: `Fs::is_local`.** In `crates/blyte-agent/src/fs.rs`, in `pub trait Fs`, add:
 
 ```rust
     /// Whether paths name files on this machine, so tools may read them in-process.
@@ -951,7 +951,7 @@ pub fn grep_lines(
 
   and in `impl Fs for LocalFs`, add `fn is_local(&self) -> bool { true }`.
 
-- [ ] **Step 6: The `grep` tool.** In `crates/blyte-agent/src/tools.rs`:
+- [x] **Step 6: The `grep` tool.** In `crates/blyte-agent/src/tools.rs`:
   1. Change `ACCELERATORS` to `&["rg", "fd", "sd", "tokei", "jq", "ast-grep"]`. Extend its doc comment with: `Pretty printers (bat, eza, dust, delta) and interactive tools are deliberately absent: their colour, icons and pagers cost a model tokens it cannot use.`
   2. In the `"grep" =>` arm, replace everything from `let cmd = grep_command(have(shell, root, "rg"), &pattern, &sub, &glob_str);` through the end of the `match shell.exec(&cmd, root, COMMAND_TIMEOUT) { ... }` expression with:
 
@@ -996,11 +996,11 @@ pub fn grep_lines(
 
   3. If `have` becomes unused and clippy reports dead code, keep it `pub` (it is public API used by tests); do not delete it.
 
-- [ ] **Step 7: Run the tests.** Run: `cargo test -p blyte-agent --test test_native_grep --test test_bound_output --test test_tools`. Expected: all pass (5 new). If an existing grep test fails because it asserted the old two-exec behaviour or rg's unsorted order, report it verbatim and stop.
+- [x] **Step 7: Run the tests.** Run: `cargo test -p blyte-agent --test test_native_grep --test test_bound_output --test test_tools`. Expected: all pass (5 new). If an existing grep test fails because it asserted the old two-exec behaviour or rg's unsorted order, report it verbatim and stop.
 
-- [ ] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
+- [x] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
 
-- [ ] **Step 9: Commit.**
+- [x] **Step 9: Commit.**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/
@@ -1015,7 +1015,7 @@ git commit --no-gpg-sign -m "feat(agent): native ripgrep grep for local workspac
 - Modify: `crates/blyte-agent/src/tools.rs`, `crates/blyte-cli/src/task_runner.rs`, `crates/blyte-agent/examples/harness_bench.rs`, `crates/blyte-provider/src/lib.rs`, `crates/blyte-provider/src/gemini.rs`, `crates/blyte-provider/src/anthropic.rs`, `crates/blyte-provider/src/ollama.rs`
 - Test: `crates/blyte-agent/tests/test_bash_session_routing.rs` (create), `crates/blyte-provider/tests/test_http_client.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
   Create `crates/blyte-agent/tests/test_bash_session_routing.rs`:
 
@@ -1073,11 +1073,11 @@ fn the_http_client_is_shared() {
 
   If `ureq` is not a dev-dependency of `blyte-provider`, it is a normal dependency, so the test can name `ureq::Agent`. If the compiler says otherwise, add `ureq` to `[dev-dependencies]` with the same version spec as `[dependencies]`.
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_bash_session_routing` and `cargo test -p blyte-provider --test test_http_client`. Expected: the routing test fails (it records `exec`, because the tool still calls `exec`), and the HTTP test does not compile (`http_client` does not exist).
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_bash_session_routing` and `cargo test -p blyte-provider --test test_http_client`. Expected: the routing test fails (it records `exec`, because the tool still calls `exec`), and the HTTP test does not compile (`http_client` does not exist).
 
-- [ ] **Step 3: Route the model's bash.** In `crates/blyte-agent/src/tools.rs`, in the `"bash" =>` arm, change `shell.exec(&s("command"), root, COMMAND_TIMEOUT)` to `shell.exec_user(&s("command"), root, COMMAND_TIMEOUT)`.
+- [x] **Step 3: Route the model's bash.** In `crates/blyte-agent/src/tools.rs`, in the `"bash" =>` arm, change `shell.exec(&s("command"), root, COMMAND_TIMEOUT)` to `shell.exec_user(&s("command"), root, COMMAND_TIMEOUT)`.
 
-- [ ] **Step 4: One HTTP client.** In `crates/blyte-provider/src/lib.rs`, add:
+- [x] **Step 4: One HTTP client.** In `crates/blyte-provider/src/lib.rs`, add:
 
 ```rust
 /// The process's one HTTP client. `ureq::Agent` pools connections, so every model call after
@@ -1095,7 +1095,7 @@ pub fn http_client() -> &'static ureq::Agent {
 
   In each of `gemini.rs`, `anthropic.rs` and `ollama.rs`, in both `complete` and `list_models`, replace the `let agent = ureq::AgentBuilder::new() ... .build();` statement with `let agent = crate::http_client();`. The timeouts are the same values those files' `CONNECT_TIMEOUT_SECS` (20) and `READ_TIMEOUT_SECS` (300) give; if a file's constants differ from 20 and 300, stop and report it. Remove constants that become unused only if clippy reports them.
 
-- [ ] **Step 5: Wire the executors.** In `crates/blyte-cli/src/task_runner.rs`, replace the construction of `local_shell`, `local_fs`, `container_shell`, `container_fs` and the `let (shell, fs, root) = match ...` statement with:
+- [x] **Step 5: Wire the executors.** In `crates/blyte-cli/src/task_runner.rs`, replace the construction of `local_shell`, `local_fs`, `container_shell`, `container_fs` and the `let (shell, fs, root) = match ...` statement with:
 
 ```rust
     // Persistent sessions: one for the harness's commands, one for the model's `bash` (its `cd`
@@ -1129,7 +1129,7 @@ pub fn http_client() -> &'static ureq::Agent {
 
   Keep every later use of `shell`, `fs` and `root` as it is.
 
-- [ ] **Step 6: The benchmark measures the new executors, with `--legacy` for the old.** In `crates/blyte-agent/examples/harness_bench.rs`:
+- [x] **Step 6: The benchmark measures the new executors, with `--legacy` for the old.** In `crates/blyte-agent/examples/harness_bench.rs`:
   1. Add `let legacy = args.iter().any(|a| a == "--legacy");` after `let out = ...;`, and add `[--legacy]` to the usage line in the module doc.
   2. Replace the block from `let (local_shell, local_fs) = (LocalShell, LocalFs);` through the `let (shell, fs, root): (...) = match ... ;` statement with:
 
@@ -1169,11 +1169,11 @@ pub fn http_client() -> &'static ureq::Agent {
   3. Update the imports: add `PersistentShell` to the `blyte_agent::shell::{...}` import and `SessionFs` to the `blyte_agent::fs::{...}` import.
   4. Make the printed and JSON `mode` include `legacy` when set: `let mode = format!("{}{}", image.map_or("local".to_string(), |i| format!("container:{i}")), if legacy { " legacy" } else { "" });` (replacing the existing `let mode = ...;`). Also move the `docker rm -f` of the container to after `drop` of the executors, by wrapping the run in a block, so sessions close before the container is removed. If that restructuring is awkward, leave the order and report it.
 
-- [ ] **Step 7: Run the tests and the local benchmark.** Run `cargo test -p blyte-agent --test test_bash_session_routing --test test_persistent_shell --test test_native_grep` and `cargo test -p blyte-provider --test test_http_client`. Expected: all pass. Then run `cargo run --release -p blyte-agent --example harness_bench -- --turns 200 --legacy` and `cargo run --release -p blyte-agent --example harness_bench -- --turns 200`, and report both outputs verbatim.
+- [x] **Step 7: Run the tests and the local benchmark.** Run `cargo test -p blyte-agent --test test_bash_session_routing --test test_persistent_shell --test test_native_grep` and `cargo test -p blyte-provider --test test_http_client`. Expected: all pass. Then run `cargo run --release -p blyte-agent --example harness_bench -- --turns 200 --legacy` and `cargo run --release -p blyte-agent --example harness_bench -- --turns 200`, and report both outputs verbatim.
 
-- [ ] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
+- [x] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
 
-- [ ] **Step 9: Commit.**
+- [x] **Step 9: Commit.**
 
 ```bash
 git add crates/
