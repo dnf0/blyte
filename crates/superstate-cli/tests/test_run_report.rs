@@ -29,6 +29,7 @@ fn config() -> TaskConfig {
         report: None,
         tdd: false,
         review: false,
+        fold_notes: false,
     }
 }
 
@@ -132,6 +133,8 @@ fn a_completed_run_maps_every_field() {
         provider_retries: 0,
         reviews: 0,
         review_rejections: 0,
+        fold_notes: 0,
+        fold_note_failures: 0,
     };
     let r = RunRecord::from_run(
         &config(),

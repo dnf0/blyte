@@ -81,6 +81,11 @@ pub struct Cli {
     #[arg(long)]
     pub review: bool,
 
+    /// When a fold first appears, ask the worker for a structured note on the folded turns and
+    /// carry it in the digest (folded and compact contexts)
+    #[arg(long)]
+    pub fold_notes: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
