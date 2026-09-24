@@ -197,3 +197,37 @@ fn folded_cuts_only_between_blocks() {
     );
     assert!(!digests[0].contains("no result"), "{}", digests[0]);
 }
+
+#[test]
+fn the_system_prompt_invites_batching_independent_calls() {
+    let d = tempfile::tempdir().unwrap();
+    let p = Scripted {
+        script: Mutex::new(vec![Response {
+            text: "done".into(),
+            ..Default::default()
+        }]),
+        seen: Mutex::new(Vec::new()),
+    };
+    let runner = Runner {
+        provider: &p,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 2,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        loop_breaker: true,
+        on_event: None,
+    };
+    runner.run(&mut State::new("anything", "true"));
+    let system = p.seen.lock().unwrap()[0].system.clone();
+    assert!(system.contains("## Working efficiently"), "{system}");
+    assert!(
+        system.contains("several tool calls in one turn"),
+        "{system}"
+    );
+}

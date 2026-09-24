@@ -251,6 +251,10 @@ impl<'a> Runner<'a> {
              decide the verdict. Do not claim to be finished; simply stop when you believe the \
              command will pass, and you will be told.\n\n\
              ## Environment\n{where_}\nAvailable: {bins}\n\n\
+             ## Working efficiently\n\
+             Independent reads, searches and commands can be issued as several tool calls in one \
+             turn: they run in order and you see every result together. Batch them whenever one \
+             does not depend on another's result; every turn you save is a full model call.\n\n\
              ## Working notes\n\
              Use `note` to record what you learn: the cause once you find it, what you ruled \
              out, which files matter. Your notes persist across turns and are the only thing \
