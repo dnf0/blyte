@@ -218,12 +218,19 @@ pub fn run_task_with_state_and_writer<W: Write>(
             .unwrap_or(superstate_agent::context::Compact::default().budget_tokens),
         ..superstate_agent::context::Compact::default()
     };
+    let adaptive = superstate_agent::context::Adaptive {
+        min_tokens: config
+            .fold_budget
+            .unwrap_or(superstate_agent::context::Adaptive::default().min_tokens),
+        ..superstate_agent::context::Adaptive::default()
+    };
     let conversational = superstate_agent::context::Conversational;
     let context_strategy: &dyn superstate_agent::context::ContextStrategy =
         match config.context_strategy.as_str() {
             "state-only" => &state_only,
             "state-window" => &state_window,
             "compact" => &compact,
+            "adaptive" => &adaptive,
             "folded" => &folded,
             _ => &conversational,
         };

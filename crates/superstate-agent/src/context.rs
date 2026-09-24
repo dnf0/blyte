@@ -29,6 +29,10 @@ pub trait ContextStrategy: Send + Sync {
     fn folds(&self, _history: &[Message]) -> Vec<(usize, usize)> {
         Vec::new()
     }
+    /// The fold budget in force after `history`, in approximate tokens, for strategies that fold.
+    fn fold_budget(&self, _history: &[Message]) -> Option<usize> {
+        None
+    }
     fn name(&self) -> &'static str;
 }
 
@@ -357,42 +361,134 @@ struct FoldPlan {
     folds: Vec<(usize, usize)>,
     seg_start: usize,
     last_trigger: Option<usize>,
+    /// The budget in force at the end of the scan.
+    budget: usize,
+}
+
+/// Greedy fold boundaries over `rest`: each fold depends only on messages before it, so the next
+/// turn reproduces every earlier fold exactly. With `grow = Some((step, max))` the budget grows by
+/// `step` (to at most `max`) at each re-fetch of something already folded (`is_refetch`), decided
+/// in the same in-order pass, so growth is prefix-stable too.
+fn greedy_plan(rest: &[Message], start_budget: usize, grow: Option<(usize, usize)>) -> FoldPlan {
+    let mut budget = start_budget;
+    let mut folds: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start = 0;
+    let mut size = 0;
+    let mut last_trigger = None;
+    for i in 0..rest.len() {
+        if let Some((step, max)) = grow {
+            if seg_start > 0 && is_refetch(rest, seg_start, i) {
+                budget = (budget + step).min(max);
+            }
+        }
+        size += approx_tokens(&rest[i]);
+        if size <= budget {
+            continue;
+        }
+        // Fold roughly the older half, cutting only between turn blocks (never after a call or
+        // before a result), so a call is never separated from its result or from calls in the
+        // same batch. No safe cut yet: keep accumulating.
+        let target = seg_start + (i + 1 - seg_start) / 2;
+        let lo = target.max(seg_start + 1);
+        let Some(cut) = (lo..=i).find(|&j| {
+            !matches!(rest[j], Message::ToolResult { .. })
+                && !matches!(rest[j - 1], Message::ToolCall { .. })
+        }) else {
+            continue;
+        };
+        folds.push((seg_start, cut));
+        size = rest[cut..=i].iter().map(approx_tokens).sum();
+        seg_start = cut;
+        last_trigger = Some(i);
+    }
+    FoldPlan {
+        folds,
+        seg_start,
+        last_trigger,
+        budget,
+    }
+}
+
+/// What a call fetches, for re-fetch detection: a `read`'s path (any range), or a `grep`/`glob`'s
+/// full arguments. Other tools (bash, edits) never count: re-running tests is legitimate.
+fn fetch_key(m: &Message) -> Option<String> {
+    let Message::ToolCall {
+        name, arguments, ..
+    } = m
+    else {
+        return None;
+    };
+    match name.as_str() {
+        "read" => arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|p| format!("read:{p}")),
+        "grep" | "glob" => Some(format!("{name}:{arguments}")),
+        _ => None,
+    }
+}
+
+/// Whether `rest[i]` re-fetches something only a fold removed from view: its fetch key matches a
+/// call in `rest[..folded_end]`, no matching call is still in view (`rest[folded_end..i]`), and,
+/// for a read, the file has not been edited or written since the folded read.
+fn is_refetch(rest: &[Message], folded_end: usize, i: usize) -> bool {
+    let Some(key) = fetch_key(&rest[i]) else {
+        return false;
+    };
+    let matches = |m: &Message| fetch_key(m).as_deref() == Some(key.as_str());
+    if rest[folded_end..i].iter().any(matches) {
+        return false;
+    }
+    let Some(j) = (0..folded_end).rev().find(|&j| matches(&rest[j])) else {
+        return false;
+    };
+    let Message::ToolCall {
+        name, arguments, ..
+    } = &rest[i]
+    else {
+        return false;
+    };
+    if name == "read" {
+        let path = arguments.get("path").and_then(|v| v.as_str());
+        let edited = rest[j + 1..i].iter().any(|m| {
+            matches!(m, Message::ToolCall { name, arguments, .. }
+                if (name == "edit" || name == "write")
+                    && arguments.get("path").and_then(|v| v.as_str()) == path)
+        });
+        if edited {
+            return false;
+        }
+    }
+    true
+}
+
+/// The prompt for a fold plan: the opening, one digest per fold (with its fold note, if any),
+/// then the verbatim tail.
+fn render_folded(
+    opening: &Message,
+    rest: &[Message],
+    plan: &FoldPlan,
+    state: &State,
+) -> Vec<Message> {
+    let mut out = vec![opening.clone()];
+    for &(a, b) in &plan.folds {
+        // Message numbers are 1-based positions in the full history.
+        out.push(digest(
+            &rest[a..b],
+            a + 2,
+            b + 1,
+            state.runtime.fold_notes.get(&b).map(String::as_str),
+        ));
+    }
+    out.extend_from_slice(&rest[plan.seg_start..]);
+    out
 }
 
 impl Folded {
     /// Greedy boundaries from the start: each fold depends only on messages before it, so the next
     /// turn reproduces every earlier fold exactly.
     fn plan(&self, rest: &[Message]) -> FoldPlan {
-        let mut folds: Vec<(usize, usize)> = Vec::new();
-        let mut seg_start = 0;
-        let mut size = 0;
-        let mut last_trigger = None;
-        for i in 0..rest.len() {
-            size += approx_tokens(&rest[i]);
-            if size <= self.budget_tokens {
-                continue;
-            }
-            // Fold roughly the older half, cutting only between turn blocks (never after a call
-            // or before a result), so a call is never separated from its result or from calls in
-            // the same batch. No safe cut yet: keep accumulating.
-            let target = seg_start + (i + 1 - seg_start) / 2;
-            let lo = target.max(seg_start + 1);
-            let Some(cut) = (lo..=i).find(|&j| {
-                !matches!(rest[j], Message::ToolResult { .. })
-                    && !matches!(rest[j - 1], Message::ToolCall { .. })
-            }) else {
-                continue;
-            };
-            folds.push((seg_start, cut));
-            size = rest[cut..=i].iter().map(approx_tokens).sum();
-            seg_start = cut;
-            last_trigger = Some(i);
-        }
-        FoldPlan {
-            folds,
-            seg_start,
-            last_trigger,
-        }
+        greedy_plan(rest, self.budget_tokens, None)
     }
 }
 
@@ -401,19 +497,7 @@ impl ContextStrategy for Folded {
         let Some((opening, rest)) = history.split_first() else {
             return Vec::new();
         };
-        let plan = self.plan(rest);
-        let mut out = vec![opening.clone()];
-        for (a, b) in plan.folds {
-            // Message numbers are 1-based positions in the full history.
-            out.push(digest(
-                &rest[a..b],
-                a + 2,
-                b + 1,
-                state.runtime.fold_notes.get(&b).map(String::as_str),
-            ));
-        }
-        out.extend_from_slice(&rest[plan.seg_start..]);
-        out
+        render_folded(opening, rest, &self.plan(rest), state)
     }
 
     fn folds(&self, history: &[Message]) -> Vec<(usize, usize)> {
@@ -421,6 +505,10 @@ impl ContextStrategy for Folded {
             .split_first()
             .map(|(_, rest)| self.plan(rest).folds)
             .unwrap_or_default()
+    }
+
+    fn fold_budget(&self, _history: &[Message]) -> Option<usize> {
+        Some(self.budget_tokens)
     }
 
     fn name(&self) -> &'static str {
@@ -597,7 +685,75 @@ impl ContextStrategy for Compact {
         .folds(history)
     }
 
+    fn fold_budget(&self, _history: &[Message]) -> Option<usize> {
+        Some(self.budget_tokens)
+    }
+
     fn name(&self) -> &'static str {
         "compact"
+    }
+}
+
+/// `folded` with a budget that grows when a fold proves too deep.
+///
+/// A fixed budget is either larger than the task needs to keep in view (wasted cached tokens) or
+/// smaller (the worker re-fetches what was folded, and a turn costs as much as 100-200K cached
+/// tokens). At 16K, build-cython-ext was 20% cheaper than at 48K, but scc took 77% more turns and
+/// re-read unchanged files four times as often (superstate-eval 13.44). Here the budget starts at
+/// `min_tokens` and grows by `step_tokens`, up to `max_tokens`, each time the worker re-fetches
+/// something only a fold removed from view (`is_refetch`). Growth is decided in the same in-order
+/// pass that places folds, so folds stay prefix-stable and the prompt changes only at a fold.
+#[derive(Debug, Clone)]
+pub struct Adaptive {
+    pub min_tokens: usize,
+    pub step_tokens: usize,
+    pub max_tokens: usize,
+}
+
+impl Default for Adaptive {
+    fn default() -> Self {
+        Self {
+            min_tokens: 16_000,
+            step_tokens: 8_000,
+            max_tokens: 64_000,
+        }
+    }
+}
+
+impl Adaptive {
+    fn plan(&self, rest: &[Message]) -> FoldPlan {
+        greedy_plan(
+            rest,
+            self.min_tokens,
+            Some((self.step_tokens, self.max_tokens)),
+        )
+    }
+}
+
+impl ContextStrategy for Adaptive {
+    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
+        let Some((opening, rest)) = history.split_first() else {
+            return Vec::new();
+        };
+        render_folded(opening, rest, &self.plan(rest), state)
+    }
+
+    fn folds(&self, history: &[Message]) -> Vec<(usize, usize)> {
+        history
+            .split_first()
+            .map(|(_, rest)| self.plan(rest).folds)
+            .unwrap_or_default()
+    }
+
+    fn fold_budget(&self, history: &[Message]) -> Option<usize> {
+        Some(
+            history
+                .split_first()
+                .map_or(self.min_tokens, |(_, rest)| self.plan(rest).budget),
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "adaptive"
     }
 }

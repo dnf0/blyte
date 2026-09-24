@@ -80,6 +80,9 @@ pub struct TurnUsage {
     pub prompt_messages: usize,
     pub appended: bool,
     pub new_chars: usize,
+    /// The fold budget in force for this call, for strategies that fold.
+    #[serde(default)]
+    pub fold_budget: Option<usize>,
 }
 
 /// Characters a message contributes to a prompt, as the context strategies size them.
@@ -767,6 +770,7 @@ impl<'a> Runner<'a> {
                 }
                 _ => (false, req.messages.iter().map(message_chars).sum()),
             };
+            let fold_budget = self.context.fold_budget(&history);
             last_sent = Some((req.messages.clone(), history.len()));
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.
@@ -803,6 +807,7 @@ impl<'a> Runner<'a> {
                 prompt_messages: req.messages.len(),
                 appended,
                 new_chars,
+                fold_budget,
             });
 
             if resp.text.trim().is_empty() && resp.tool_calls.is_empty() {
