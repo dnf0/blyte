@@ -37,9 +37,9 @@ Claude dry-ran it on a throwaway worktree: clippy was clean, every test passed, 
 
 **Files:** everything the script touches (the whole repository except the historical records named above).
 
-- [ ] **Step 1: Run the script** from the worktree root: `bash scripts/rename_to_blyte.sh`. Expected: it prints `renamed; now run: ...` and exits 0.
+- [x] **Step 1: Run the script** from the worktree root: `bash scripts/rename_to_blyte.sh`. Expected: it prints `renamed; now run: ...` and exits 0.
 
-- [ ] **Step 2: Check nothing but protected names remain.** Run:
+- [x] **Step 2: Check nothing but protected names remain.** Run:
 
 ```bash
 git ls-files | grep -v -E '^docs/superpowers/(plans|specs)/|^CHANGELOG\.md$|^scripts/rename_to_blyte\.sh$' \
@@ -48,9 +48,9 @@ git ls-files | grep -v -E '^docs/superpowers/(plans|specs)/|^CHANGELOG\.md$|^scr
 
   Expected: only `superstate-eval`, `superstate_eval…` and `https://github.com/climate-x-org/superstate…` forms. If anything else remains, stop and report it.
 
-- [ ] **Step 3: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Confirm `target/debug/blyte` exists.
+- [x] **Step 3: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Confirm `target/debug/blyte` exists.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git add -A
