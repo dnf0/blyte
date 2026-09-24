@@ -231,3 +231,49 @@ fn the_system_prompt_invites_batching_independent_calls() {
         "{system}"
     );
 }
+
+#[test]
+fn folded_digests_pair_by_position_not_by_repeating_gemini_ids() {
+    // Gemini issues no ids; the adapter numbers calls call_0, call_1 ... afresh every turn.
+    let read = |id: &str, path: &str| Message::ToolCall {
+        id: id.into(),
+        name: "read".into(),
+        arguments: json!({"path": path}),
+        signature: None,
+    };
+    let lines = |id: &str, n: usize| Message::ToolResult {
+        id: id.into(),
+        name: "read".into(),
+        content: "line\n".repeat(n),
+        is_error: false,
+    };
+    let mut h = vec![Message::User("Begin.".into())];
+    for t in 0..60 {
+        h.push(read("call_0", &format!("first_{t}.rs")));
+        h.push(read("call_1", &format!("second_{t}.rs")));
+        h.push(lines("call_0", 2 + t));
+        h.push(lines("call_1", 20 + t));
+        h.push(Message::Assistant("x".repeat(400)));
+    }
+    let out = Folded {
+        budget_tokens: 1_000,
+    }
+    .build(&State::new("fix it", ""), &h);
+    let digest = out
+        .iter()
+        .find_map(|m| match m {
+            Message::User(t) if t.starts_with("## Earlier turns, folded") => Some(t.clone()),
+            _ => None,
+        })
+        .expect("a fold");
+    for t in 0..3 {
+        assert!(
+            digest.contains(&format!("`first_{t}.rs` -> {} lines read", 2 + t)),
+            "{digest}"
+        );
+        assert!(
+            digest.contains(&format!("`second_{t}.rs` -> {} lines read", 20 + t)),
+            "{digest}"
+        );
+    }
+}

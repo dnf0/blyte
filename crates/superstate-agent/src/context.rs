@@ -292,41 +292,51 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 /// One harness-written line per folded item, from the same summarisers as the action ledger.
-/// A call is paired with its result by id, so a parallel batch summarises correctly.
+/// Calls are paired with results by position within their turn block (calls, then results, in
+/// call order). Not by id: Gemini issues no ids, the adapter numbers calls from `call_0` every
+/// turn, so ids repeat across turns and an id match would pair a call with another turn's result.
 fn digest(folded: &[Message], first: usize, last: usize) -> Message {
     let mut text =
         format!("## Earlier turns, folded (messages {first}-{last}; summarised by the harness)\n");
-    let result_of = |id: &str| {
-        folded.iter().find_map(|m| match m {
-            Message::ToolResult {
-                id: rid,
-                content,
-                is_error,
-                ..
-            } if rid == id => Some((content.as_str(), *is_error)),
-            _ => None,
-        })
-    };
-    for m in folded {
-        match m {
-            Message::ToolCall {
-                id,
-                name,
-                arguments,
-                ..
-            } => {
-                let target = crate::run::extract_action_target(name, arguments);
-                let summary = match result_of(id) {
-                    Some((content, is_error)) => {
-                        crate::run::extract_action_summary(name, content, is_error)
-                    }
-                    None => "no result".to_string(),
-                };
-                text.push_str(&format!("- `{name}` `{target}` -> {summary}\n"));
+    let mut i = 0;
+    while i < folded.len() {
+        match &folded[i] {
+            Message::ToolCall { .. } => {
+                let calls_end = (i..folded.len())
+                    .find(|&j| !matches!(folded[j], Message::ToolCall { .. }))
+                    .unwrap_or(folded.len());
+                let results_end = (calls_end..folded.len())
+                    .find(|&j| !matches!(folded[j], Message::ToolResult { .. }))
+                    .unwrap_or(folded.len());
+                for (k, call) in folded[i..calls_end].iter().enumerate() {
+                    let Message::ToolCall {
+                        name, arguments, ..
+                    } = call
+                    else {
+                        continue;
+                    };
+                    let target = crate::run::extract_action_target(name, arguments);
+                    let summary = match folded.get(calls_end + k) {
+                        Some(Message::ToolResult {
+                            content, is_error, ..
+                        }) if calls_end + k < results_end => {
+                            crate::run::extract_action_summary(name, content, *is_error)
+                        }
+                        _ => "no result".to_string(),
+                    };
+                    text.push_str(&format!("- `{name}` `{target}` -> {summary}\n"));
+                }
+                i = results_end.max(i + 1);
             }
-            Message::Assistant(t) => text.push_str(&format!("- you said: {}\n", clip(t, 160))),
-            Message::User(t) => text.push_str(&format!("- harness: {}\n", clip(t, 160))),
-            Message::ToolResult { .. } => {}
+            Message::Assistant(t) => {
+                text.push_str(&format!("- you said: {}\n", clip(t, 160)));
+                i += 1;
+            }
+            Message::User(t) => {
+                text.push_str(&format!("- harness: {}\n", clip(t, 160)));
+                i += 1;
+            }
+            Message::ToolResult { .. } => i += 1,
         }
     }
     Message::User(text)
