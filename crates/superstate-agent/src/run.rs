@@ -270,7 +270,7 @@ impl<'a> Runner<'a> {
             Duration::from_secs(1800),
         ) {
             Ok(o) => {
-                let body = tools::distil(o.merged().trim_end(), tools::OUTPUT_LINE_BUDGET);
+                let body = tools::bound_output(o.merged().trim_end());
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
             }
             // A gate that cannot execute has not passed. Treating an error as success is how

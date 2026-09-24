@@ -30,6 +30,51 @@ pub const OUTPUT_LINE_BUDGET: usize = 400;
 /// truncated search reads as truncated rather than as a complete answer with few hits.
 pub const MAX_MATCHES: usize = 200;
 
+/// Longest line kept whole. Minified code puts megabytes on one line, which a line budget alone
+/// never catches: a single grep over node_modules overflowed a 1,048,576-token request.
+pub const MAX_LINE_CHARS: usize = 500;
+
+/// Most characters a single tool result may carry (about 15K tokens), after line clipping and
+/// line distillation. The final guarantee that one result cannot swamp the context.
+pub const MAX_OUTPUT_CHARS: usize = 60_000;
+
+/// Bound a tool's output by size: clip over-long lines, distil to `OUTPUT_LINE_BUDGET` lines,
+/// then cap the total, keeping head and tail. Ordinary output passes through unchanged.
+pub fn bound_output(text: &str) -> String {
+    let clipped: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let n = l.chars().count();
+            if n > MAX_LINE_CHARS {
+                let head: String = l.chars().take(MAX_LINE_CHARS).collect();
+                format!(
+                    "{head} …[{} more chars clipped by superstate]",
+                    n - MAX_LINE_CHARS
+                )
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    let mut joined = clipped.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    let distilled = distil(&joined, OUTPUT_LINE_BUDGET);
+    let total = distilled.chars().count();
+    if total <= MAX_OUTPUT_CHARS {
+        return distilled;
+    }
+    let head_n = MAX_OUTPUT_CHARS * 2 / 3;
+    let tail_n = MAX_OUTPUT_CHARS - head_n;
+    let head: String = distilled.chars().take(head_n).collect();
+    let tail: String = distilled.chars().skip(total - tail_n).collect();
+    format!(
+        "{head}\n\n[... {} chars elided by superstate ...]\n\n{tail}",
+        total - head_n - tail_n
+    )
+}
+
 /// Ceiling on a single MODEL-ISSUED command.
 ///
 /// Deliberately much shorter than the gate's budget, because the two have different shapes. A
@@ -262,6 +307,42 @@ pub fn specs() -> Vec<ToolSpec> {
     ]
 }
 
+/// The search command. ripgrep honours .gitignore, which keeps dependency and build trees out of
+/// results; the grep fallback (used when a container has no rg) excludes them explicitly, or a
+/// search over node_modules returns megabyte-long minified lines.
+pub fn grep_command(use_rg: bool, pattern: &str, sub: &str, glob: &str) -> String {
+    if use_rg {
+        let globarg = if glob.is_empty() {
+            String::new()
+        } else {
+            format!("--glob {}", shell_quote(glob))
+        };
+        format!(
+            "rg --line-number --no-heading --color never {globarg} -e {} {} | head -n {}",
+            shell_quote(pattern),
+            shell_quote(sub),
+            MAX_MATCHES + 1
+        )
+    } else {
+        let globarg = if glob.is_empty() {
+            String::new()
+        } else {
+            format!("--include={}", shell_quote(glob))
+        };
+        let excludes = ["node_modules", ".git", "target", ".venv", "dist", "build"]
+            .iter()
+            .map(|d| format!("--exclude-dir={d}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "grep -rnI {excludes} {globarg} -e {} {} | head -n {}",
+            shell_quote(pattern),
+            shell_quote(sub),
+            MAX_MATCHES + 1
+        )
+    }
+}
+
 /// Execute one tool call. `note` is handled by the loop, which owns the state.
 ///
 /// `shell` decides WHERE commands land -- host, container, remote. The tools never know, which
@@ -273,6 +354,19 @@ pub fn specs() -> Vec<ToolSpec> {
 /// own commands, and a remote sandbox shares neither. Pairing the wrong two would have the
 /// model editing one filesystem and verifying another.
 pub fn execute(
+    root: &Path,
+    shell: &dyn Shell,
+    fs: &dyn Fs,
+    name: &str,
+    args: &Value,
+) -> ToolOutcome {
+    let mut outcome = execute_unbounded(root, shell, fs, name, args);
+    outcome.content = bound_output(&outcome.content);
+    outcome
+}
+
+/// The tools themselves; `execute` bounds whatever they return.
+fn execute_unbounded(
     root: &Path,
     shell: &dyn Shell,
     fs: &dyn Fs,
@@ -412,34 +506,7 @@ pub fn execute(
                 return ToolOutcome::err(e);
             }
             let glob_str = s("glob");
-            let globarg_rg = if glob_str.is_empty() {
-                String::new()
-            } else {
-                format!("--glob {}", shell_quote(&glob_str))
-            };
-            let globarg_grep = if glob_str.is_empty() {
-                String::new()
-            } else {
-                format!("--include={}", shell_quote(&glob_str))
-            };
-            // ripgrep when present -- it honours .gitignore, which keeps node_modules and
-            // target/ out of the results and is most of why a repo search is usable at all.
-            // grep -rn is the fallback so the tool never simply vanishes on a bare machine.
-            let cmd = if have(shell, root, "rg") {
-                format!(
-                    "rg --line-number --no-heading --color never {globarg_rg} -e {} {} | head -n {}",
-                    shell_quote(&pattern),
-                    shell_quote(&sub),
-                    MAX_MATCHES + 1
-                )
-            } else {
-                format!(
-                    "grep -rnI {globarg_grep} -e {} {} | head -n {}",
-                    shell_quote(&pattern),
-                    shell_quote(&sub),
-                    MAX_MATCHES + 1
-                )
-            };
+            let cmd = grep_command(have(shell, root, "rg"), &pattern, &sub, &glob_str);
             match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
                 Ok(o) => {
                     let body = o.stdout.clone();
