@@ -68,6 +68,7 @@ fn runner<'a>(p: &'a Flaky, root: &std::path::Path, max: Option<Duration>) -> Ru
             max_turns: 5,
             max_gate_attempts: 1,
             max_duration: max,
+            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,

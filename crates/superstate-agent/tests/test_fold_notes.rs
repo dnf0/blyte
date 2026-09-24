@@ -84,6 +84,7 @@ fn run_with(note_reply: &str, fold_notes: bool) -> (Outcome, RunReport, Vec<Requ
             max_turns: 10,
             max_gate_attempts: 1,
             max_duration: None,
+            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: false,

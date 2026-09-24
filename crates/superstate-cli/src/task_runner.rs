@@ -246,6 +246,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
             max_turns: config.max_turns as u32,
             max_gate_attempts: config.max_gates as u32,
             max_duration: config.max_seconds.map(std::time::Duration::from_secs),
+            max_cost_usd: None,
         },
         rollback: config.rollback,
         loop_breaker: config.loop_breaker,

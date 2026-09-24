@@ -116,6 +116,7 @@ pub fn format_event(event: &superstate_agent::run::Event<'_>) -> String {
         superstate_agent::run::Event::RolledBack { to } => {
             format!("↺ Rolled back working tree to {}", to)
         }
+        superstate_agent::run::Event::Checkpoint { .. } => String::new(),
     }
 }
 

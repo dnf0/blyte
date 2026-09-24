@@ -100,6 +100,7 @@ fn runner<'a>(
             max_turns: 12,
             max_gate_attempts: 3,
             max_duration: None,
+            max_cost_usd: None,
         },
         rollback,
         loop_breaker: true,
