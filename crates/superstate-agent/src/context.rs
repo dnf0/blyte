@@ -516,7 +516,7 @@ impl ContextStrategy for Compact {
             .last_trigger
             .map_or(tail_start, |t| (t + 2).min(history.len()));
 
-        // Superseded outputs, judged only by calls inside completed epochs.
+        // Superseded outputs, judged only by calls up to the cutoff.
         let mut masked = vec![false; history.len()];
         for r in tail_start..cutoff {
             if !matches!(history[r], Message::ToolResult { .. }) {
