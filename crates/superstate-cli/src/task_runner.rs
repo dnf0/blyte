@@ -178,11 +178,13 @@ pub fn run_task_with_state_and_writer<W: Write>(
     // whereas "conversational" accumulates full turn history.
     let state_only = superstate_agent::context::StateOnly;
     let state_window = superstate_agent::context::StateWindow::default();
+    let folded = superstate_agent::context::Folded::default();
     let conversational = superstate_agent::context::Conversational;
     let context_strategy: &dyn superstate_agent::context::ContextStrategy =
         match config.context_strategy.as_str() {
             "state-only" => &state_only,
             "state-window" => &state_window,
+            "folded" => &folded,
             _ => &conversational,
         };
 

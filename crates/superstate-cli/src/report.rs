@@ -69,6 +69,7 @@ pub struct RunRecord {
     pub tool_calls: u32,
     pub gate_attempts: u32,
     pub rollbacks: u32,
+    pub provider_retries: u32,
     pub usage: UsageRecord,
     pub interceptions: Interceptions,
     pub insists: u32,
@@ -103,6 +104,7 @@ impl RunRecord {
             tool_calls: 0,
             gate_attempts: 0,
             rollbacks: 0,
+            provider_retries: 0,
             usage: UsageRecord::default(),
             interceptions: Interceptions::default(),
             insists: 0,
@@ -139,6 +141,7 @@ impl RunRecord {
             tool_calls: report.tool_calls,
             gate_attempts: report.gate_attempts,
             rollbacks: state.runtime.rollbacks,
+            provider_retries: report.provider_retries,
             usage: UsageRecord {
                 input: report.usage.input,
                 cached: report.usage.cached,

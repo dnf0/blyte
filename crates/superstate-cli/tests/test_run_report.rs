@@ -128,6 +128,7 @@ fn a_completed_run_maps_every_field() {
         empty_turns: 1,
         tool_calls: 3,
         gate_attempts: 2,
+        provider_retries: 0,
     };
     let r = RunRecord::from_run(
         &config(),
