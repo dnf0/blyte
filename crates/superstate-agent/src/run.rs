@@ -251,6 +251,10 @@ impl<'a> Runner<'a> {
              decide the verdict. Do not claim to be finished; simply stop when you believe the \
              command will pass, and you will be told.\n\n\
              ## Environment\n{where_}\nAvailable: {bins}\n\n\
+             ## Working efficiently\n\
+             Independent reads, searches and commands can be issued as several tool calls in one \
+             turn: they run in order and you see every result together. Batch them whenever one \
+             does not depend on another's result; every turn you save is a full model call.\n\n\
              ## Working notes\n\
              Use `note` to record what you learn: the cause once you find it, what you ruled \
              out, which files matter. Your notes persist across turns and are the only thing \
@@ -456,14 +460,20 @@ impl<'a> Runner<'a> {
 
             // --- the model is still working -------------------------------------------------
             if !resp.tool_calls.is_empty() {
+                // A turn's calls are recorded together, then its results together, in call
+                // order. Providers encode one model turn carrying several calls and one reply
+                // carrying their results; interleaving them split a parallel batch into turns
+                // Gemini rejects (it signs only the first call of a batch).
                 for call in &resp.tool_calls {
-                    report.tool_calls += 1;
                     history.push(Message::ToolCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                         signature: call.signature.clone(),
                     });
+                }
+                for call in &resp.tool_calls {
+                    report.tool_calls += 1;
 
                     let guards_on = self.loop_breaker && !is_insist(call, &state.runtime.actions);
 
