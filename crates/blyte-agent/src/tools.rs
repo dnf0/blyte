@@ -219,7 +219,9 @@ pub fn have(shell: &dyn Shell, root: &Path, bin: &str) -> bool {
 ///
 /// POSIX-guaranteed utilities (`sed`, `awk`, `find`, `xargs`, `grep`) are deliberately absent:
 /// they are present everywhere, so listing them is noise in every prompt for no decision.
-pub const ACCELERATORS: &[&str] = &["rg", "fd", "jq", "ast-grep"];
+/// Pretty printers (bat, eza, dust, delta) and interactive tools are deliberately absent: their
+/// colour, icons and pagers cost a model tokens it cannot use.
+pub const ACCELERATORS: &[&str] = &["rg", "fd", "sd", "tokei", "jq", "ast-grep"];
 
 /// Language toolchains. Reported against what the REPOSITORY declares, not as a bare list --
 /// "this is a Node project and `npm` is not reachable" is actionable; "npm: absent" is not.
@@ -506,23 +508,40 @@ fn execute_unbounded(
                 return ToolOutcome::err(e);
             }
             let glob_str = s("glob");
-            let cmd = grep_command(have(shell, root, "rg"), &pattern, &sub, &glob_str);
-            match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
-                Ok(o) => {
-                    let body = o.stdout.clone();
-                    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
-                    if lines.is_empty() {
-                        return ToolOutcome::ok(format!("no matches for {pattern}"));
-                    }
-                    if lines.len() > MAX_MATCHES {
-                        ToolOutcome::ok(format!(
-                            "{}\n\n[capped at {MAX_MATCHES} matches; narrow the pattern or pass `glob` \
-                             to see the rest]", lines[..MAX_MATCHES].join("\n")))
-                    } else {
-                        ToolOutcome::ok(format!("{} match(es):\n{}", lines.len(), lines.join("\n")))
-                    }
+            // A local workspace is searched in-process with ripgrep's libraries; elsewhere one
+            // command, using rg when the environment has it (no separate probe).
+            let lines: Vec<String> = if fs.is_local() {
+                match crate::search::grep_lines(root, &sub, &pattern, &glob_str, MAX_MATCHES + 1) {
+                    Ok(l) => l,
+                    Err(e) => return ToolOutcome::err(format!("grep failed: {e}")),
                 }
-                Err(e) => ToolOutcome::err(format!("grep failed: {e}")),
+            } else {
+                let cmd = format!(
+                    "if command -v rg >/dev/null 2>&1; then {}; else {}; fi",
+                    grep_command(true, &pattern, &sub, &glob_str),
+                    grep_command(false, &pattern, &sub, &glob_str)
+                );
+                match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
+                    Ok(o) => o
+                        .stdout
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(String::from)
+                        .collect(),
+                    Err(e) => return ToolOutcome::err(format!("grep failed: {e}")),
+                }
+            };
+            if lines.is_empty() {
+                return ToolOutcome::ok(format!("no matches for {pattern}"));
+            }
+            if lines.len() > MAX_MATCHES {
+                ToolOutcome::ok(format!(
+                    "{}\n\n[capped at {MAX_MATCHES} matches; narrow the pattern or pass `glob` \
+                     to see the rest]",
+                    lines[..MAX_MATCHES].join("\n")
+                ))
+            } else {
+                ToolOutcome::ok(format!("{} match(es):\n{}", lines.len(), lines.join("\n")))
             }
         }
         other => ToolOutcome::err(format!("unknown tool: {other}")),

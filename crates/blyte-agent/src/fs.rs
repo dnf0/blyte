@@ -22,12 +22,19 @@ pub trait Fs: Send + Sync {
     /// Resolve symlinks and `..`. Used for the workspace-escape check, so it must answer for
     /// the filesystem the operation will really touch.
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, String>;
+    /// Whether paths name files on this machine, so tools may read them in-process.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct LocalFs;
 
 impl Fs for LocalFs {
+    fn is_local(&self) -> bool {
+        true
+    }
     fn read(&self, path: &Path) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
     }

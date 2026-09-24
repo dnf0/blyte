@@ -424,6 +424,20 @@ fn bash_goes_through_the_seam_not_the_host() {
     );
 }
 
+/// Host files presented as a remote filesystem, as a container's are.
+struct NotLocal;
+impl blyte_agent::fs::Fs for NotLocal {
+    fn read(&self, p: &std::path::Path) -> Result<String, String> {
+        LocalFs.read(p)
+    }
+    fn write(&self, p: &std::path::Path, c: &str) -> Result<(), String> {
+        LocalFs.write(p, c)
+    }
+    fn canonicalize(&self, p: &std::path::Path) -> Result<std::path::PathBuf, String> {
+        LocalFs.canonicalize(p)
+    }
+}
+
 #[test]
 fn search_tools_also_go_through_the_seam() {
     // glob and grep shell out too. Routing bash but not these would mean a containerised run
@@ -437,10 +451,12 @@ fn search_tools_also_go_through_the_seam() {
         "glob",
         &json!({"pattern": "**/*.rs"}),
     );
+    // A container's files are not local (`Fs::is_local` is false), so grep must go through its
+    // executor. A local workspace is searched in-process instead (test_native_grep).
     execute(
         d.path(),
         &fake,
-        &LocalFs,
+        &NotLocal,
         "grep",
         &json!({"pattern": "needle"}),
     );
