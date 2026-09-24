@@ -38,7 +38,7 @@ The re-fetch is the signal that a fold cut too deep.
 - Modify (literal only): `crates/superstate-cli/tests/test_fold_budget.rs`
 - Test: `crates/superstate-agent/tests/test_adaptive.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.** Create `crates/superstate-agent/tests/test_adaptive.rs`:
+- [x] **Step 1: Write the failing tests.** Create `crates/superstate-agent/tests/test_adaptive.rs`:
 
 ```rust
 //! `adaptive`: `folded` whose budget grows when the worker re-fetches something only a fold
@@ -315,9 +315,9 @@ fn each_turn_records_the_budget_in_force() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_adaptive`. Expected: compile errors, because `Adaptive`, `fold_budget` and `TurnUsage.fold_budget` do not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_adaptive`. Expected: compile errors, because `Adaptive`, `fold_budget` and `TurnUsage.fold_budget` do not exist.
 
-- [ ] **Step 3: Context.** In `crates/superstate-agent/src/context.rs`:
+- [x] **Step 3: Context.** In `crates/superstate-agent/src/context.rs`:
   1. In `pub trait ContextStrategy`, after the `folds` method, add:
 
 ```rust
@@ -532,7 +532,7 @@ impl ContextStrategy for Adaptive {
 }
 ```
 
-- [ ] **Step 4: The runner.** In `crates/superstate-agent/src/run.rs`:
+- [x] **Step 4: The runner.** In `crates/superstate-agent/src/run.rs`:
   1. In `pub struct TurnUsage`, add as the last field:
 
 ```rust
@@ -544,7 +544,7 @@ impl ContextStrategy for Adaptive {
   2. In `run_until`, directly before the line `last_sent = Some((req.messages.clone(), history.len()));`, add `let fold_budget = self.context.fold_budget(&history);`.
   3. In the `report.turn_usage.push(TurnUsage { ... })` literal, add `fold_budget,` after `new_chars,`.
 
-- [ ] **Step 5: CLI.**
+- [x] **Step 5: CLI.**
   1. `crates/superstate-cli/src/cli.rs`: add `"adaptive"` to the `--context` `value_parser` list. Append to its doc comment: ` or 'adaptive' (folded, with a budget that starts at --fold-budget or 16000 and grows when the worker re-fetches folded content)`.
   2. `crates/superstate-cli/src/task_runner.rs`: after the `let compact = ...;` statement, add:
 
@@ -560,11 +560,11 @@ impl ContextStrategy for Adaptive {
      and add `"adaptive" => &adaptive,` to the `match config.context_strategy.as_str()` arms, after `"compact" => &compact,`.
   3. `crates/superstate-cli/tests/test_fold_budget.rs`: in the `TurnUsage { ... }` literal, add `fold_budget: None,` after `new_chars: 40,`.
 
-- [ ] **Step 6: Run the new tests.** Run: `cargo test -p superstate-agent --test test_adaptive --test test_folded --test test_compact --test test_fold_notes --test test_turn_usage` and `cargo test -p superstate --test test_fold_budget`. Expected: all pass (11 new).
+- [x] **Step 6: Run the new tests.** Run: `cargo test -p superstate-agent --test test_adaptive --test test_folded --test test_compact --test test_fold_notes --test test_turn_usage` and `cargo test -p superstate --test test_fold_budget`. Expected: all pass (11 new).
 
-- [ ] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
 
 ```bash
 git add crates/
