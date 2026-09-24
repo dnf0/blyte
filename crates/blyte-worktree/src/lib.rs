@@ -1,0 +1,11 @@
+//! Native Worktree management engine for Blyte powered by Worktrunk.
+
+pub mod cache;
+pub mod error;
+pub mod manager;
+pub mod types;
+
+pub use cache::reflink_cache_dirs;
+pub use error::WorktreeError;
+pub use manager::{ensure_git_baseline, ensure_git_exclude, IsolatedWorktree, WorktreeManager};
+pub use types::{WorktreeConfig, WorktreeSummary};

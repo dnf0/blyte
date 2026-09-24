@@ -8,7 +8,7 @@ Small fixes found during validation, plan edits and docs may be done directly.
 
 ## Repo basics
 
-- Rust workspace (`crates/`); binary `superstate`.
+- Rust workspace (`crates/`); binary `blyte`.
 - Checks (same as CI): `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`
 - Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - Worktrees live in `.wt/<task>` (gitignored), not the sibling-directory default.

@@ -1,8 +1,8 @@
-# Superstate Daemon Capabilities Roadmap
+# Blyte Daemon Capabilities Roadmap
 
 **Date:** 2026-09-19  
 **Status:** Approved & Prioritized  
-**Context:** Following the validation of the single-milestone autonomous control plane in EXP-062 (blocking review, deterministic git rollback, and native tool output shunting), this roadmap charts the sequence for unlocking the full multi-milestone control plane in `superstate`.
+**Context:** Following the validation of the single-milestone autonomous control plane in EXP-062 (blocking review, deterministic git rollback, and native tool output shunting), this roadmap charts the sequence for unlocking the full multi-milestone control plane in `blyte`.
 
 ---
 
@@ -15,7 +15,7 @@
    - Deterministic Git rollback on gate failure (clean baselines on retry).
    - Tool output shunting (preventing context window saturation).
    - Detached OS daemon runner (driving iteration outside LLM context loops).
-3. **Core Ethos:** Superstate is an external, deterministic verification runtime. It executes against verifiable gates provided by the human or orchestrator; it must never synthesize its own answer keys or grade its own homework.
+3. **Core Ethos:** Blyte is an external, deterministic verification runtime. It executes against verifiable gates provided by the human or orchestrator; it must never synthesize its own answer keys or grade its own homework.
 
 ---
 
@@ -68,7 +68,7 @@
   - Implementation (test filter adapters & staged gating): 2h 30m
   - TDD Multi-language Test Suite: 1h 15m
   - Review & PR: 30m
-* **Problem:** ADR-0001 specified progressive verification, and `crates/superstate-core/src/impact.rs` implements 346 lines of Tree-sitter AST symbol extraction for Rust, Python, Go, and TypeScript. However, nothing in the execution loop invokes it.
+* **Problem:** ADR-0001 specified progressive verification, and `crates/blyte-core/src/impact.rs` implements 346 lines of Tree-sitter AST symbol extraction for Rust, Python, Go, and TypeScript. However, nothing in the execution loop invokes it.
 * **Scope:**
   - Language adapters translating AST diffs into test-runner filters (`pytest -k`, `cargo test <symbol>`, `go test -run`).
   - Staged gating in `daemon.rs`: run fast impacted slice on intermediate turns; run full milestone verification gate before advancement.
@@ -85,6 +85,6 @@
   - Review & PR: 45m
 * **Problem:** The product promise of "Zero Negative Work" requires that an agent never leaves `main` or the host checkout in a broken state. In early versions, worktrees were provisioned externally or disabled (`no_worktree: true`).
 * **Scope:**
-  - Native `WorktreeManager` in `superstate-core` managing copy-on-write worktrees (`.wt/<task-id>`).
+  - Native `WorktreeManager` in `blyte-core` managing copy-on-write worktrees (`.wt/<task-id>`).
   - Dependency caching: symlink or reflink heavy directories (`node_modules/`, `target/`, `.venv/`) to avoid install latency.
   - Autonomous merge/prune lifecycle: fast-forward or squash merge into target branch on milestone completion; instantly prune worktree on failure or abort.

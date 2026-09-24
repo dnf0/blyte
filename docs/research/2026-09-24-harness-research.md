@@ -14,7 +14,7 @@ A feature earns its place only if it improves one of these, or completion, in re
 
 | Finding | Evidence |
 |---|---|
-| Superstate beats agy on cost and time at an equal pass rate. On build-cython-ext its worst run was cheaper and faster than agy's best: $1.32–1.43 and 539–592s for `folded`, against $1.45–1.70 and 816–902s for agy. | repeats + agy repeats, 2026-09-24 |
+| Blyte beats agy on cost and time at an equal pass rate. On build-cython-ext its worst run was cheaper and faster than agy's best: $1.32–1.43 and 539–592s for `folded`, against $1.45–1.70 and 816–902s for agy. | repeats + agy repeats, 2026-09-24 |
 | agy writes 2–4× the output tokens (planning and narration), and output is the expensive, slow token. Its extra ~38K tokens alone come to roughly 150–250s. | 13.39, 13.41 |
 | **Turn count drives cost.** Cost per turn is steady within a configuration (sd about 5%). Runs that cost more are runs that took more turns. | 13.43, 13.44 |
 | About 94% of fresh input is Gemini implicit-cache misses. The cache starts only when the prompt passes about 16K tokens, matches in blocks of about 4K, and lags a turn or two. That is about $0.0033 per turn of fixed overhead. Explicit caching would not pay (creation bills the prefix at the fresh rate). | 13.43 |

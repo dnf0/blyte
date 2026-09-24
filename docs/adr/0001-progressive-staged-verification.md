@@ -3,7 +3,7 @@
 **Status:** Proposed  
 **Date:** 2026-09-12  
 **Deciders:** Core Engineering Team  
-**Consulted:** Superstate Architecture, Agent Rules System  
+**Consulted:** Blyte Architecture, Agent Rules System  
 
 ---
 
@@ -11,7 +11,7 @@
 
 In enterprise repositories and frontier SWE benchmarks (e.g. SWE-bench / DataCurve), comprehensive test suites often take **5 to 15+ minutes** to execute. 
 
-When autonomous agents execute multi-step implementation plans under Superstate:
+When autonomous agents execute multi-step implementation plans under Blyte:
 1. **The Latency Trap:** Running the full test suite on every intermediate milestone (`state_next`) inflates total wall-clock time exponentially. A 4-milestone task can easily spend 45–60 minutes solely executing unchanged regression tests.
 2. **The Scoped Testing Trap ("Winning on F2P, Losing on P2P"):** If an agent is granted unfettered freedom to narrow the test scope during milestones (e.g. running only `pytest tests/test_new_feature.py`), it optimizes strictly for **Fail-to-Pass (F2P)** tests. In doing so, it frequently introduces subtle breaking changes to shared abstractions, causing silent regressions across the existing **Pass-to-Pass (P2P)** test suite. In SWE-bench and production CI, any P2P regression results in an immediate 0.0 score or broken main branch.
 3. **Stateless Fragility:** Without workspace isolation, an agent that breaks existing tests at Step 3 leaves the working tree corrupted, making clean recovery or rollback extremely difficult.
@@ -22,7 +22,7 @@ A mechanism is needed that allows **fast, iterative milestone progress** without
 
 ## 2. Decision: Progressive Staged Verification
 
-We will implement **Progressive Staged Verification** across `superstate_core`, `superstate_worktree`, and `superstate_mcp`.
+We will implement **Progressive Staged Verification** across `blyte_core`, `blyte_worktree`, and `blyte_mcp`.
 
 Verification is structured into a two-tier hierarchy tied directly to git worktree lifecycle states:
 
@@ -94,7 +94,7 @@ Verification is structured into a two-tier hierarchy tied directly to git worktr
 
 ### B. Impact-Aware Automatic Test Slicing (Heuristic)
 
-When an agent specifies `verify_stage: "milestone"` without an explicit `verify_cmd`, Superstate automatically synthesizes the Tier 1 command:
+When an agent specifies `verify_stage: "milestone"` without an explicit `verify_cmd`, Blyte automatically synthesizes the Tier 1 command:
 1. Query `git diff --name-only` against the base branch.
 2. For each modified source file (e.g. `src/auth/jwt.py`):
    * Look for adjacent or mirrored test files (e.g. `tests/auth/test_jwt.py`).

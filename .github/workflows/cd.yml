@@ -55,12 +55,12 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           TOPOLOGICAL_CRATES=(
-            "superstate-core"
-            "superstate-syntax"
-            "superstate-review"
-            "superstate-rules"
-            "superstate-mcp"
-            "superstate"
+            "blyte-core"
+            "blyte-syntax"
+            "blyte-review"
+            "blyte-rules"
+            "blyte-mcp"
+            "blyte"
           )
 
           for crate in "${TOPOLOGICAL_CRATES[@]}"; do
@@ -69,7 +69,7 @@ jobs:
             echo "=================================================="
 
             if [ "${{ inputs.dry_run }}" = "true" ]; then
-              if [ "$crate" = "superstate-core" ] || [ "$crate" = "superstate-syntax" ] || [ "$crate" = "superstate-review" ] || [ "$crate" = "superstate-rules" ]; then
+              if [ "$crate" = "blyte-core" ] || [ "$crate" = "blyte-syntax" ] || [ "$crate" = "blyte-review" ] || [ "$crate" = "blyte-rules" ]; then
                 echo "Testing dry-run publish for leaf crate: $crate"
                 cargo publish --dry-run -p "$crate"
               else

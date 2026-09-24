@@ -1,0 +1,20 @@
+[package]
+name = "blyte-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "Native Model Context Protocol (MCP) server for Blyte state and review tools."
+
+[dependencies]
+blyte-core = { path = "../blyte-core", version = "0.1.0" }
+blyte-worktree = { path = "../blyte-worktree", version = "0.1.0" }
+blyte-review = { path = "../blyte-review", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
