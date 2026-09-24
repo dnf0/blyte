@@ -2,17 +2,17 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$REPO_ROOT/target/debug/superstate"
+BIN="$REPO_ROOT/target/debug/blyte"
 
-echo "==> Building latest superstate binary..."
-cargo build -p superstate
+echo "==> Building latest blyte binary..."
+cargo build -p blyte
 
 if [ ! -x "$BIN" ]; then
     echo "Error: binary not found at $BIN" >&2
     exit 1
 fi
 
-TMP_DIR="$(mktemp -d /tmp/superstate_e2e_XXXXXX)"
+TMP_DIR="$(mktemp -d /tmp/blyte_e2e_XXXXXX)"
 cleanup() {
     rm -rf "$TMP_DIR"
 }
@@ -22,7 +22,7 @@ echo "==> Setting up test repo at $TMP_DIR..."
 cd "$TMP_DIR"
 git init -b main
 git config user.name "E2E Tester"
-git config user.email "tester@superstate.local"
+git config user.email "tester@blyte.local"
 git commit --allow-empty --no-gpg-sign -m "chore: initial commit"
 
 # ==============================================================================
@@ -38,12 +38,12 @@ set -eu
 
 # Capture prompt delivered via standard input
 STDIN_INPUT="$(cat)"
-echo "$STDIN_INPUT" > "stdin_${SUPERSTATE_ACTIVE_TASK:-unknown}.txt"
+echo "$STDIN_INPUT" > "stdin_${BLYTE_ACTIVE_TASK:-unknown}.txt"
 
-if [ "${SUPERSTATE_ACTIVE_TASK:-}" = "task-1" ]; then
+if [ "${BLYTE_ACTIVE_TASK:-}" = "task-1" ]; then
     echo "Creating a.txt"
     echo "milestone 1 content" > a.txt
-elif [ "${SUPERSTATE_ACTIVE_TASK:-}" = "task-2" ]; then
+elif [ "${BLYTE_ACTIVE_TASK:-}" = "task-2" ]; then
     echo "Creating b.txt"
     echo "milestone 2 content" > b.txt
 fi
@@ -128,11 +128,11 @@ fi
 echo "==> Verifying auto-checkpoint commits..."
 GIT_LOG="$(git log --oneline)"
 echo "$GIT_LOG"
-if ! echo "$GIT_LOG" | grep -q "chore(superstate): checkpoint completed milestone task-1: Create a.txt"; then
+if ! echo "$GIT_LOG" | grep -q "chore(blyte): checkpoint completed milestone task-1: Create a.txt"; then
     echo "Error: expected checkpoint commit for task-1 not found in git log" >&2
     exit 1
 fi
-if ! echo "$GIT_LOG" | grep -q "chore(superstate): checkpoint completed milestone task-2: Create b.txt"; then
+if ! echo "$GIT_LOG" | grep -q "chore(blyte): checkpoint completed milestone task-2: Create b.txt"; then
     echo "Error: expected checkpoint commit for task-2 not found in git log" >&2
     exit 1
 fi
@@ -167,9 +167,9 @@ git checkout -b feat/e2e-worktree main
 cat << 'WT_DRIVER_EOF' > wt_driver.sh
 #!/usr/bin/env bash
 set -eu
-if [ "${SUPERSTATE_ACTIVE_TASK:-}" = "task-1" ]; then
+if [ "${BLYTE_ACTIVE_TASK:-}" = "task-1" ]; then
     echo "wt 1 content" > wt_a.txt
-elif [ "${SUPERSTATE_ACTIVE_TASK:-}" = "task-2" ]; then
+elif [ "${BLYTE_ACTIVE_TASK:-}" = "task-2" ]; then
     echo "wt 2 content" > wt_b.txt
 fi
 WT_DRIVER_EOF

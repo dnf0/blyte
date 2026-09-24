@@ -1,4 +1,4 @@
-# Superstate
+# Blyte
 
 A high-performance, deterministic Rust agent harness implementing the **[SKILL.state](https://arxiv.org/html/2608.26263v2)** architecture ([arXiv:2608.26263v2](https://arxiv.org/html/2608.26263v2)) for autonomous software engineering.
 
@@ -21,7 +21,7 @@ On real codebases, this collapses:
 
 ## The Solution: SKILL.state Architecture
 
-Superstate replaces append-only conversational history with **explicit, mutable execution state transitions**:
+Blyte replaces append-only conversational history with **explicit, mutable execution state transitions**:
 
 ```
          (P, Σ_t, O_t) ---> [ Language Model ] ---> (R_t, ΔΣ_t, a_t)
@@ -53,10 +53,10 @@ At every step $t$:
 
 ## Core Systems Invariants
 
-Superstate enforces three hard systems invariants:
+Blyte enforces three hard systems invariants:
 
 ### Invariant I: Native Execution Ownership (No Wrapper Tax)
-The turn loop runs directly in compiled Rust (`crates/superstate-agent`). Tool calls execute synchronously with strict wall-clock deadlines. There are no background polling turns, no uninterceptable external loops, and no async sleep loops.
+The turn loop runs directly in compiled Rust (`crates/blyte-agent`). Tool calls execute synchronously with strict wall-clock deadlines. There are no background polling turns, no uninterceptable external loops, and no async sleep loops.
 
 ### Invariant II: The Sealed Verification Gate (No LLM Self-Grading)
 An LLM must never grade its own homework. A gate the model can invoke is a gate it can decline to invoke, skip, or report a fake passing verdict for.
@@ -86,12 +86,12 @@ To ensure the harness can run anywhere without changing the agent's behavior, ex
 ## Workspace Structure
 
 ```
-superstate/
+blyte/
 ├── crates/
-│   ├── superstate-agent/     # Core SKILL.state runtime, turn loop, tools, shell/fs seams
-│   ├── superstate-provider/  # Provider client layer (Anthropic, Gemini, OpenAI)
-│   ├── superstate-core/      # State schemas, dictionary merge operators, serialization
-│   └── superstate-cli/       # Command-line inspection and utilities
+│   ├── blyte-agent/     # Core SKILL.state runtime, turn loop, tools, shell/fs seams
+│   ├── blyte-provider/  # Provider client layer (Anthropic, Gemini, OpenAI)
+│   ├── blyte-core/      # State schemas, dictionary merge operators, serialization
+│   └── blyte-cli/       # Command-line inspection and utilities
 ├── examples/                 # End-to-end evaluation harness runners
 └── tests/                    # Integration and regression test suites
 ```
@@ -112,26 +112,26 @@ cargo test
 
 ### Interactive Agent Harness (REPL)
 
-Running `superstate` without a prompt launches the interactive agent harness REPL with live turn event streaming, tool outcome indicators, gate verification, and slash commands:
+Running `blyte` without a prompt launches the interactive agent harness REPL with live turn event streaming, tool outcome indicators, gate verification, and slash commands:
 
 ```bash
 # Start interactive REPL in the current repository
-superstate
+blyte
 
 # Launch REPL configured with a specific verification gate and model
-superstate --gate "cargo test" --model gemini-3.8-flash --context state-only
+blyte --gate "cargo test" --model gemini-3.8-flash --context state-only
 ```
 
 ### Headless Single-Shot Solver
 
-Provide a prompt argument to run Superstate autonomously in headless mode. The harness attempts the task, evaluates the external verification gate, automatically rolls back on failure, and exits 0 only when the gate passes:
+Provide a prompt argument to run Blyte autonomously in headless mode. The harness attempts the task, evaluates the external verification gate, automatically rolls back on failure, and exits 0 only when the gate passes:
 
 ```bash
 # Autonomous bug fix with fail-closed gate verification
-superstate "fix parsing bug in token lexer" --gate "cargo test -p my-crate --test lexer"
+blyte "fix parsing bug in token lexer" --gate "cargo test -p my-crate --test lexer"
 
 # Run with SKILL.state O(1) bounded memory and container isolation
-superstate "refactor database migration" \
+blyte "refactor database migration" \
   --gate "pytest tests/test_migrations.py" \
   --context state-only \
   --container alpine-dev \
@@ -158,7 +158,7 @@ superstate "refactor database migration" \
 
 ### Interactive REPL Slash Commands
 
-Inside the interactive REPL (`superstate`), the following slash commands control session execution and state:
+Inside the interactive REPL (`blyte`), the following slash commands control session execution and state:
 
 | Slash Command | Description |
 |---|---|
@@ -174,7 +174,7 @@ Inside the interactive REPL (`superstate`), the following slash commands control
 
 ### Cloud Model Providers & Model Discovery
 
-Superstate natively integrates with multiple cloud AI providers without external proxy wrappers. Set credentials in your environment to enable automatic discovery and routing:
+Blyte natively integrates with multiple cloud AI providers without external proxy wrappers. Set credentials in your environment to enable automatic discovery and routing:
 
 | Provider | Supported Identifiers | Environment Variables | Description |
 |---|---|---|---|
@@ -187,7 +187,7 @@ Superstate natively integrates with multiple cloud AI providers without external
 Run `/model` inside the REPL to probe configured cloud credentials and inspect available models:
 
 ```text
-superstate > /model
+blyte > /model
 Discovering available cloud models...
 
 [Google Gemini] (via GEMINI_API_KEY)
@@ -208,10 +208,10 @@ To switch: /model <number> or /model <name> (e.g. /model 1 or /model claude-3-7-
 Switch active models by numeric index or model identifier:
 
 ```text
-superstate > /model 4
+blyte > /model 4
 Switched active model to: claude-3-7-sonnet-latest (anthropic)
 
-superstate > /model gemini-2.5-pro
+blyte > /model gemini-2.5-pro
 Switched active model to: gemini-2.5-pro (Gemini)
 ```
 
@@ -219,18 +219,18 @@ Switched active model to: gemini-2.5-pro (Gemini)
 
 | Subcommand | Description |
 |---|---|
-| `superstate doctor` | Run 6-step verification handshake and health check |
-| `superstate mcp` | Launch standard JSON-RPC Model Context Protocol (MCP) server over stdio |
-| `superstate review` | Run adversarial code review engine over git diff or commit ranges |
-| `superstate state` | Manage SKILL.state lifecycle (`init`, `apply`, `checkpoint`, `resume`, `show`) |
-| `superstate worktree` | Manage isolated git worktree environments and COW caches |
-| `superstate daemon` | Run autonomous background daemon over milestones with DAG dependencies |
-| `superstate cancel` | Cancel running background daemon processes |
-| `superstate logs` | Inspect background daemon logs and telemetry |
-| `superstate handoff` | Generate standardized cross-agent handoff packages |
-| `superstate shunt` | Execute commands with output shunting distillation for token efficiency |
-| `superstate inspect` | Inspect AST symbols, structural outlines, and code slices |
-| `superstate guard` | Intercept and evaluate agent tool invocations before execution |
+| `blyte doctor` | Run 6-step verification handshake and health check |
+| `blyte mcp` | Launch standard JSON-RPC Model Context Protocol (MCP) server over stdio |
+| `blyte review` | Run adversarial code review engine over git diff or commit ranges |
+| `blyte state` | Manage SKILL.state lifecycle (`init`, `apply`, `checkpoint`, `resume`, `show`) |
+| `blyte worktree` | Manage isolated git worktree environments and COW caches |
+| `blyte daemon` | Run autonomous background daemon over milestones with DAG dependencies |
+| `blyte cancel` | Cancel running background daemon processes |
+| `blyte logs` | Inspect background daemon logs and telemetry |
+| `blyte handoff` | Generate standardized cross-agent handoff packages |
+| `blyte shunt` | Execute commands with output shunting distillation for token efficiency |
+| `blyte inspect` | Inspect AST symbols, structural outlines, and code slices |
+| `blyte guard` | Intercept and evaluate agent tool invocations before execution |
 
 ---
 

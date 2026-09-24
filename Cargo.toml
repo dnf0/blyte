@@ -1,14 +1,14 @@
 [workspace]
 members = [
-    "crates/superstate-core",
-    "crates/superstate-syntax",
-    "crates/superstate-review",
-    "crates/superstate-rules",
-    "crates/superstate-mcp",
-    "crates/superstate-worktree",
-    "crates/superstate-provider",
-    "crates/superstate-agent",
-    "crates/superstate-cli",
+    "crates/blyte-core",
+    "crates/blyte-syntax",
+    "crates/blyte-review",
+    "crates/blyte-rules",
+    "crates/blyte-mcp",
+    "crates/blyte-worktree",
+    "crates/blyte-provider",
+    "crates/blyte-agent",
+    "crates/blyte-cli",
 ]
 resolver = "2"
 

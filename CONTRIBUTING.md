@@ -1,13 +1,13 @@
-# Contributing to Superstate
+# Contributing to Blyte
 
-Thank you for contributing to Superstate! We welcome contributions that maintain high standards of determinism, correctness, and performance.
+Thank you for contributing to Blyte! We welcome contributions that maintain high standards of determinism, correctness, and performance.
 
 ## Development Setup
 
 1. Clone the repository:
    ```bash
    git clone https://github.com/climate-x-org/superstate.git
-   cd superstate
+   cd blyte
    ```
 
 2. Run tests across the workspace:
@@ -17,7 +17,7 @@ Thank you for contributing to Superstate! We welcome contributions that maintain
 
 3. Run the 5-step health check:
    ```bash
-   cargo run --bin superstate -- doctor
+   cargo run --bin blyte -- doctor
    ```
 
 ## Commit Guidelines

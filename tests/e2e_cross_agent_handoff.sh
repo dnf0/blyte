@@ -2,17 +2,17 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$REPO_ROOT/target/debug/superstate"
+BIN="$REPO_ROOT/target/debug/blyte"
 
-echo "==> Building latest superstate binary..."
-cargo build -p superstate
+echo "==> Building latest blyte binary..."
+cargo build -p blyte
 
 if [ ! -x "$BIN" ]; then
     echo "Error: binary not found at $BIN" >&2
     exit 1
 fi
 
-TMP_DIR="$(mktemp -d /tmp/superstate_cross_agent_XXXXXX)"
+TMP_DIR="$(mktemp -d /tmp/blyte_cross_agent_XXXXXX)"
 cleanup() {
     rm -rf "$TMP_DIR"
 }
@@ -22,7 +22,7 @@ echo "==> Setting up test repo at $TMP_DIR..."
 cd "$TMP_DIR"
 git init -b main
 git config user.name "Cross Agent Tester"
-git config user.email "cross-agent@superstate.local"
+git config user.email "cross-agent@blyte.local"
 git commit --allow-empty --no-gpg-sign -m "chore: initial commit"
 
 # ==============================================================================

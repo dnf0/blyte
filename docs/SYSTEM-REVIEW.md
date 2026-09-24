@@ -1,9 +1,9 @@
-# Superstate: system review
+# Blyte: system review
 
 **Date:** 2026-09-17
 **Scope:** the whole system, against its stated design and against what the evaluation measures.
 **Prompted by:** the evaluation producing +3pp and the question of whether it was measuring
-superstate at all.
+blyte at all.
 
 **Conclusion up front: it was not.** The design is a dependency graph of units of work, each
 verified before the next begins. Three separate layers of loss stand between that design and
@@ -33,7 +33,7 @@ machinery for offloading a chunk of work somewhere it can be checked and discard
 with a stated goal of *"cutting Phase 1 planning latency to 0ms on atomic tasks"*. It is equally
 explicit about scope:
 
-> We are **NOT** discarding multi-milestone planning; `superstate state init --plan <path>`
+> We are **NOT** discarding multi-milestone planning; `blyte state init --plan <path>`
 > remains supported for complex multi-module features.
 
 **That boundary was never enforced.** The fast path became the evaluation's default the next day
@@ -68,7 +68,7 @@ analysis are all still in the tree. They stopped being measured, and so stopped 
 
 ---
 
-## 1. What superstate is designed to be
+## 1. What blyte is designed to be
 
 The README is unambiguous:
 
@@ -107,7 +107,7 @@ Substantially more than the evaluation uses. These are real, not stubs:
 | `impact.rs` | 346 | test slicing: which tests a diff actually affects |
 | `daemon.rs` | — | autonomous loop, gate, retry, checkpoint commits |
 | `checkpoint.rs` | 87 | git checkpoint and rollback |
-| `superstate-review` | 103 | adversarial review over a git diff |
+| `blyte-review` | 103 | adversarial review over a git diff |
 | `handoff.rs`, `ledger.rs` | 235 / 84 | cross-agent handoff, epistemic ledger |
 
 The CLI exposes 21 `state` verbs plus `review`, `worktree`, `daemon`, `handoff`.
@@ -131,7 +131,7 @@ state.active_task = Some(state.pending_tasks.remove(0));
 
 File order. So the dependency graph is parsed, modelled, computed on request, and **never used
 to choose what runs next**. The one consumer that does walk the DAG is the *evaluation's*
-`superstate_mcp` adapter, which calls `state_ready` — the Rust daemon does not.
+`blyte_mcp` adapter, which calls `state_ready` — the Rust daemon does not.
 
 ### Loss 2 — `interfaces_produces` is dead
 
@@ -146,7 +146,7 @@ ADR 0001's whole purpose is running only impacted tests per milestone. `impact.r
 the analysis in 346 lines. **Nothing in the execution path calls it.** Each milestone runs
 whatever `verification_cmd` it was given, full stop.
 
-Likewise `superstate-review` is reachable only as a standalone command and through one MCP tool
+Likewise `blyte-review` is reachable only as a standalone command and through one MCP tool
 name; neither the state machine nor the daemon invokes it.
 
 Checkpointing is the exception: the daemon does commit on gate pass. Rollback is never called.
@@ -183,7 +183,7 @@ In dependency order:
    `pending_tasks[0]`. Without this the DAG is decoration, and this is a small change.
 2. **Populate `files_modify`** when a plan is produced. It unlocks `state decompose` and
    `impact.rs` at once; both are already written.
-3. **Evaluate multi-milestone execution on datacurve**, where single-milestone superstate loses
+3. **Evaluate multi-milestone execution on datacurve**, where single-milestone blyte loses
    to vanilla (23-27% against 43%) and where pooled history suggests decomposition wins
    (anko 100% vs 33%, httpx 100% vs 44%, arktype 50% vs 11%).
 4. **Wire `review` into the advance decision, or evaluate it beside the gate.** It is the only

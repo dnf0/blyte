@@ -2,17 +2,17 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$REPO_ROOT/target/debug/superstate"
+BIN="$REPO_ROOT/target/debug/blyte"
 
-echo "==> Building latest superstate binary..."
-cargo build -p superstate
+echo "==> Building latest blyte binary..."
+cargo build -p blyte
 
 if [ ! -x "$BIN" ]; then
     echo "Error: binary not found at $BIN" >&2
     exit 1
 fi
 
-TMP_DIR="$(mktemp -d /tmp/superstate_fleet_XXXXXX)"
+TMP_DIR="$(mktemp -d /tmp/blyte_fleet_XXXXXX)"
 cleanup() {
     rm -rf "$TMP_DIR"
 }
@@ -22,7 +22,7 @@ echo "==> Setting up test repo at $TMP_DIR..."
 cd "$TMP_DIR"
 git init -b main
 git config user.name "Fleet Tester"
-git config user.email "fleet-tester@superstate.local"
+git config user.email "fleet-tester@blyte.local"
 echo "initial baseline" > README.md
 git add README.md
 git commit --no-gpg-sign -m "chore: initial baseline"
@@ -87,9 +87,9 @@ echo "==> Spawning detached daemon for feat/fleet-beta..."
   --detach
 
 # ==============================================================================
-# Step 3: Run 'superstate state daemon list' and assert active fleet status
+# Step 3: Run 'blyte state daemon list' and assert active fleet status
 # ==============================================================================
-echo "==> Inspecting multi-daemon fleet via 'superstate state daemon list'..."
+echo "==> Inspecting multi-daemon fleet via 'blyte state daemon list'..."
 DAEMON_LIST="$("$BIN" state daemon list)"
 echo "$DAEMON_LIST"
 
