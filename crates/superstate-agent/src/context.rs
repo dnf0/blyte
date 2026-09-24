@@ -342,22 +342,30 @@ fn digest(folded: &[Message], first: usize, last: usize) -> Message {
     Message::User(text)
 }
 
-impl ContextStrategy for Folded {
-    fn build(&self, _state: &State, history: &[Message]) -> Vec<Message> {
-        let Some((opening, rest)) = history.split_first() else {
-            return Vec::new();
-        };
+/// Where `Folded` put its boundaries over `history[1..]`: each fold `(a, b)`, the start of the
+/// verbatim tail, and the index at which the most recent fold was triggered (if any).
+struct FoldPlan {
+    folds: Vec<(usize, usize)>,
+    seg_start: usize,
+    last_trigger: Option<usize>,
+}
 
-        // Greedy boundaries from the start: each fold depends only on messages before it.
+impl Folded {
+    /// Greedy boundaries from the start: each fold depends only on messages before it, so the next
+    /// turn reproduces every earlier fold exactly.
+    fn plan(&self, rest: &[Message]) -> FoldPlan {
         let mut folds: Vec<(usize, usize)> = Vec::new();
         let mut seg_start = 0;
         let mut size = 0;
+        let mut last_trigger = None;
         for i in 0..rest.len() {
             size += approx_tokens(&rest[i]);
             if size <= self.budget_tokens {
                 continue;
             }
-            // Fold roughly the older half, cutting only between turn blocks (never after a call or before a result), so a call is never separated from its result or from calls in the same batch. No safe cut yet: keep accumulating.
+            // Fold roughly the older half, cutting only between turn blocks (never after a call
+            // or before a result), so a call is never separated from its result or from calls in
+            // the same batch. No safe cut yet: keep accumulating.
             let target = seg_start + (i + 1 - seg_start) / 2;
             let lo = target.max(seg_start + 1);
             let Some(cut) = (lo..=i).find(|&j| {
@@ -369,14 +377,28 @@ impl ContextStrategy for Folded {
             folds.push((seg_start, cut));
             size = rest[cut..=i].iter().map(approx_tokens).sum();
             seg_start = cut;
+            last_trigger = Some(i);
         }
+        FoldPlan {
+            folds,
+            seg_start,
+            last_trigger,
+        }
+    }
+}
 
+impl ContextStrategy for Folded {
+    fn build(&self, _state: &State, history: &[Message]) -> Vec<Message> {
+        let Some((opening, rest)) = history.split_first() else {
+            return Vec::new();
+        };
+        let plan = self.plan(rest);
         let mut out = vec![opening.clone()];
-        for (a, b) in folds {
+        for (a, b) in plan.folds {
             // Message numbers are 1-based positions in the full history.
             out.push(digest(&rest[a..b], a + 2, b + 1));
         }
-        out.extend_from_slice(&rest[seg_start..]);
+        out.extend_from_slice(&rest[plan.seg_start..]);
         out
     }
 
@@ -393,15 +415,15 @@ impl ContextStrategy for Folded {
 /// halved cost at no loss of solve rate on SWE-bench Verified (JetBrains, "The Complexity Trap"),
 /// but hiding by age can drop something still relevant. The harness knows which outputs are
 /// **superseded**: a read of a file edited since, or a call repeated since with identical
-/// arguments. Those are masked; outputs identical to one still visible are referenced. Masks apply
-/// only for completed epochs, so the cacheable prefix changes once per epoch rather than every
-/// turn (TokenPilot, 2026). Calls are never removed, so no result is ever orphaned.
+/// arguments. Those are masked; outputs identical to one still visible are referenced. Masks are
+/// applied only when a fold happens, judged by calls up to that fold's trigger: a fold already
+/// rewrites the prompt from its digest on, so masking then costs no extra cache miss (v1's
+/// per-epoch masks re-prefilled the tail at the fresh price and saved nothing; superstate-eval
+/// FINDINGS 13.39). Calls are never removed, so no result is ever orphaned.
 #[derive(Debug, Clone)]
 pub struct Compact {
     /// Approximate token budget for the verbatim tail, as in `Folded`.
     pub budget_tokens: usize,
-    /// Supersession is applied only for completed epochs of this many tail messages.
-    pub epoch_messages: usize,
     /// Outputs shorter than this are never replaced by a duplicate reference.
     pub min_dedup_chars: usize,
 }
@@ -410,7 +432,6 @@ impl Default for Compact {
     fn default() -> Self {
         Self {
             budget_tokens: 48_000,
-            epoch_messages: 40,
             min_dedup_chars: 200,
         }
     }
@@ -479,27 +500,23 @@ fn superseded(
 
 impl ContextStrategy for Compact {
     fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
-        let mut out = Folded {
+        let folded = Folded {
             budget_tokens: self.budget_tokens,
-        }
-        .build(state, history);
-        if out.is_empty() {
+        };
+        let mut out = folded.build(state, history);
+        let Some((_, rest)) = history.split_first() else {
             return out;
-        }
-        let digests = out
-            .iter()
-            .skip(1)
-            .take_while(
-                |m| matches!(m, Message::User(t) if t.starts_with("## Earlier turns, folded")),
-            )
-            .count();
-        let tail_out = 1 + digests;
-        let tail_len = out.len() - tail_out;
-        let tail_start = history.len() - tail_len;
-        let epoch = self.epoch_messages.max(1);
-        let cutoff = tail_start + (tail_len / epoch) * epoch;
+        };
+        let plan = folded.plan(rest);
+        let tail_out = 1 + plan.folds.len();
+        let tail_start = 1 + plan.seg_start;
+        // Supersession is judged only by calls up to the most recent fold's trigger. Between folds
+        // that cutoff is fixed, so the prompt is pure append; before the first fold nothing masks.
+        let cutoff = plan
+            .last_trigger
+            .map_or(tail_start, |t| (t + 2).min(history.len()));
 
-        // Superseded outputs, judged only by calls inside completed epochs.
+        // Superseded outputs, judged only by calls up to the cutoff.
         let mut masked = vec![false; history.len()];
         for r in tail_start..cutoff {
             if !matches!(history[r], Message::ToolResult { .. }) {
