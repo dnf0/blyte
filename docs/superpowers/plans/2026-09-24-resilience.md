@@ -36,7 +36,7 @@
 - Modify (literals only): every file containing a `Budget { ... }` literal (Step 5)
 - Test: `crates/superstate-agent/tests/test_resilience.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.** Create `crates/superstate-agent/tests/test_resilience.rs`:
+- [x] **Step 1: Write the failing tests.** Create `crates/superstate-agent/tests/test_resilience.rs`:
 
 ```rust
 //! Resilience: server retry hints, a cost cap, and checkpoints a run can be resumed from.
@@ -259,9 +259,9 @@ fn a_run_resumes_from_its_last_checkpoint_without_rerunning_tools() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_resilience`. Expected: compile errors, because `retry_wait`, `server_retry_hint`, `pricing`, `max_cost_usd`, `Event::Checkpoint` and `Runner::resume` do not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_resilience`. Expected: compile errors, because `retry_wait`, `server_retry_hint`, `pricing`, `max_cost_usd`, `Event::Checkpoint` and `Runner::resume` do not exist.
 
-- [ ] **Step 3: Pricing.** In `crates/superstate-provider/src/lib.rs`, directly after the `pub struct Usage { ... }` definition, add:
+- [x] **Step 3: Pricing.** In `crates/superstate-provider/src/lib.rs`, directly after the `pub struct Usage { ... }` definition, add:
 
 ```rust
 /// List prices in USD per million tokens: fresh input, cached input, and output. Thinking is
@@ -298,7 +298,7 @@ pub fn pricing(model_id: &str) -> Option<Pricing> {
 }
 ```
 
-- [ ] **Step 4: Runner.** In `crates/superstate-agent/src/run.rs`:
+- [x] **Step 4: Runner.** In `crates/superstate-agent/src/run.rs`:
   1. In `pub struct Budget`, after `max_duration`, add:
 
 ```rust
@@ -414,7 +414,7 @@ pub fn retry_wait(e: &ProviderError, attempt: u32) -> Duration {
 
   7. `crates/superstate-cli/src/repl.rs`, in `format_event`, add the arm `superstate_agent::run::Event::Checkpoint { .. } => String::new(),`.
 
-- [ ] **Step 5: `Budget` literals (mechanical).** Run from the repo root:
+- [x] **Step 5: `Budget` literals (mechanical).** Run from the repo root:
 
 ```bash
 grep -rl "max_duration:" crates --include='*.rs' | xargs perl -0pi -e 's/(\n([ \t]*)max_duration: [^\n]*,\n)/$1$2max_cost_usd: None,\n/g'
@@ -422,11 +422,11 @@ grep -rl "max_duration:" crates --include='*.rs' | xargs perl -0pi -e 's/(\n([ \
 
   This adds `max_cost_usd: None,` after every `max_duration: ...,` literal line, including `impl Default for Budget` and `task_runner.rs` (Task 2 changes that one). The declaration `pub max_duration` is not matched. Run `git diff --stat` and confirm that only `Budget` literals changed besides your Step 3–4 edits.
 
-- [ ] **Step 6: Run the new tests.** Run: `cargo test -p superstate-agent --test test_resilience --test test_provider_retry --test test_phases --test test_fold_notes`. Expected: all pass (5 new).
+- [x] **Step 6: Run the new tests.** Run: `cargo test -p superstate-agent --test test_resilience --test test_provider_retry --test test_phases --test test_fold_notes`. Expected: all pass (5 new).
 
-- [ ] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
 
 ```bash
 git add crates/
@@ -443,7 +443,7 @@ git commit --no-gpg-sign -m "feat(agent): server retry hints, cost cap, checkpoi
 - Modify (literals only): `crates/superstate-cli/src/repl.rs` (1), `crates/superstate-cli/tests/test_task_runner.rs` (4), `test_run_report.rs` (1), `test_tdd_phases.rs` (1): each `TaskConfig { ... }` literal
 - Test: `crates/superstate-cli/tests/test_journal.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.** Create `crates/superstate-cli/tests/test_journal.rs`:
+- [x] **Step 1: Write the failing tests.** Create `crates/superstate-cli/tests/test_journal.rs`:
 
 ```rust
 //! A saved run can be reloaded; the CLI exposes the cost cap, journal and resume.
@@ -501,9 +501,9 @@ fn the_cli_parses_cost_cap_journal_and_resume() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate --test test_journal`. (If the package name differs, use the one in `crates/superstate-cli/Cargo.toml`.) Expected: compile errors, because `journal`, `max_cost_usd`, `journal` and `resume` do not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate --test test_journal`. (If the package name differs, use the one in `crates/superstate-cli/Cargo.toml`.) Expected: compile errors, because `journal`, `max_cost_usd`, `journal` and `resume` do not exist.
 
-- [ ] **Step 3: The journal module.** Create `crates/superstate-cli/src/journal.rs`:
+- [x] **Step 3: The journal module.** Create `crates/superstate-cli/src/journal.rs`:
 
 ```rust
 //! A saved run: the history and state at the last checkpoint, enough to `--resume` it.
@@ -546,7 +546,7 @@ pub fn read(path: &Path) -> Result<Journal, String> {
 
   Add `pub mod journal;` to `crates/superstate-cli/src/lib.rs` (keep the list alphabetical). If `serde` or `superstate-provider` is not already a dependency of `superstate-cli`, add it to its `Cargo.toml` with the same version spec the workspace uses elsewhere.
 
-- [ ] **Step 4: Flags.** In `crates/superstate-cli/src/cli.rs`, after the `fold_notes` field, add:
+- [x] **Step 4: Flags.** In `crates/superstate-cli/src/cli.rs`, after the `fold_notes` field, add:
 
 ```rust
     /// Stop the run once it has cost this many US dollars at list price (needs a priced model)
@@ -564,7 +564,7 @@ pub fn read(path: &Path) -> Result<Journal, String> {
 
   (Use the `PathBuf` import already in `cli.rs`; add `use std::path::PathBuf;` if absent.)
 
-- [ ] **Step 5: Task runner.** In `crates/superstate-cli/src/task_runner.rs`:
+- [x] **Step 5: Task runner.** In `crates/superstate-cli/src/task_runner.rs`:
   1. In `TaskConfig`, after `fold_notes`, add:
 
 ```rust
@@ -631,12 +631,12 @@ pub fn read(path: &Path) -> Result<Journal, String> {
         }
 ```
 
-- [ ] **Step 6: Report cost.** In `crates/superstate-cli/src/report.rs`:
+- [x] **Step 6: Report cost.** In `crates/superstate-cli/src/report.rs`:
   - In `RunRecord`, after `fold_note_failures`, add: `/// List-price cost in USD, when the model's price is known.` and `pub cost_usd: Option<f64>,`.
   - In `base`, add `cost_usd: None,`.
   - In `from_run`, add `cost_usd: superstate_provider::pricing(model_id).map(|p| p.cost(&report.usage)),`.
 
-- [ ] **Step 7: `main.rs`: resume without a prompt.** In the `None =>` arm of `main`, replace
+- [x] **Step 7: `main.rs`: resume without a prompt.** In the `None =>` arm of `main`, replace
 
 ```rust
             if let Some(ref prompt) = cli.prompt {
@@ -652,13 +652,13 @@ pub fn read(path: &Path) -> Result<Journal, String> {
 
   Leave the rest of the block unchanged.
 
-- [ ] **Step 8: `TaskConfig` literals (mechanical).** In `crates/superstate-cli/src/repl.rs` (1 literal), `crates/superstate-cli/tests/test_task_runner.rs` (4 literals), `test_run_report.rs` (1) and `test_tdd_phases.rs` (1), add `max_cost_usd: None,`, `journal: None,` and `resume: None,` after `fold_notes: false,` in every `TaskConfig { ... }` literal.
+- [x] **Step 8: `TaskConfig` literals (mechanical).** In `crates/superstate-cli/src/repl.rs` (1 literal), `crates/superstate-cli/tests/test_task_runner.rs` (4 literals), `test_run_report.rs` (1) and `test_tdd_phases.rs` (1), add `max_cost_usd: None,`, `journal: None,` and `resume: None,` after `fold_notes: false,` in every `TaskConfig { ... }` literal.
 
-- [ ] **Step 9: Run the new tests.** Run: `cargo test -p superstate --test test_journal --test test_run_report --test test_task_runner`. Expected: all pass (3 new).
+- [x] **Step 9: Run the new tests.** Run: `cargo test -p superstate --test test_journal --test test_run_report --test test_task_runner`. Expected: all pass (3 new).
 
-- [ ] **Step 10: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 10: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 11: Commit.**
+- [x] **Step 11: Commit.**
 
 ```bash
 git add crates/
