@@ -38,6 +38,8 @@ pub struct TaskConfig {
     pub report: Option<PathBuf>,
     /// Gate by autonomous TDD phases instead of a single command (`--tdd`).
     pub tdd: bool,
+    /// Completeness review before a passing verification is accepted (`--review`).
+    pub review: bool,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -61,6 +63,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             max_seconds: cli.max_seconds,
             report: cli.report.clone(),
             tdd: cli.tdd,
+            review: cli.review,
         }
     }
 }
@@ -154,6 +157,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     ),
     String,
 > {
+    state.orchestrator.review = config.review;
     let started = std::time::Instant::now();
     // Derived before the provider, so an unrecognised repository fails closed without an API call.
     let phases = if config.tdd {

@@ -73,6 +73,10 @@ pub struct RunReport {
     pub gate_attempts: u32,
     /// Transient provider failures (rate limits, overload) waited out during the run.
     pub provider_retries: u32,
+    /// Completeness reviews run after a passing verification.
+    pub reviews: u32,
+    /// Reviews that sent the worker back with unmet requirements.
+    pub review_rejections: u32,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -191,6 +195,40 @@ pub struct PhaseResult {
     pub gate_attempts: u32,
 }
 
+/// Review rejections allowed before a passing verification is accepted as-is. The exit code stays
+/// the verdict: a review can only send the worker back, and only this many times.
+pub const MAX_REVIEW_ROUNDS: u32 = 2;
+
+/// The completeness reviewer's instructions. It judges only whether the task is done, not style:
+/// a reviewer that blocks on naming or refactoring would spend turns on work nobody asked for.
+const REVIEW_SYSTEM: &str = "You review whether a code change fully accomplishes a task. You are \
+not its author. Compare the diff against every behaviour the task statement requires. Report only \
+requirements the change does not implement or implements incorrectly, each with severity \
+\"Critical\" or \"High\". Do not report style, naming, refactoring, documentation or hypothetical \
+improvements. Respond with strict JSON only: {\"summary\": \"<one sentence>\", \"findings\": \
+[{\"severity\": \"Critical\" or \"High\", \"file\": \"<path>\", \"line_range\": [<start>, <end>], \
+\"problem\": \"<the unmet requirement>\", \"suggested_fix\": \"<what to change>\"}], \
+\"has_blocking_issues\": true or false}. If every requirement is met, return an empty findings \
+list and has_blocking_issues false.";
+
+#[derive(serde::Deserialize)]
+struct ReviewVerdict {
+    #[serde(default)]
+    findings: Vec<ReviewFinding>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReviewFinding {
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    problem: String,
+    #[serde(default)]
+    suggested_fix: String,
+}
+
 /// Retries allowed for one model call before a transient failure ends the run.
 pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
@@ -279,6 +317,80 @@ impl<'a> Runner<'a> {
         }
     }
 
+    /// An independent review of the change against the goal, by the same model with no tools.
+    /// `Some(feedback)` when it names Critical or High unmet requirements. Any failure to review
+    /// (no baseline, empty diff, provider error, unparseable reply) accepts: the exit code remains
+    /// the verdict, and a reviewer that cannot run must not be able to block completion.
+    fn review(
+        &self,
+        state: &State,
+        baseline: Option<&str>,
+        report: &mut RunReport,
+    ) -> Option<String> {
+        let base = baseline?;
+        let out = self
+            .shell
+            .exec(
+                &format!("git add -A --intent-to-add && git diff {base}"),
+                &self.root,
+                Duration::from_secs(60),
+            )
+            .ok()?;
+        if out.exit_code != 0 || out.stdout.trim().is_empty() {
+            return None;
+        }
+        let prompt = format!(
+            "## Task\n{}\n\n## Change (git diff against the starting point)\n```diff\n{}\n```\n",
+            state.orchestrator.goal,
+            tools::distil(&out.stdout, 1500)
+        );
+        let req = Request {
+            system: REVIEW_SYSTEM.into(),
+            messages: vec![Message::User(prompt)],
+            tools: Vec::new(),
+            max_output_tokens: None,
+        };
+        let resp = self.provider.complete(&req).ok()?;
+        report.usage.input += resp.usage.input;
+        report.usage.cached += resp.usage.cached;
+        report.usage.output += resp.usage.output;
+        report.usage.thinking += resp.usage.thinking;
+        report.reviews += 1;
+
+        let text = resp.text;
+        let (start, end) = (text.find('{')?, text.rfind('}')?);
+        if end < start {
+            return None;
+        }
+        let verdict: ReviewVerdict = serde_json::from_str(&text[start..=end]).ok()?;
+        let blocking: Vec<&ReviewFinding> = verdict
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.severity.to_ascii_lowercase().as_str(),
+                    "critical" | "high"
+                )
+            })
+            .collect();
+        if blocking.is_empty() {
+            return None;
+        }
+        let mut feedback = String::from(
+            "The verification command passed, but an independent review of your change against \
+             the task found requirements it does not meet:\n",
+        );
+        for f in blocking {
+            feedback.push_str(&format!(
+                "- {} (in {}): {}\n",
+                f.problem, f.file, f.suggested_fix
+            ));
+        }
+        feedback
+            .push_str("\nAddress them, then stop again; the verification command will run again.");
+        Some(feedback)
+    }
+
     fn checkpoint(&self) -> Option<String> {
         let out = self
             .shell
@@ -317,10 +429,12 @@ impl<'a> Runner<'a> {
             .max_duration
             .map(|d| std::time::Instant::now() + d);
         let task = state.orchestrator.goal.clone();
+        let wants_review = state.orchestrator.review;
         let mut total = RunReport::default();
         let mut results = Vec::new();
         for (i, phase) in phases.iter().enumerate() {
             let Some(start) = self.checkpoint() else {
+                state.orchestrator.review = wants_review;
                 return (
                     Outcome::Error("phases need a git repository: cannot read HEAD".into()),
                     total,
@@ -335,6 +449,7 @@ impl<'a> Runner<'a> {
                 phase.instruction
             );
             state.orchestrator.verification_cmd = phase.gate(&start);
+            state.orchestrator.review = wants_review && i + 1 == phases.len();
             state.runtime.actions.push(ActionEntry {
                 turn: 0,
                 tool: PHASE_MARKER_TOOL.into(),
@@ -352,6 +467,8 @@ impl<'a> Runner<'a> {
             total.tool_calls += report.tool_calls;
             total.gate_attempts += report.gate_attempts;
             total.provider_retries += report.provider_retries;
+            total.reviews += report.reviews;
+            total.review_rejections += report.review_rejections;
             results.push(PhaseResult {
                 id: phase.id.clone(),
                 outcome: outcome.clone(),
@@ -360,16 +477,19 @@ impl<'a> Runner<'a> {
             });
             if outcome != Outcome::Verified {
                 state.orchestrator.goal = task;
+                state.orchestrator.review = wants_review;
                 return (outcome, total, results);
             }
             if i + 1 < phases.len() {
                 if let Err(e) = self.commit_checkpoint(&phase.id) {
                     state.orchestrator.goal = task;
+                    state.orchestrator.review = wants_review;
                     return (Outcome::Error(e), total, results);
                 }
             }
         }
         state.orchestrator.goal = task;
+        state.orchestrator.review = wants_review;
         (Outcome::Verified, total, results)
     }
 
@@ -403,6 +523,7 @@ impl<'a> Runner<'a> {
         let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
+        let mut review_rounds = 0;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -671,6 +792,16 @@ impl<'a> Runner<'a> {
                 output: output.lines().next().unwrap_or(""),
             });
             if passed {
+                // The exit code is necessary, not sufficient: a worker-written gate is only as
+                // complete as the worker's reading of the task (superstate-eval FINDINGS 13.38).
+                if state.orchestrator.review && review_rounds < MAX_REVIEW_ROUNDS {
+                    if let Some(feedback) = self.review(state, baseline.as_deref(), &mut report) {
+                        review_rounds += 1;
+                        report.review_rejections += 1;
+                        history.push(Message::User(feedback));
+                        continue;
+                    }
+                }
                 return (Outcome::Verified, report);
             }
 
