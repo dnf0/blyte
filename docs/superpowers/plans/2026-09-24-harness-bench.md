@@ -39,7 +39,7 @@ It writes JSON (`--out`) so runs can be compared.
 - Modify: `crates/blyte-agent/src/lib.rs` (one module)
 - Create: `crates/blyte-agent/src/bench.rs`
 
-- [ ] **Step 1: Write the failing test.** Create `crates/blyte-agent/tests/test_harness_bench_trajectory.rs`:
+- [x] **Step 1: Write the failing test.** Create `crates/blyte-agent/tests/test_harness_bench_trajectory.rs`:
 
 ```rust
 //! The benchmark's trajectory is deterministic, realistic in mix, and every step is valid
@@ -99,9 +99,9 @@ fn reads_use_fixture_files_and_percentiles_are_nearest_rank() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm it fails.** Run: `cargo test -p blyte-agent --test test_harness_bench_trajectory`. Expected: a compile error, because `blyte_agent::bench` does not exist.
+- [x] **Step 2: Run to confirm it fails.** Run: `cargo test -p blyte-agent --test test_harness_bench_trajectory`. Expected: a compile error, because `blyte_agent::bench` does not exist.
 
-- [ ] **Step 3: The trajectory module.** Create `crates/blyte-agent/src/bench.rs`:
+- [x] **Step 3: The trajectory module.** Create `crates/blyte-agent/src/bench.rs`:
 
 ```rust
 //! A model-free benchmark of the harness's own time: a fixed trajectory of tool calls, replayed
@@ -160,7 +160,7 @@ pub fn percentile(xs: &[f64], p: f64) -> f64 {
 
   Add `pub mod bench;` to `crates/blyte-agent/src/lib.rs` (keep the module list alphabetical).
 
-- [ ] **Step 4: The example.** Create `crates/blyte-agent/examples/harness_bench.rs`:
+- [x] **Step 4: The example.** Create `crates/blyte-agent/examples/harness_bench.rs`:
 
 ```rust
 //! Model-free harness benchmark. A scripted provider replays `bench::trajectory` at zero model
@@ -411,13 +411,13 @@ fn main() {
 }
 ```
 
-- [ ] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_harness_bench_trajectory`. Expected: 3 passed.
+- [x] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_harness_bench_trajectory`. Expected: 3 passed.
 
-- [ ] **Step 6: Run the benchmark locally.** Run: `cargo run --release -p blyte-agent --example harness_bench -- --turns 40`. Expected: it prints a `harness_bench mode=local turns=40 total=...` line, per-turn and context lines, and one line per tool (read, grep, glob, write, edit, bash). Report the output verbatim.
+- [x] **Step 6: Run the benchmark locally.** Run: `cargo run --release -p blyte-agent --example harness_bench -- --turns 40`. Expected: it prints a `harness_bench mode=local turns=40 total=...` line, per-turn and context lines, and one line per tool (read, grep, glob, write, edit, bash). Report the output verbatim.
 
-- [ ] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
 
 ```bash
 git add crates/
