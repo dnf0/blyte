@@ -36,7 +36,7 @@ So a fold keeps only a mechanical summary, and conclusions reached in the folded
 - Modify (literals only, Step 7): `crates/superstate-agent/tests/test_working_set.rs`, `crates/superstate-cli/tests/test_task_runner.rs`, `crates/superstate-cli/tests/test_run_report.rs`, `crates/superstate-cli/tests/test_tdd_phases.rs`
 - Test: `crates/superstate-agent/tests/test_fold_notes.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.** Create `crates/superstate-agent/tests/test_fold_notes.rs`:
+- [x] **Step 1: Write the failing tests.** Create `crates/superstate-agent/tests/test_fold_notes.rs`:
 
 ```rust
 //! Fold notes: the first time a fold appears, the worker records what to keep from the turns
@@ -258,9 +258,9 @@ fn notes_render_deterministically_from_json() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_fold_notes`. Expected: compile errors, because `render_fold_note`, `FOLD_NOTE_MARKER`, `folds`, `fold_notes` and `fold_note_failures` do not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p superstate-agent --test test_fold_notes`. Expected: compile errors, because `render_fold_note`, `FOLD_NOTE_MARKER`, `folds`, `fold_notes` and `fold_note_failures` do not exist.
 
-- [ ] **Step 3: State.** In `crates/superstate-agent/src/state.rs`:
+- [x] **Step 3: State.** In `crates/superstate-agent/src/state.rs`:
   1. In `pub struct Orchestrator`, after the `review` field, add:
 
 ```rust
@@ -281,7 +281,7 @@ fn notes_render_deterministically_from_json() {
     pub fold_notes: std::collections::BTreeMap<usize, String>,
 ```
 
-- [ ] **Step 4: Context.** In `crates/superstate-agent/src/context.rs`:
+- [x] **Step 4: Context.** In `crates/superstate-agent/src/context.rs`:
   1. In `pub trait ContextStrategy`, after `fn build(...)`, add:
 
 ```rust
@@ -323,7 +323,7 @@ fn notes_render_deterministically_from_json() {
     }
 ```
 
-- [ ] **Step 5: The runner.** In `crates/superstate-agent/src/run.rs`:
+- [x] **Step 5: The runner.** In `crates/superstate-agent/src/run.rs`:
   1. Change the import `use superstate_provider::{Message, Provider, ProviderError, Request, ToolCall, Usage};` to also import `ToolSpec`.
   2. In `pub struct RunReport`, after `review_rejections`, add:
 
@@ -476,7 +476,7 @@ pub fn render_fold_note(text: &str) -> Option<String> {
             last_sent = Some((req.messages.clone(), history.len()));
 ```
 
-- [ ] **Step 6: CLI.**
+- [x] **Step 6: CLI.**
   1. `crates/superstate-cli/src/cli.rs`: after the `review` field, add:
 
 ```rust
@@ -495,16 +495,16 @@ pub fn render_fold_note(text: &str) -> Option<String> {
      - In `base`, add `fold_notes: 0,` and `fold_note_failures: 0,`.
      - In `from_run`, add `fold_notes: report.fold_notes,` and `fold_note_failures: report.fold_note_failures,`.
 
-- [ ] **Step 7: Literal additions in existing tests (mechanical, nothing else).**
+- [x] **Step 7: Literal additions in existing tests (mechanical, nothing else).**
   - `crates/superstate-agent/tests/test_working_set.rs`: in the `Orchestrator { ... }` literal, add `fold_notes: false,` after `review: false,`.
   - `crates/superstate-cli/tests/test_task_runner.rs` (4 literals), `test_run_report.rs` (1), `test_tdd_phases.rs` (1): in each `TaskConfig { ... }` literal, add `fold_notes: false,` after `review: false,`.
   - `crates/superstate-cli/tests/test_run_report.rs`: in the `RunReport { ... }` literal, add `fold_notes: 0,` and `fold_note_failures: 0,` after `review_rejections: 0,`.
 
-- [ ] **Step 8: Run the new tests.** Run: `cargo test -p superstate-agent --test test_fold_notes --test test_folded --test test_compact --test test_parallel_calls`. Expected: all pass (5 new).
+- [x] **Step 8: Run the new tests.** Run: `cargo test -p superstate-agent --test test_fold_notes --test test_folded --test test_compact --test test_parallel_calls`. Expected: all pass (5 new).
 
-- [ ] **Step 9: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 9: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 10: Commit.**
+- [x] **Step 10: Commit.**
 
 ```bash
 git add crates/
