@@ -10,22 +10,6 @@ use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, Tool
 
 const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 
-/// Deadlines on the HTTP call itself.
-///
-/// The third instance of one bug in a single afternoon. A command with no deadline let
-/// `find /` run for fifteen minutes; stdin left inherited let a command wait forever on a
-/// terminal nobody was watching; and an HTTP client with no timeout blocked a run for
-/// seventeen minutes on a single request, with no child process to show for it and nothing in
-/// the log after "turn 2".
-///
-/// A harness is largely a collection of things that can wait forever. Every one of them needs
-/// a number, and the absence of one is not a neutral default -- it is the longest possible
-/// value.
-const CONNECT_TIMEOUT_SECS: u64 = 20;
-/// Generous: a thinking model on a long conversation legitimately takes minutes. Bounded all
-/// the same, because "legitimately slow" and "never coming back" are indistinguishable without
-/// a deadline.
-const READ_TIMEOUT_SECS: u64 = 300;
 const API_ROOT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /// agy's effort suffixes that map onto Gemini's `thinkingLevel`. `-xhigh` and `-max` are
@@ -298,10 +282,7 @@ impl Gemini {
 impl Provider for Gemini {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = format!("{API_ROOT}/{}:generateContent", self.model);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
-            .build();
+        let agent = crate::http_client();
         let resp = agent
             .post(&url)
             .set("x-goog-api-key", &self.api_key)
@@ -330,10 +311,7 @@ impl Provider for Gemini {
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let url = API_ROOT;
         // Build an agent with bounded connection and read timeouts.
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
-            .build();
+        let agent = crate::http_client();
         // Query Google GenAI models list endpoint using AI Studio API key header.
         let resp = agent.get(url).set("x-goog-api-key", &self.api_key).call();
 

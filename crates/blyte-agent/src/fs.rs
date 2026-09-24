@@ -22,12 +22,19 @@ pub trait Fs: Send + Sync {
     /// Resolve symlinks and `..`. Used for the workspace-escape check, so it must answer for
     /// the filesystem the operation will really touch.
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, String>;
+    /// Whether paths name files on this machine, so tools may read them in-process.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct LocalFs;
 
 impl Fs for LocalFs {
+    fn is_local(&self) -> bool {
+        true
+    }
     fn read(&self, path: &Path) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
     }
@@ -114,6 +121,92 @@ impl Fs for ContainerFs {
         match self.exec(&["readlink", "-f", "--", &p], None)? {
             (out, 0) if !out.trim().is_empty() => Ok(PathBuf::from(out.trim())),
             _ => Err(format!("cannot resolve {p} in container")),
+        }
+    }
+}
+
+/// Files reached through a persistent session: the container counterpart of [`LocalFs`] at a
+/// round trip of a few milliseconds, instead of 2-5 `docker exec` per operation (a container
+/// `edit` cost about 300 ms). Content crosses base64-encoded, so no byte is interpreted on the
+/// way. Falls back to [`ContainerFs`] (or [`LocalFs`] for a local launcher) when no session can
+/// start. Error messages match [`ContainerFs`].
+pub struct SessionFs {
+    shell: crate::shell::PersistentShell,
+    fallback: Box<dyn Fs>,
+}
+
+impl SessionFs {
+    pub fn container(container_id: String, workdir: PathBuf) -> Self {
+        Self {
+            shell: crate::shell::PersistentShell::container(container_id.clone(), workdir),
+            fallback: Box::new(ContainerFs { container_id }),
+        }
+    }
+
+    /// A session on this machine: for tests, and for executors without a container.
+    pub fn local(root: PathBuf) -> Self {
+        Self {
+            shell: crate::shell::PersistentShell::local(root),
+            fallback: Box::new(LocalFs),
+        }
+    }
+
+    fn run(&self, command: &str) -> Option<crate::shell::Output> {
+        use crate::shell::Shell;
+        if !self.shell.is_persistent() {
+            return None;
+        }
+        self.shell
+            .exec(command, Path::new("/"), std::time::Duration::from_secs(120))
+            .ok()
+    }
+}
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+impl Fs for SessionFs {
+    fn read(&self, path: &Path) -> Result<String, String> {
+        let p = path.to_string_lossy().to_string();
+        match self.run(&format!("cat -- {}", sh_quote(&p))) {
+            Some(o) if o.exit_code == 0 => Ok(o.stdout),
+            Some(_) => Err(format!("cannot read {p} in container")),
+            None => self.fallback.read(path),
+        }
+    }
+
+    fn write(&self, path: &Path, content: &str) -> Result<(), String> {
+        let p = path.to_string_lossy().to_string();
+        let dir = path
+            .parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mkdir = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("mkdir -p -- {} && ", sh_quote(&dir))
+        };
+        let cmd = format!(
+            "{mkdir}printf %s {} | base64 -d > {}",
+            crate::shell::b64_encode(content.as_bytes()),
+            sh_quote(&p)
+        );
+        match self.run(&cmd) {
+            Some(o) if o.exit_code == 0 => Ok(()),
+            Some(_) => Err(format!("cannot write {p} in container")),
+            None => self.fallback.write(path, content),
+        }
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, String> {
+        let p = path.to_string_lossy().to_string();
+        match self.run(&format!("readlink -f -- {}", sh_quote(&p))) {
+            Some(o) if o.exit_code == 0 && !o.stdout.trim().is_empty() => {
+                Ok(PathBuf::from(o.stdout.trim()))
+            }
+            Some(_) => Err(format!("cannot resolve {p} in container")),
+            None => self.fallback.canonicalize(path),
         }
     }
 }

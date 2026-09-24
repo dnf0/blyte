@@ -8,6 +8,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 blyte-provider = { path = "../blyte-provider" }
+grep-searcher.workspace = true
+grep-regex.workspace = true
+grep-matcher.workspace = true
+ignore.workspace = true
 
 [dependencies.tempfile]
 workspace = true

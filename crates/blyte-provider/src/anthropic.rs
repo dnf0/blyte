@@ -24,16 +24,6 @@ const API_ROOT: &str = "https://api.anthropic.com/v1";
 /// Anthropic API version header required by all requests.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Connection timeout in seconds.
-///
-/// Bounded to prevent silent indefinite hanging if the network or gateway is unresponsive.
-const CONNECT_TIMEOUT_SECS: u64 = 20;
-
-/// Read timeout in seconds.
-///
-/// Long conversations or extended model reasoning runs can take several minutes.
-const READ_TIMEOUT_SECS: u64 = 300;
-
 /// Standard convenience aliases always made available for interactive selection.
 const STANDARD_ALIASES: &[(&str, &str)] = &[
     ("claude-3-7-sonnet-latest", "Claude 3.7 Sonnet (Latest)"),
@@ -325,10 +315,7 @@ impl Anthropic {
 impl Provider for Anthropic {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = format!("{API_ROOT}/messages");
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
-            .build();
+        let agent = crate::http_client();
         let resp = agent
             .post(&url)
             .set("x-api-key", &self.api_key)
@@ -357,10 +344,7 @@ impl Provider for Anthropic {
 
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let url = format!("{API_ROOT}/models");
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
-            .build();
+        let agent = crate::http_client();
         let resp = agent
             .get(&url)
             .set("x-api-key", &self.api_key)
