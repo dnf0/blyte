@@ -26,6 +26,7 @@ fn config() -> TaskConfig {
         report: None,
         tdd: false,
         review: false,
+        fold_notes: false,
     }
 }
 

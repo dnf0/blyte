@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use superstate_provider::{Message, Provider, ProviderError, Request, ToolCall, Usage};
+use superstate_provider::{Message, Provider, ProviderError, Request, ToolCall, ToolSpec, Usage};
 
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
@@ -77,6 +77,9 @@ pub struct RunReport {
     pub reviews: u32,
     /// Reviews that sent the worker back with unmet requirements.
     pub review_rejections: u32,
+    /// Fold notes recorded, and fold-note requests that failed (the fold kept the harness digest).
+    pub fold_notes: u32,
+    pub fold_note_failures: u32,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -248,6 +251,60 @@ pub fn retry_delay(attempt: u32) -> Duration {
     Duration::from_secs((2u64 << exp).min(60))
 }
 
+/// First line of a fold-note request. Test providers recognise note requests by it.
+pub const FOLD_NOTE_MARKER: &str = "## Fold notes requested by the harness";
+
+/// Render a fold-note reply: a JSON object with any of `findings`, `ruled_out` and `next`
+/// (string lists) and `files` (path -> role). `None` when there is no such object or it says
+/// nothing, so the fold keeps the harness digest alone. Deterministic, so the note enters the
+/// prompt identically every turn.
+pub fn render_fold_note(text: &str) -> Option<String> {
+    let (start, end) = (text.find('{')?, text.rfind('}')?);
+    if end < start {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
+    let obj = v.as_object()?;
+    let list = |key: &str| -> Vec<String> {
+        obj.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .take(12)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut out = String::new();
+    let mut section = |title: &str, items: Vec<String>| {
+        if !items.is_empty() {
+            out.push_str(&format!("{title}:\n"));
+            for it in items {
+                out.push_str(&format!("- {it}\n"));
+            }
+        }
+    };
+    section("Established", list("findings"));
+    section("Ruled out", list("ruled_out"));
+    let files: Vec<String> = obj
+        .get("files")
+        .and_then(|x| x.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(p, r)| r.as_str().map(|r| format!("`{p}`: {}", r.trim())))
+                .take(12)
+                .collect()
+        })
+        .unwrap_or_default();
+    section("Files", files);
+    section("Still to do", list("next"));
+    (!out.is_empty()).then_some(out)
+}
+
 pub struct Runner<'a> {
     pub provider: &'a dyn Provider,
     pub shell: &'a dyn Shell,
@@ -395,6 +452,46 @@ impl<'a> Runner<'a> {
         Some(feedback)
     }
 
+    /// Ask the worker what to keep from messages `first..=last`, which are about to be folded.
+    /// `prefix` is the previous request's messages plus everything since, and the system prompt
+    /// and tools are the loop's own, so all but the newest turn is read from cache. Any failure
+    /// yields `None`: the fold keeps the harness digest.
+    fn fold_note(
+        &self,
+        system: &str,
+        specs: &[ToolSpec],
+        prefix: Vec<Message>,
+        (first, last): (usize, usize),
+        report: &mut RunReport,
+    ) -> Option<String> {
+        let mut messages = prefix;
+        messages.push(Message::User(format!(
+            "{FOLD_NOTE_MARKER}\n\
+             Messages {first}-{last} are about to be folded: from the next turn you will see only \
+             a one-line summary of each call there, not its output. Record now what you still \
+             need from them. Reply with only a JSON object and no tool calls:\n\
+             {{\"findings\": [\"facts established, with paths, line numbers and identifiers \
+             verbatim\"], \"ruled_out\": [\"approaches tried and why they failed\"], \
+             \"files\": {{\"path\": \"what it is for\"}}, \"next\": [\"what remains\"]}}\n\
+             Keep it under 300 words."
+        )));
+        let req = Request {
+            system: system.to_string(),
+            messages,
+            tools: specs.to_vec(),
+            max_output_tokens: None,
+        };
+        let resp = self.provider.complete(&req).ok()?;
+        report.usage.input += resp.usage.input;
+        report.usage.cached += resp.usage.cached;
+        report.usage.output += resp.usage.output;
+        report.usage.thinking += resp.usage.thinking;
+        if !resp.tool_calls.is_empty() {
+            return None;
+        }
+        render_fold_note(&resp.text)
+    }
+
     fn checkpoint(&self) -> Option<String> {
         let out = self
             .shell
@@ -529,11 +626,38 @@ impl<'a> Runner<'a> {
         let baseline = self.checkpoint();
         let mut review_rounds = 0;
 
+        // Fold notes are keyed by position in this history, which starts afresh here (each phase
+        // of a multi-phase run has its own).
+        state.runtime.fold_notes.clear();
+        let mut last_sent: Option<(Vec<Message>, usize)> = None;
+
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return (Outcome::BudgetExhausted, report);
             }
             report.outcome_turns = turn;
+
+            // The first time a fold appears, the worker records what to keep from it. The prompt
+            // changes then anyway, so the note costs no extra cache miss.
+            if state.orchestrator.fold_notes {
+                if let Some((sent, len)) = &last_sent {
+                    for (a, b) in self.context.folds(&history) {
+                        if state.runtime.fold_notes.contains_key(&b) {
+                            continue;
+                        }
+                        let mut prefix = sent.clone();
+                        prefix.extend_from_slice(&history[*len..]);
+                        let note =
+                            self.fold_note(&system, &specs, prefix, (a + 2, b + 1), &mut report);
+                        if note.is_some() {
+                            report.fold_notes += 1;
+                        } else {
+                            report.fold_note_failures += 1;
+                        }
+                        state.runtime.fold_notes.insert(b, note.unwrap_or_default());
+                    }
+                }
+            }
 
             let req = Request {
                 system: system.clone(),
@@ -541,6 +665,7 @@ impl<'a> Runner<'a> {
                 tools: specs.clone(),
                 max_output_tokens: None,
             };
+            last_sent = Some((req.messages.clone(), history.len()));
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.
             let mut attempt = 0;

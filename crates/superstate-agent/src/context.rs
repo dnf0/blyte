@@ -24,6 +24,11 @@ use crate::state::State;
 pub trait ContextStrategy: Send + Sync {
     /// Build the messages for the next call from the run so far.
     fn build(&self, state: &State, history: &[Message]) -> Vec<Message>;
+    /// The folds this strategy makes over `history`, as `(a, b)` ranges of `history[1..]`.
+    /// Strategies that never fold return none.
+    fn folds(&self, _history: &[Message]) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
     fn name(&self) -> &'static str;
 }
 
@@ -295,7 +300,7 @@ fn clip(text: &str, max: usize) -> String {
 /// Calls are paired with results by position within their turn block (calls, then results, in
 /// call order). Not by id: Gemini issues no ids, the adapter numbers calls from `call_0` every
 /// turn, so ids repeat across turns and an id match would pair a call with another turn's result.
-fn digest(folded: &[Message], first: usize, last: usize) -> Message {
+fn digest(folded: &[Message], first: usize, last: usize, note: Option<&str>) -> Message {
     let mut text =
         format!("## Earlier turns, folded (messages {first}-{last}; summarised by the harness)\n");
     let mut i = 0;
@@ -338,6 +343,10 @@ fn digest(folded: &[Message], first: usize, last: usize) -> Message {
             }
             Message::ToolResult { .. } => i += 1,
         }
+    }
+    if let Some(note) = note.filter(|n| !n.trim().is_empty()) {
+        text.push_str("\n### Your notes from these turns\n");
+        text.push_str(note);
     }
     Message::User(text)
 }
@@ -388,7 +397,7 @@ impl Folded {
 }
 
 impl ContextStrategy for Folded {
-    fn build(&self, _state: &State, history: &[Message]) -> Vec<Message> {
+    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
         let Some((opening, rest)) = history.split_first() else {
             return Vec::new();
         };
@@ -396,10 +405,22 @@ impl ContextStrategy for Folded {
         let mut out = vec![opening.clone()];
         for (a, b) in plan.folds {
             // Message numbers are 1-based positions in the full history.
-            out.push(digest(&rest[a..b], a + 2, b + 1));
+            out.push(digest(
+                &rest[a..b],
+                a + 2,
+                b + 1,
+                state.runtime.fold_notes.get(&b).map(String::as_str),
+            ));
         }
         out.extend_from_slice(&rest[plan.seg_start..]);
         out
+    }
+
+    fn folds(&self, history: &[Message]) -> Vec<(usize, usize)> {
+        history
+            .split_first()
+            .map(|(_, rest)| self.plan(rest).folds)
+            .unwrap_or_default()
     }
 
     fn name(&self) -> &'static str {
@@ -567,6 +588,13 @@ impl ContextStrategy for Compact {
             }
         }
         out
+    }
+
+    fn folds(&self, history: &[Message]) -> Vec<(usize, usize)> {
+        Folded {
+            budget_tokens: self.budget_tokens,
+        }
+        .folds(history)
     }
 
     fn name(&self) -> &'static str {

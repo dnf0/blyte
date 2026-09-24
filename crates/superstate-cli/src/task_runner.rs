@@ -40,6 +40,8 @@ pub struct TaskConfig {
     pub tdd: bool,
     /// Completeness review before a passing verification is accepted (`--review`).
     pub review: bool,
+    /// Fold notes (`--fold-notes`).
+    pub fold_notes: bool,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -64,6 +66,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             report: cli.report.clone(),
             tdd: cli.tdd,
             review: cli.review,
+            fold_notes: cli.fold_notes,
         }
     }
 }
@@ -158,6 +161,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     String,
 > {
     state.orchestrator.review = config.review;
+    state.orchestrator.fold_notes = config.fold_notes;
     let started = std::time::Instant::now();
     // Derived before the provider, so an unrecognised repository fails closed without an API call.
     let phases = if config.tdd {
