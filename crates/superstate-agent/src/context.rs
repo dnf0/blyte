@@ -87,31 +87,17 @@ impl ContextStrategy for StateOnly {
                 failure.trim_end()
             ));
         } else {
-            // When tests have run and are currently passing following code edits, inform the worker
-            // that its tests are passing so it stops calling tools instead of spinning on inspections.
-            let has_edit = state
-                .runtime
-                .actions
-                .iter()
-                .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
-            let tests_passing = has_edit
-                && state
-                    .runtime
-                    .actions
-                    .iter()
-                    .rev()
-                    .take_while(|a| a.tool != "edit" && a.tool != "write")
-                    .any(|a| {
-                        a.tool == "bash"
-                            && !a.is_error
-                            && !a.summary.starts_with("intercepted")
-                            && crate::run::is_test_command(
-                                &a.target,
-                                &state.orchestrator.verification_cmd,
-                            )
-                    });
-            if tests_passing {
-                user_prompt.push_str("\n## Verification Status\nUnit tests are passing. If your changes are complete, stop calling tools now to submit your work for verification.\n");
+            // Only the verification command itself exiting 0 predicts the gate. Claiming "tests
+            // are passing" from any test-like command told a GREEN worker its failing test passed.
+            if crate::run::verification_passed_since_edit(
+                &state.runtime.actions,
+                &state.orchestrator.verification_cmd,
+            ) {
+                user_prompt.push_str(&format!(
+                    "\n## Verification Status\nThe verification command `{}` exited 0 after your \
+                     last edit. If your change is complete, stop calling tools to submit it.\n",
+                    state.orchestrator.verification_cmd.trim()
+                ));
             }
         }
 

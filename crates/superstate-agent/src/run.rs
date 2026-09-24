@@ -102,6 +102,93 @@ pub enum Event<'e> {
     },
 }
 
+/// The action-ledger tool name `run_phases` writes when a phase begins. Loop-breaker inferences
+/// look no further back than the latest marker: what passed in RED says nothing about GREEN.
+pub const PHASE_MARKER_TOOL: &str = "phase";
+
+/// Actions since the current phase began, or all of them when the run has no phases.
+pub fn current_phase_actions(actions: &[ActionEntry]) -> &[ActionEntry] {
+    match actions.iter().rposition(|a| a.tool == PHASE_MARKER_TOOL) {
+        Some(i) => &actions[i + 1..],
+        None => actions,
+    }
+}
+
+/// Whether, in the current phase and since its last edit, the worker ran the verification
+/// command itself and it exited 0. That is the only exit code that predicts the gate. Another
+/// test-like command passing (a compile-only `go test -run '^$'`, a single test) says nothing
+/// about it. Treating it as if it did told a GREEN worker its failing test was passing.
+pub fn verification_passed_since_edit(actions: &[ActionEntry], verification_cmd: &str) -> bool {
+    let v = verification_cmd.trim();
+    if v.is_empty() || v == "true" || v == "false" {
+        return false;
+    }
+    let phase = current_phase_actions(actions);
+    let edited = phase
+        .iter()
+        .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
+    edited
+        && phase
+            .iter()
+            .rev()
+            .take_while(|a| a.tool != "edit" && a.tool != "write")
+            .any(|a| {
+                a.tool == "bash"
+                    && !a.is_error
+                    && !a.summary.starts_with("intercepted")
+                    && a.target.trim() == v
+            })
+}
+
+/// One stage of a multi-phase run, with its own instruction and verification command.
+///
+/// Phases belong to the runtime, not the worker. The harness derives them (for example from the
+/// repository, by autonomous TDD), and the worker can neither see nor edit the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phase {
+    pub id: String,
+    pub instruction: String,
+    pub verify_cmd: String,
+    /// The only tracked path allowed to differ from the phase's starting commit when its gate
+    /// passes. RED uses it: a worker that fixes the bug while "writing a failing test" makes
+    /// the RED proof meaningless.
+    pub scope_only: Option<String>,
+    /// A path that must be unchanged from the phase's starting commit when its gate passes.
+    /// GREEN uses it: the test that defines done may not be weakened after it was seen to fail.
+    pub protect: Option<String>,
+}
+
+impl Phase {
+    /// The command the gate actually runs: the phase's own command plus its mechanical checks,
+    /// measured against `start`, the commit captured when the phase began. A worker that commits
+    /// mid-phase cannot move that reference point.
+    pub fn gate(&self, start: &str) -> String {
+        let mut cmd = format!("( {} )", self.verify_cmd);
+        if let Some(p) = &self.scope_only {
+            cmd.push_str(&format!(
+                " && {{ git diff --quiet {start} -- . ':(exclude){p}' || \
+                 {{ echo 'superstate: in this phase only {p} may change; revert your other edits'; false; }}; }}"
+            ));
+        }
+        if let Some(p) = &self.protect {
+            cmd.push_str(&format!(
+                " && {{ git diff --quiet {start} -- '{p}' || \
+                 {{ echo 'superstate: {p} defines done and may not change in this phase'; false; }}; }}"
+            ));
+        }
+        cmd
+    }
+}
+
+/// How one phase of a multi-phase run ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseResult {
+    pub id: String,
+    pub outcome: Outcome,
+    pub turns: u32,
+    pub gate_attempts: u32,
+}
+
 pub struct Runner<'a> {
     pub provider: &'a dyn Provider,
     pub shell: &'a dyn Shell,
@@ -188,19 +275,116 @@ impl<'a> Runner<'a> {
     }
 
     pub fn run(&self, state: &mut State) -> (Outcome, RunReport) {
+        let deadline = self
+            .budget
+            .max_duration
+            .map(|d| std::time::Instant::now() + d);
+        self.run_until(state, deadline)
+    }
+
+    /// Run `phases` in order under one deadline. After each verified phase except the last, a
+    /// checkpoint is committed, so the next phase's rollback baseline keeps it: a GREEN rollback
+    /// must never delete RED's verified test. Turn and gate budgets apply per phase, matching
+    /// the daemon's per-milestone retry budget. The deadline covers the whole run.
+    pub fn run_phases(
+        &self,
+        state: &mut State,
+        phases: &[Phase],
+    ) -> (Outcome, RunReport, Vec<PhaseResult>) {
+        let deadline = self
+            .budget
+            .max_duration
+            .map(|d| std::time::Instant::now() + d);
+        let task = state.orchestrator.goal.clone();
+        let mut total = RunReport::default();
+        let mut results = Vec::new();
+        for (i, phase) in phases.iter().enumerate() {
+            let Some(start) = self.checkpoint() else {
+                return (
+                    Outcome::Error("phases need a git repository: cannot read HEAD".into()),
+                    total,
+                    results,
+                );
+            };
+            state.orchestrator.goal = format!(
+                "{task}\n\n## Current milestone ({}/{}): {}\n{}",
+                i + 1,
+                phases.len(),
+                phase.id,
+                phase.instruction
+            );
+            state.orchestrator.verification_cmd = phase.gate(&start);
+            state.runtime.actions.push(ActionEntry {
+                turn: 0,
+                tool: PHASE_MARKER_TOOL.into(),
+                target: phase.id.clone(),
+                summary: format!("phase {}/{} started", i + 1, phases.len()),
+                is_error: false,
+            });
+            let (outcome, report) = self.run_until(state, deadline);
+            total.outcome_turns += report.outcome_turns;
+            total.usage.input += report.usage.input;
+            total.usage.cached += report.usage.cached;
+            total.usage.output += report.usage.output;
+            total.usage.thinking += report.usage.thinking;
+            total.empty_turns += report.empty_turns;
+            total.tool_calls += report.tool_calls;
+            total.gate_attempts += report.gate_attempts;
+            results.push(PhaseResult {
+                id: phase.id.clone(),
+                outcome: outcome.clone(),
+                turns: report.outcome_turns,
+                gate_attempts: report.gate_attempts,
+            });
+            if outcome != Outcome::Verified {
+                state.orchestrator.goal = task;
+                return (outcome, total, results);
+            }
+            if i + 1 < phases.len() {
+                if let Err(e) = self.commit_checkpoint(&phase.id) {
+                    state.orchestrator.goal = task;
+                    return (Outcome::Error(e), total, results);
+                }
+            }
+        }
+        state.orchestrator.goal = task;
+        (Outcome::Verified, total, results)
+    }
+
+    /// Commit the tree as the verified end of a phase. The identity is set inline because a
+    /// task container often has no git user configured.
+    fn commit_checkpoint(&self, phase_id: &str) -> Result<(), String> {
+        let cmd = format!(
+            "git add -A && git -c user.name=superstate -c user.email=superstate@localhost \
+             commit --no-gpg-sign -q --allow-empty -m 'chore(superstate): checkpoint phase {phase_id}'"
+        );
+        match self.shell.exec(&cmd, &self.root, Duration::from_secs(120)) {
+            Ok(o) if o.exit_code == 0 => Ok(()),
+            Ok(o) => Err(format!(
+                "checkpoint commit for phase {phase_id} failed: {}",
+                o.merged().trim()
+            )),
+            Err(e) => Err(format!(
+                "checkpoint commit for phase {phase_id} could not run: {e}"
+            )),
+        }
+    }
+
+    fn run_until(
+        &self,
+        state: &mut State,
+        deadline: Option<std::time::Instant>,
+    ) -> (Outcome, RunReport) {
         let mut report = RunReport::default();
         let mut history: Vec<Message> =
             vec![Message::User(format!("Begin. {}", state.orchestrator.goal))];
         let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
-        let started = std::time::Instant::now();
 
         for turn in 1..=self.budget.max_turns {
-            if let Some(limit) = self.budget.max_duration {
-                if started.elapsed() >= limit {
-                    return (Outcome::BudgetExhausted, report);
-                }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return (Outcome::BudgetExhausted, report);
             }
             report.outcome_turns = turn;
 
@@ -416,9 +600,12 @@ impl<'a> Runner<'a> {
                             let is_test_cmd =
                                 is_test_command(cmd, &state.orchestrator.verification_cmd);
                             if outcome.is_error && is_test_cmd {
-                                state.runtime.working_set.record_failure(&outcome.content);
+                                state
+                                    .runtime
+                                    .working_set
+                                    .record_failure_for(cmd, &outcome.content);
                             } else if !outcome.is_error && is_test_cmd {
-                                state.runtime.working_set.clear_failure();
+                                state.runtime.working_set.clear_failure_for(cmd);
                             }
                         }
                         _ => {}
@@ -631,7 +818,7 @@ pub fn should_intercept_redundant_read(
 pub fn should_intercept_redundant_bash(
     call: &ToolCall,
     actions: &[ActionEntry],
-    working_set: &crate::working_set::WorkingSet,
+    _working_set: &crate::working_set::WorkingSet,
     verification_cmd: &str,
 ) -> Option<String> {
     if call.name != "bash" {
@@ -640,23 +827,29 @@ pub fn should_intercept_redundant_bash(
     let raw_cmd = call.arguments.get("command").and_then(|v| v.as_str())?;
     let cmd = raw_cmd.trim();
 
-    // Guard 1: Redundant test execution after tests have already passed without file modifications
-    let is_test = is_test_command(cmd, verification_cmd);
-    if is_test && working_set.last_failure.is_none() {
-        let test_passed_since_edit = actions
-            .iter()
-            .rev()
-            .take_while(|a| a.tool != "edit" && a.tool != "write")
-            .any(|a| {
-                a.tool == "bash"
-                    && is_test_command(&a.target, verification_cmd)
-                    && !a.is_error
-                    && !a.summary.starts_with("intercepted")
-            });
-        if test_passed_since_edit {
+    // Guard 1: re-running a command that already exited 0, with no edit since, cannot tell the
+    // worker anything new. Only the IDENTICAL command counts: a different test command passing
+    // says nothing about this one. A target the ledger truncated cannot be compared, so it runs.
+    // Truncation is judged by length, not by a trailing `...`: Go's `./...` ends that way too.
+    if is_test_command(cmd, verification_cmd) {
+        let target = extract_action_target("bash", &call.arguments);
+        let truncated = raw_cmd.replace('\n', " ").chars().count() > 60;
+        let already_passed = !truncated
+            && current_phase_actions(actions)
+                .iter()
+                .rev()
+                .take_while(|a| a.tool != "edit" && a.tool != "write")
+                .any(|a| {
+                    a.tool == "bash"
+                        && a.target == target
+                        && !a.is_error
+                        && !a.summary.starts_with("intercepted")
+                });
+        if already_passed {
             return Some(format!(
-                "[Harness Working Memory Guard]: Unit tests `{cmd}` have already passed and no files were modified since. \
-                 Stop calling tools now to trigger the verification completion gate."
+                "[Harness Working Memory Guard]: `{cmd}` already exited 0 and no file has changed since, \
+                 so it would exit 0 again. If your change is complete, stop calling tools to submit it \
+                 for verification."
             ));
         }
     }
@@ -686,27 +879,14 @@ pub fn should_intercept_redundant_bash(
         })
         .count();
 
-    let has_edit = actions
-        .iter()
-        .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
-    let tests_passing = has_edit
-        && working_set.last_failure.is_none()
-        && actions
-            .iter()
-            .rev()
-            .take_while(|a| a.tool != "edit" && a.tool != "write")
-            .any(|a| {
-                a.tool == "bash"
-                    && !a.is_error
-                    && !a.summary.starts_with("intercepted")
-                    && is_test_command(&a.target, verification_cmd)
-            });
-
-    if last_was_same || recent_same >= 2 || tests_passing {
-        let advice = if tests_passing {
+    let verified = verification_passed_since_edit(actions, verification_cmd);
+    if last_was_same || recent_same >= 2 || verified {
+        let advice = if verified {
             format!(
-                "[Harness Working Memory Guard]: `{cmd}` inspection intercepted: unit tests have already passed. \
-                 Stop calling tools now to trigger the verification completion gate."
+                "[Harness Working Memory Guard]: `{cmd}` inspection intercepted: the verification \
+                 command `{}` exited 0 after your last edit. If your change is complete, stop calling \
+                 tools to submit it.",
+                verification_cmd.trim()
             )
         } else {
             format!(

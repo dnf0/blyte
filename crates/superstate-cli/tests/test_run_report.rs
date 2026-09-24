@@ -27,6 +27,7 @@ fn config() -> TaskConfig {
         container_workdir: "/app".into(),
         max_seconds: Some(600),
         report: None,
+        tdd: false,
     }
 }
 
