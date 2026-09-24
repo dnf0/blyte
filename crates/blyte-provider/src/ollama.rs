@@ -20,16 +20,6 @@ const DEFAULT_MODEL: &str = "qwen2.5-coder:32b";
 /// Default base URL for Ollama Cloud API.
 const DEFAULT_API_ROOT: &str = "https://ollama.com/api";
 
-/// Connection timeout in seconds.
-///
-/// Bounded to prevent silent indefinite hanging if the network or gateway is unresponsive.
-const CONNECT_TIMEOUT_SECS: u64 = 20;
-
-/// Read timeout in seconds.
-///
-/// Long conversations or local model generation runs on large models can take several minutes.
-const READ_TIMEOUT_SECS: u64 = 300;
-
 /// Normalizes the API root URL so that trailing slashes are removed and the `/api` prefix
 /// is consistently present (e.g. `http://localhost:11434` -> `http://localhost:11434/api`).
 fn normalize_api_root(raw: &str) -> String {
@@ -391,10 +381,7 @@ impl Provider for Ollama {
     /// Attaches Bearer authentication header when `api_key` is present.
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = format!("{}/chat", self.api_root);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
-            .build();
+        let agent = crate::http_client();
         let mut req_builder = agent.post(&url).set("content-type", "application/json");
 
         // Attach Authorization header if credentials are configured.
@@ -429,10 +416,7 @@ impl Provider for Ollama {
     /// Attaches Bearer authentication header when `api_key` is present.
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let url = format!("{}/tags", self.api_root);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            .timeout_read(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
-            .build();
+        let agent = crate::http_client();
         let mut req_builder = agent.get(&url);
 
         // Attach Authorization header if credentials are configured.

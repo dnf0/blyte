@@ -1,7 +1,7 @@
 //! Model-free harness benchmark. A scripted provider replays `bench::trajectory` at zero model
 //! latency, so every millisecond measured is the harness's own.
 //!
-//!   cargo run --release -p blyte-agent --example harness_bench -- [--turns N] [--image IMG] [--out FILE]
+//!   cargo run --release -p blyte-agent --example harness_bench -- [--turns N] [--image IMG] [--out FILE] [--legacy]
 //!
 //! Local mode runs tools on a temporary copy of this repository's `crates/`. With `--image`, the
 //! copy is bind-mounted at /work in a fresh container of IMG, removed afterwards.
@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use blyte_agent::bench::{percentile, trajectory};
 use blyte_agent::context::Folded;
-use blyte_agent::fs::{ContainerFs, Fs, LocalFs};
+use blyte_agent::fs::{ContainerFs, Fs, LocalFs, SessionFs};
 use blyte_agent::run::{Budget, Event, Runner};
-use blyte_agent::shell::{ContainerShell, LocalShell, Shell};
+use blyte_agent::shell::{ContainerShell, LocalShell, PersistentShell, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall};
 
@@ -118,6 +118,7 @@ fn main() {
     let turns: usize = arg(&args, "--turns").map_or(200, |t| t.parse().expect("--turns N"));
     let image = arg(&args, "--image");
     let out = arg(&args, "--out");
+    let legacy = args.iter().any(|a| a == "--legacy");
 
     // Fixture: this repository's crates/ and Cargo.toml, in a fresh git repository.
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -182,45 +183,68 @@ fn main() {
         }
     };
 
-    let (local_shell, local_fs) = (LocalShell, LocalFs);
-    let container_shell = container.as_ref().map(|id| ContainerShell {
-        container_id: id.clone(),
-        workdir: PathBuf::from("/work"),
-    });
-    let container_fs = container.as_ref().map(|id| ContainerFs {
-        container_id: id.clone(),
-    });
-    let (shell, fs, root): (&dyn Shell, &dyn Fs, PathBuf) = match (&container_shell, &container_fs)
-    {
-        (Some(s), Some(f)) => (s, f, PathBuf::from("/work")),
-        _ => (&local_shell, &local_fs, fixture.clone()),
-    };
-    let context = Folded::default();
-    let runner = Runner {
-        provider: &replay,
-        shell,
-        fs,
-        context: &context,
-        root,
-        budget: Budget {
-            max_turns: (turns + 5) as u32,
-            max_gate_attempts: 1,
-            max_duration: None,
-            max_cost_usd: None,
-        },
-        rollback: false,
-        loop_breaker: false,
-        on_event: Some(&on_event),
-    };
     let started = Instant::now();
-    let _ = runner.run(&mut State::new("benchmark", "true"));
+    {
+        let (local_shell, local_fs) = (LocalShell, LocalFs);
+        let legacy_shell = container.as_ref().map(|id| ContainerShell {
+            container_id: id.clone(),
+            workdir: PathBuf::from("/work"),
+        });
+        let legacy_fs = container.as_ref().map(|id| ContainerFs {
+            container_id: id.clone(),
+        });
+        let persistent = match &container {
+            Some(id) => PersistentShell::container(id.clone(), PathBuf::from("/work")),
+            None => PersistentShell::local(fixture.clone()),
+        };
+        let session_fs = container
+            .as_ref()
+            .map(|id| SessionFs::container(id.clone(), PathBuf::from("/work")));
+        let root = if container.is_some() {
+            PathBuf::from("/work")
+        } else {
+            fixture.clone()
+        };
+        let shell: &dyn Shell = match (legacy, &legacy_shell) {
+            (true, Some(s)) => s,
+            (true, None) => &local_shell,
+            (false, _) => &persistent,
+        };
+        let fs: &dyn Fs = match (legacy, &legacy_fs, &session_fs) {
+            (true, Some(f), _) => f,
+            (false, _, Some(f)) => f,
+            _ => &local_fs,
+        };
+        let context = Folded::default();
+        let runner = Runner {
+            provider: &replay,
+            shell,
+            fs,
+            context: &context,
+            root,
+            budget: Budget {
+                max_turns: (turns + 5) as u32,
+                max_gate_attempts: 1,
+                max_duration: None,
+                max_cost_usd: None,
+            },
+            rollback: false,
+            loop_breaker: false,
+            on_event: Some(&on_event),
+        };
+        let _ = runner.run(&mut State::new("benchmark", "true"));
+    }
     let total_ms = started.elapsed().as_secs_f64() * 1e3;
     if let Some(id) = &container {
         let _ = Command::new("docker").args(["rm", "-f", id]).output();
     }
 
     let c = replay.clock.lock().unwrap();
-    let mode = image.map_or("local".to_string(), |i| format!("container:{i}"));
+    let mode = format!(
+        "{}{}",
+        image.map_or("local".to_string(), |i| format!("container:{i}")),
+        if legacy { " legacy" } else { "" }
+    );
     let mut tools = serde_json::Map::new();
     println!("harness_bench  mode={mode}  turns={turns}  total={total_ms:.0} ms");
     println!(

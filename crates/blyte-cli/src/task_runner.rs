@@ -221,32 +221,32 @@ pub fn run_task_with_state_and_writer<W: Write>(
             _ => &conversational,
         };
 
-    // 3. Select execution shell and filesystem target.
-    // If a container ID is specified, execution and file operations land inside Docker
-    // at `/workspace` so host environment is unaffected.
-    let local_shell = blyte_agent::shell::LocalShell;
+    // Persistent sessions: one for the harness's commands, one for the model's `bash` (its `cd`
+    // and `export` carry over). Container files go through a session too. Each falls back to a
+    // process per command if a session cannot start.
     let local_fs = blyte_agent::fs::LocalFs;
-    let container_shell = config
-        .container
-        .as_ref()
-        .map(|cid| blyte_agent::shell::ContainerShell {
-            container_id: cid.clone(),
-            workdir: PathBuf::from(&config.container_workdir),
-        });
-    let container_fs = config
-        .container
-        .as_ref()
-        .map(|cid| blyte_agent::fs::ContainerFs {
-            container_id: cid.clone(),
-        });
-
-    let (shell, fs, root): (
-        &dyn blyte_agent::shell::Shell,
-        &dyn blyte_agent::fs::Fs,
-        PathBuf,
-    ) = match (&container_shell, &container_fs) {
-        (Some(cs), Some(cf)) => (cs, cf, PathBuf::from(&config.container_workdir)),
-        _ => (&local_shell, &local_fs, config.root.clone()),
+    let (persistent, session_fs, root) = match &config.container {
+        Some(cid) => (
+            blyte_agent::shell::PersistentShell::container(
+                cid.clone(),
+                PathBuf::from(&config.container_workdir),
+            ),
+            Some(blyte_agent::fs::SessionFs::container(
+                cid.clone(),
+                PathBuf::from(&config.container_workdir),
+            )),
+            PathBuf::from(&config.container_workdir),
+        ),
+        None => (
+            blyte_agent::shell::PersistentShell::local(config.root.clone()),
+            None,
+            config.root.clone(),
+        ),
+    };
+    let shell: &dyn blyte_agent::shell::Shell = &persistent;
+    let fs: &dyn blyte_agent::fs::Fs = match &session_fs {
+        Some(f) => f,
+        None => &local_fs,
     };
 
     // 4. Wrap writer in a Mutex so the event callback satisfies Fn trait bounds.

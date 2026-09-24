@@ -25,6 +25,18 @@ pub mod registry;
 
 pub use registry::{detect_provider_kind, discover_all_models, resolve_provider, ProviderKind};
 
+/// The process's one HTTP client. `ureq::Agent` pools connections, so every model call after
+/// the first reuses one instead of paying a TCP and TLS handshake (15-45 ms) each time.
+pub fn http_client() -> &'static ureq::Agent {
+    static CLIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(20))
+            .timeout_read(std::time::Duration::from_secs(300))
+            .build()
+    })
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]

@@ -453,7 +453,7 @@ fn execute_unbounded(
                 },
             }
         }
-        "bash" => match shell.exec(&s("command"), root, COMMAND_TIMEOUT) {
+        "bash" => match shell.exec_user(&s("command"), root, COMMAND_TIMEOUT) {
             Ok(o) => {
                 let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
                 // Exit code always stated: a non-zero exit with quiet output reads as success.
