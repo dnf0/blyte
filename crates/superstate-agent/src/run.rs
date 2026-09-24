@@ -50,6 +50,9 @@ pub struct Budget {
     /// Wall-clock limit, checked before each turn. The harness stops itself and reports, rather
     /// than being killed from outside with its telemetry lost (FINDINGS 13.5).
     pub max_duration: Option<Duration>,
+    /// Dollar limit at list price (`superstate_provider::pricing`), checked before each turn of a
+    /// `run_until` call (so per phase in a phased run). Requires a model with a known price.
+    pub max_cost_usd: Option<f64>,
 }
 
 impl Default for Budget {
@@ -58,6 +61,7 @@ impl Default for Budget {
             max_turns: 60,
             max_gate_attempts: 5,
             max_duration: None,
+            max_cost_usd: None,
         }
     }
 }
@@ -108,6 +112,12 @@ pub enum Event<'e> {
     },
     RolledBack {
         to: &'e str,
+    },
+    /// The run so far, emitted before each model call and when the turn budget runs out. Taken
+    /// between turns, so `Runner::resume` from it never re-executes a recorded tool result.
+    Checkpoint {
+        history: &'e [Message],
+        state: &'e State,
     },
 }
 
@@ -249,6 +259,25 @@ pub fn is_transient(e: &ProviderError) -> bool {
 pub fn retry_delay(attempt: u32) -> Duration {
     let exp = attempt.saturating_sub(1).min(5);
     Duration::from_secs((2u64 << exp).min(60))
+}
+
+/// How long the server asked us to wait, if it said: Gemini puts `"retryDelay": "37s"` in a
+/// 429's body. Capped at 120 seconds.
+pub fn server_retry_hint(e: &ProviderError) -> Option<Duration> {
+    let ProviderError::Api { body, .. } = e else {
+        return None;
+    };
+    let key = "\"retryDelay\"";
+    let rest = &body[body.find(key)? + key.len()..];
+    let value = &rest[rest.find('"')? + 1..];
+    let secs: f64 = value[..value.find('s')?].trim().parse().ok()?;
+    Some(Duration::from_secs_f64(secs.max(0.0)).min(Duration::from_secs(120)))
+}
+
+/// Wait before retry `attempt` (1-based): the backoff, or the server's hint when it is longer.
+pub fn retry_wait(e: &ProviderError, attempt: u32) -> Duration {
+    let backoff = retry_delay(attempt);
+    server_retry_hint(e).map_or(backoff, |hint| hint.max(backoff))
 }
 
 /// First line of a fold-note request. Test providers recognise note requests by it.
@@ -513,7 +542,17 @@ impl<'a> Runner<'a> {
             .budget
             .max_duration
             .map(|d| std::time::Instant::now() + d);
-        self.run_until(state, deadline)
+        self.run_until(state, deadline, None)
+    }
+
+    /// Continue a run from a checkpoint (`Event::Checkpoint`) with a fresh budget. Tool results
+    /// already in `history` are never re-executed.
+    pub fn resume(&self, state: &mut State, history: Vec<Message>) -> (Outcome, RunReport) {
+        let deadline = self
+            .budget
+            .max_duration
+            .map(|d| std::time::Instant::now() + d);
+        self.run_until(state, deadline, Some(history))
     }
 
     /// Run `phases` in order under one deadline. After each verified phase except the last, a
@@ -558,7 +597,7 @@ impl<'a> Runner<'a> {
                 summary: format!("phase {}/{} started", i + 1, phases.len()),
                 is_error: false,
             });
-            let (outcome, report) = self.run_until(state, deadline);
+            let (outcome, report) = self.run_until(state, deadline, None);
             total.outcome_turns += report.outcome_turns;
             total.usage.input += report.usage.input;
             total.usage.cached += report.usage.cached;
@@ -617,10 +656,12 @@ impl<'a> Runner<'a> {
         &self,
         state: &mut State,
         deadline: Option<std::time::Instant>,
+        resumed: Option<Vec<Message>>,
     ) -> (Outcome, RunReport) {
         let mut report = RunReport::default();
-        let mut history: Vec<Message> =
-            vec![Message::User(format!("Begin. {}", state.orchestrator.goal))];
+        let resuming = resumed.is_some();
+        let mut history: Vec<Message> = resumed
+            .unwrap_or_else(|| vec![Message::User(format!("Begin. {}", state.orchestrator.goal))]);
         let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
@@ -628,12 +669,34 @@ impl<'a> Runner<'a> {
 
         // Fold notes are keyed by position in this history, which starts afresh here (each phase
         // of a multi-phase run has its own).
-        state.runtime.fold_notes.clear();
+        if !resuming {
+            state.runtime.fold_notes.clear();
+        }
         let mut last_sent: Option<(Vec<Message>, usize)> = None;
 
+        let price = superstate_provider::pricing(&self.provider.model_id());
+        if self.budget.max_cost_usd.is_some() && price.is_none() {
+            return (
+                Outcome::Error(format!(
+                    "a cost cap needs a known price; none for model {}",
+                    self.provider.model_id()
+                )),
+                report,
+            );
+        }
+
         for turn in 1..=self.budget.max_turns {
+            self.emit(Event::Checkpoint {
+                history: &history,
+                state,
+            });
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return (Outcome::BudgetExhausted, report);
+            }
+            if let (Some(cap), Some(p)) = (self.budget.max_cost_usd, price) {
+                if p.cost(&report.usage) >= cap {
+                    return (Outcome::BudgetExhausted, report);
+                }
             }
             report.outcome_turns = turn;
 
@@ -674,7 +737,7 @@ impl<'a> Runner<'a> {
                     Ok(r) => break r,
                     Err(e) if is_transient(&e) && attempt < MAX_PROVIDER_RETRIES => {
                         attempt += 1;
-                        let wait = retry_delay(attempt);
+                        let wait = retry_wait(&e, attempt);
                         if deadline.is_some_and(|d| std::time::Instant::now() + wait >= d) {
                             return (Outcome::Error(e.to_string()), report);
                         }
@@ -975,6 +1038,10 @@ impl<'a> Runner<'a> {
                 "Verification did not pass.\n\n{output}{reset_note}"
             )));
         }
+        self.emit(Event::Checkpoint {
+            history: &history,
+            state,
+        });
         (Outcome::BudgetExhausted, report)
     }
 }

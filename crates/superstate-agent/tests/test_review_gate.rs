@@ -96,6 +96,7 @@ fn runner<'a>(p: &'a Scripted, root: &Path) -> Runner<'a> {
             max_turns: 10,
             max_gate_attempts: 5,
             max_duration: None,
+            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,

@@ -27,6 +27,9 @@ fn config() -> TaskConfig {
         tdd: false,
         review: false,
         fold_notes: false,
+        max_cost_usd: None,
+        journal: None,
+        resume: None,
     }
 }
 

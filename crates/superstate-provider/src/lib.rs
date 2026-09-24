@@ -121,6 +121,39 @@ pub struct Usage {
     pub thinking: u64,
 }
 
+/// List prices in USD per million tokens: fresh input, cached input, and output. Thinking is
+/// billed as output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pricing {
+    pub input: f64,
+    pub cached: f64,
+    pub output: f64,
+}
+
+impl Pricing {
+    /// What `u` costs. `Usage.input` is fresh input only; cached input is counted separately.
+    pub fn cost(&self, u: &Usage) -> f64 {
+        (u.input as f64 * self.input
+            + u.cached as f64 * self.cached
+            + (u.output + u.thinking) as f64 * self.output)
+            / 1e6
+    }
+}
+
+/// The list price for a model id, if known. A cost cap on a model with no known price is an
+/// error, never silently unenforced.
+pub fn pricing(model_id: &str) -> Option<Pricing> {
+    // Gemini 3.8 Flash, list price through 2026-12-31.
+    if model_id.contains("gemini-3.8-flash") {
+        return Some(Pricing {
+            input: 0.75,
+            cached: 0.075,
+            output: 3.75,
+        });
+    }
+    None
+}
+
 /// Metadata describing a model supported by a provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelInfo {

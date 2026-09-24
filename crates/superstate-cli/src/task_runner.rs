@@ -42,6 +42,12 @@ pub struct TaskConfig {
     pub review: bool,
     /// Fold notes (`--fold-notes`).
     pub fold_notes: bool,
+    /// Dollar limit (`--max-cost-usd`).
+    pub max_cost_usd: Option<f64>,
+    /// Where to save the run before every model call (`--journal`).
+    pub journal: Option<PathBuf>,
+    /// A journal to resume from (`--resume`).
+    pub resume: Option<PathBuf>,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -67,6 +73,9 @@ impl From<&crate::cli::Cli> for TaskConfig {
             tdd: cli.tdd,
             review: cli.review,
             fold_notes: cli.fold_notes,
+            max_cost_usd: cli.max_cost_usd,
+            journal: cli.journal.clone(),
+            resume: cli.resume.clone(),
         }
     }
 }
@@ -160,6 +169,15 @@ pub fn run_task_with_state_and_writer<W: Write>(
     ),
     String,
 > {
+    // A resumed run takes its goal, gate, ledger and fold notes from the journal.
+    let resumed = match &config.resume {
+        Some(path) => {
+            let j = crate::journal::read(path)?;
+            *state = j.state;
+            Some(j.history)
+        }
+        None => None,
+    };
     state.orchestrator.review = config.review;
     state.orchestrator.fold_notes = config.fold_notes;
     let started = std::time::Instant::now();
@@ -230,6 +248,14 @@ pub fn run_task_with_state_and_writer<W: Write>(
     // 4. Wrap writer in a Mutex so the event callback satisfies Fn trait bounds.
     let writer_mutex = Mutex::new(writer);
     let on_event = |event: superstate_agent::run::Event<'_>| {
+        if let superstate_agent::run::Event::Checkpoint { history, state } = &event {
+            if let Some(path) = &config.journal {
+                if let Err(e) = crate::journal::write(path, state, history) {
+                    eprintln!("{e}");
+                }
+            }
+            return;
+        }
         if let Ok(mut w) = writer_mutex.lock() {
             let _ = writeln!(w, "{}", crate::repl::format_event(&event));
         }
@@ -246,6 +272,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
             max_turns: config.max_turns as u32,
             max_gate_attempts: config.max_gates as u32,
             max_duration: config.max_seconds.map(std::time::Duration::from_secs),
+            max_cost_usd: config.max_cost_usd,
         },
         rollback: config.rollback,
         loop_breaker: config.loop_breaker,
@@ -255,7 +282,10 @@ pub fn run_task_with_state_and_writer<W: Write>(
     let (outcome, report, phase_results) = match &phases {
         Some(p) => runner.run_phases(state, p),
         None => {
-            let (o, r) = runner.run(state);
+            let (o, r) = match resumed {
+                Some(history) => runner.resume(state, history),
+                None => runner.run(state),
+            };
             (o, r, Vec::new())
         }
     };

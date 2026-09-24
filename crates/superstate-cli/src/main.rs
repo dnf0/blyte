@@ -117,8 +117,8 @@ fn main() {
             }
         },
         None => {
-            if let Some(ref prompt) = cli.prompt {
-                if prompt.trim().is_empty() {
+            if cli.prompt.is_some() || cli.resume.is_some() {
+                if cli.resume.is_none() && cli.prompt.as_deref().unwrap_or("").trim().is_empty() {
                     eprintln!("Error: prompt cannot be empty");
                     std::process::exit(1);
                 }

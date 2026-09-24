@@ -116,6 +116,7 @@ pub fn format_event(event: &superstate_agent::run::Event<'_>) -> String {
         superstate_agent::run::Event::RolledBack { to } => {
             format!("↺ Rolled back working tree to {}", to)
         }
+        superstate_agent::run::Event::Checkpoint { .. } => String::new(),
     }
 }
 
@@ -576,6 +577,9 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     tdd: false,
                     review: false,
                     fold_notes: false,
+                    max_cost_usd: None,
+                    journal: None,
+                    resume: None,
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer
