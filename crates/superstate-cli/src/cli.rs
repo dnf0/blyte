@@ -76,6 +76,11 @@ pub struct Cli {
     #[arg(long, conflicts_with = "gate")]
     pub tdd: bool,
 
+    /// Before accepting a passing verification, review the change against the task with the same
+    /// model; unmet requirements send the worker back (at most twice)
+    #[arg(long)]
+    pub review: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

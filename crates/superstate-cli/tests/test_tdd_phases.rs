@@ -25,6 +25,7 @@ fn config() -> TaskConfig {
         max_seconds: None,
         report: None,
         tdd: false,
+        review: false,
     }
 }
 
