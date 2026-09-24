@@ -384,3 +384,175 @@ impl ContextStrategy for Folded {
         "folded"
     }
 }
+
+/// `folded`, plus two exact reductions of tool output that only the harness can make safely,
+/// because it observes every action.
+///
+/// Re-reading history is most of a long run's real cost (16–20M cached input tokens on
+/// build-cython-ext), and tool outputs dominate history. Hiding old outputs while keeping the calls
+/// halved cost at no loss of solve rate on SWE-bench Verified (JetBrains, "The Complexity Trap"),
+/// but hiding by age can drop something still relevant. The harness knows which outputs are
+/// **superseded**: a read of a file edited since, or a call repeated since with identical
+/// arguments. Those are masked; outputs identical to one still visible are referenced. Masks apply
+/// only for completed epochs, so the cacheable prefix changes once per epoch rather than every
+/// turn (TokenPilot, 2026). Calls are never removed, so no result is ever orphaned.
+#[derive(Debug, Clone)]
+pub struct Compact {
+    /// Approximate token budget for the verbatim tail, as in `Folded`.
+    pub budget_tokens: usize,
+    /// Supersession is applied only for completed epochs of this many tail messages.
+    pub epoch_messages: usize,
+    /// Outputs shorter than this are never replaced by a duplicate reference.
+    pub min_dedup_chars: usize,
+}
+
+impl Default for Compact {
+    fn default() -> Self {
+        Self {
+            budget_tokens: 48_000,
+            epoch_messages: 40,
+            min_dedup_chars: 200,
+        }
+    }
+}
+
+/// The call that produced the result at `r`: calls and results of a turn are recorded as a block
+/// (calls, then results, in call order), so the k-th result of a run pairs with the k-th call of
+/// the run before it. Also correct for the older interleaved layout (a block of one).
+fn call_for_result(h: &[Message], r: usize) -> Option<&Message> {
+    let mut results_start = r;
+    while results_start > 0 && matches!(h[results_start - 1], Message::ToolResult { .. }) {
+        results_start -= 1;
+    }
+    let k = r - results_start;
+    let mut calls_start = results_start;
+    while calls_start > 0 && matches!(h[calls_start - 1], Message::ToolCall { .. }) {
+        calls_start -= 1;
+    }
+    h[calls_start..results_start].get(k)
+}
+
+/// Why the output at `r` (produced by `name(args)`) is superseded by a later call before `cutoff`.
+fn superseded(
+    h: &[Message],
+    r: usize,
+    cutoff: usize,
+    name: &str,
+    args: &serde_json::Value,
+) -> Option<String> {
+    let path = args.get("path").and_then(|v| v.as_str());
+    for m in &h[r + 1..cutoff] {
+        let Message::ToolCall {
+            name: later,
+            arguments: later_args,
+            ..
+        } = m
+        else {
+            continue;
+        };
+        let later_path = later_args.get("path").and_then(|v| v.as_str());
+        match (name, later.as_str()) {
+            ("read", "edit" | "write") if path.is_some() && path == later_path => {
+                return Some(format!(
+                    "superseded: {} changed later",
+                    path.unwrap_or_default()
+                ));
+            }
+            ("read", "read") if args == later_args => {
+                return Some(format!(
+                    "superseded by a later identical read of {}",
+                    path.unwrap_or_default()
+                ));
+            }
+            (n, l)
+                if n == l
+                    && !matches!(n, "read" | "edit" | "write" | "note")
+                    && args == later_args =>
+            {
+                return Some("superseded by a later run of the same call".to_string());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+impl ContextStrategy for Compact {
+    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
+        let mut out = Folded {
+            budget_tokens: self.budget_tokens,
+        }
+        .build(state, history);
+        if out.is_empty() {
+            return out;
+        }
+        let digests = out
+            .iter()
+            .skip(1)
+            .take_while(
+                |m| matches!(m, Message::User(t) if t.starts_with("## Earlier turns, folded")),
+            )
+            .count();
+        let tail_out = 1 + digests;
+        let tail_len = out.len() - tail_out;
+        let tail_start = history.len() - tail_len;
+        let epoch = self.epoch_messages.max(1);
+        let cutoff = tail_start + (tail_len / epoch) * epoch;
+
+        // Superseded outputs, judged only by calls inside completed epochs.
+        let mut masked = vec![false; history.len()];
+        for r in tail_start..cutoff {
+            if !matches!(history[r], Message::ToolResult { .. }) {
+                continue;
+            }
+            let Some(Message::ToolCall {
+                name, arguments, ..
+            }) = call_for_result(history, r)
+            else {
+                continue;
+            };
+            if let Some(reason) = superseded(history, r, cutoff, name, arguments) {
+                if let Message::ToolResult { content, .. } = &mut out[tail_out + (r - tail_start)] {
+                    *content = format!("[{reason}; output elided by superstate]");
+                }
+                masked[r] = true;
+            }
+        }
+
+        // Exact duplicates of an output still visible above.
+        for r in tail_start..history.len() {
+            let Message::ToolResult { content: here, .. } = &history[r] else {
+                continue;
+            };
+            if masked[r] || here.len() < self.min_dedup_chars {
+                continue;
+            }
+            let earlier = (tail_start..r).find(|&q| {
+                !masked[q]
+                    && matches!(&history[q], Message::ToolResult { content, .. } if content == here)
+            });
+            let Some(q) = earlier else {
+                continue;
+            };
+            let what = match call_for_result(history, q) {
+                Some(Message::ToolCall {
+                    name, arguments, ..
+                }) => format!(
+                    "`{name}` `{}`",
+                    crate::run::extract_action_target(name, arguments)
+                ),
+                _ => "an earlier call".to_string(),
+            };
+            if let Message::ToolResult { content, .. } = &mut out[tail_out + (r - tail_start)] {
+                *content = format!(
+                    "[identical to the earlier output of {what} above; elided by superstate]"
+                );
+            }
+        }
+        out
+    }
+
+    fn name(&self) -> &'static str {
+        "compact"
+    }
+}

@@ -8,7 +8,7 @@ fn test_parse_no_args_launches_interactive() {
     let cli = Cli::try_parse_from(["superstate"]).expect("should parse");
     assert_eq!(cli.prompt, None);
     assert_eq!(cli.command, None);
-    assert_eq!(cli.context, "conversational");
+    assert_eq!(cli.context, "folded");
     assert_eq!(cli.max_turns, 25);
     assert_eq!(cli.max_gates, 5);
     assert!(cli.rollback);

@@ -33,6 +33,11 @@ pub struct Orchestrator {
     pub goal: String,
     /// The shell command whose exit code decides completion. Exit 0 and only exit 0.
     pub verification_cmd: String,
+    /// Before a passing verification is accepted, an independent review of the change against the
+    /// goal may send the worker back (at most `run::MAX_REVIEW_ROUNDS` times). Part of what "done"
+    /// means, so it is set by the caller, never by the worker.
+    #[serde(default)]
+    pub review: bool,
 }
 
 /// A single action observed and summarized objectively by the harness.
@@ -93,6 +98,7 @@ impl State {
             orchestrator: Orchestrator {
                 goal: goal.into(),
                 verification_cmd: verification_cmd.into(),
+                review: false,
             },
             runtime: Runtime::default(),
             agent: Agent::default(),

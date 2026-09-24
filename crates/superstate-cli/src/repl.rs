@@ -20,7 +20,7 @@ impl Default for ReplConfig {
             repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             model: None,
             gate: None,
-            context_strategy: "state-only".to_string(),
+            context_strategy: "folded".to_string(),
             container: None,
             max_turns: 60,
             max_gates: 5,
@@ -574,6 +574,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     max_seconds: None,
                     report: None,
                     tdd: false,
+                    review: false,
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer

@@ -104,6 +104,7 @@ fn test_invariant_i_agent_patch_cannot_mutate_working_set() {
         orchestrator: Orchestrator {
             goal: "Test".into(),
             verification_cmd: "cargo test".into(),
+            review: false,
         },
         runtime: Default::default(),
         agent: Default::default(),

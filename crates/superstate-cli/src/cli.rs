@@ -19,11 +19,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub gate: Option<String>,
 
-    /// Context strategy: 'state-only' (O(1) prompt, latest result only), 'state-window' (O(1) prompt plus the last 8 results) or 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
+    /// Context strategy: 'state-only' (O(1) prompt, latest result only), 'state-window' (O(1) prompt plus the last 8 results) or 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget) or 'compact' (folded, plus superseded outputs masked and duplicates referenced)
     #[arg(
         long,
-        default_value = "conversational",
-        value_parser = ["state-only", "state-window", "conversational", "folded"]
+        default_value = "folded",
+        value_parser = ["state-only", "state-window", "conversational", "folded", "compact"]
     )]
     pub context: String,
 
@@ -75,6 +75,11 @@ pub struct Cli {
     /// from the repository's own test runner. Fails closed on an unrecognised repository
     #[arg(long, conflicts_with = "gate")]
     pub tdd: bool,
+
+    /// Before accepting a passing verification, review the change against the task with the same
+    /// model; unmet requirements send the worker back (at most twice)
+    #[arg(long)]
+    pub review: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,

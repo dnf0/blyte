@@ -28,6 +28,7 @@ fn config() -> TaskConfig {
         max_seconds: Some(600),
         report: None,
         tdd: false,
+        review: false,
     }
 }
 
@@ -129,6 +130,8 @@ fn a_completed_run_maps_every_field() {
         tool_calls: 3,
         gate_attempts: 2,
         provider_retries: 0,
+        reviews: 0,
+        review_rejections: 0,
     };
     let r = RunRecord::from_run(
         &config(),

@@ -47,7 +47,7 @@ fn test_task_config_defaults() {
     let config = TaskConfig::from(&cli);
     assert_eq!(config.prompt, "");
     assert_eq!(config.gate, None);
-    assert_eq!(config.context_strategy, "conversational");
+    assert_eq!(config.context_strategy, "folded");
     assert_eq!(config.model, None);
     assert_eq!(config.container, None);
     assert_eq!(config.max_turns, 25);
@@ -85,6 +85,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         max_seconds: None,
         report: None,
         tdd: false,
+        review: false,
     };
 
     let result = run_task(config);
@@ -119,6 +120,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         max_seconds: None,
         report: None,
         tdd: false,
+        review: false,
     };
 
     let err = run_task(anthropic_config).unwrap_err();
@@ -142,6 +144,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         max_seconds: None,
         report: None,
         tdd: false,
+        review: false,
     };
 
     let err = run_task(ollama_config).unwrap_err();
@@ -176,6 +179,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         max_seconds: None,
         report: None,
         tdd: false,
+        review: false,
     };
 
     let mut state = superstate_agent::state::State::new("custom goal", "echo 1");
