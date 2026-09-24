@@ -49,6 +49,19 @@ impl ContextStrategy for Conversational {
 #[derive(Debug, Default, Clone)]
 pub struct StateOnly;
 
+/// Start of the turn block ending at `pos` (a `ToolResult`): the run of results ending there,
+/// preceded by the run of calls that produced them.
+fn block_start(history: &[Message], pos: usize) -> usize {
+    let mut start = pos;
+    while start > 0 && matches!(history[start - 1], Message::ToolResult { .. }) {
+        start -= 1;
+    }
+    while start > 0 && matches!(history[start - 1], Message::ToolCall { .. }) {
+        start -= 1;
+    }
+    start
+}
+
 impl ContextStrategy for StateOnly {
     fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
         let mut out = Vec::new();
@@ -131,12 +144,9 @@ impl ContextStrategy for StateOnly {
             .iter()
             .rposition(|m| matches!(m, Message::ToolResult { .. }))
         {
-            if pos > 0 {
-                if let Message::ToolCall { .. } = &history[pos - 1] {
-                    out.push(history[pos - 1].clone());
-                }
-            }
-            out.push(history[pos].clone());
+            // The whole last turn block: its calls, then its results.
+            let start = block_start(history, pos);
+            out.extend_from_slice(&history[start..=pos]);
         } else if let Some(last) = history.last() {
             out.push(last.clone());
         }
@@ -176,37 +186,49 @@ impl ContextStrategy for StateWindow {
         // The state prompt, exactly as `state-only` builds it with nothing carried.
         let mut out = StateOnly.build(state, &[]);
 
-        // Walk back collecting call/result pairs. The call is carried with its result because
-        // providers reject a functionResponse with no matching functionCall.
-        let mut pairs: Vec<(Message, Message)> = Vec::new();
-        for i in (1..history.len()).rev() {
-            if pairs.len() == self.results {
+        // Walk back collecting whole turn blocks (a turn's calls, then its results) until at
+        // least `results` results are carried. A block is never split: a result without its
+        // call, or a call without its result, is rejected by providers.
+        let mut blocks: Vec<Vec<Message>> = Vec::new();
+        let mut carried = 0;
+        let mut end = history.len();
+        while carried < self.results {
+            let Some(pos) = history[..end]
+                .iter()
+                .rposition(|m| matches!(m, Message::ToolResult { .. }))
+            else {
+                break;
+            };
+            let start = block_start(history, pos);
+            if !matches!(history[start], Message::ToolCall { .. }) {
                 break;
             }
-            if let (
-                Message::ToolCall { .. },
-                Message::ToolResult {
-                    id,
-                    name,
-                    content,
-                    is_error,
-                },
-            ) = (&history[i - 1], &history[i])
-            {
-                pairs.push((
-                    history[i - 1].clone(),
+            let block: Vec<Message> = history[start..=pos]
+                .iter()
+                .map(|m| match m {
                     Message::ToolResult {
+                        id,
+                        name,
+                        content,
+                        is_error,
+                    } => Message::ToolResult {
                         id: id.clone(),
                         name: name.clone(),
                         content: crate::tools::distil(content, self.lines_per_result),
                         is_error: *is_error,
                     },
-                ));
-            }
+                    other => other.clone(),
+                })
+                .collect();
+            carried += block
+                .iter()
+                .filter(|m| matches!(m, Message::ToolResult { .. }))
+                .count();
+            blocks.push(block);
+            end = start;
         }
-        for (call, result) in pairs.into_iter().rev() {
-            out.push(call);
-            out.push(result);
+        for block in blocks.into_iter().rev() {
+            out.extend(block);
         }
 
         // Whatever came after the last result (gate feedback, or the opening message on the
@@ -270,24 +292,35 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 /// One harness-written line per folded item, from the same summarisers as the action ledger.
+/// A call is paired with its result by id, so a parallel batch summarises correctly.
 fn digest(folded: &[Message], first: usize, last: usize) -> Message {
     let mut text =
         format!("## Earlier turns, folded (messages {first}-{last}; summarised by the harness)\n");
-    let mut i = 0;
-    while i < folded.len() {
-        match &folded[i] {
+    let result_of = |id: &str| {
+        folded.iter().find_map(|m| match m {
+            Message::ToolResult {
+                id: rid,
+                content,
+                is_error,
+                ..
+            } if rid == id => Some((content.as_str(), *is_error)),
+            _ => None,
+        })
+    };
+    for m in folded {
+        match m {
             Message::ToolCall {
-                name, arguments, ..
+                id,
+                name,
+                arguments,
+                ..
             } => {
                 let target = crate::run::extract_action_target(name, arguments);
-                let summary = match folded.get(i + 1) {
-                    Some(Message::ToolResult {
-                        content, is_error, ..
-                    }) => {
-                        i += 1;
-                        crate::run::extract_action_summary(name, content, *is_error)
+                let summary = match result_of(id) {
+                    Some((content, is_error)) => {
+                        crate::run::extract_action_summary(name, content, is_error)
                     }
-                    _ => "no result".to_string(),
+                    None => "no result".to_string(),
                 };
                 text.push_str(&format!("- `{name}` `{target}` -> {summary}\n"));
             }
@@ -295,7 +328,6 @@ fn digest(folded: &[Message], first: usize, last: usize) -> Message {
             Message::User(t) => text.push_str(&format!("- harness: {}\n", clip(t, 160))),
             Message::ToolResult { .. } => {}
         }
-        i += 1;
     }
     Message::User(text)
 }
@@ -315,12 +347,13 @@ impl ContextStrategy for Folded {
             if size <= self.budget_tokens {
                 continue;
             }
-            // Fold roughly the older half, cutting before a message that is not a result, so a
-            // call is never separated from its result. No safe cut yet: keep accumulating.
+            // Fold roughly the older half, cutting only between turn blocks (never after a call or before a result), so a call is never separated from its result or from calls in the same batch. No safe cut yet: keep accumulating.
             let target = seg_start + (i + 1 - seg_start) / 2;
             let lo = target.max(seg_start + 1);
-            let Some(cut) = (lo..=i).find(|&j| !matches!(rest[j], Message::ToolResult { .. }))
-            else {
+            let Some(cut) = (lo..=i).find(|&j| {
+                !matches!(rest[j], Message::ToolResult { .. })
+                    && !matches!(rest[j - 1], Message::ToolCall { .. })
+            }) else {
                 continue;
             };
             folds.push((seg_start, cut));

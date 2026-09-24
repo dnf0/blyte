@@ -49,6 +49,13 @@ pub fn split_effort(model: &str) -> (String, Option<String>) {
     (model.to_string(), None)
 }
 
+/// Append a part to the last content. Used to keep a parallel batch in one content.
+fn push_part(contents: &mut [Value], part: Value) {
+    if let Some(parts) = contents.last_mut().and_then(|c| c["parts"].as_array_mut()) {
+        parts.push(part);
+    }
+}
+
 pub struct Gemini {
     api_key: String,
     model: String,
@@ -87,6 +94,7 @@ impl Gemini {
     /// without a network or a key -- the mapping is where the bugs live, not the POST.
     pub fn body(&self, req: &Request) -> Value {
         let mut contents: Vec<Value> = Vec::new();
+        let mut prev: Option<&Message> = None;
         for m in &req.messages {
             match m {
                 Message::User(t) => contents.push(json!({
@@ -107,7 +115,13 @@ impl Gemini {
                     if let Some(sig) = signature {
                         part["thoughtSignature"] = json!(sig);
                     }
-                    contents.push(json!({"role": "model", "parts": [part]}));
+                    // Calls from one turn are one model content: Gemini signs only the first call
+                    // of a parallel batch, so a batch split into separate turns would be rejected.
+                    if matches!(prev, Some(Message::ToolCall { .. })) {
+                        push_part(&mut contents, part);
+                    } else {
+                        contents.push(json!({"role": "model", "parts": [part]}));
+                    }
                 }
                 // Gemini carries no tool-call id: a functionResponse is matched to its call by
                 // NAME and position. Ids are kept in our own Message type anyway, because the
@@ -117,14 +131,19 @@ impl Gemini {
                     content,
                     is_error,
                     ..
-                } => contents.push(json!({
-                    "role": "user",
-                    "parts": [{"functionResponse": {
+                } => {
+                    let part = json!({"functionResponse": {
                         "name": name,
                         "response": {"output": content, "error": is_error}
-                    }}]
-                })),
+                    }});
+                    if matches!(prev, Some(Message::ToolResult { .. })) {
+                        push_part(&mut contents, part);
+                    } else {
+                        contents.push(json!({"role": "user", "parts": [part]}));
+                    }
+                }
             }
+            prev = Some(m);
         }
 
         let mut body = json!({ "contents": contents });

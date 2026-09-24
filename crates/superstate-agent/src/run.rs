@@ -456,14 +456,20 @@ impl<'a> Runner<'a> {
 
             // --- the model is still working -------------------------------------------------
             if !resp.tool_calls.is_empty() {
+                // A turn's calls are recorded together, then its results together, in call
+                // order. Providers encode one model turn carrying several calls and one reply
+                // carrying their results; interleaving them split a parallel batch into turns
+                // Gemini rejects (it signs only the first call of a batch).
                 for call in &resp.tool_calls {
-                    report.tool_calls += 1;
                     history.push(Message::ToolCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                         signature: call.signature.clone(),
                     });
+                }
+                for call in &resp.tool_calls {
+                    report.tool_calls += 1;
 
                     let guards_on = self.loop_breaker && !is_insist(call, &state.runtime.actions);
 

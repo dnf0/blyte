@@ -248,3 +248,87 @@ fn split_effort_handles_each_supported_level() {
     );
     assert_eq!(split_effort("-high"), ("-high".to_string(), None));
 }
+
+#[test]
+fn a_parallel_batch_is_one_model_turn_and_one_reply() {
+    // Gemini signs only the first call of a parallel batch, and rejects a model turn whose
+    // first call is unsigned, so the batch must stay one content.
+    let msgs = vec![
+        Message::User("go".into()),
+        Message::ToolCall {
+            id: "a".into(),
+            name: "read".into(),
+            arguments: json!({"path": "a"}),
+            signature: Some("sigA".into()),
+        },
+        Message::ToolCall {
+            id: "b".into(),
+            name: "read".into(),
+            arguments: json!({"path": "b"}),
+            signature: None,
+        },
+        Message::ToolResult {
+            id: "a".into(),
+            name: "read".into(),
+            content: "A".into(),
+            is_error: false,
+        },
+        Message::ToolResult {
+            id: "b".into(),
+            name: "read".into(),
+            content: "B".into(),
+            is_error: false,
+        },
+    ];
+    let b = gemini().body(&Request {
+        messages: msgs,
+        ..Default::default()
+    });
+    let contents = b["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3, "{b}");
+    assert_eq!(contents[1]["role"], "model");
+    let calls = contents[1]["parts"].as_array().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["thoughtSignature"], "sigA");
+    assert!(calls[1].get("thoughtSignature").is_none());
+    assert_eq!(contents[2]["role"], "user");
+    let replies = contents[2]["parts"].as_array().unwrap();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[1]["functionResponse"]["response"]["output"], "B");
+}
+
+#[test]
+fn interleaved_calls_still_encode_one_per_turn() {
+    let msgs = vec![
+        Message::User("go".into()),
+        Message::ToolCall {
+            id: "a".into(),
+            name: "read".into(),
+            arguments: json!({"path": "a"}),
+            signature: Some("s".into()),
+        },
+        Message::ToolResult {
+            id: "a".into(),
+            name: "read".into(),
+            content: "A".into(),
+            is_error: false,
+        },
+        Message::ToolCall {
+            id: "b".into(),
+            name: "read".into(),
+            arguments: json!({"path": "b"}),
+            signature: Some("t".into()),
+        },
+        Message::ToolResult {
+            id: "b".into(),
+            name: "read".into(),
+            content: "B".into(),
+            is_error: false,
+        },
+    ];
+    let b = gemini().body(&Request {
+        messages: msgs,
+        ..Default::default()
+    });
+    assert_eq!(b["contents"].as_array().unwrap().len(), 5, "{b}");
+}
