@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use blyte_agent::run::{Outcome, PhaseResult, RunReport};
+use blyte_agent::run::{Outcome, RunReport};
 use blyte_agent::state::State;
 use serde::Serialize;
 
@@ -21,14 +21,6 @@ pub struct UsageRecord {
     pub cached: u64,
     pub output: u64,
     pub thinking: u64,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct PhaseRecord {
-    pub id: String,
-    pub outcome: String,
-    pub turns: u32,
-    pub gate_attempts: u32,
 }
 
 /// The report's name for an outcome, and its error message if it carries one.
@@ -50,10 +42,8 @@ pub struct RunRecord {
     pub model_id: Option<String>,
     pub context: String,
     pub gated: bool,
-    /// Where the gate came from: `none` (ungated), `user` (`--gate`) or `tdd` (`--tdd`).
+    /// Where the gate came from: `none` (ungated) or `user` (`--gate`).
     pub gate_source: String,
-    /// Per-phase results for a multi-phase run; empty otherwise.
-    pub phases: Vec<PhaseRecord>,
     pub container: Option<String>,
     pub container_workdir: String,
     pub duration_seconds: f64,
@@ -63,8 +53,6 @@ pub struct RunRecord {
     pub gate_attempts: u32,
     pub rollbacks: u32,
     pub provider_retries: u32,
-    pub reviews: u32,
-    pub review_rejections: u32,
     /// List-price cost in USD, when the model's price is known.
     pub cost_usd: Option<f64>,
     /// Fold budget given with `--fold-budget`, if any.
@@ -76,6 +64,7 @@ pub struct RunRecord {
 
 impl RunRecord {
     fn base(config: &TaskConfig, elapsed: Duration) -> Self {
+        let gated = config.gate.as_deref().is_some_and(|g| !g.trim().is_empty());
         Self {
             schema_version: SCHEMA_VERSION,
             outcome: "error".into(),
@@ -83,16 +72,8 @@ impl RunRecord {
             model_requested: config.model.clone(),
             model_id: None,
             context: config.context_strategy.clone(),
-            gated: config.tdd || config.gate.as_deref().is_some_and(|g| !g.trim().is_empty()),
-            gate_source: if config.tdd {
-                "tdd"
-            } else if config.gate.as_deref().is_some_and(|g| !g.trim().is_empty()) {
-                "user"
-            } else {
-                "none"
-            }
-            .into(),
-            phases: Vec::new(),
+            gated,
+            gate_source: if gated { "user" } else { "none" }.into(),
             container: config.container.clone(),
             container_workdir: config.container_workdir.clone(),
             duration_seconds: elapsed.as_secs_f64(),
@@ -102,8 +83,6 @@ impl RunRecord {
             gate_attempts: 0,
             rollbacks: 0,
             provider_retries: 0,
-            reviews: 0,
-            review_rejections: 0,
             cost_usd: None,
             fold_budget: config.fold_budget,
             turn_usage: Vec::new(),
@@ -139,8 +118,6 @@ impl RunRecord {
             gate_attempts: report.gate_attempts,
             rollbacks: state.runtime.rollbacks,
             provider_retries: report.provider_retries,
-            reviews: report.reviews,
-            review_rejections: report.review_rejections,
             cost_usd: blyte_provider::pricing(model_id).map(|p| p.cost(&report.usage)),
             turn_usage: report.turn_usage.clone(),
             usage: UsageRecord {
@@ -151,20 +128,6 @@ impl RunRecord {
             },
             ..Self::base(config, elapsed)
         }
-    }
-
-    /// Attach per-phase results, in the order the phases ran.
-    pub fn with_phases(mut self, results: &[PhaseResult]) -> Self {
-        self.phases = results
-            .iter()
-            .map(|r| PhaseRecord {
-                id: r.id.clone(),
-                outcome: outcome_name(&r.outcome).0.into(),
-                turns: r.turns,
-                gate_attempts: r.gate_attempts,
-            })
-            .collect();
-        self
     }
 }
 

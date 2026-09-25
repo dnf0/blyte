@@ -64,16 +64,6 @@ pub struct Cli {
     #[arg(long)]
     pub report: Option<PathBuf>,
 
-    /// Gate by autonomous TDD: derive a RED (failing reproduction test) then GREEN (fix) phase
-    /// from the repository's own test runner. Fails closed on an unrecognised repository
-    #[arg(long, conflicts_with = "gate")]
-    pub tdd: bool,
-
-    /// Before accepting a passing verification, review the change against the task with the same
-    /// model; unmet requirements send the worker back (at most twice)
-    #[arg(long)]
-    pub review: bool,
-
     /// Approximate token budget for the verbatim tail before folding (folded context; default 48000)
     #[arg(long)]
     pub fold_budget: Option<usize>,
