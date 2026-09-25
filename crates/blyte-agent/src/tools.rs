@@ -391,12 +391,19 @@ fn execute_unbounded(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1)
                 .max(1) as usize;
-            let end = args
-                .get("end_line")
-                .and_then(|v| v.as_u64())
-                .map(|e| e as usize)
-                .unwrap_or(lines.len())
-                .min(lines.len());
+            // A read from the top of a file that fits comes back whole, whatever end_line says:
+            // models page from line 1 out of habit (a shadow run read 700 lines as six 200-line
+            // calls). A range starting later is a deliberate re-read and is honoured.
+            let fits = lines.len() <= READ_LINE_BUDGET && body.chars().count() <= MAX_OUTPUT_CHARS;
+            let end = if start == 1 && fits {
+                lines.len()
+            } else {
+                args.get("end_line")
+                    .and_then(|v| v.as_u64())
+                    .map(|e| e as usize)
+                    .unwrap_or(lines.len())
+                    .min(lines.len())
+            };
             if start > lines.len() {
                 return ToolOutcome::err(format!(
                     "{} has {} lines; start_line {start} is past the end",
