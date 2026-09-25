@@ -200,9 +200,3 @@ fn test_slash_model_negative_index_and_on_demand_cache() {
     let text2 = String::from_utf8(out2).unwrap();
     assert!(text2.contains("Invalid model index: 9999. Use /model to view available models."));
 }
-
-#[test]
-fn test_doctor_handshake_verification_includes_step_6() {
-    let res = blyte_cli::commands::doctor::run_doctor();
-    assert!(res.is_ok());
-}

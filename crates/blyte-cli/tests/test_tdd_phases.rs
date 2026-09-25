@@ -31,10 +31,10 @@ fn config() -> TaskConfig {
 }
 
 #[test]
-fn tdd_phases_are_red_then_green_from_blyte_core() {
+fn tdd_phases_are_red_then_green() {
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("pyproject.toml"), "").unwrap();
-    let profile = blyte_core::tdd::detect_profile(d.path()).unwrap();
+    let profile = blyte_cli::tdd::detect_profile(d.path()).unwrap();
     let phases = tdd_phases(d.path()).unwrap();
     assert_eq!(phases.len(), 2);
     assert_eq!(phases[0].id, "tdd-reproduction-test");

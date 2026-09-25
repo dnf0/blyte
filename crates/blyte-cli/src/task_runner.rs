@@ -72,12 +72,11 @@ impl From<&crate::cli::Cli> for TaskConfig {
 }
 
 /// Autonomous TDD's RED/GREEN milestones as harness phases. The wording, commands and
-/// reproduction path come from `blyte_core::tdd` unchanged, so native and daemon runs are
-/// given identical instructions. RED may change only the reproduction test; GREEN may not
-/// change it at all.
+/// reproduction path come from `crate::tdd` (moved from the removed daemon crate). RED may
+/// change only the reproduction test; GREEN may not change it at all.
 pub fn tdd_phases(repo_root: &std::path::Path) -> Result<Vec<blyte_agent::run::Phase>, String> {
     let milestones =
-        blyte_core::tdd::tdd_milestones(repo_root).map_err(|e| format!("autonomous TDD: {e}"))?;
+        crate::tdd::tdd_milestones(repo_root).map_err(|e| format!("autonomous TDD: {e}"))?;
     let repro = milestones
         .first()
         .and_then(|m| m.files.first())

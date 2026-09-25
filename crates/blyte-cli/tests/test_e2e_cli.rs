@@ -48,23 +48,6 @@ fn test_cli_headless_missing_api_key() {
 }
 
 #[test]
-fn test_cli_subcommand_dispatch() {
-    let output = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("doctor")
-        .output()
-        .expect("Failed to execute blyte doctor");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}{stderr}");
-    assert!(
-        combined.contains("Verification Handshake")
-            || combined.contains("Verification Handshake Passed")
-    );
-}
-
-#[test]
 fn test_cli_interactive_repl_stdin_driving() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .stdin(std::process::Stdio::piped())

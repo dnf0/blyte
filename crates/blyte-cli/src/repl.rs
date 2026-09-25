@@ -238,16 +238,6 @@ pub fn handle_repl_command<W: Write>(
                 .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
-                    "  /review       - Run code review engine on uncommitted changes"
-                )
-                .map_err(|e| e.to_string())?;
-                writeln!(
-                    writer,
-                    "  /doctor       - Run 6-step system verification handshake"
-                )
-                .map_err(|e| e.to_string())?;
-                writeln!(
-                    writer,
                     "  /gate [cmd]   - Inspect or update the verification gate command"
                 )
                 .map_err(|e| e.to_string())?;
@@ -438,41 +428,6 @@ pub fn handle_repl_command<W: Write>(
                     }
                     Err(e) => {
                         writeln!(writer, "Failed to run git diff: {}", e)
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                Ok(ReplControl::Handled)
-            }
-            "/review" => {
-                writeln!(
-                    writer,
-                    "Running review engine on {}...",
-                    session.repo_root.display()
-                )
-                .map_err(|e| e.to_string())?;
-                match crate::commands::review::cmd_review(crate::commands::review::ReviewArgs {
-                    commit_range: None,
-                    repo: session.repo_root.clone(),
-                    driver: None,
-                    state_path: None,
-                    record: false,
-                    json: false,
-                    fail_on_blocking: false,
-                }) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        writeln!(writer, "Review advisory: {}", e).map_err(|e| e.to_string())?;
-                    }
-                }
-                Ok(ReplControl::Handled)
-            }
-            "/doctor" => {
-                writeln!(writer, "Running system verification handshake...")
-                    .map_err(|e| e.to_string())?;
-                match crate::commands::doctor::run_doctor() {
-                    Ok(()) => {}
-                    Err(e) => {
-                        writeln!(writer, "Doctor check failed: {}", e)
                             .map_err(|e| e.to_string())?;
                     }
                 }
