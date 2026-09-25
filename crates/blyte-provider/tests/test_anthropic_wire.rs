@@ -14,6 +14,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn anthropic() -> Anthropic {
     std::env::set_var("ANTHROPIC_API_KEY", "test-key-not-real");
+    std::env::remove_var("BLYTE_MODEL");
     Anthropic::from_env().unwrap()
 }
 

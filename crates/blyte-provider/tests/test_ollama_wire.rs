@@ -15,6 +15,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn ollama_cloud() -> Ollama {
     std::env::set_var("OLLAMA_API_KEY", "test-key-not-real");
     std::env::remove_var("OLLAMA_HOST");
+    std::env::remove_var("BLYTE_MODEL");
     Ollama::from_env().unwrap()
 }
 
@@ -294,6 +295,7 @@ fn from_env_requires_api_key_or_host() {
     let _guard = ENV_LOCK.lock().unwrap();
     std::env::remove_var("OLLAMA_API_KEY");
     std::env::remove_var("OLLAMA_HOST");
+    std::env::remove_var("BLYTE_MODEL");
     assert!(matches!(
         Ollama::from_env(),
         Err(ProviderError::MissingKey("OLLAMA_API_KEY"))

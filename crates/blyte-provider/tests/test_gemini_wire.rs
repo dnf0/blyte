@@ -9,6 +9,7 @@ use serde_json::json;
 
 fn gemini() -> Gemini {
     std::env::set_var("GEMINI_API_KEY", "test-key-not-real");
+    std::env::remove_var("BLYTE_MODEL");
     Gemini::from_env().unwrap()
 }
 

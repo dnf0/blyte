@@ -26,6 +26,30 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Variables the harness itself uses, never passed to the commands it runs: provider credentials
+/// (the model could otherwise read them with `env`) and blyte's own configuration (a
+/// `BLYTE_MODEL` in the environment broke the repository's provider tests). Every variable named
+/// `BLYTE_*` is removed as well. Container commands never inherit the host environment.
+pub const HARNESS_ENV: &[&str] = &[
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OLLAMA_API_KEY",
+    "OLLAMA_HOST",
+];
+
+/// Remove the harness's own variables from a command about to run on this machine.
+fn scrub(cmd: &mut Command) {
+    for name in HARNESS_ENV {
+        cmd.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("BLYTE_") {
+            cmd.env_remove(&name);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
     pub stdout: String,
@@ -185,6 +209,7 @@ impl Shell for LocalShell {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
         let mut cmd = Command::new("bash");
         cmd.arg("-lc").arg(command).current_dir(cwd);
+        scrub(&mut cmd);
         exec_command(cmd, timeout)
     }
 
@@ -248,6 +273,7 @@ impl Launcher {
             Launcher::Local { root } => {
                 let mut c = Command::new("bash");
                 c.arg("-l").current_dir(root);
+                scrub(&mut c);
                 c
             }
             Launcher::Container {
