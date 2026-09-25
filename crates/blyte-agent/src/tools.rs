@@ -26,6 +26,11 @@ use crate::shell::Shell;
 /// tail, so the bound exists for the rare case; it must not clip the common one.
 pub const OUTPUT_LINE_BUDGET: usize = 400;
 
+/// Lines a `read` returns at once, within `MAX_OUTPUT_CHARS`. Larger than `OUTPUT_LINE_BUDGET`
+/// because a file the model asked for is the point, not noise: at 400 lines a dogfood run spent
+/// 15 turns paging through one 650-line file, each re-sending the whole prompt.
+pub const READ_LINE_BUDGET: usize = 2_000;
+
 /// Most matches a single search returns. The count of what was cut is always reported, so a
 /// truncated search reads as truncated rather than as a complete answer with few hits.
 pub const MAX_MATCHES: usize = 200;
@@ -38,9 +43,8 @@ pub const MAX_LINE_CHARS: usize = 500;
 /// line distillation. The final guarantee that one result cannot swamp the context.
 pub const MAX_OUTPUT_CHARS: usize = 60_000;
 
-/// Bound a tool's output by size: clip over-long lines, distil to `OUTPUT_LINE_BUDGET` lines,
-/// then cap the total, keeping head and tail. Ordinary output passes through unchanged.
-pub fn bound_output(text: &str) -> String {
+/// `bound_output` with a caller-chosen line budget (`read` uses `READ_LINE_BUDGET`).
+pub fn bound_output_lines(text: &str, line_budget: usize) -> String {
     let clipped: Vec<String> = text
         .lines()
         .map(|l| {
@@ -60,7 +64,7 @@ pub fn bound_output(text: &str) -> String {
     if text.ends_with('\n') {
         joined.push('\n');
     }
-    let distilled = distil(&joined, OUTPUT_LINE_BUDGET);
+    let distilled = distil(&joined, line_budget);
     let total = distilled.chars().count();
     if total <= MAX_OUTPUT_CHARS {
         return distilled;
@@ -73,6 +77,12 @@ pub fn bound_output(text: &str) -> String {
         "{head}\n\n[... {} chars elided by blyte ...]\n\n{tail}",
         total - head_n - tail_n
     )
+}
+
+/// Bound a tool's output by size: clip over-long lines, distil to `OUTPUT_LINE_BUDGET` lines,
+/// then cap the total, keeping head and tail. Ordinary output passes through unchanged.
+pub fn bound_output(text: &str) -> String {
+    bound_output_lines(text, OUTPUT_LINE_BUDGET)
 }
 
 /// Ceiling on a single MODEL-ISSUED command.
@@ -228,7 +238,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "read".into(),
-            description: "Read a file. Prefer a line range for large files.".into(),
+            description: "Read a file. Up to 2,000 lines (60,000 characters) come back in one call, so read whole files; pass start_line/end_line only for larger ones.".into(),
             parameters: json!({"type":"object","properties":{
                 "path":{"type":"string"},
                 "start_line":{"type":"integer","description":"1-indexed, inclusive"},
@@ -342,7 +352,12 @@ pub fn execute(
     args: &Value,
 ) -> ToolOutcome {
     let mut outcome = execute_unbounded(root, shell, fs, name, args);
-    outcome.content = bound_output(&outcome.content);
+    let line_budget = if name == "read" {
+        READ_LINE_BUDGET
+    } else {
+        OUTPUT_LINE_BUDGET
+    };
+    outcome.content = bound_output_lines(&outcome.content, line_budget);
     outcome
 }
 
@@ -396,7 +411,7 @@ fn execute_unbounded(
                 .map(|(i, l)| format!("{:>6}\t{l}", start + i))
                 .collect::<Vec<_>>()
                 .join("\n");
-            ToolOutcome::ok(distil(&body, OUTPUT_LINE_BUDGET))
+            ToolOutcome::ok(distil(&body, READ_LINE_BUDGET))
         }
         "write" => {
             let path = match resolve_in_workspace(fs, root, &s("path")) {
