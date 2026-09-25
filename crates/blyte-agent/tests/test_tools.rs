@@ -465,7 +465,10 @@ fn search_tools_also_go_through_the_seam() {
         seen.len() >= 2,
         "both searches must reach the executor: {seen:?}"
     );
-    assert!(seen.iter().any(|c| c.contains("*.rs")));
+    // glob lists a container's repository with git ls-files (or falls back to a shell glob).
+    assert!(seen
+        .iter()
+        .any(|c| c.contains("ls-files") || c.contains("*.rs")));
     assert!(seen.iter().any(|c| c.contains("needle")));
 }
 
