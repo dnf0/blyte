@@ -31,7 +31,7 @@
 
 **Files:** `crates/blyte-agent/src/{run.rs,state.rs,lib.rs,working_set.rs}`, `crates/blyte-agent/examples/{harness_bench.rs,solve.rs}`, `crates/blyte-cli/src/{cli.rs,task_runner.rs,report.rs,repl.rs}`, and tests.
 
-- [ ] **Step 1: Agent.**
+- [x] **Step 1: Agent.**
   - Delete `crates/blyte-agent/src/working_set.rs` and `pub mod working_set;`.
   - In `state.rs`, delete `ActionEntry`, `Runtime.actions` and `Runtime.working_set`, and any docs that describe them.
   - In `run.rs`:
@@ -42,11 +42,11 @@
     
     A tool call is now always executed: `note` is handled as before, and everything else goes to `tools::execute`. Keep emitting `Event::Tool` exactly as now.
   - Remove `loop_breaker` from the `Runner` literals in `examples/harness_bench.rs` and `examples/solve.rs`.
-- [ ] **Step 2: CLI.**
+- [x] **Step 2: CLI.**
   - Delete the `--no-loop-breaker` flag (`no_loop_breaker`), the `TaskConfig.loop_breaker` field and its `From<&Cli>` line, and the `loop_breaker:` line of the `Runner` literal in `task_runner.rs`.
   - In `report.rs`, delete `RunRecord.loop_breaker`, `interceptions` and `insists`, the `Interceptions` type, `count_interceptions`, `count_insists`, and the now-unused `ActionEntry` import.
   - In `repl.rs`, remove the `/state` output's working-set and last-failure sections (the rest of `/state` stays), and remove `loop_breaker` from its `TaskConfig` literal.
-- [ ] **Step 3: Tests.** Remove every `loop_breaker: <expr>,` line from `Runner` literals, and every `loop_breaker: <expr>,` field from `TaskConfig` literals, across `crates/*/tests/` and `crates/*/examples/`. For example:
+- [x] **Step 3: Tests.** Remove every `loop_breaker: <expr>,` line from `Runner` literals, and every `loop_breaker: <expr>,` field from `TaskConfig` literals, across `crates/*/tests/` and `crates/*/examples/`. For example:
 
 ```bash
 git grep -l "loop_breaker:" -- crates | xargs perl -0pi -e 's/\n[ \t]*loop_breaker: [^\n]*,\n/\n/g'
@@ -56,14 +56,14 @@ git grep -l "loop_breaker:" -- crates | xargs perl -0pi -e 's/\n[ \t]*loop_break
   - **Delete** test files whose subject is deleted: `crates/blyte-agent/tests/test_loop_breaker_honesty.rs`, `crates/blyte-agent/tests/test_working_set.rs`, `crates/blyte-cli/tests/test_working_set_e2e.rs`, `crates/blyte-cli/tests/test_action_ledger_e2e.rs`.
   - **In `test_phases.rs`**, delete the test that asserts phase markers in the ledger.
   - **In `test_run.rs`, `test_state.rs`, `test_run_report.rs` and any other file** that still fails to compile: delete tests of guards, the ledger, the working set, interceptions or insists, and edit incidental references minimally.
-- [ ] **Step 4: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Then:
+- [x] **Step 4: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Then:
 
 ```bash
 git grep -n -E "loop_breaker|working_set|WorkingSet|ActionEntry|runtime\.actions|is_insist|should_intercept|verification_passed_since_edit|current_phase_actions|PHASE_MARKER_TOOL|count_interceptions|count_insists|no-loop-breaker|Active Working Set|Working Memory Guard" -- crates/
 ```
 
   Expected: no output. Report the deleted test files, the edited tests, and `find crates -name '*.rs' | xargs wc -l | tail -1`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add -A crates/
