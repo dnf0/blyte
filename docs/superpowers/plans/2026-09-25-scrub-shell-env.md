@@ -32,7 +32,7 @@ Container runs were unaffected: `docker exec` does not pass the host environment
 
 **Files:** `crates/blyte-agent/src/shell.rs`, `crates/blyte-provider/tests/{test_ollama_wire.rs,test_gemini_wire.rs,test_anthropic_wire.rs,test_gemini_models.rs,test_registry.rs}` (Step 3 only), and a new test `crates/blyte-agent/tests/test_shell_env.rs`.
 
-- [ ] **Step 1: Write the failing test.** Create `crates/blyte-agent/tests/test_shell_env.rs`:
+- [x] **Step 1: Write the failing test.** Create `crates/blyte-agent/tests/test_shell_env.rs`:
 
 ```rust
 //! Commands blyte runs never see its own configuration or provider credentials. The model could
@@ -66,11 +66,11 @@ fn credentials_and_blyte_configuration_do_not_reach_commands() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm it fails.** Run: `cargo test -p blyte-agent --test test_shell_env`. Expected: FAIL (the probe prints the secret values).
+- [x] **Step 2: Run to confirm it fails.** Run: `cargo test -p blyte-agent --test test_shell_env`. Expected: FAIL (the probe prints the secret values).
 
-- [ ] **Step 3: Make the provider tests hermetic.** In each provider test file listed above, in every helper or test that calls a provider's `from_env()` **without** being a test about `BLYTE_MODEL` itself, add `std::env::remove_var("BLYTE_MODEL");` next to the existing `set_var` / `remove_var` calls, under the same `ENV_LOCK` guard the file already uses. Tests that are about `BLYTE_MODEL` (e.g. `from_env_honors_blyte_model`) must set it explicitly, and remove it again before they finish. Change nothing else in these files.
+- [x] **Step 3: Make the provider tests hermetic.** In each provider test file listed above, in every helper or test that calls a provider's `from_env()` **without** being a test about `BLYTE_MODEL` itself, add `std::env::remove_var("BLYTE_MODEL");` next to the existing `set_var` / `remove_var` calls, under the same `ENV_LOCK` guard the file already uses. Tests that are about `BLYTE_MODEL` (e.g. `from_env_honors_blyte_model`) must set it explicitly, and remove it again before they finish. Change nothing else in these files.
 
-- [ ] **Step 4: Scrub.** In `crates/blyte-agent/src/shell.rs`:
+- [x] **Step 4: Scrub.** In `crates/blyte-agent/src/shell.rs`:
   1. Add, near the top (after the imports):
 
 ```rust
@@ -102,11 +102,11 @@ fn scrub(cmd: &mut Command) {
   2. In `impl Shell for LocalShell`, `exec`: call `scrub(&mut cmd);` after building `cmd` and before `exec_command(cmd, timeout)`.
   3. In `Launcher::command`, in the `Launcher::Local { root }` arm, call `scrub(&mut c);` before returning `c`. Do not scrub the `Container` arm.
 
-- [ ] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_shell_env --test test_persistent_shell --test test_session_protocol`. Expected: all pass. Then run the full check twice: once normally, and once as `BLYTE_MODEL=gemini-3.8-flash-high cargo test --workspace --all-targets`. Expected: 0 failed both times.
+- [x] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_shell_env --test test_persistent_shell --test test_session_protocol`. Expected: all pass. Then run the full check twice: once normally, and once as `BLYTE_MODEL=gemini-3.8-flash-high cargo test --workspace --all-targets`. Expected: 0 failed both times.
 
-- [ ] **Step 6: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
+- [x] **Step 6: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```bash
 git add crates/
