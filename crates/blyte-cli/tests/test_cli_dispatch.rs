@@ -24,12 +24,12 @@ fn test_parse_single_shot_prompt() {
         "--gate",
         "pytest",
         "--context",
-        "state-only",
+        "conversational",
     ])
     .expect("should parse");
     assert_eq!(cli.prompt, Some("fix issue".to_string()));
     assert_eq!(cli.gate, Some("pytest".to_string()));
-    assert_eq!(cli.context, "state-only");
+    assert_eq!(cli.context, "conversational");
     assert_eq!(cli.command, None);
 }
 
@@ -79,9 +79,9 @@ fn test_parse_rollback_disabled() {
 
 #[test]
 fn test_context_validation() {
-    let cli =
-        Cli::try_parse_from(["blyte", "task", "--context", "state-only"]).expect("should parse");
-    assert_eq!(cli.context, "state-only");
+    let cli = Cli::try_parse_from(["blyte", "task", "--context", "conversational"])
+        .expect("should parse");
+    assert_eq!(cli.context, "conversational");
 
     let invalid = Cli::try_parse_from(["blyte", "task", "--context", "invalid-strategy"]);
     assert!(

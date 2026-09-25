@@ -13,7 +13,7 @@ fn config() -> TaskConfig {
     TaskConfig {
         prompt: "fix it".into(),
         gate: None,
-        context_strategy: "state-only".into(),
+        context_strategy: "folded".into(),
         model: Some("gemini-3.8-flash-high".into()),
         container: None,
         max_turns: 1000,
@@ -26,10 +26,6 @@ fn config() -> TaskConfig {
         report: None,
         tdd: false,
         review: false,
-        fold_notes: false,
-        max_cost_usd: None,
-        journal: None,
-        resume: None,
         fold_budget: None,
     }
 }

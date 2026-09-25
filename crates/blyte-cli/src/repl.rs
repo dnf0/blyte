@@ -116,7 +116,6 @@ pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
         blyte_agent::run::Event::RolledBack { to } => {
             format!("↺ Rolled back working tree to {}", to)
         }
-        blyte_agent::run::Event::Checkpoint { .. } => String::new(),
     }
 }
 
@@ -572,10 +571,6 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     report: None,
                     tdd: false,
                     review: false,
-                    fold_notes: false,
-                    max_cost_usd: None,
-                    journal: None,
-                    resume: None,
                     fold_budget: None,
                 };
 

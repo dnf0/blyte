@@ -4,22 +4,20 @@
 //! 1. REPL `/state` displays active working set files and last test failure cleanly.
 //! 2. Multi-turn coordination: `read`, `edit`, and `bash` synchronously update working set
 //!    and test failure state observable by the runner.
-//! 3. Bounded context invariant (`messages.len() <= 3`) preserved under `StateOnly` while
-//!    surfacing `## Active Working Set` and `## Last Test Failure`.
-//! 4. Zero-latency loop breaker intercepts redundant reads during runner execution.
-//! 5. Working set enforces LRU capacity bounds across multi-file workflows.
+//! 3. Zero-latency loop breaker intercepts redundant reads during runner execution.
+//! 4. Working set enforces LRU capacity bounds across multi-file workflows.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use blyte_agent::context::StateOnly;
+use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
 use blyte_agent::shell::{LocalShell, Shell};
 use blyte_agent::state::State;
 use blyte_agent::working_set::FileSnippet;
 use blyte_cli::repl::{handle_repl_command, ReplConfig, ReplControl, ReplSession};
-use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
 use serde_json::json;
 
 /// Replays a script of provider responses while capturing all requests for invariant inspection.
@@ -206,13 +204,12 @@ fn test_working_set_multi_file_coordination_and_context_invariants() {
         provider: &provider,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: repo.path().to_path_buf(),
         budget: Budget {
             max_turns: 10,
             max_gate_attempts: 2,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: true,
         loop_breaker: true,
@@ -229,68 +226,6 @@ fn test_working_set_multi_file_coordination_and_context_invariants() {
     assert_eq!(cached.path, "calc.py");
     assert!(cached.content.contains("return a + b"));
     assert_eq!(state.runtime.working_set.last_failure, None);
-
-    // 2. Invariant verification across all captured requests
-    let seen_requests = provider.seen.lock().unwrap();
-    assert_eq!(seen_requests.len(), 5);
-
-    for (turn_idx, req) in seen_requests.iter().enumerate() {
-        // Invariant: messages.len() <= 3 at all times in StateOnly
-        assert!(
-            req.messages.len() <= 3,
-            "Turn {} request exceeded message budget: got {} messages (expected <= 3)",
-            turn_idx + 1,
-            req.messages.len()
-        );
-
-        let Message::User(ref prompt) = req.messages[0] else {
-            panic!("first message in StateOnly request must be Message::User");
-        };
-
-        // Turn 2: prompt must contain calc.py in Active Working Set
-        if turn_idx == 1 {
-            assert!(
-                prompt.contains("## Active Working Set"),
-                "Turn 2 prompt missing Active Working Set header"
-            );
-            assert!(
-                prompt.contains("### `calc.py` (lines 1-2)"),
-                "Turn 2 prompt missing calc.py snippet"
-            );
-        }
-
-        // Turn 3: prompt must contain both Active Working Set AND Last Test Failure
-        if turn_idx == 2 {
-            assert!(
-                prompt.contains("## Active Working Set"),
-                "Turn 3 prompt missing Active Working Set"
-            );
-            assert!(
-                prompt.contains("## Last Test Failure"),
-                "Turn 3 prompt missing Last Test Failure"
-            );
-            assert!(
-                prompt.contains("FAIL: 2+3!=5"),
-                "Turn 3 prompt missing test failure output"
-            );
-        }
-
-        // Turn 4: prompt must contain updated calc.py in Active Working Set
-        if turn_idx == 3 {
-            assert!(
-                prompt.contains("return a + b"),
-                "Turn 4 prompt must contain updated code in Active Working Set"
-            );
-        }
-
-        // Turn 5: prompt must NOT contain Last Test Failure because previous bash test passed
-        if turn_idx == 4 {
-            assert!(
-                !prompt.contains("## Last Test Failure"),
-                "Turn 5 prompt should not contain cleared failure"
-            );
-        }
-    }
 }
 
 #[test]
@@ -314,13 +249,12 @@ fn test_working_set_guard_intercepts_redundant_read_e2e() {
         provider: &provider,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: repo.path().to_path_buf(),
         budget: Budget {
             max_turns: 5,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,
@@ -374,13 +308,12 @@ fn test_working_set_multi_file_lru_pruning_e2e() {
         provider: &provider,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: repo.path().to_path_buf(),
         budget: Budget {
             max_turns: 6,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,
@@ -425,13 +358,12 @@ fn test_loop_breaker_serves_an_insisted_read_e2e() {
         provider: &provider,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: repo.path().to_path_buf(),
         budget: Budget {
             max_turns: 6,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,
@@ -476,13 +408,12 @@ fn test_loop_breaker_off_executes_every_read_e2e() {
         provider: &provider,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: repo.path().to_path_buf(),
         budget: Budget {
             max_turns: 5,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: false,
@@ -511,13 +442,12 @@ fn test_budget_max_duration_ends_the_run_before_the_next_turn() {
         provider: &provider,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: repo.path().to_path_buf(),
         budget: Budget {
             max_turns: 10,
             max_gate_attempts: 1,
             max_duration: Some(std::time::Duration::ZERO),
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,

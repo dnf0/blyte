@@ -232,7 +232,6 @@ fn main() {
                 max_turns: (turns + 5) as u32,
                 max_gate_attempts: 1,
                 max_duration: None,
-                max_cost_usd: None,
             },
             rollback: false,
             loop_breaker: false,

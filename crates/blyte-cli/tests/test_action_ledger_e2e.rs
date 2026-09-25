@@ -3,19 +3,17 @@
 //! Validates:
 //! 1. REPL `/state` command formats and displays the `Runtime.actions` ledger correctly.
 //! 2. Multi-turn sessions accumulate chronological `ActionEntry` records across turns, including rollbacks.
-//! 3. Sessions configured with `StateOnly` context strategy preserve the bounded prompt invariant (`<= 3` messages)
-//!    while surfacing the complete action ledger in `## Actions Taken So Far`.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use blyte_agent::context::{ContextStrategy, StateOnly};
+use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
 use blyte_agent::shell::{LocalShell, Shell};
-use blyte_agent::state::{ActionEntry, State};
+use blyte_agent::state::ActionEntry;
 use blyte_cli::repl::{handle_repl_command, ReplConfig, ReplControl, ReplSession};
-use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
 use serde_json::json;
 
 /// Replays a script of provider responses while capturing all requests for invariant inspection.
@@ -100,7 +98,7 @@ fn test_repl_state_command_displays_action_ledger() {
         repo_root: PathBuf::from("."),
         model: Some("gemini-2.5-flash".to_string()),
         gate: Some("cargo test".to_string()),
-        context_strategy: "state-only".to_string(),
+        context_strategy: "folded".to_string(),
         container: None,
         max_turns: 60,
         max_gates: 5,
@@ -170,7 +168,7 @@ fn test_repl_session_records_actions_across_turns() {
         repo_root: repo.path().to_path_buf(),
         model: Some("gemini-2.5-flash".to_string()),
         gate: Some("test -f artifact.txt".to_string()),
-        context_strategy: "state-only".to_string(),
+        context_strategy: "folded".to_string(),
         container: None,
         max_turns: 10,
         max_gates: 3,
@@ -195,13 +193,12 @@ fn test_repl_session_records_actions_across_turns() {
         provider: &provider,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: repo.path().to_path_buf(),
         budget: Budget {
             max_turns: 10,
             max_gate_attempts: 3,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: true,
         loop_breaker: true,
@@ -252,113 +249,4 @@ fn test_repl_session_records_actions_across_turns() {
     let res = handle_repl_command(&mut session, "/clear", &mut clear_out).unwrap();
     assert_eq!(res, ReplControl::Handled);
     assert!(session.state.runtime.actions.is_empty());
-}
-
-#[test]
-fn test_state_only_invariant_preservation_e2e() {
-    let repo = create_temp_git_repo();
-    let mut state = State::new("implement robust state tracking", "true");
-
-    // Simulate 8 turns of tool actions to populate action history.
-    let script: Vec<Response> = (1..=8)
-        .map(|i| calls("bash", json!({"command": format!("echo turn_{i}")})))
-        .collect();
-    let provider = ScriptedProvider::new(script);
-
-    let runner = Runner {
-        provider: &provider,
-        shell: &LocalShell,
-        fs: &LocalFs,
-        context: &StateOnly,
-        root: repo.path().to_path_buf(),
-        budget: Budget {
-            max_turns: 12,
-            max_gate_attempts: 2,
-            max_duration: None,
-            max_cost_usd: None,
-        },
-        rollback: false,
-        loop_breaker: true,
-        on_event: None,
-    };
-
-    let (outcome, _) = runner.run(&mut state);
-    assert_eq!(outcome, Outcome::Verified);
-    assert_eq!(state.runtime.actions.len(), 8);
-
-    // Invariant check across all captured requests:
-    // Every request produced under StateOnly MUST have messages.len() <= 3.
-    let seen_requests = provider.seen.lock().unwrap();
-    assert_eq!(seen_requests.len(), 9); // 8 tool turns + 1 final turn
-
-    for (turn_idx, req) in seen_requests.iter().enumerate() {
-        assert!(
-            req.messages.len() <= 3,
-            "Turn {} request exceeded message budget: got {} messages (expected <= 3)",
-            turn_idx + 1,
-            req.messages.len()
-        );
-
-        // From turn 2 onwards (after turn 1 recorded an action), prompt must contain ## Actions Taken So Far.
-        if turn_idx > 0 {
-            let Message::User(ref prompt) = req.messages[0] else {
-                panic!("first message in StateOnly request must be Message::User");
-            };
-            assert!(
-                prompt.contains("## Actions Taken So Far"),
-                "Turn {} prompt missing action ledger header",
-                turn_idx + 1
-            );
-            // Verify prior action is present in the prompt.
-            assert!(
-                prompt.contains(&format!("Turn {turn_idx}: `bash` `echo turn_{turn_idx}`")),
-                "Turn {} prompt missing entry for prior turn",
-                turn_idx + 1
-            );
-        }
-    }
-
-    // Direct context assembly check: even with substantial history, StateOnly bounds to <= 3 messages.
-    let fake_history = vec![
-        Message::User("initial user goal".into()),
-        Message::ToolCall {
-            id: "call_1".into(),
-            name: "bash".into(),
-            arguments: json!({"command": "echo 1"}),
-            signature: None,
-        },
-        Message::ToolResult {
-            id: "call_1".into(),
-            name: "bash".into(),
-            content: "output 1".into(),
-            is_error: false,
-        },
-        Message::ToolCall {
-            id: "call_2".into(),
-            name: "bash".into(),
-            arguments: json!({"command": "echo 2"}),
-            signature: None,
-        },
-        Message::ToolResult {
-            id: "call_2".into(),
-            name: "bash".into(),
-            content: "output 2".into(),
-            is_error: false,
-        },
-    ];
-
-    let messages = StateOnly.build(&state, &fake_history);
-    assert!(
-        messages.len() <= 3,
-        "StateOnly.build with large history must remain <= 3, got {}",
-        messages.len()
-    );
-
-    let Message::User(ref prompt) = messages[0] else {
-        panic!("expected primary user message");
-    };
-    assert!(prompt.contains("## Actions Taken So Far"));
-    for i in 1..=8 {
-        assert!(prompt.contains(&format!("Turn {i}: `bash` `echo turn_{i}` -> exit 0")));
-    }
 }

@@ -4,14 +4,13 @@
 //! exiting 0 made the guard and the prompt tell a GREEN worker its failing test was passing,
 //! and the worker never edited a file.
 
-use blyte_agent::context::{ContextStrategy, StateOnly};
 use blyte_agent::run::{
     current_phase_actions, extract_action_target, should_intercept_redundant_bash,
     verification_passed_since_edit, PHASE_MARKER_TOOL,
 };
-use blyte_agent::state::{ActionEntry, State};
+use blyte_agent::state::ActionEntry;
 use blyte_agent::working_set::WorkingSet;
-use blyte_provider::{Message, ToolCall};
+use blyte_provider::ToolCall;
 use serde_json::json;
 
 fn act(tool: &str, target: &str, summary: &str) -> ActionEntry {
@@ -35,18 +34,6 @@ fn bash(cmd: &str) -> ToolCall {
         arguments: json!({"command": cmd}),
         signature: None,
     }
-}
-
-fn prompt_text(st: &State) -> String {
-    StateOnly
-        .build(st, &[])
-        .iter()
-        .map(|m| match m {
-            Message::User(t) => t.clone(),
-            _ => String::new(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[test]
@@ -180,27 +167,6 @@ fn inspection_advice_never_claims_tests_pass_from_a_compile_only_check() {
     .expect("an immediately repeated inspection is intercepted");
     assert!(!msg.contains("already passed"), "{msg}");
     assert!(!msg.contains("exited 0 after your last edit"), "{msg}");
-}
-
-#[test]
-fn the_prompt_never_claims_tests_pass_from_a_compile_only_check() {
-    let mut st = State::new("fix it", "go test ./...");
-    st.runtime.actions = vec![
-        act("write", "reproduce_issue_test.go", "wrote 95 lines"),
-        act("bash", "go test -run '^$' ./...", "exit 0"),
-    ];
-    let text = prompt_text(&st);
-    assert!(!text.contains("## Verification Status"), "{text}");
-
-    st.runtime
-        .actions
-        .push(act("bash", "go test ./...", "exit 0"));
-    let text = prompt_text(&st);
-    assert!(
-        text.contains("The verification command `go test ./...` exited 0 after your last edit"),
-        "{text}"
-    );
-    assert!(!text.contains("Unit tests are passing"), "{text}");
 }
 
 #[test]

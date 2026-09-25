@@ -72,8 +72,6 @@ pub struct RunRecord {
     pub provider_retries: u32,
     pub reviews: u32,
     pub review_rejections: u32,
-    pub fold_notes: u32,
-    pub fold_note_failures: u32,
     /// List-price cost in USD, when the model's price is known.
     pub cost_usd: Option<f64>,
     /// Fold budget given with `--fold-budget`, if any.
@@ -117,8 +115,6 @@ impl RunRecord {
             provider_retries: 0,
             reviews: 0,
             review_rejections: 0,
-            fold_notes: 0,
-            fold_note_failures: 0,
             cost_usd: None,
             fold_budget: config.fold_budget,
             turn_usage: Vec::new(),
@@ -161,8 +157,6 @@ impl RunRecord {
             provider_retries: report.provider_retries,
             reviews: report.reviews,
             review_rejections: report.review_rejections,
-            fold_notes: report.fold_notes,
-            fold_note_failures: report.fold_note_failures,
             cost_usd: blyte_provider::pricing(model_id).map(|p| p.cost(&report.usage)),
             turn_usage: report.turn_usage.clone(),
             usage: UsageRecord {

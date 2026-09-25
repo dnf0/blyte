@@ -19,11 +19,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub gate: Option<String>,
 
-    /// Context strategy: 'state-only' (O(1) prompt, latest result only), 'state-window' (O(1) prompt plus the last 8 results) or 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget) or 'compact' (folded, plus superseded outputs masked and duplicates referenced) or 'adaptive' (folded, with a budget that starts at --fold-budget or 16000 and grows when the worker re-fetches folded content)
+    /// Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
     #[arg(
         long,
         default_value = "folded",
-        value_parser = ["state-only", "state-window", "conversational", "folded", "compact", "adaptive"]
+        value_parser = ["conversational", "folded"]
     )]
     pub context: String,
 
@@ -81,25 +81,7 @@ pub struct Cli {
     #[arg(long)]
     pub review: bool,
 
-    /// When a fold first appears, ask the worker for a structured note on the folded turns and
-    /// carry it in the digest (folded and compact contexts)
-    #[arg(long)]
-    pub fold_notes: bool,
-
-    /// Stop the run once it has cost this many US dollars at list price (needs a priced model)
-    #[arg(long)]
-    pub max_cost_usd: Option<f64>,
-
-    /// Save the run before every model call to this file, so it can be resumed
-    #[arg(long)]
-    pub journal: Option<PathBuf>,
-
-    /// Resume a run from a journal written by --journal (a fresh budget; the prompt is optional)
-    #[arg(long, conflicts_with = "tdd")]
-    pub resume: Option<PathBuf>,
-
-    /// Approximate token budget for the verbatim tail before folding (folded and compact
-    /// contexts; default 48000)
+    /// Approximate token budget for the verbatim tail before folding (folded context; default 48000)
     #[arg(long)]
     pub fold_budget: Option<usize>,
 

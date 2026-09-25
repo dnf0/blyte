@@ -63,7 +63,6 @@ fn a_ranged_read_is_logged_with_its_range() {
             max_turns: 3,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: false,

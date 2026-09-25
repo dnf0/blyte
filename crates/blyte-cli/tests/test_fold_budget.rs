@@ -12,7 +12,7 @@ fn the_fold_budget_and_turn_usage_reach_the_report() {
     let cli = Cli::try_parse_from([
         "blyte",
         "--context",
-        "compact",
+        "folded",
         "--fold-budget",
         "12000",
         "fix it",
