@@ -203,18 +203,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Whether a binary exists **where commands actually run**.
-pub fn have(shell: &dyn Shell, root: &Path, bin: &str) -> bool {
-    shell
-        .exec(
-            &format!("command -v {bin} >/dev/null"),
-            root,
-            COMMAND_TIMEOUT,
-        )
-        .map(|o| o.exit_code == 0)
-        .unwrap_or(false)
-}
-
 /// Optional accelerators worth telling the model about, because their presence changes strategy.
 ///
 /// POSIX-guaranteed utilities (`sed`, `awk`, `find`, `xargs`, `grep`) are deliberately absent:

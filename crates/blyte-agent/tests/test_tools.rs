@@ -271,7 +271,12 @@ fn grep_honours_gitignore_so_node_modules_does_not_drown_the_result() {
     // The single reason a repo-wide search is usable. Requires ripgrep; skipped without it
     // rather than asserted falsely, since the grep fallback has no such behaviour.
     let d = seeded();
-    if !blyte_agent::tools::have(&LocalShell, d.path(), "rg") {
+    let have_rg = std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !have_rg {
         return;
     }
     std::fs::write(d.path().join(".gitignore"), "node_modules/\n").unwrap();

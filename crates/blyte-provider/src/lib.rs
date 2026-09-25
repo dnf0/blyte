@@ -152,8 +152,6 @@ impl Pricing {
     }
 }
 
-/// The list price for a model id, if known. A cost cap on a model with no known price is an
-/// error, never silently unenforced.
 pub fn pricing(model_id: &str) -> Option<Pricing> {
     // Gemini 3.8 Flash, list price through 2026-12-31.
     if model_id.contains("gemini-3.8-flash") {

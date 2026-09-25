@@ -10,12 +10,8 @@ thiserror.workspace = true
 blyte-provider = { path = "../blyte-provider" }
 grep-searcher.workspace = true
 grep-regex.workspace = true
-grep-matcher.workspace = true
 ignore.workspace = true
 globset.workspace = true
-
-[dependencies.tempfile]
-workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -35,12 +35,7 @@ pub struct Orchestrator {
 /// Facts the harness observed. Not opinions, and not reported by the worker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Runtime {
-    pub attempts: u32,
-    /// Verification failures, most recent last. The text the worker is shown on retry.
-    pub failures: Vec<String>,
     pub rollbacks: u32,
-    /// Files the harness saw written, in order of first write.
-    pub files_written: Vec<String>,
 }
 
 /// Execution state across two regions: [`Orchestrator`] and [`Runtime`].
@@ -60,14 +55,5 @@ impl State {
             },
             runtime: Runtime::default(),
         }
-    }
-
-    /// The failure text a retry should carry, if any.
-    ///
-    /// Invariant III: the worker restarts from a clean tree "armed with the exact failure
-    /// telemetry of the previous attempt", so the last failure is surfaced and the rest are
-    /// kept for the record rather than replayed into context.
-    pub fn last_failure(&self) -> Option<&str> {
-        self.runtime.failures.last().map(String::as_str)
     }
 }

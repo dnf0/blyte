@@ -14,7 +14,7 @@ license = "Apache-2.0 OR MIT"
 repository = "https://github.com/climate-x-org/superstate"
 homepage = "https://github.com/climate-x-org/superstate"
 readme = "README.md"
-keywords = ["agent", "state-machine", "mcp", "workflow", "developer-tools"]
+keywords = ["agent", "state-machine", "workflow", "developer-tools"]
 categories = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
@@ -25,6 +25,5 @@ tempfile = "3.17"
 clap = { version = "4.5", features = ["derive"] }
 grep-searcher = "0.1.17"
 grep-regex = "0.1.14"
-grep-matcher = "0.1.9"
 ignore = "0.4.33"
 globset = "0.4.20"

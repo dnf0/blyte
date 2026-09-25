@@ -167,10 +167,6 @@ fn a_gate_that_cannot_run_is_a_failure_not_a_pass() {
     let mut st = State::new("g", "this-command-does-not-exist-anywhere");
     let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
     assert_eq!(outcome, Outcome::GateFailed);
-    assert!(
-        st.runtime.failures[0].contains("exit"),
-        "the failure must be recorded verbatim"
-    );
 }
 
 #[test]

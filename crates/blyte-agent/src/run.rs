@@ -397,9 +397,6 @@ impl<'a> Runner<'a> {
         Some(feedback)
     }
 
-    /// Ask the worker what to keep from messages `first..=last`, which are about to be folded.
-    /// `prefix` is the previous request's messages plus everything since, and the system prompt
-    /// and tools are the loop's own, so all but the newest turn is read from cache. Any failure
     fn checkpoint(&self) -> Option<String> {
         let out = self
             .shell
@@ -672,7 +669,6 @@ impl<'a> Runner<'a> {
 
             // --- the model stopped calling tools: the runtime decides -----------------------
             report.gate_attempts += 1;
-            state.runtime.attempts += 1;
             let (passed, output) = self.run_gate(state);
             self.emit(Event::Gate {
                 attempt: report.gate_attempts,
@@ -693,7 +689,6 @@ impl<'a> Runner<'a> {
                 return (Outcome::Verified, report);
             }
 
-            state.runtime.failures.push(output.clone());
             if self.rollback {
                 if let Some(base) = &baseline {
                     self.reset_to(base);
