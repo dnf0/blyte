@@ -297,16 +297,6 @@ pub fn specs() -> Vec<ToolSpec> {
                 "glob":{"type":"string","description":"restrict to files matching this glob, e.g. `*.ts`"}},
                 "required":["pattern"]}),
         },
-        ToolSpec {
-            name: "note".into(),
-            description: "Record working state: findings, hypotheses, what you ruled out. \
-                          Merged into your own region of the state file and carried across \
-                          turns. Keys you set persist; setting a key to null removes it."
-                .into(),
-            parameters: json!({"type":"object","properties":{
-                "patch":{"type":"object","description":"JSON object merged into your state"}},
-                "required":["patch"]}),
-        },
     ]
 }
 
@@ -346,7 +336,7 @@ pub fn grep_command(use_rg: bool, pattern: &str, sub: &str, glob: &str) -> Strin
     }
 }
 
-/// Execute one tool call. `note` is handled by the loop, which owns the state.
+/// Execute one tool call.
 ///
 /// `shell` decides WHERE commands land -- host, container, remote. The tools never know, which
 /// is the point: the previous harness encoded that in a prompt instruction and the worker

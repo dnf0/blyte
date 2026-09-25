@@ -110,10 +110,6 @@ fn main() {
     println!("usage     : {:?}", report.usage);
     println!("elapsed   : {:.0}s", started.elapsed().as_secs_f64());
     println!(
-        "agent state: {}",
-        serde_json::to_string(&state.agent.fields).unwrap()
-    );
-    println!(
         "\n--- stats.py as left ---\n{}",
         std::fs::read_to_string(root.join("stats.py")).unwrap_or_default()
     );

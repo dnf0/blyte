@@ -1,17 +1,11 @@
 //! Execution state, split by authority rather than by who happens to write.
 //!
-//! Measured basis (FINDINGS 13.30): on a full katex task the state file accumulated 15 notes,
-//! **all 15 written by the runtime and none by the agent**, despite the agent having a `note`
-//! verb available throughout. The state that proved useful was observed -- what failed, what
-//! was rolled back -- not self-reported.
-//!
 //! The split that follows:
 //!
 //! | region | written by | agent may mutate |
 //! |---|---|---|
 //! | [`Orchestrator`] -- goal, gate | human or calling agent | **never** |
 //! | [`Runtime`] -- observed facts | the harness | no |
-//! | [`Agent`] -- working notes | the worker | yes |
 //!
 //! The first is the load-bearing one. A control plane whose worker can author its own
 //! definition of done is self-grading with extra steps, which is the failure this project spent
@@ -49,24 +43,11 @@ pub struct Runtime {
     pub files_written: Vec<String>,
 }
 
-/// The worker's own scratch space. Free-form on purpose.
-///
-/// SKILL.state's first named limitation is that a fixed schema must be known in advance, and
-/// nobody knows what it is for a repository. Rather than guess, this region is an open map and
-/// the prompt explicitly invites the worker to use it -- which the previous harness never did.
-/// What keys actually appear across real tasks is the measurement that decides whether a
-/// schema can be formalised at all.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct Agent {
-    #[serde(flatten)]
-    pub fields: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Execution state across two regions: [`Orchestrator`] and [`Runtime`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
     pub orchestrator: Orchestrator,
     pub runtime: Runtime,
-    pub agent: Agent,
 }
 
 impl State {
@@ -78,24 +59,6 @@ impl State {
                 review: false,
             },
             runtime: Runtime::default(),
-            agent: Agent::default(),
-        }
-    }
-
-    /// Merge a patch into the AGENT region only, with null-deletion semantics.
-    ///
-    /// Modelled on SKILL.state's `Σt+1 = Σt ⊕ ΔΣt`, restricted to the one region the worker
-    /// owns. A patch naming `goal` or `verification_cmd` does not fail loudly and does not
-    /// partially apply -- there is simply nowhere for it to land, because this method cannot
-    /// reach the other regions.
-    pub fn apply_agent_patch(&mut self, patch: &serde_json::Value) {
-        let Some(obj) = patch.as_object() else { return };
-        for (k, v) in obj {
-            if v.is_null() {
-                self.agent.fields.remove(k);
-            } else {
-                self.agent.fields.insert(k.clone(), v.clone());
-            }
         }
     }
 

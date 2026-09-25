@@ -59,20 +59,11 @@ fn an_error_record_has_zeroed_counters_and_no_model_id() {
         v["usage"],
         json!({"input": 0, "cached": 0, "output": 0, "thinking": 0})
     );
-    assert_eq!(v["agent_note_keys"], json!([]));
 }
 
 #[test]
 fn a_completed_run_maps_every_field() {
     let mut state = State::new("fix it", "");
-    state
-        .agent
-        .fields
-        .insert("next_step".into(), json!("run tests"));
-    state
-        .agent
-        .fields
-        .insert("hypothesis".into(), json!("off by one"));
     state.runtime.rollbacks = 2;
     let report = RunReport {
         outcome_turns: 7,
@@ -111,7 +102,6 @@ fn a_completed_run_maps_every_field() {
         v["usage"],
         json!({"input": 100, "cached": 50, "output": 20, "thinking": 5})
     );
-    assert_eq!(v["agent_note_keys"], json!(["hypothesis", "next_step"]));
 }
 
 #[test]

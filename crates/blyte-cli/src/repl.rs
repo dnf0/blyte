@@ -228,7 +228,7 @@ pub fn handle_repl_command<W: Write>(
                 .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
-                    "  /state        - Inspect SKILL.state (Orchestrator, Runtime, Agent)"
+                    "  /state        - Inspect SKILL.state (Orchestrator, Runtime)"
                 )
                 .map_err(|e| e.to_string())?;
                 writeln!(
@@ -382,11 +382,6 @@ pub fn handle_repl_command<W: Write>(
                     .map_err(|e| e.to_string())?;
                 writeln!(writer, "Runtime:\n{}", rt).map_err(|e| e.to_string())?;
 
-                // Render agent domain state: epistemic ledger notes and hypothesis scratchpad
-                let agent = serde_json::to_string_pretty(&session.state.agent)
-                    .map_err(|e| e.to_string())?;
-                writeln!(writer, "Agent:\n{}", agent).map_err(|e| e.to_string())?;
-
                 Ok(ReplControl::Handled)
             }
             "/diff" => {
@@ -431,7 +426,6 @@ pub fn handle_repl_command<W: Write>(
             "/clear" => {
                 session.history.clear();
                 session.state.runtime = blyte_agent::state::Runtime::default();
-                session.state.agent = blyte_agent::state::Agent::default();
                 writeln!(writer, "Session history cleared and working state reset.")
                     .map_err(|e| e.to_string())?;
                 Ok(ReplControl::Handled)

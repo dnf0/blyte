@@ -233,25 +233,6 @@ fn the_worker_is_told_when_its_edits_were_reverted() {
 }
 
 #[test]
-fn note_writes_only_the_agent_region() {
-    let d = repo();
-    let p = ScriptedProvider::new(vec![
-        calls(
-            "note",
-            json!({"patch": {"cause": "span width", "verification_cmd": "true"}}),
-        ),
-        says("done"),
-    ]);
-    let mut st = State::new("g", "false");
-    runner(&p, d.path(), &Conversational, false).run(&mut st);
-    assert_eq!(st.agent.fields["cause"], "span width");
-    assert_eq!(
-        st.orchestrator.verification_cmd, "false",
-        "the gate must be untouched"
-    );
-}
-
-#[test]
 fn the_system_prompt_states_the_gate_without_offering_it() {
     let d = repo();
     let p = ScriptedProvider::new(vec![says("done")]);
