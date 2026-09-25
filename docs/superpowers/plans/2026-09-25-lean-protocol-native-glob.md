@@ -44,7 +44,7 @@
 - Modify: `crates/blyte-agent/src/shell.rs`, `crates/blyte-agent/src/fs.rs`
 - Test: `crates/blyte-agent/tests/test_session_protocol.rs` (create)
 
-- [ ] **Step 1: Write the new tests.** Create `crates/blyte-agent/tests/test_session_protocol.rs`:
+- [x] **Step 1: Write the new tests.** Create `crates/blyte-agent/tests/test_session_protocol.rs`:
 
 ```rust
 //! The lean session protocol: exact bytes in and out, robust to what the model's own shell state
@@ -125,9 +125,9 @@ fn container_style_writes_are_exact_for_awkward_content() {
 }
 ```
 
-- [ ] **Step 2: Run the new and existing session tests.** Run: `cargo test -p blyte-agent --test test_session_protocol --test test_persistent_shell`. Record the results: some of the new tests may already pass under the current protocol. (This is a refactor with a byte-identical contract, so no failing-first requirement applies.)
+- [x] **Step 2: Run the new and existing session tests.** Run: `cargo test -p blyte-agent --test test_session_protocol --test test_persistent_shell`. Record the results: some of the new tests may already pass under the current protocol. (This is a refactor with a byte-identical contract, so no failing-first requirement applies.)
 
-- [ ] **Step 3: The protocol.** In `crates/blyte-agent/src/shell.rs`:
+- [x] **Step 3: The protocol.** In `crates/blyte-agent/src/shell.rs`:
   1. Delete the `B64` constant and the `b64_encode` and `b64_decode` functions (their only other user, `SessionFs::write`, changes in Step 4).
   2. In the imports, replace `use std::io::{BufRead, BufReader, Write};` with `use std::io::{Read, Write};`. If `exec_command` has its own inner `use std::io::Read;`, remove that inner import.
   3. Replace the whole `pub struct Session { ... }` definition, the `const READY` line, and the whole `impl Session { ... }` block (keep `Launcher`, `RunResult`, `PersistentShell` and the rest unchanged) with:
@@ -356,7 +356,7 @@ impl Session {
 
   4. Update the `SessionFs` doc comment in `fs.rs` (Step 4). Nothing else in `shell.rs` changes.
 
-- [ ] **Step 4: Heredoc writes.** In `crates/blyte-agent/src/fs.rs`, in `impl Fs for SessionFs`, replace the body of `fn write` with:
+- [x] **Step 4: Heredoc writes.** In `crates/blyte-agent/src/fs.rs`, in `impl Fs for SessionFs`, replace the body of `fn write` with:
 
 ```rust
         let p = path.to_string_lossy().to_string();
@@ -393,13 +393,13 @@ impl Session {
 
   In the `SessionFs` doc comment, replace `Content crosses base64-encoded, so no byte is interpreted on the way.` with `Content crosses through a heredoc read by the \`read\` builtin, so no byte is interpreted on the way.`
 
-- [ ] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_session_protocol --test test_persistent_shell`. Expected: all pass (4 new, 8 existing). If one fails, report the test, command and both outputs verbatim, and stop.
+- [x] **Step 5: Run the tests.** Run: `cargo test -p blyte-agent --test test_session_protocol --test test_persistent_shell`. Expected: all pass (4 new, 8 existing). If one fails, report the test, command and both outputs verbatim, and stop.
 
-- [ ] **Step 6: Benchmark.** Run: `cargo run --release -p blyte-agent --example harness_bench -- --turns 200` and report the output verbatim.
+- [x] **Step 6: Benchmark.** Run: `cargo run --release -p blyte-agent --example harness_bench -- --turns 200` and report the output verbatim.
 
-- [ ] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
 
 ```bash
 git add crates/
@@ -415,7 +415,7 @@ git commit --no-gpg-sign -m "perf(agent): lean session protocol — builtin here
 - Modify (one test, Step 5): `crates/blyte-agent/tests/test_tools.rs`
 - Test: `crates/blyte-agent/tests/test_native_glob.rs` (create)
 
-- [ ] **Step 1: Write the failing tests.** Create `crates/blyte-agent/tests/test_native_glob.rs`:
+- [x] **Step 1: Write the failing tests.** Create `crates/blyte-agent/tests/test_native_glob.rs`:
 
 ```rust
 //! `glob` on a local workspace expands in-process, matching what the shell expands (bash
@@ -530,11 +530,11 @@ fn the_glob_tool_uses_it_on_a_local_workspace_without_spawning() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_native_glob`. Expected: a compile error, because `glob_paths` does not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_native_glob`. Expected: a compile error, because `glob_paths` does not exist.
 
-- [ ] **Step 3: Dependency.** Add `globset = "0.4.20"` to the root `[workspace.dependencies]` and `globset.workspace = true` to `crates/blyte-agent/Cargo.toml` `[dependencies]`.
+- [x] **Step 3: Dependency.** Add `globset = "0.4.20"` to the root `[workspace.dependencies]` and `globset.workspace = true` to `crates/blyte-agent/Cargo.toml` `[dependencies]`.
 
-- [ ] **Step 4: `glob_paths`.** Append to `crates/blyte-agent/src/search.rs`:
+- [x] **Step 4: `glob_paths`.** Append to `crates/blyte-agent/src/search.rs`:
 
 ```rust
 /// Paths matching a shell glob, as bash expands it with `globstar`, `dotglob` and `nullglob`,
@@ -599,7 +599,7 @@ pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>>
 }
 ```
 
-- [ ] **Step 5: The `glob` tool, and the seam test.**
+- [x] **Step 5: The `glob` tool, and the seam test.**
   1. In `crates/blyte-agent/src/tools.rs`, in the `"glob" =>` arm, directly after `let pattern = s("pattern");`, add:
 
 ```rust
@@ -618,13 +618,13 @@ pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>>
 
   2. In `crates/blyte-agent/tests/test_tools.rs`, in `search_tools_also_go_through_the_seam`, change the `glob` call's filesystem argument from `&LocalFs` to `&NotLocal` (the `NotLocal` struct already defined in that file), and update the comment above it to say that a container's files are not local, so glob, like grep, must go through its executor. This is the only permitted edit to an existing test.
 
-- [ ] **Step 6: Run the tests.** Run: `cargo test -p blyte-agent --test test_native_glob --test test_tools --test test_native_grep`. Expected: all pass (3 new). If `native_expansion_matches_the_shell` fails for a pattern, report the pattern and both sets verbatim, and stop. Do not change the test.
+- [x] **Step 6: Run the tests.** Run: `cargo test -p blyte-agent --test test_native_glob --test test_tools --test test_native_grep`. Expected: all pass (3 new). If `native_expansion_matches_the_shell` fails for a pattern, report the pattern and both sets verbatim, and stop. Do not change the test.
 
-- [ ] **Step 7: Benchmark.** Run: `cargo run --release -p blyte-agent --example harness_bench -- --turns 200` and report the output verbatim.
+- [x] **Step 7: Benchmark.** Run: `cargo run --release -p blyte-agent --example harness_bench -- --turns 200` and report the output verbatim.
 
-- [ ] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
+- [x] **Step 8: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed.
 
-- [ ] **Step 9: Commit.**
+- [x] **Step 9: Commit.**
 
 ```bash
 git add Cargo.toml crates/
