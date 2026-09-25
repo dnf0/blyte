@@ -16,7 +16,7 @@ fn config() -> TaskConfig {
     TaskConfig {
         prompt: "fix it".into(),
         gate: None,
-        context_strategy: "state-only".into(),
+        context_strategy: "folded".into(),
         model: Some("gemini-3.8-flash-high".into()),
         container: Some("abc123".into()),
         max_turns: 1000,
@@ -29,10 +29,6 @@ fn config() -> TaskConfig {
         report: None,
         tdd: false,
         review: false,
-        fold_notes: false,
-        max_cost_usd: None,
-        journal: None,
-        resume: None,
         fold_budget: None,
     }
 }
@@ -86,7 +82,7 @@ fn an_error_record_has_zeroed_counters_and_no_model_id() {
     assert_eq!(v["error"], "Provider error: no API key");
     assert_eq!(v["model_requested"], "gemini-3.8-flash-high");
     assert!(v["model_id"].is_null());
-    assert_eq!(v["context"], "state-only");
+    assert_eq!(v["context"], "folded");
     assert_eq!(v["loop_breaker"], false);
     assert_eq!(v["gated"], false);
     assert_eq!(v["container"], "abc123");
@@ -137,8 +133,6 @@ fn a_completed_run_maps_every_field() {
         provider_retries: 0,
         reviews: 0,
         review_rejections: 0,
-        fold_notes: 0,
-        fold_note_failures: 0,
         turn_usage: Vec::new(),
     };
     let r = RunRecord::from_run(
@@ -203,7 +197,7 @@ fn the_binary_writes_a_report_when_the_provider_cannot_start() {
             "--model",
             "gemini-3.8-flash-high",
             "--context",
-            "state-only",
+            "folded",
             "--no-loop-breaker",
             "--container-workdir",
             "/app",
@@ -226,7 +220,7 @@ fn the_binary_writes_a_report_when_the_provider_cannot_start() {
     assert!(v["error"].as_str().unwrap().contains("GEMINI_API_KEY"));
     assert_eq!(v["model_requested"], "gemini-3.8-flash-high");
     assert!(v["model_id"].is_null());
-    assert_eq!(v["context"], "state-only");
+    assert_eq!(v["context"], "folded");
     assert_eq!(v["loop_breaker"], false);
     assert_eq!(v["gated"], false);
     assert!(v["container"].is_null());

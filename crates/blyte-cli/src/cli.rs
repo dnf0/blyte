@@ -1,14 +1,11 @@
-use crate::commands;
-use crate::state_cli::StateCommands;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, PartialEq)]
 #[command(
     name = "blyte",
     version = "0.1.0",
-    about = "Blyte: Autonomous agent harness with deterministic state and verification gates",
-    args_conflicts_with_subcommands = true
+    about = "Blyte: Autonomous agent harness with deterministic state and verification gates"
 )]
 pub struct Cli {
     /// Direct task prompt to run in single-shot / headless mode
@@ -19,11 +16,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub gate: Option<String>,
 
-    /// Context strategy: 'state-only' (O(1) prompt, latest result only), 'state-window' (O(1) prompt plus the last 8 results) or 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget) or 'compact' (folded, plus superseded outputs masked and duplicates referenced) or 'adaptive' (folded, with a budget that starts at --fold-budget or 16000 and grows when the worker re-fetches folded content)
+    /// Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
     #[arg(
         long,
         default_value = "folded",
-        value_parser = ["state-only", "state-window", "conversational", "folded", "compact", "adaptive"]
+        value_parser = ["conversational", "folded"]
     )]
     pub context: String,
 
@@ -81,108 +78,7 @@ pub struct Cli {
     #[arg(long)]
     pub review: bool,
 
-    /// When a fold first appears, ask the worker for a structured note on the folded turns and
-    /// carry it in the digest (folded and compact contexts)
-    #[arg(long)]
-    pub fold_notes: bool,
-
-    /// Stop the run once it has cost this many US dollars at list price (needs a priced model)
-    #[arg(long)]
-    pub max_cost_usd: Option<f64>,
-
-    /// Save the run before every model call to this file, so it can be resumed
-    #[arg(long)]
-    pub journal: Option<PathBuf>,
-
-    /// Resume a run from a journal written by --journal (a fresh budget; the prompt is optional)
-    #[arg(long, conflicts_with = "tdd")]
-    pub resume: Option<PathBuf>,
-
-    /// Approximate token budget for the verbatim tail before folding (folded and compact
-    /// contexts; default 48000)
+    /// Approximate token budget for the verbatim tail before folding (folded context; default 48000)
     #[arg(long)]
     pub fold_budget: Option<usize>,
-
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-}
-
-#[derive(Subcommand, Debug, PartialEq)]
-pub enum Commands {
-    /// Run 5-step verification handshake and health check
-    Doctor,
-    /// Run stdio JSON-RPC MCP server
-    Mcp,
-    /// Adversarial code review over git diff
-    Review {
-        /// Git commit range (e.g. HEAD~1..HEAD). If omitted, inspects uncommitted diff in working tree
-        commit_range: Option<String>,
-        /// Repository root path
-        #[arg(short, long, default_value = ".")]
-        repo: PathBuf,
-        /// Reviewer driver command (e.g. "agy --model gemini-3.8-flash-low" or "claude")
-        #[arg(short, long)]
-        driver: Option<String>,
-        /// Path to .agent-state/state.json (auto-detected if omitted)
-        #[arg(long)]
-        state_path: Option<PathBuf>,
-        /// Record critical/high findings into the state epistemic ledger
-        #[arg(long)]
-        record: bool,
-        /// Output full ReviewReport JSON to stdout
-        #[arg(long)]
-        json: bool,
-        /// Exit with code 1 if blocking issues are present
-        #[arg(long)]
-        fail_on_blocking: bool,
-    },
-    /// Initialize agent guidance (AGENTS.md, Cursor rules)
-    Init {
-        /// Destination directory
-        #[arg(short, long, default_value = ".")]
-        dest: PathBuf,
-        /// Primary language
-        #[arg(short, long, default_value = "rust")]
-        language: String,
-        /// Strictness profile
-        #[arg(short, long, default_value = "balanced")]
-        strictness: String,
-    },
-    /// State machine operations
-    State {
-        #[command(subcommand)]
-        cmd: StateCommands,
-    },
-    /// Git worktree and COW cache operations
-    Worktree {
-        #[command(subcommand)]
-        cmd: commands::worktree::WorktreeCommands,
-    },
-    /// Run autonomous background daemon over milestones
-    Daemon(crate::state_cli::DaemonArgs),
-    /// Cancel a running background daemon process
-    Cancel(crate::state_cli::CancelArgs),
-    /// Inspect background daemon logs
-    Logs(crate::state_cli::LogsArgs),
-    /// Prepare standardized cross-agent handoff package
-    Handoff(crate::state_cli::HandoffArgs),
-    /// Execute a shell command through the output shunting distillation layer
-    Shunt {
-        /// Line count threshold before shunting triggers
-        #[arg(long, default_value = "50")]
-        threshold_lines: usize,
-        /// Directory where full unstripped command logs are stored
-        #[arg(long)]
-        logs_dir: Option<PathBuf>,
-        /// Command and arguments to execute
-        #[arg(trailing_var_arg = true, required = true)]
-        cmd: Vec<String>,
-    },
-    /// Inspect AST symbols, outlines, and code slices
-    Inspect(commands::inspect::InspectArgs),
-    /// Intercept and evaluate agent tool invocations before execution
-    Guard {
-        #[command(subcommand)]
-        cmd: commands::guard::GuardCommands,
-    },
 }

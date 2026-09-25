@@ -22,8 +22,6 @@ fn test_slash_help() {
     assert!(text.contains("/help"));
     assert!(text.contains("/state"));
     assert!(text.contains("/diff"));
-    assert!(text.contains("/review"));
-    assert!(text.contains("/doctor"));
     assert!(text.contains("/gate"));
     assert!(text.contains("/clear"));
     assert!(text.contains("/exit"));

@@ -116,7 +116,6 @@ pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
         blyte_agent::run::Event::RolledBack { to } => {
             format!("↺ Rolled back working tree to {}", to)
         }
-        blyte_agent::run::Event::Checkpoint { .. } => String::new(),
     }
 }
 
@@ -235,16 +234,6 @@ pub fn handle_repl_command<W: Write>(
                 writeln!(
                     writer,
                     "  /diff         - Show current git diff in working tree"
-                )
-                .map_err(|e| e.to_string())?;
-                writeln!(
-                    writer,
-                    "  /review       - Run code review engine on uncommitted changes"
-                )
-                .map_err(|e| e.to_string())?;
-                writeln!(
-                    writer,
-                    "  /doctor       - Run 6-step system verification handshake"
                 )
                 .map_err(|e| e.to_string())?;
                 writeln!(
@@ -444,41 +433,6 @@ pub fn handle_repl_command<W: Write>(
                 }
                 Ok(ReplControl::Handled)
             }
-            "/review" => {
-                writeln!(
-                    writer,
-                    "Running review engine on {}...",
-                    session.repo_root.display()
-                )
-                .map_err(|e| e.to_string())?;
-                match crate::commands::review::cmd_review(crate::commands::review::ReviewArgs {
-                    commit_range: None,
-                    repo: session.repo_root.clone(),
-                    driver: None,
-                    state_path: None,
-                    record: false,
-                    json: false,
-                    fail_on_blocking: false,
-                }) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        writeln!(writer, "Review advisory: {}", e).map_err(|e| e.to_string())?;
-                    }
-                }
-                Ok(ReplControl::Handled)
-            }
-            "/doctor" => {
-                writeln!(writer, "Running system verification handshake...")
-                    .map_err(|e| e.to_string())?;
-                match crate::commands::doctor::run_doctor() {
-                    Ok(()) => {}
-                    Err(e) => {
-                        writeln!(writer, "Doctor check failed: {}", e)
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                Ok(ReplControl::Handled)
-            }
             "/gate" => {
                 if args.is_empty() {
                     match &session.gate {
@@ -572,10 +526,6 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     report: None,
                     tdd: false,
                     review: false,
-                    fold_notes: false,
-                    max_cost_usd: None,
-                    journal: None,
-                    resume: None,
                     fold_budget: None,
                 };
 

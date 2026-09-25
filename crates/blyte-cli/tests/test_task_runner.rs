@@ -14,7 +14,7 @@ fn test_task_config_from_cli() {
         "--gate",
         "cargo test",
         "--context",
-        "state-only",
+        "folded",
         "--model",
         "gemini-3.8-flash",
         "--container",
@@ -29,7 +29,7 @@ fn test_task_config_from_cli() {
     let config = TaskConfig::from(&cli);
     assert_eq!(config.prompt, "solve the bug");
     assert_eq!(config.gate.as_deref(), Some("cargo test"));
-    assert_eq!(config.context_strategy, "state-only");
+    assert_eq!(config.context_strategy, "folded");
     assert_eq!(config.model.as_deref(), Some("gemini-3.8-flash"));
     assert_eq!(config.container.as_deref(), Some("docker-123"));
     assert_eq!(config.max_turns, 42);
@@ -73,7 +73,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
     let config = TaskConfig {
         prompt: "echo hello".to_string(),
         gate: None,
-        context_strategy: "state-only".to_string(),
+        context_strategy: "folded".to_string(),
         model: None,
         container: None,
         max_turns: 10,
@@ -86,10 +86,6 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         report: None,
         tdd: false,
         review: false,
-        fold_notes: false,
-        max_cost_usd: None,
-        journal: None,
-        resume: None,
         fold_budget: None,
     };
 
@@ -113,7 +109,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
     let anthropic_config = TaskConfig {
         prompt: "echo hello".to_string(),
         gate: None,
-        context_strategy: "state-only".to_string(),
+        context_strategy: "folded".to_string(),
         model: Some("claude-3-7-sonnet".to_string()),
         container: None,
         max_turns: 10,
@@ -126,10 +122,6 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         report: None,
         tdd: false,
         review: false,
-        fold_notes: false,
-        max_cost_usd: None,
-        journal: None,
-        resume: None,
         fold_budget: None,
     };
 
@@ -142,7 +134,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
     let ollama_config = TaskConfig {
         prompt: "echo hello".to_string(),
         gate: None,
-        context_strategy: "state-only".to_string(),
+        context_strategy: "folded".to_string(),
         model: Some("qwen2.5-coder:32b".to_string()),
         container: None,
         max_turns: 10,
@@ -155,10 +147,6 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         report: None,
         tdd: false,
         review: false,
-        fold_notes: false,
-        max_cost_usd: None,
-        journal: None,
-        resume: None,
         fold_budget: None,
     };
 
@@ -182,7 +170,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
     let config = TaskConfig {
         prompt: "task goal".to_string(),
         gate: Some("echo 1".to_string()),
-        context_strategy: "state-only".to_string(),
+        context_strategy: "folded".to_string(),
         model: None,
         container: None,
         max_turns: 5,
@@ -195,10 +183,6 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         report: None,
         tdd: false,
         review: false,
-        fold_notes: false,
-        max_cost_usd: None,
-        journal: None,
-        resume: None,
         fold_budget: None,
     };
 

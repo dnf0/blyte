@@ -1,13 +1,10 @@
-use blyte_cli::cli::{Cli, Commands};
-use blyte_cli::state_cli::{InitArgs, StateCommands};
+use blyte_cli::cli::Cli;
 use clap::Parser;
-use std::path::PathBuf;
 
 #[test]
 fn test_parse_no_args_launches_interactive() {
     let cli = Cli::try_parse_from(["blyte"]).expect("should parse");
     assert_eq!(cli.prompt, None);
-    assert_eq!(cli.command, None);
     assert_eq!(cli.context, "folded");
     assert_eq!(cli.max_turns, 25);
     assert_eq!(cli.max_gates, 5);
@@ -24,13 +21,12 @@ fn test_parse_single_shot_prompt() {
         "--gate",
         "pytest",
         "--context",
-        "state-only",
+        "conversational",
     ])
     .expect("should parse");
     assert_eq!(cli.prompt, Some("fix issue".to_string()));
     assert_eq!(cli.gate, Some("pytest".to_string()));
-    assert_eq!(cli.context, "state-only");
-    assert_eq!(cli.command, None);
+    assert_eq!(cli.context, "conversational");
 }
 
 #[test]
@@ -79,53 +75,13 @@ fn test_parse_rollback_disabled() {
 
 #[test]
 fn test_context_validation() {
-    let cli =
-        Cli::try_parse_from(["blyte", "task", "--context", "state-only"]).expect("should parse");
-    assert_eq!(cli.context, "state-only");
+    let cli = Cli::try_parse_from(["blyte", "task", "--context", "conversational"])
+        .expect("should parse");
+    assert_eq!(cli.context, "conversational");
 
     let invalid = Cli::try_parse_from(["blyte", "task", "--context", "invalid-strategy"]);
     assert!(
         invalid.is_err(),
         "invalid context strategy must be rejected"
     );
-}
-
-#[test]
-fn test_parse_subcommand_doctor() {
-    let cli = Cli::try_parse_from(["blyte", "doctor"]).expect("should parse");
-    assert_eq!(cli.prompt, None);
-    assert_eq!(cli.command, Some(Commands::Doctor));
-}
-
-#[test]
-fn test_parse_subcommand_mcp() {
-    let cli = Cli::try_parse_from(["blyte", "mcp"]).expect("should parse");
-    assert_eq!(cli.prompt, None);
-    assert_eq!(cli.command, Some(Commands::Mcp));
-}
-
-#[test]
-fn test_parse_subcommand_state_init() {
-    let cli =
-        Cli::try_parse_from(["blyte", "state", "init", "--plan", "plan.md"]).expect("should parse");
-    assert_eq!(cli.prompt, None);
-    let expected = Commands::State {
-        cmd: StateCommands::Init(InitArgs {
-            plan: Some(PathBuf::from("plan.md")),
-            state: PathBuf::from(".agent-state/state.json"),
-            worktree: false,
-            no_worktree: false,
-            goal: None,
-            verify_cmd: None,
-            files: None,
-            milestones: None,
-        }),
-    };
-    assert_eq!(cli.command, Some(expected));
-}
-
-#[test]
-fn test_prompt_conflicts_with_subcommand() {
-    let result = Cli::try_parse_from(["blyte", "fix task", "doctor"]);
-    assert!(result.is_err(), "prompt should conflict with subcommand");
 }

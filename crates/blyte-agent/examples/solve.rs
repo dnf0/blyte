@@ -78,7 +78,6 @@ fn main() {
                 if passed { "PASS" } else { "FAIL" }
             ),
             RolledBack { to } => println!("    reset to {to}"),
-            Checkpoint { .. } => {}
         }
     };
 
@@ -92,7 +91,6 @@ fn main() {
             max_turns: 20,
             max_gate_attempts: 4,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: true,
         loop_breaker: true,

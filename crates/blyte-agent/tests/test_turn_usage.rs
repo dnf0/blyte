@@ -85,7 +85,6 @@ fn run(context: &dyn ContextStrategy) -> (Outcome, RunReport, Vec<Request>) {
             max_turns: 10,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: false,

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use blyte_agent::context::StateOnly;
+use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Phase, Runner};
 use blyte_agent::shell::{LocalShell, Shell};
@@ -89,7 +89,6 @@ fn budget(gates: u32) -> Budget {
         max_turns: 10,
         max_gate_attempts: gates,
         max_duration: None,
-        max_cost_usd: None,
     }
 }
 
@@ -98,7 +97,7 @@ fn runner<'a>(p: &'a ScriptedProvider, root: &Path, budget: Budget) -> Runner<'a
         provider: p,
         shell: &LocalShell,
         fs: &LocalFs,
-        context: &StateOnly,
+        context: &Conversational,
         root: root.to_path_buf(),
         budget,
         rollback: true,
@@ -287,7 +286,6 @@ fn the_deadline_covers_every_phase() {
         max_turns: 10,
         max_gate_attempts: 1,
         max_duration: Some(Duration::ZERO),
-        max_cost_usd: None,
     };
     let (outcome, _, phases) = runner(&p, d.path(), b)
         .run_phases(&mut st, &[phase("first", "true"), phase("second", "true")]);

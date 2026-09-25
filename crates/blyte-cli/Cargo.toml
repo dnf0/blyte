@@ -18,18 +18,11 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
-blyte-core = { path = "../blyte-core", version = "0.1.0" }
-blyte-syntax = { path = "../blyte-syntax", version = "0.1.0" }
-blyte-review = { path = "../blyte-review", version = "0.1.0" }
-blyte-rules = { path = "../blyte-rules", version = "0.1.0" }
-blyte-mcp = { path = "../blyte-mcp", version = "0.1.0" }
-blyte-worktree = { path = "../blyte-worktree", version = "0.1.0" }
 blyte-agent = { path = "../blyte-agent", version = "0.1.0" }
 blyte-provider = { path = "../blyte-provider", version = "0.1.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
-thiserror.workspace = true
-fd-lock.workspace = true
+
+[dev-dependencies]
 tempfile.workspace = true

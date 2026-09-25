@@ -3,7 +3,7 @@
 
 use std::sync::Mutex;
 
-use blyte_agent::context::{ContextStrategy, Conversational, Folded, StateOnly, StateWindow};
+use blyte_agent::context::{ContextStrategy, Conversational, Folded};
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
 use blyte_agent::shell::LocalShell;
@@ -129,7 +129,6 @@ fn the_loop_records_a_turns_calls_then_its_results() {
             max_turns: 5,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,
@@ -144,23 +143,6 @@ fn the_loop_records_a_turns_calls_then_its_results() {
         kinds(&second.messages),
         vec!["U", "C:r1", "C:r2", "R:r1", "R:r2"]
     );
-}
-
-#[test]
-fn state_only_carries_the_whole_last_block() {
-    let out = StateOnly.build(&State::new("fix it", ""), &batched(3, 10));
-    assert_eq!(kinds(&out[1..]), vec!["C:c5", "C:c6", "R:c5", "R:c6"]);
-}
-
-#[test]
-fn state_window_carries_whole_blocks() {
-    let w = StateWindow {
-        results: 1,
-        lines_per_result: 60,
-    };
-    let out = w.build(&State::new("fix it", ""), &batched(3, 10));
-    assert_eq!(kinds(&out[1..]), vec!["C:c5", "C:c6", "R:c5", "R:c6"]);
-    assert!(blocks_whole(&out));
 }
 
 #[test]
@@ -219,7 +201,6 @@ fn the_system_prompt_invites_batching_independent_calls() {
             max_turns: 2,
             max_gate_attempts: 1,
             max_duration: None,
-            max_cost_usd: None,
         },
         rollback: false,
         loop_breaker: true,

@@ -1,5 +1,5 @@
 site_name: Blyte
-site_description: Deterministic state engine, tree-sitter AST intelligence, zero-noise code review, and MCP server for autonomous agents.
+site_description: A lean coding-agent harness in Rust.
 site_author: Climate X Engineering
 repo_url: https://github.com/climate-x-org/superstate
 theme:
@@ -15,12 +15,7 @@ theme:
 
 nav:
   - Overview: index.md
-  - Architecture: architecture.md
-  - State Machine & DFA: state.md
-  - Code Intelligence (AST): syntax.md
-  - Adversarial Review: review.md
-  - MCP Server & Integrations: mcp.md
-  - Contributing: contributing.md
+  - Research: research/2026-09-24-harness-research.md
 
 plugins:
   - search

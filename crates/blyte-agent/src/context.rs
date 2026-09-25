@@ -1,21 +1,12 @@
-//! How the next prompt is assembled. A seam, because the right answer is not yet known.
+//! How the next prompt is assembled.
 //!
-//! [`Conversational`] is what every mainstream harness does: append every turn and re-send the
-//! lot. Its cost grows with the square of the run -- each call re-sends everything before it --
-//! and EXP-081 shows where that lands: a single turn costing 1,384,188 fresh input tokens
-//! against 15,327,627 cached (FINDINGS 13.29).
+//! [`Conversational`] is what mainstream harnesses do: append every turn and re-send the lot.
 //!
-//! [`StateOnly`] is the SKILL.state model: the model sees the immutable spec, the structured
-//! state, and the latest observation -- `(P, Σ, O)` -- and its reasoning is discarded rather
-//! than accumulated. The paper reports 16.2x fewer tokens at equal accuracy.
-//!
-//! Both ship, and neither is the default by fiat, because the paper's evidence is from
-//! synthetic warehouse tasks and InterCode CTF. Its own first limitation is that a fixed schema
-//! must be known in advance, and nobody knows what that is for a repository; its second is an
-//! observation whose relevance is only recognised later, which is the daily texture of
-//! debugging and absent from its benchmarks. Shipping it as *the* architecture would repeat
-//! this project's most expensive mistake -- committing to a mechanism before measuring it, as
-//! the read cache was (13.25). Behind a trait it is an experiment instead.
+//! [`Folded`] sends `[opening] [digest 1] … [digest k] [verbatim tail]`. Once the verbatim part
+//! passes `budget_tokens`, its older half becomes one harness-written digest. Boundaries are
+//! computed greedily from the start of history, so each depends only on the messages before it:
+//! the next turn reproduces every earlier fold exactly, and between folds the output is pure
+//! append. A cut never separates a tool call from its result.
 
 use blyte_provider::Message;
 
@@ -49,218 +40,7 @@ impl ContextStrategy for Conversational {
     }
 }
 
-/// `(P, Σ, O)`: the task, the state, and the most recent observation.
-///
-/// The model's prior reasoning is not carried. What it wants to remember it must write to its
-/// own state region with `note` -- which is the mechanism under test, since the previous
-/// harness offered a state file the agent never wrote to (FINDINGS 13.30), having never been
-/// asked.
-#[derive(Debug, Default, Clone)]
-pub struct StateOnly;
-
-/// Start of the turn block ending at `pos` (a `ToolResult`): the run of results ending there,
-/// preceded by the run of calls that produced them.
-fn block_start(history: &[Message], pos: usize) -> usize {
-    let mut start = pos;
-    while start > 0 && matches!(history[start - 1], Message::ToolResult { .. }) {
-        start -= 1;
-    }
-    while start > 0 && matches!(history[start - 1], Message::ToolCall { .. }) {
-        start -= 1;
-    }
-    start
-}
-
-impl ContextStrategy for StateOnly {
-    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
-        let mut out = Vec::new();
-        // Order is for the cache as much as for the reader. Gemini caches a shared prompt prefix
-        // of at least 4,096 tokens, so what is stable goes first: the task, then the append-only
-        // action ledger, which turn N+1 repeats exactly with one more line. Everything that
-        // changes turn to turn (notes, working set, failure, verification status) follows it.
-        let mut user_prompt = format!("## Task\n{}\n", state.orchestrator.goal);
-
-        // The chronological action ledger: episodic memory of tool outcomes without growing
-        // conversation history. Append-only, which is what makes it cacheable.
-        if !state.runtime.actions.is_empty() {
-            user_prompt.push_str("\n## Actions Taken So Far\n");
-            for action in &state.runtime.actions {
-                let status_indicator = if action.is_error { " [ERROR]" } else { "" };
-                user_prompt.push_str(&format!(
-                    "- Turn {}: `{}` `{}` -> {}{}\n",
-                    action.turn, action.tool, action.target, action.summary, status_indicator
-                ));
-            }
-        }
-
-        user_prompt.push_str(&format!(
-            "\n## Your state\n{}\n",
-            serde_json::to_string_pretty(&state.agent.fields).unwrap_or_default(),
-        ));
-
-        // External working memory: active file snippets inspected or edited by the worker.
-        // Injects distilled snippets so the agent has continuous visibility across turns without
-        // re-reading unchanged files or bloating conversation history.
-        if !state.runtime.working_set.files.is_empty() {
-            user_prompt.push_str("\n## Active Working Set\n");
-            for file in &state.runtime.working_set.files {
-                // Format line range indicator when partial file slice is cached
-                let lines_info = match (file.start_line, file.end_line) {
-                    (Some(s), Some(e)) => format!(" (lines {s}-{e})"),
-                    _ => String::new(),
-                };
-                user_prompt.push_str(&format!(
-                    "### `{}`{}\n```\n{}\n```\n",
-                    file.path,
-                    lines_info,
-                    file.content.trim_end()
-                ));
-            }
-        }
-
-        // Grounding telemetry: distilled output from the most recent failed test or command.
-        // Provides the failure trace directly in context so the worker does not have to re-run
-        // tests just to recall error lines.
-        if let Some(failure) = &state.runtime.working_set.last_failure {
-            user_prompt.push_str(&format!(
-                "\n## Last Test Failure\n```text\n{}\n```\n",
-                failure.trim_end()
-            ));
-        } else {
-            // Only the verification command itself exiting 0 predicts the gate. Claiming "tests
-            // are passing" from any test-like command told a GREEN worker its failing test passed.
-            if crate::run::verification_passed_since_edit(
-                &state.runtime.actions,
-                &state.orchestrator.verification_cmd,
-            ) {
-                user_prompt.push_str(&format!(
-                    "\n## Verification Status\nThe verification command `{}` exited 0 after your \
-                     last edit. If your change is complete, stop calling tools to submit it.\n",
-                    state.orchestrator.verification_cmd.trim()
-                ));
-            }
-        }
-
-        out.push(Message::User(user_prompt));
-
-        // The latest observation, and only that. A tool result the model has already acted on
-        // is not re-sent; if it mattered, it belonged in state.
-        //
-        // The tool CALL is carried alongside its result because a result with no call is
-        // meaningless -- and because providers reject a functionResponse with no matching
-        // functionCall.
-        if let Some(pos) = history
-            .iter()
-            .rposition(|m| matches!(m, Message::ToolResult { .. }))
-        {
-            // The whole last turn block: its calls, then its results.
-            let start = block_start(history, pos);
-            out.extend_from_slice(&history[start..=pos]);
-        } else if let Some(last) = history.last() {
-            out.push(last.clone());
-        }
-        out
-    }
-    fn name(&self) -> &'static str {
-        "state-only"
-    }
-}
-
-/// `state-only` plus the last few tool results.
-///
-/// `StateOnly` sends only the latest tool call and result, on the theory that anything worth
-/// keeping belongs in state. In practice the worker rarely writes state, so every search result
-/// lived for one turn and was run again: the same grep 14 times on build-cython-ext, six files
-/// re-read 101 times on scc (superstate-eval FINDINGS 13.33). This keeps recent results in view
-/// and stays bounded in session length: at most `1 + 2 * results + 1` messages.
-#[derive(Debug, Clone)]
-pub struct StateWindow {
-    /// How many of the most recent tool call/result pairs to carry.
-    pub results: usize,
-    /// Each carried result is cut to this many lines with `tools::distil`.
-    pub lines_per_result: usize,
-}
-
-impl Default for StateWindow {
-    fn default() -> Self {
-        Self {
-            results: 8,
-            lines_per_result: 60,
-        }
-    }
-}
-
-impl ContextStrategy for StateWindow {
-    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
-        // The state prompt, exactly as `state-only` builds it with nothing carried.
-        let mut out = StateOnly.build(state, &[]);
-
-        // Walk back collecting whole turn blocks (a turn's calls, then its results) until at
-        // least `results` results are carried. A block is never split: a result without its
-        // call, or a call without its result, is rejected by providers.
-        let mut blocks: Vec<Vec<Message>> = Vec::new();
-        let mut carried = 0;
-        let mut end = history.len();
-        while carried < self.results {
-            let Some(pos) = history[..end]
-                .iter()
-                .rposition(|m| matches!(m, Message::ToolResult { .. }))
-            else {
-                break;
-            };
-            let start = block_start(history, pos);
-            if !matches!(history[start], Message::ToolCall { .. }) {
-                break;
-            }
-            let block: Vec<Message> = history[start..=pos]
-                .iter()
-                .map(|m| match m {
-                    Message::ToolResult {
-                        id,
-                        name,
-                        content,
-                        is_error,
-                    } => Message::ToolResult {
-                        id: id.clone(),
-                        name: name.clone(),
-                        content: crate::tools::distil(content, self.lines_per_result),
-                        is_error: *is_error,
-                    },
-                    other => other.clone(),
-                })
-                .collect();
-            carried += block
-                .iter()
-                .filter(|m| matches!(m, Message::ToolResult { .. }))
-                .count();
-            blocks.push(block);
-            end = start;
-        }
-        for block in blocks.into_iter().rev() {
-            out.extend(block);
-        }
-
-        // Whatever came after the last result (gate feedback, or the opening message on the
-        // first turn) is the newest thing the worker must see.
-        if let Some(last) = history.last() {
-            if !matches!(last, Message::ToolResult { .. }) {
-                out.push(last.clone());
-            }
-        }
-        out
-    }
-
-    fn name(&self) -> &'static str {
-        "state-window"
-    }
-}
-
 /// An append-only conversation, bounded by folding.
-///
-/// `Conversational` keeps everything, which is what Gemini expects ("You MUST always resend all
-/// `thought` blocks exactly as they were received") and what caches well, but it grows without
-/// limit. The bounded strategies rebuild the prompt every turn, which drops thought signatures,
-/// caches badly, and in every eval run lost the thread (superstate-eval FINDINGS 13.33-13.35).
 ///
 /// `Folded` sends `[opening] [digest 1] … [digest k] [verbatim tail]`. Once the verbatim part
 /// passes `budget_tokens`, its older half becomes one harness-written digest. Boundaries are
@@ -304,7 +84,7 @@ fn clip(text: &str, max: usize) -> String {
 /// Calls are paired with results by position within their turn block (calls, then results, in
 /// call order). Not by id: Gemini issues no ids, the adapter numbers calls from `call_0` every
 /// turn, so ids repeat across turns and an id match would pair a call with another turn's result.
-fn digest(folded: &[Message], first: usize, last: usize, note: Option<&str>) -> Message {
+fn digest(folded: &[Message], first: usize, last: usize) -> Message {
     let mut text =
         format!("## Earlier turns, folded (messages {first}-{last}; summarised by the harness)\n");
     let mut i = 0;
@@ -348,39 +128,23 @@ fn digest(folded: &[Message], first: usize, last: usize, note: Option<&str>) -> 
             Message::ToolResult { .. } => i += 1,
         }
     }
-    if let Some(note) = note.filter(|n| !n.trim().is_empty()) {
-        text.push_str("\n### Your notes from these turns\n");
-        text.push_str(note);
-    }
     Message::User(text)
 }
 
-/// Where `Folded` put its boundaries over `history[1..]`: each fold `(a, b)`, the start of the
-/// verbatim tail, and the index at which the most recent fold was triggered (if any).
+/// Where `Folded` put its boundaries over `history[1..]`: each fold `(a, b)` and the start of the
+/// verbatim tail.
 struct FoldPlan {
     folds: Vec<(usize, usize)>,
     seg_start: usize,
-    last_trigger: Option<usize>,
-    /// The budget in force at the end of the scan.
-    budget: usize,
 }
 
 /// Greedy fold boundaries over `rest`: each fold depends only on messages before it, so the next
-/// turn reproduces every earlier fold exactly. With `grow = Some((step, max))` the budget grows by
-/// `step` (to at most `max`) at each re-fetch of something already folded (`is_refetch`), decided
-/// in the same in-order pass, so growth is prefix-stable too.
-fn greedy_plan(rest: &[Message], start_budget: usize, grow: Option<(usize, usize)>) -> FoldPlan {
-    let mut budget = start_budget;
+/// turn reproduces every earlier fold exactly.
+fn greedy_plan(rest: &[Message], budget: usize) -> FoldPlan {
     let mut folds: Vec<(usize, usize)> = Vec::new();
     let mut seg_start = 0;
     let mut size = 0;
-    let mut last_trigger = None;
     for i in 0..rest.len() {
-        if let Some((step, max)) = grow {
-            if seg_start > 0 && is_refetch(rest, seg_start, i) {
-                budget = (budget + step).min(max);
-            }
-        }
         size += approx_tokens(&rest[i]);
         if size <= budget {
             continue;
@@ -399,86 +163,16 @@ fn greedy_plan(rest: &[Message], start_budget: usize, grow: Option<(usize, usize
         folds.push((seg_start, cut));
         size = rest[cut..=i].iter().map(approx_tokens).sum();
         seg_start = cut;
-        last_trigger = Some(i);
     }
-    FoldPlan {
-        folds,
-        seg_start,
-        last_trigger,
-        budget,
-    }
+    FoldPlan { folds, seg_start }
 }
 
-/// What a call fetches, for re-fetch detection: a `read`'s path (any range), or a `grep`/`glob`'s
-/// full arguments. Other tools (bash, edits) never count: re-running tests is legitimate.
-fn fetch_key(m: &Message) -> Option<String> {
-    let Message::ToolCall {
-        name, arguments, ..
-    } = m
-    else {
-        return None;
-    };
-    match name.as_str() {
-        "read" => arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|p| format!("read:{p}")),
-        "grep" | "glob" => Some(format!("{name}:{arguments}")),
-        _ => None,
-    }
-}
-
-/// Whether `rest[i]` re-fetches something only a fold removed from view: its fetch key matches a
-/// call in `rest[..folded_end]`, no matching call is still in view (`rest[folded_end..i]`), and,
-/// for a read, the file has not been edited or written since the folded read.
-fn is_refetch(rest: &[Message], folded_end: usize, i: usize) -> bool {
-    let Some(key) = fetch_key(&rest[i]) else {
-        return false;
-    };
-    let matches = |m: &Message| fetch_key(m).as_deref() == Some(key.as_str());
-    if rest[folded_end..i].iter().any(matches) {
-        return false;
-    }
-    let Some(j) = (0..folded_end).rev().find(|&j| matches(&rest[j])) else {
-        return false;
-    };
-    let Message::ToolCall {
-        name, arguments, ..
-    } = &rest[i]
-    else {
-        return false;
-    };
-    if name == "read" {
-        let path = arguments.get("path").and_then(|v| v.as_str());
-        let edited = rest[j + 1..i].iter().any(|m| {
-            matches!(m, Message::ToolCall { name, arguments, .. }
-                if (name == "edit" || name == "write")
-                    && arguments.get("path").and_then(|v| v.as_str()) == path)
-        });
-        if edited {
-            return false;
-        }
-    }
-    true
-}
-
-/// The prompt for a fold plan: the opening, one digest per fold (with its fold note, if any),
-/// then the verbatim tail.
-fn render_folded(
-    opening: &Message,
-    rest: &[Message],
-    plan: &FoldPlan,
-    state: &State,
-) -> Vec<Message> {
+/// The prompt for a fold plan: the opening, one digest per fold, then the verbatim tail.
+fn render_folded(opening: &Message, rest: &[Message], plan: &FoldPlan) -> Vec<Message> {
     let mut out = vec![opening.clone()];
     for &(a, b) in &plan.folds {
         // Message numbers are 1-based positions in the full history.
-        out.push(digest(
-            &rest[a..b],
-            a + 2,
-            b + 1,
-            state.runtime.fold_notes.get(&b).map(String::as_str),
-        ));
+        out.push(digest(&rest[a..b], a + 2, b + 1));
     }
     out.extend_from_slice(&rest[plan.seg_start..]);
     out
@@ -488,16 +182,16 @@ impl Folded {
     /// Greedy boundaries from the start: each fold depends only on messages before it, so the next
     /// turn reproduces every earlier fold exactly.
     fn plan(&self, rest: &[Message]) -> FoldPlan {
-        greedy_plan(rest, self.budget_tokens, None)
+        greedy_plan(rest, self.budget_tokens)
     }
 }
 
 impl ContextStrategy for Folded {
-    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
+    fn build(&self, _state: &State, history: &[Message]) -> Vec<Message> {
         let Some((opening, rest)) = history.split_first() else {
             return Vec::new();
         };
-        render_folded(opening, rest, &self.plan(rest), state)
+        render_folded(opening, rest, &self.plan(rest))
     }
 
     fn folds(&self, history: &[Message]) -> Vec<(usize, usize)> {
@@ -513,246 +207,5 @@ impl ContextStrategy for Folded {
 
     fn name(&self) -> &'static str {
         "folded"
-    }
-}
-
-/// `folded`, plus two exact reductions of tool output that only the harness can make safely,
-/// because it observes every action.
-///
-/// Re-reading history is most of a long run's real cost (16–20M cached input tokens on
-/// build-cython-ext), and tool outputs dominate history. Hiding old outputs while keeping the calls
-/// halved cost at no loss of solve rate on SWE-bench Verified (JetBrains, "The Complexity Trap"),
-/// but hiding by age can drop something still relevant. The harness knows which outputs are
-/// **superseded**: a read of a file edited since, or a call repeated since with identical
-/// arguments. Those are masked; outputs identical to one still visible are referenced. Masks are
-/// applied only when a fold happens, judged by calls up to that fold's trigger: a fold already
-/// rewrites the prompt from its digest on, so masking then costs no extra cache miss (v1's
-/// per-epoch masks re-prefilled the tail at the fresh price and saved nothing; superstate-eval
-/// FINDINGS 13.39). Calls are never removed, so no result is ever orphaned.
-#[derive(Debug, Clone)]
-pub struct Compact {
-    /// Approximate token budget for the verbatim tail, as in `Folded`.
-    pub budget_tokens: usize,
-    /// Outputs shorter than this are never replaced by a duplicate reference.
-    pub min_dedup_chars: usize,
-}
-
-impl Default for Compact {
-    fn default() -> Self {
-        Self {
-            budget_tokens: 48_000,
-            min_dedup_chars: 200,
-        }
-    }
-}
-
-/// The call that produced the result at `r`: calls and results of a turn are recorded as a block
-/// (calls, then results, in call order), so the k-th result of a run pairs with the k-th call of
-/// the run before it. Also correct for the older interleaved layout (a block of one).
-fn call_for_result(h: &[Message], r: usize) -> Option<&Message> {
-    let mut results_start = r;
-    while results_start > 0 && matches!(h[results_start - 1], Message::ToolResult { .. }) {
-        results_start -= 1;
-    }
-    let k = r - results_start;
-    let mut calls_start = results_start;
-    while calls_start > 0 && matches!(h[calls_start - 1], Message::ToolCall { .. }) {
-        calls_start -= 1;
-    }
-    h[calls_start..results_start].get(k)
-}
-
-/// Why the output at `r` (produced by `name(args)`) is superseded by a later call before `cutoff`.
-fn superseded(
-    h: &[Message],
-    r: usize,
-    cutoff: usize,
-    name: &str,
-    args: &serde_json::Value,
-) -> Option<String> {
-    let path = args.get("path").and_then(|v| v.as_str());
-    for m in &h[r + 1..cutoff] {
-        let Message::ToolCall {
-            name: later,
-            arguments: later_args,
-            ..
-        } = m
-        else {
-            continue;
-        };
-        let later_path = later_args.get("path").and_then(|v| v.as_str());
-        match (name, later.as_str()) {
-            ("read", "edit" | "write") if path.is_some() && path == later_path => {
-                return Some(format!(
-                    "superseded: {} changed later",
-                    path.unwrap_or_default()
-                ));
-            }
-            ("read", "read") if args == later_args => {
-                return Some(format!(
-                    "superseded by a later identical read of {}",
-                    path.unwrap_or_default()
-                ));
-            }
-            (n, l)
-                if n == l
-                    && !matches!(n, "read" | "edit" | "write" | "note")
-                    && args == later_args =>
-            {
-                return Some("superseded by a later run of the same call".to_string());
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-impl ContextStrategy for Compact {
-    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
-        let folded = Folded {
-            budget_tokens: self.budget_tokens,
-        };
-        let mut out = folded.build(state, history);
-        let Some((_, rest)) = history.split_first() else {
-            return out;
-        };
-        let plan = folded.plan(rest);
-        let tail_out = 1 + plan.folds.len();
-        let tail_start = 1 + plan.seg_start;
-        // Supersession is judged only by calls up to the most recent fold's trigger. Between folds
-        // that cutoff is fixed, so the prompt is pure append; before the first fold nothing masks.
-        let cutoff = plan
-            .last_trigger
-            .map_or(tail_start, |t| (t + 2).min(history.len()));
-
-        // Superseded outputs, judged only by calls up to the cutoff.
-        let mut masked = vec![false; history.len()];
-        for r in tail_start..cutoff {
-            if !matches!(history[r], Message::ToolResult { .. }) {
-                continue;
-            }
-            let Some(Message::ToolCall {
-                name, arguments, ..
-            }) = call_for_result(history, r)
-            else {
-                continue;
-            };
-            if let Some(reason) = superseded(history, r, cutoff, name, arguments) {
-                if let Message::ToolResult { content, .. } = &mut out[tail_out + (r - tail_start)] {
-                    *content = format!("[{reason}; output elided by blyte]");
-                }
-                masked[r] = true;
-            }
-        }
-
-        // Exact duplicates of an output still visible above.
-        for r in tail_start..history.len() {
-            let Message::ToolResult { content: here, .. } = &history[r] else {
-                continue;
-            };
-            if masked[r] || here.len() < self.min_dedup_chars {
-                continue;
-            }
-            let earlier = (tail_start..r).find(|&q| {
-                !masked[q]
-                    && matches!(&history[q], Message::ToolResult { content, .. } if content == here)
-            });
-            let Some(q) = earlier else {
-                continue;
-            };
-            let what = match call_for_result(history, q) {
-                Some(Message::ToolCall {
-                    name, arguments, ..
-                }) => format!(
-                    "`{name}` `{}`",
-                    crate::run::extract_action_target(name, arguments)
-                ),
-                _ => "an earlier call".to_string(),
-            };
-            if let Message::ToolResult { content, .. } = &mut out[tail_out + (r - tail_start)] {
-                *content =
-                    format!("[identical to the earlier output of {what} above; elided by blyte]");
-            }
-        }
-        out
-    }
-
-    fn folds(&self, history: &[Message]) -> Vec<(usize, usize)> {
-        Folded {
-            budget_tokens: self.budget_tokens,
-        }
-        .folds(history)
-    }
-
-    fn fold_budget(&self, _history: &[Message]) -> Option<usize> {
-        Some(self.budget_tokens)
-    }
-
-    fn name(&self) -> &'static str {
-        "compact"
-    }
-}
-
-/// `folded` with a budget that grows when a fold proves too deep.
-///
-/// A fixed budget is either larger than the task needs to keep in view (wasted cached tokens) or
-/// smaller (the worker re-fetches what was folded, and a turn costs as much as 100-200K cached
-/// tokens). At 16K, build-cython-ext was 20% cheaper than at 48K, but scc took 77% more turns and
-/// re-read unchanged files four times as often (superstate-eval 13.44). Here the budget starts at
-/// `min_tokens` and grows by `step_tokens`, up to `max_tokens`, each time the worker re-fetches
-/// something only a fold removed from view (`is_refetch`). Growth is decided in the same in-order
-/// pass that places folds, so folds stay prefix-stable and the prompt changes only at a fold.
-#[derive(Debug, Clone)]
-pub struct Adaptive {
-    pub min_tokens: usize,
-    pub step_tokens: usize,
-    pub max_tokens: usize,
-}
-
-impl Default for Adaptive {
-    fn default() -> Self {
-        Self {
-            min_tokens: 16_000,
-            step_tokens: 8_000,
-            max_tokens: 64_000,
-        }
-    }
-}
-
-impl Adaptive {
-    fn plan(&self, rest: &[Message]) -> FoldPlan {
-        greedy_plan(
-            rest,
-            self.min_tokens,
-            Some((self.step_tokens, self.max_tokens)),
-        )
-    }
-}
-
-impl ContextStrategy for Adaptive {
-    fn build(&self, state: &State, history: &[Message]) -> Vec<Message> {
-        let Some((opening, rest)) = history.split_first() else {
-            return Vec::new();
-        };
-        render_folded(opening, rest, &self.plan(rest), state)
-    }
-
-    fn folds(&self, history: &[Message]) -> Vec<(usize, usize)> {
-        history
-            .split_first()
-            .map(|(_, rest)| self.plan(rest).folds)
-            .unwrap_or_default()
-    }
-
-    fn fold_budget(&self, history: &[Message]) -> Option<usize> {
-        Some(
-            history
-                .split_first()
-                .map_or(self.min_tokens, |(_, rest)| self.plan(rest).budget),
-        )
-    }
-
-    fn name(&self) -> &'static str {
-        "adaptive"
     }
 }

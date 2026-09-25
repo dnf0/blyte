@@ -40,14 +40,6 @@ pub struct TaskConfig {
     pub tdd: bool,
     /// Completeness review before a passing verification is accepted (`--review`).
     pub review: bool,
-    /// Fold notes (`--fold-notes`).
-    pub fold_notes: bool,
-    /// Dollar limit (`--max-cost-usd`).
-    pub max_cost_usd: Option<f64>,
-    /// Where to save the run before every model call (`--journal`).
-    pub journal: Option<PathBuf>,
-    /// A journal to resume from (`--resume`).
-    pub resume: Option<PathBuf>,
     /// Fold budget in approximate tokens (`--fold-budget`).
     pub fold_budget: Option<usize>,
 }
@@ -74,22 +66,17 @@ impl From<&crate::cli::Cli> for TaskConfig {
             report: cli.report.clone(),
             tdd: cli.tdd,
             review: cli.review,
-            fold_notes: cli.fold_notes,
-            max_cost_usd: cli.max_cost_usd,
-            journal: cli.journal.clone(),
-            resume: cli.resume.clone(),
             fold_budget: cli.fold_budget,
         }
     }
 }
 
 /// Autonomous TDD's RED/GREEN milestones as harness phases. The wording, commands and
-/// reproduction path come from `blyte_core::tdd` unchanged, so native and daemon runs are
-/// given identical instructions. RED may change only the reproduction test; GREEN may not
-/// change it at all.
+/// reproduction path come from `crate::tdd` (moved from the removed daemon crate). RED may
+/// change only the reproduction test; GREEN may not change it at all.
 pub fn tdd_phases(repo_root: &std::path::Path) -> Result<Vec<blyte_agent::run::Phase>, String> {
     let milestones =
-        blyte_core::tdd::tdd_milestones(repo_root).map_err(|e| format!("autonomous TDD: {e}"))?;
+        crate::tdd::tdd_milestones(repo_root).map_err(|e| format!("autonomous TDD: {e}"))?;
     let repro = milestones
         .first()
         .and_then(|m| m.files.first())
@@ -158,17 +145,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     state: &mut blyte_agent::state::State,
     writer: &mut W,
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
-    // A resumed run takes its goal, gate, ledger and fold notes from the journal.
-    let resumed = match &config.resume {
-        Some(path) => {
-            let j = crate::journal::read(path)?;
-            *state = j.state;
-            Some(j.history)
-        }
-        None => None,
-    };
     state.orchestrator.review = config.review;
-    state.orchestrator.fold_notes = config.fold_notes;
     let started = std::time::Instant::now();
     // Derived before the provider, so an unrecognised repository fails closed without an API call.
     let phases = if config.tdd {
@@ -189,36 +166,16 @@ pub fn run_task_with_state_and_writer<W: Write>(
     };
 
     // 2. Select context assembly strategy.
-    // "state-only" discards prior conversational turns and keeps only structured state O(1),
-    // whereas "conversational" accumulates full turn history.
-    let state_only = blyte_agent::context::StateOnly;
-    let state_window = blyte_agent::context::StateWindow::default();
     let folded = blyte_agent::context::Folded {
         budget_tokens: config
             .fold_budget
             .unwrap_or(blyte_agent::context::Folded::default().budget_tokens),
     };
-    let compact = blyte_agent::context::Compact {
-        budget_tokens: config
-            .fold_budget
-            .unwrap_or(blyte_agent::context::Compact::default().budget_tokens),
-        ..blyte_agent::context::Compact::default()
-    };
-    let adaptive = blyte_agent::context::Adaptive {
-        min_tokens: config
-            .fold_budget
-            .unwrap_or(blyte_agent::context::Adaptive::default().min_tokens),
-        ..blyte_agent::context::Adaptive::default()
-    };
     let conversational = blyte_agent::context::Conversational;
     let context_strategy: &dyn blyte_agent::context::ContextStrategy =
         match config.context_strategy.as_str() {
-            "state-only" => &state_only,
-            "state-window" => &state_window,
-            "compact" => &compact,
-            "adaptive" => &adaptive,
-            "folded" => &folded,
-            _ => &conversational,
+            "conversational" => &conversational,
+            _ => &folded,
         };
 
     // Persistent sessions: one for the harness's commands, one for the model's `bash` (its `cd`
@@ -252,14 +209,6 @@ pub fn run_task_with_state_and_writer<W: Write>(
     // 4. Wrap writer in a Mutex so the event callback satisfies Fn trait bounds.
     let writer_mutex = Mutex::new(writer);
     let on_event = |event: blyte_agent::run::Event<'_>| {
-        if let blyte_agent::run::Event::Checkpoint { history, state } = &event {
-            if let Some(path) = &config.journal {
-                if let Err(e) = crate::journal::write(path, state, history) {
-                    eprintln!("{e}");
-                }
-            }
-            return;
-        }
         if let Ok(mut w) = writer_mutex.lock() {
             let _ = writeln!(w, "{}", crate::repl::format_event(&event));
         }
@@ -276,7 +225,6 @@ pub fn run_task_with_state_and_writer<W: Write>(
             max_turns: config.max_turns as u32,
             max_gate_attempts: config.max_gates as u32,
             max_duration: config.max_seconds.map(std::time::Duration::from_secs),
-            max_cost_usd: config.max_cost_usd,
         },
         rollback: config.rollback,
         loop_breaker: config.loop_breaker,
@@ -286,10 +234,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     let (outcome, report, phase_results) = match &phases {
         Some(p) => runner.run_phases(state, p),
         None => {
-            let (o, r) = match resumed {
-                Some(history) => runner.resume(state, history),
-                None => runner.run(state),
-            };
+            let (o, r) = runner.run(state);
             (o, r, Vec::new())
         }
     };

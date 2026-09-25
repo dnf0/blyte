@@ -22,7 +22,14 @@
 
 use std::path::Path;
 
-use crate::models::MilestoneSpec;
+/// One autonomous-TDD phase: what to do, and the command that decides it is done.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MilestoneSpec {
+    pub id: Option<String>,
+    pub title: String,
+    pub verify_cmd: String,
+    pub files: Vec<std::path::PathBuf>,
+}
 
 /// Task id of the reproduction milestone. Stable so tooling can recognise the DAG.
 pub const TDD_REPRODUCTION_ID: &str = "tdd-reproduction-test";
@@ -211,7 +218,6 @@ pub fn tdd_milestones(repo_root: &Path) -> Result<Vec<MilestoneSpec>, TddError> 
                 profile.reproduction_path, profile.runner
             ),
             verify_cmd: profile.red_cmd.clone(),
-            depends_on: None,
             files: vec![profile.reproduction_path.into()],
         },
         MilestoneSpec {
@@ -223,7 +229,6 @@ pub fn tdd_milestones(repo_root: &Path) -> Result<Vec<MilestoneSpec>, TddError> 
                 profile.reproduction_path, profile.runner
             ),
             verify_cmd: profile.green_cmd.clone(),
-            depends_on: Some(vec![TDD_REPRODUCTION_ID.to_string()]),
             files: Vec::new(),
         },
     ])
@@ -398,12 +403,6 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].id.as_deref(), Some(TDD_REPRODUCTION_ID));
         assert_eq!(m[1].id.as_deref(), Some(TDD_IMPLEMENTATION_ID));
-        assert_eq!(m[0].depends_on, None);
-        assert_eq!(
-            m[1].depends_on,
-            Some(vec![TDD_REPRODUCTION_ID.to_string()]),
-            "implementation must not be reachable before the test is proven RED"
-        );
         assert_eq!(
             m[0].files,
             vec![std::path::PathBuf::from("reproduce_issue_test.go")]

@@ -60,9 +60,6 @@ jobs:
       - name: Workspace Tests
         run: cargo test --workspace --all-targets
 
-      - name: 5-Step Fail-Closed Doctor Handshake
-        if: hashFiles('crates/blyte-cli/Cargo.toml') != ''
-        run: cargo run --bin blyte -- doctor
 
   docs-check:
     name: Docs Build Check

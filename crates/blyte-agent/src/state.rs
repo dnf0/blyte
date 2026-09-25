@@ -38,10 +38,6 @@ pub struct Orchestrator {
     /// means, so it is set by the caller, never by the worker.
     #[serde(default)]
     pub review: bool,
-    /// When a fold first appears, ask the worker for a structured note on the turns being folded
-    /// and carry it in that fold's digest (`run::FOLD_NOTE_MARKER`). Set by the caller.
-    #[serde(default)]
-    pub fold_notes: bool,
 }
 
 /// A single action observed and summarized objectively by the harness.
@@ -74,11 +70,6 @@ pub struct Runtime {
     /// Harness-observed working set containing active file snippets and failure output.
     #[serde(default)]
     pub working_set: WorkingSet,
-    /// Rendered fold notes, keyed by the end of the fold they describe (an index into
-    /// `history[1..]`, stable because folds are prefix-stable). Empty means the request failed
-    /// and the fold keeps the harness digest alone.
-    #[serde(default)]
-    pub fold_notes: std::collections::BTreeMap<usize, String>,
 }
 
 /// The worker's own scratch space. Free-form on purpose.
@@ -108,7 +99,6 @@ impl State {
                 goal: goal.into(),
                 verification_cmd: verification_cmd.into(),
                 review: false,
-                fold_notes: false,
             },
             runtime: Runtime::default(),
             agent: Agent::default(),
