@@ -488,8 +488,6 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     container_workdir: "/workspace".into(),
                     max_seconds: None,
                     report: None,
-                    tdd: false,
-                    review: false,
                     fold_budget: None,
                 };
 

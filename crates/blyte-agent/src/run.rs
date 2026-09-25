@@ -101,10 +101,6 @@ pub struct RunReport {
     pub gate_attempts: u32,
     /// Transient provider failures (rate limits, overload) waited out during the run.
     pub provider_retries: u32,
-    /// Completeness reviews run after a passing verification.
-    pub reviews: u32,
-    /// Reviews that sent the worker back with unmet requirements.
-    pub review_rejections: u32,
     /// One entry per main-loop model call, in order.
     pub turn_usage: Vec<TurnUsage>,
 }
@@ -136,89 +132,6 @@ pub enum Event<'e> {
     RolledBack {
         to: &'e str,
     },
-}
-
-/// One stage of a multi-phase run, with its own instruction and verification command.
-///
-/// Phases belong to the runtime, not the worker. The harness derives them (for example from the
-/// repository, by autonomous TDD), and the worker can neither see nor edit the list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Phase {
-    pub id: String,
-    pub instruction: String,
-    pub verify_cmd: String,
-    /// The only tracked path allowed to differ from the phase's starting commit when its gate
-    /// passes. RED uses it: a worker that fixes the bug while "writing a failing test" makes
-    /// the RED proof meaningless.
-    pub scope_only: Option<String>,
-    /// A path that must be unchanged from the phase's starting commit when its gate passes.
-    /// GREEN uses it: the test that defines done may not be weakened after it was seen to fail.
-    pub protect: Option<String>,
-}
-
-impl Phase {
-    /// The command the gate actually runs: the phase's own command plus its mechanical checks,
-    /// measured against `start`, the commit captured when the phase began. A worker that commits
-    /// mid-phase cannot move that reference point.
-    pub fn gate(&self, start: &str) -> String {
-        let mut cmd = format!("( {} )", self.verify_cmd);
-        if let Some(p) = &self.scope_only {
-            cmd.push_str(&format!(
-                " && {{ git diff --quiet {start} -- . ':(exclude){p}' || \
-                 {{ echo 'blyte: in this phase only {p} may change; revert your other edits'; false; }}; }}"
-            ));
-        }
-        if let Some(p) = &self.protect {
-            cmd.push_str(&format!(
-                " && {{ git diff --quiet {start} -- '{p}' || \
-                 {{ echo 'blyte: {p} defines done and may not change in this phase'; false; }}; }}"
-            ));
-        }
-        cmd
-    }
-}
-
-/// How one phase of a multi-phase run ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PhaseResult {
-    pub id: String,
-    pub outcome: Outcome,
-    pub turns: u32,
-    pub gate_attempts: u32,
-}
-
-/// Review rejections allowed before a passing verification is accepted as-is. The exit code stays
-/// the verdict: a review can only send the worker back, and only this many times.
-pub const MAX_REVIEW_ROUNDS: u32 = 2;
-
-/// The completeness reviewer's instructions. It judges only whether the task is done, not style:
-/// a reviewer that blocks on naming or refactoring would spend turns on work nobody asked for.
-const REVIEW_SYSTEM: &str = "You review whether a code change fully accomplishes a task. You are \
-not its author. Compare the diff against every behaviour the task statement requires. Report only \
-requirements the change does not implement or implements incorrectly, each with severity \
-\"Critical\" or \"High\". Do not report style, naming, refactoring, documentation or hypothetical \
-improvements. Respond with strict JSON only: {\"summary\": \"<one sentence>\", \"findings\": \
-[{\"severity\": \"Critical\" or \"High\", \"file\": \"<path>\", \"line_range\": [<start>, <end>], \
-\"problem\": \"<the unmet requirement>\", \"suggested_fix\": \"<what to change>\"}], \
-\"has_blocking_issues\": true or false}. If every requirement is met, return an empty findings \
-list and has_blocking_issues false.";
-
-#[derive(serde::Deserialize)]
-struct ReviewVerdict {
-    #[serde(default)]
-    findings: Vec<ReviewFinding>,
-}
-
-#[derive(serde::Deserialize)]
-struct ReviewFinding {
-    #[serde(default)]
-    severity: String,
-    #[serde(default)]
-    file: String,
-    #[serde(default)]
-    problem: String,
-    #[serde(default)]
-    suggested_fix: String,
 }
 
 /// Retries allowed for one model call before a transient failure ends the run.
@@ -323,80 +236,6 @@ impl<'a> Runner<'a> {
         }
     }
 
-    /// An independent review of the change against the goal, by the same model with no tools.
-    /// `Some(feedback)` when it names Critical or High unmet requirements. Any failure to review
-    /// (no baseline, empty diff, provider error, unparseable reply) accepts: the exit code remains
-    /// the verdict, and a reviewer that cannot run must not be able to block completion.
-    fn review(
-        &self,
-        state: &State,
-        baseline: Option<&str>,
-        report: &mut RunReport,
-    ) -> Option<String> {
-        let base = baseline?;
-        let out = self
-            .shell
-            .exec(
-                &format!("git add -A --intent-to-add && git diff {base}"),
-                &self.root,
-                Duration::from_secs(60),
-            )
-            .ok()?;
-        if out.exit_code != 0 || out.stdout.trim().is_empty() {
-            return None;
-        }
-        let prompt = format!(
-            "## Task\n{}\n\n## Change (git diff against the starting point)\n```diff\n{}\n```\n",
-            state.orchestrator.goal,
-            tools::distil(&out.stdout, 1500)
-        );
-        let req = Request {
-            system: REVIEW_SYSTEM.into(),
-            messages: vec![Message::User(prompt)],
-            tools: Vec::new(),
-            max_output_tokens: None,
-        };
-        let resp = self.provider.complete(&req).ok()?;
-        report.usage.input += resp.usage.input;
-        report.usage.cached += resp.usage.cached;
-        report.usage.output += resp.usage.output;
-        report.usage.thinking += resp.usage.thinking;
-        report.reviews += 1;
-
-        let text = resp.text;
-        let (start, end) = (text.find('{')?, text.rfind('}')?);
-        if end < start {
-            return None;
-        }
-        let verdict: ReviewVerdict = serde_json::from_str(&text[start..=end]).ok()?;
-        let blocking: Vec<&ReviewFinding> = verdict
-            .findings
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.severity.to_ascii_lowercase().as_str(),
-                    "critical" | "high"
-                )
-            })
-            .collect();
-        if blocking.is_empty() {
-            return None;
-        }
-        let mut feedback = String::from(
-            "The verification command passed, but an independent review of your change against \
-             the task found requirements it does not meet:\n",
-        );
-        for f in blocking {
-            feedback.push_str(&format!(
-                "- {} (in {}): {}\n",
-                f.problem, f.file, f.suggested_fix
-            ));
-        }
-        feedback
-            .push_str("\nAddress them, then stop again; the verification command will run again.");
-        Some(feedback)
-    }
-
     fn checkpoint(&self) -> Option<String> {
         let out = self
             .shell
@@ -421,96 +260,6 @@ impl<'a> Runner<'a> {
         self.run_until(state, deadline)
     }
 
-    /// Run `phases` in order under one deadline. After each verified phase except the last, a
-    /// checkpoint is committed, so the next phase's rollback baseline keeps it: a GREEN rollback
-    /// must never delete RED's verified test. Turn and gate budgets apply per phase, matching
-    /// the daemon's per-milestone retry budget. The deadline covers the whole run.
-    pub fn run_phases(
-        &self,
-        state: &mut State,
-        phases: &[Phase],
-    ) -> (Outcome, RunReport, Vec<PhaseResult>) {
-        let deadline = self
-            .budget
-            .max_duration
-            .map(|d| std::time::Instant::now() + d);
-        let task = state.orchestrator.goal.clone();
-        let wants_review = state.orchestrator.review;
-        let mut total = RunReport::default();
-        let mut results = Vec::new();
-        for (i, phase) in phases.iter().enumerate() {
-            let Some(start) = self.checkpoint() else {
-                state.orchestrator.review = wants_review;
-                return (
-                    Outcome::Error("phases need a git repository: cannot read HEAD".into()),
-                    total,
-                    results,
-                );
-            };
-            state.orchestrator.goal = format!(
-                "{task}\n\n## Current milestone ({}/{}): {}\n{}",
-                i + 1,
-                phases.len(),
-                phase.id,
-                phase.instruction
-            );
-            state.orchestrator.verification_cmd = phase.gate(&start);
-            state.orchestrator.review = wants_review && i + 1 == phases.len();
-            let (outcome, report) = self.run_until(state, deadline);
-            total.outcome_turns += report.outcome_turns;
-            total.usage.input += report.usage.input;
-            total.usage.cached += report.usage.cached;
-            total.usage.output += report.usage.output;
-            total.usage.thinking += report.usage.thinking;
-            total.empty_turns += report.empty_turns;
-            total.tool_calls += report.tool_calls;
-            total.gate_attempts += report.gate_attempts;
-            total.provider_retries += report.provider_retries;
-            total.reviews += report.reviews;
-            total.review_rejections += report.review_rejections;
-            results.push(PhaseResult {
-                id: phase.id.clone(),
-                outcome: outcome.clone(),
-                turns: report.outcome_turns,
-                gate_attempts: report.gate_attempts,
-            });
-            if outcome != Outcome::Verified {
-                state.orchestrator.goal = task;
-                state.orchestrator.review = wants_review;
-                return (outcome, total, results);
-            }
-            if i + 1 < phases.len() {
-                if let Err(e) = self.commit_checkpoint(&phase.id) {
-                    state.orchestrator.goal = task;
-                    state.orchestrator.review = wants_review;
-                    return (Outcome::Error(e), total, results);
-                }
-            }
-        }
-        state.orchestrator.goal = task;
-        state.orchestrator.review = wants_review;
-        (Outcome::Verified, total, results)
-    }
-
-    /// Commit the tree as the verified end of a phase. The identity is set inline because a
-    /// task container often has no git user configured.
-    fn commit_checkpoint(&self, phase_id: &str) -> Result<(), String> {
-        let cmd = format!(
-            "git add -A && git -c user.name=blyte -c user.email=blyte@localhost \
-             commit --no-gpg-sign -q --allow-empty -m 'chore(blyte): checkpoint phase {phase_id}'"
-        );
-        match self.shell.exec(&cmd, &self.root, Duration::from_secs(120)) {
-            Ok(o) if o.exit_code == 0 => Ok(()),
-            Ok(o) => Err(format!(
-                "checkpoint commit for phase {phase_id} failed: {}",
-                o.merged().trim()
-            )),
-            Err(e) => Err(format!(
-                "checkpoint commit for phase {phase_id} could not run: {e}"
-            )),
-        }
-    }
-
     fn run_until(
         &self,
         state: &mut State,
@@ -521,7 +270,6 @@ impl<'a> Runner<'a> {
         let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
-        let mut review_rounds = 0;
         let mut last_sent: Option<Vec<Message>> = None;
 
         for turn in 1..=self.budget.max_turns {
@@ -676,16 +424,6 @@ impl<'a> Runner<'a> {
                 output: output.lines().next().unwrap_or(""),
             });
             if passed {
-                // The exit code is necessary, not sufficient: a worker-written gate is only as
-                // complete as the worker's reading of the task (superstate-eval FINDINGS 13.38).
-                if state.orchestrator.review && review_rounds < MAX_REVIEW_ROUNDS {
-                    if let Some(feedback) = self.review(state, baseline.as_deref(), &mut report) {
-                        review_rounds += 1;
-                        report.review_rejections += 1;
-                        history.push(Message::User(feedback));
-                        continue;
-                    }
-                }
                 return (Outcome::Verified, report);
             }
 

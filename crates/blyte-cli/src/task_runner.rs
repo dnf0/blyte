@@ -33,10 +33,6 @@ pub struct TaskConfig {
     pub max_seconds: Option<u64>,
     /// Where to write the JSON run report, if anywhere (`--report`).
     pub report: Option<PathBuf>,
-    /// Gate by autonomous TDD phases instead of a single command (`--tdd`).
-    pub tdd: bool,
-    /// Completeness review before a passing verification is accepted (`--review`).
-    pub review: bool,
     /// Fold budget in approximate tokens (`--fold-budget`).
     pub fold_budget: Option<usize>,
 }
@@ -60,35 +56,9 @@ impl From<&crate::cli::Cli> for TaskConfig {
             container_workdir: cli.container_workdir.clone(),
             max_seconds: cli.max_seconds,
             report: cli.report.clone(),
-            tdd: cli.tdd,
-            review: cli.review,
             fold_budget: cli.fold_budget,
         }
     }
-}
-
-/// Autonomous TDD's RED/GREEN milestones as harness phases. The wording, commands and
-/// reproduction path come from `crate::tdd` (moved from the removed daemon crate). RED may
-/// change only the reproduction test; GREEN may not change it at all.
-pub fn tdd_phases(repo_root: &std::path::Path) -> Result<Vec<blyte_agent::run::Phase>, String> {
-    let milestones =
-        crate::tdd::tdd_milestones(repo_root).map_err(|e| format!("autonomous TDD: {e}"))?;
-    let repro = milestones
-        .first()
-        .and_then(|m| m.files.first())
-        .map(|p| p.to_string_lossy().into_owned())
-        .ok_or_else(|| "autonomous TDD: no reproduction path".to_string())?;
-    Ok(milestones
-        .into_iter()
-        .enumerate()
-        .map(|(i, m)| blyte_agent::run::Phase {
-            id: m.id.unwrap_or_else(|| format!("phase-{}", i + 1)),
-            instruction: m.title,
-            verify_cmd: m.verify_cmd,
-            scope_only: (i == 0).then(|| repro.clone()),
-            protect: (i > 0).then(|| repro.clone()),
-        })
-        .collect())
 }
 
 /// Executes an autonomous solver run using the provided task configuration and live stdout.
@@ -141,14 +111,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     state: &mut blyte_agent::state::State,
     writer: &mut W,
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
-    state.orchestrator.review = config.review;
     let started = std::time::Instant::now();
-    // Derived before the provider, so an unrecognised repository fails closed without an API call.
-    let phases = if config.tdd {
-        Some(tdd_phases(&config.root)?)
-    } else {
-        None
-    };
     // 1. Initialize LLM provider from environment credentials or model specification.
     // If credentials for the detected provider are missing, produce a clear error indicating which key to set.
     let provider = match blyte_provider::resolve_provider(config.model.as_deref()) {
@@ -226,13 +189,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
         on_event: Some(&on_event),
     };
 
-    let (outcome, report, phase_results) = match &phases {
-        Some(p) => runner.run_phases(state, p),
-        None => {
-            let (o, r) = runner.run(state);
-            (o, r, Vec::new())
-        }
-    };
+    let (outcome, report) = runner.run(state);
     if let Some(path) = &config.report {
         let model_id = blyte_provider::Provider::model_id(provider.as_ref());
         let record = crate::report::RunRecord::from_run(
@@ -242,8 +199,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
             &report,
             state,
             started.elapsed(),
-        )
-        .with_phases(&phase_results);
+        );
         crate::report::write(path, &record)?;
     }
     Ok((outcome, report))

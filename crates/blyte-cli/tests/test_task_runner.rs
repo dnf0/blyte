@@ -83,8 +83,6 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
-        tdd: false,
-        review: false,
         fold_budget: None,
     };
 
@@ -118,8 +116,6 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
-        tdd: false,
-        review: false,
         fold_budget: None,
     };
 
@@ -142,8 +138,6 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
-        tdd: false,
-        review: false,
         fold_budget: None,
     };
 
@@ -177,8 +171,6 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,
-        tdd: false,
-        review: false,
         fold_budget: None,
     };
 
