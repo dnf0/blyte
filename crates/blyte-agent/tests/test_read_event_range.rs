@@ -65,7 +65,6 @@ fn a_ranged_read_is_logged_with_its_range() {
             max_duration: None,
         },
         rollback: false,
-        loop_breaker: false,
         on_event: Some(&on_event),
     };
     runner.run(&mut State::new("read", "true"));

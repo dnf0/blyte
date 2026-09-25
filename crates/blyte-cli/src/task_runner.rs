@@ -28,8 +28,6 @@ pub struct TaskConfig {
     pub rollback: bool,
     /// Target repository or workspace root on the local filesystem.
     pub root: PathBuf,
-    /// Run the loop-breaker guards. False is the ablation control (`--no-loop-breaker`).
-    pub loop_breaker: bool,
     /// Working directory inside the container (`--container-workdir`).
     pub container_workdir: String,
     /// Wall-clock budget in seconds (`--max-seconds`).
@@ -60,7 +58,6 @@ impl From<&crate::cli::Cli> for TaskConfig {
             max_gates: cli.max_gates,
             rollback: cli.rollback,
             root,
-            loop_breaker: !cli.no_loop_breaker,
             container_workdir: cli.container_workdir.clone(),
             max_seconds: cli.max_seconds,
             report: cli.report.clone(),
@@ -227,7 +224,6 @@ pub fn run_task_with_state_and_writer<W: Write>(
             max_duration: config.max_seconds.map(std::time::Duration::from_secs),
         },
         rollback: config.rollback,
-        loop_breaker: config.loop_breaker,
         on_event: Some(&on_event),
     };
 

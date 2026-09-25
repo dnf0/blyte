@@ -52,10 +52,6 @@ pub struct Cli {
     )]
     pub rollback: bool,
 
-    /// Disable the loop-breaker guards (redundant read / inspection interception). Ablation control
-    #[arg(long)]
-    pub no_loop_breaker: bool,
-
     /// Working directory inside the container when --container is set
     #[arg(long, default_value = "/workspace")]
     pub container_workdir: String,

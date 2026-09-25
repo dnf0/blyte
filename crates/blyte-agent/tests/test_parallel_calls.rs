@@ -131,7 +131,6 @@ fn the_loop_records_a_turns_calls_then_its_results() {
             max_duration: None,
         },
         rollback: false,
-        loop_breaker: true,
         on_event: None,
     };
     let mut st = State::new("read both", "true");
@@ -203,7 +202,6 @@ fn the_system_prompt_invites_batching_independent_calls() {
             max_duration: None,
         },
         rollback: false,
-        loop_breaker: true,
         on_event: None,
     };
     runner.run(&mut State::new("anything", "true"));

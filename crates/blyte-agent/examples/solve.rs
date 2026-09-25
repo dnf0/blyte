@@ -93,7 +93,6 @@ fn main() {
             max_duration: None,
         },
         rollback: true,
-        loop_breaker: true,
         on_event: Some(&log),
     };
 

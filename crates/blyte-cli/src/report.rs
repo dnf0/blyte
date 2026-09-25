@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use blyte_agent::run::{Outcome, PhaseResult, RunReport};
-use blyte_agent::state::{ActionEntry, State};
+use blyte_agent::state::State;
 use serde::Serialize;
 
 use crate::task_runner::TaskConfig;
@@ -21,12 +21,6 @@ pub struct UsageRecord {
     pub cached: u64,
     pub output: u64,
     pub thinking: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
-pub struct Interceptions {
-    pub read: u32,
-    pub bash: u32,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -55,7 +49,6 @@ pub struct RunRecord {
     pub model_requested: Option<String>,
     pub model_id: Option<String>,
     pub context: String,
-    pub loop_breaker: bool,
     pub gated: bool,
     /// Where the gate came from: `none` (ungated), `user` (`--gate`) or `tdd` (`--tdd`).
     pub gate_source: String,
@@ -79,8 +72,6 @@ pub struct RunRecord {
     /// Per-call usage (see `blyte_agent::run::TurnUsage`).
     pub turn_usage: Vec<blyte_agent::run::TurnUsage>,
     pub usage: UsageRecord,
-    pub interceptions: Interceptions,
-    pub insists: u32,
     pub agent_note_keys: Vec<String>,
 }
 
@@ -93,7 +84,6 @@ impl RunRecord {
             model_requested: config.model.clone(),
             model_id: None,
             context: config.context_strategy.clone(),
-            loop_breaker: config.loop_breaker,
             gated: config.tdd || config.gate.as_deref().is_some_and(|g| !g.trim().is_empty()),
             gate_source: if config.tdd {
                 "tdd"
@@ -119,8 +109,6 @@ impl RunRecord {
             fold_budget: config.fold_budget,
             turn_usage: Vec::new(),
             usage: UsageRecord::default(),
-            interceptions: Interceptions::default(),
-            insists: 0,
             agent_note_keys: Vec::new(),
         }
     }
@@ -165,8 +153,6 @@ impl RunRecord {
                 output: report.usage.output,
                 thinking: report.usage.thinking,
             },
-            interceptions: count_interceptions(&state.runtime.actions),
-            insists: count_insists(&state.runtime.actions),
             agent_note_keys,
             ..Self::base(config, elapsed)
         }
@@ -185,34 +171,6 @@ impl RunRecord {
             .collect();
         self
     }
-}
-
-/// Loop-breaker interceptions, by guard.
-pub fn count_interceptions(actions: &[ActionEntry]) -> Interceptions {
-    let mut counts = Interceptions::default();
-    for a in actions {
-        match a.summary.as_str() {
-            "intercepted: already in working set" => counts.read += 1,
-            "intercepted: redundant inspection" => counts.bash += 1,
-            _ => {}
-        }
-    }
-    counts
-}
-
-/// Calls executed immediately after an interception of the same tool and target: the worker
-/// insisted. EXP-081 found 90% of perimeter suppressions were insisted on; this is the number
-/// that says whether the native guard fares any better.
-pub fn count_insists(actions: &[ActionEntry]) -> u32 {
-    actions
-        .windows(2)
-        .filter(|w| {
-            w[0].summary.starts_with("intercepted")
-                && !w[1].summary.starts_with("intercepted")
-                && w[0].tool == w[1].tool
-                && w[0].target == w[1].target
-        })
-        .count() as u32
 }
 
 pub fn write(path: &Path, record: &RunRecord) -> Result<(), String> {

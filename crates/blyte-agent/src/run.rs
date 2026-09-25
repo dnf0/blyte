@@ -22,12 +22,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use blyte_provider::{Message, Provider, ProviderError, Request, ToolCall, Usage};
+use blyte_provider::{Message, Provider, ProviderError, Request, Usage};
 
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
 use crate::shell::Shell;
-use crate::state::{ActionEntry, State};
+use crate::state::State;
 use crate::tools;
 
 /// How a run ended.
@@ -136,44 +136,6 @@ pub enum Event<'e> {
     RolledBack {
         to: &'e str,
     },
-}
-
-/// The action-ledger tool name `run_phases` writes when a phase begins. Loop-breaker inferences
-/// look no further back than the latest marker: what passed in RED says nothing about GREEN.
-pub const PHASE_MARKER_TOOL: &str = "phase";
-
-/// Actions since the current phase began, or all of them when the run has no phases.
-pub fn current_phase_actions(actions: &[ActionEntry]) -> &[ActionEntry] {
-    match actions.iter().rposition(|a| a.tool == PHASE_MARKER_TOOL) {
-        Some(i) => &actions[i + 1..],
-        None => actions,
-    }
-}
-
-/// Whether, in the current phase and since its last edit, the worker ran the verification
-/// command itself and it exited 0. That is the only exit code that predicts the gate. Another
-/// test-like command passing (a compile-only `go test -run '^$'`, a single test) says nothing
-/// about it. Treating it as if it did told a GREEN worker its failing test was passing.
-pub fn verification_passed_since_edit(actions: &[ActionEntry], verification_cmd: &str) -> bool {
-    let v = verification_cmd.trim();
-    if v.is_empty() || v == "true" || v == "false" {
-        return false;
-    }
-    let phase = current_phase_actions(actions);
-    let edited = phase
-        .iter()
-        .any(|a| (a.tool == "edit" || a.tool == "write") && !a.is_error);
-    edited
-        && phase
-            .iter()
-            .rev()
-            .take_while(|a| a.tool != "edit" && a.tool != "write")
-            .any(|a| {
-                a.tool == "bash"
-                    && !a.is_error
-                    && !a.summary.starts_with("intercepted")
-                    && a.target.trim() == v
-            })
 }
 
 /// One stage of a multi-phase run, with its own instruction and verification command.
@@ -306,10 +268,6 @@ pub struct Runner<'a> {
     pub budget: Budget,
     /// Reset the tree to the checkpoint when the gate fails. Invariant III; default on.
     pub rollback: bool,
-    /// Run the loop-breaker guards (redundant read and inspection interception). Default on;
-    /// off is the ablation control, because a guard that changes what the worker sees must be
-    /// measured, not assumed (FINDINGS 13.25).
-    pub loop_breaker: bool,
     /// Called as the run proceeds. Default is silent.
     pub on_event: Option<&'a dyn Fn(Event<'_>)>,
 }
@@ -505,13 +463,6 @@ impl<'a> Runner<'a> {
             );
             state.orchestrator.verification_cmd = phase.gate(&start);
             state.orchestrator.review = wants_review && i + 1 == phases.len();
-            state.runtime.actions.push(ActionEntry {
-                turn: 0,
-                tool: PHASE_MARKER_TOOL.into(),
-                target: phase.id.clone(),
-                summary: format!("phase {}/{} started", i + 1, phases.len()),
-                is_error: false,
-            });
             let (outcome, report) = self.run_until(state, deadline);
             total.outcome_turns += report.outcome_turns;
             total.usage.input += report.usage.input;
@@ -672,42 +623,9 @@ impl<'a> Runner<'a> {
                 for call in &resp.tool_calls {
                     report.tool_calls += 1;
 
-                    let guards_on = self.loop_breaker && !is_insist(call, &state.runtime.actions);
-
-                    // Intercept redundant file reads and redundant read-only inspections before execution
-                    // using the loop-breaker guard.
-                    // Also `note` is the loop's, not the tool layer's: it mutates state, and only
+                    // `note` is the loop's, not the tool layer's: it mutates state, and only
                     // the agent region can be reached from here.
-                    let outcome = if let Some(guard_msg) = guards_on
-                        .then(|| {
-                            should_intercept_redundant_read(
-                                call,
-                                &state.runtime.working_set,
-                                &state.runtime.actions,
-                            )
-                        })
-                        .flatten()
-                    {
-                        crate::tools::ToolOutcome {
-                            content: guard_msg,
-                            is_error: false,
-                        }
-                    } else if let Some(guard_msg) = guards_on
-                        .then(|| {
-                            should_intercept_redundant_bash(
-                                call,
-                                &state.runtime.actions,
-                                &state.runtime.working_set,
-                                &state.orchestrator.verification_cmd,
-                            )
-                        })
-                        .flatten()
-                    {
-                        crate::tools::ToolOutcome {
-                            content: guard_msg,
-                            is_error: false,
-                        }
-                    } else if call.name == "note" {
+                    let outcome = if call.name == "note" {
                         let patch = call.arguments.get("patch").cloned().unwrap_or_default();
                         state.apply_agent_patch(&patch);
                         crate::tools::ToolOutcome {
@@ -754,120 +672,6 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
 
-                    // Record tool invocation in the chronological action ledger.
-                    // Captures deterministic targets and outcome summaries so that episodic memory
-                    // retains an accurate, bounded audit trail of all agent actions.
-                    let action_target = extract_action_target(&call.name, &call.arguments);
-                    let action_summary =
-                        extract_action_summary(&call.name, &outcome.content, outcome.is_error);
-                    state.runtime.actions.push(crate::state::ActionEntry {
-                        turn,
-                        tool: call.name.clone(),
-                        target: action_target,
-                        summary: action_summary,
-                        is_error: outcome.is_error,
-                    });
-
-                    // Synchronize working set on read, edit, write, and bash tool calls.
-                    // Maintains external working memory in Runtime (Invariant I) without LLM intervention.
-                    match call.name.as_str() {
-                        "read" => {
-                            // Track active file snippet on successful read, stripping line numbers.
-                            // If the read was intercepted by the guard, do not overwrite cached file content.
-                            if !outcome.is_error
-                                && !outcome
-                                    .content
-                                    .starts_with("[Harness Working Memory Guard]")
-                            {
-                                let raw_path = call
-                                    .arguments
-                                    .get("path")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let path = normalize_path(raw_path);
-                                let raw_content = strip_line_number_prefixes(&outcome.content);
-                                let start = call.arguments.get("start_line").and_then(|v| {
-                                    v.as_u64().map(|n| n as usize).or_else(|| {
-                                        v.as_str().and_then(|s| s.parse::<usize>().ok())
-                                    })
-                                });
-                                let end = call.arguments.get("end_line").and_then(|v| {
-                                    v.as_u64().map(|n| n as usize).or_else(|| {
-                                        v.as_str().and_then(|s| s.parse::<usize>().ok())
-                                    })
-                                });
-                                state.runtime.working_set.add_or_update(
-                                    path,
-                                    &raw_content,
-                                    start,
-                                    end,
-                                    turn,
-                                );
-                            }
-                        }
-                        "edit" => {
-                            // Apply exact replacement chunk to working set cache
-                            if !outcome.is_error {
-                                let raw_path = call
-                                    .arguments
-                                    .get("path")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let path = normalize_path(raw_path);
-                                let old = call
-                                    .arguments
-                                    .get("old")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let new = call
-                                    .arguments
-                                    .get("new")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                state.runtime.working_set.apply_edit(path, old, new, turn);
-                            }
-                        }
-                        "write" => {
-                            // Update or insert full file snippet on successful write
-                            if !outcome.is_error {
-                                let raw_path = call
-                                    .arguments
-                                    .get("path")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let path = normalize_path(raw_path);
-                                let content = call
-                                    .arguments
-                                    .get("content")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                state
-                                    .runtime
-                                    .working_set
-                                    .add_or_update(path, content, None, None, turn);
-                            }
-                        }
-                        "bash" => {
-                            // Track or clear test failures based on test command exit code
-                            let cmd = call
-                                .arguments
-                                .get("command")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let is_test_cmd =
-                                is_test_command(cmd, &state.orchestrator.verification_cmd);
-                            if outcome.is_error && is_test_cmd {
-                                state
-                                    .runtime
-                                    .working_set
-                                    .record_failure_for(cmd, &outcome.content);
-                            } else if !outcome.is_error && is_test_cmd {
-                                state.runtime.working_set.clear_failure_for(cmd);
-                            }
-                        }
-                        _ => {}
-                    }
-
                     history.push(Message::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -908,15 +712,6 @@ impl<'a> Runner<'a> {
                     state.runtime.rollbacks += 1;
                     let short_sha = &base[..base.len().min(8)];
                     self.emit(Event::RolledBack { to: short_sha });
-                    // Record rollback in the action ledger to ensure the worker and orchestrator
-                    // observe workspace resets explicitly within episodic action history.
-                    state.runtime.actions.push(crate::state::ActionEntry {
-                        turn,
-                        tool: "rollback".into(),
-                        target: format!("checkpoint {short_sha}"),
-                        summary: "Gate failed; working tree reset to verified state".into(),
-                        is_error: true,
-                    });
                 }
             }
             if report.gate_attempts >= self.budget.max_gate_attempts {
@@ -937,233 +732,6 @@ impl<'a> Runner<'a> {
             )));
         }
         (Outcome::BudgetExhausted, report)
-    }
-}
-
-/// Helper to determine if an action target matches a normalized file path.
-/// Handles raw paths, leading `./`, line range annotations like `lru.py (L1-L20)`,
-/// and byte count annotations like `lru.py (26 bytes)`, even when paths contain parentheses or " (L".
-pub fn target_matches_path(target: &str, path: &str) -> bool {
-    let mut raw = target;
-    if target.ends_with(" bytes)") {
-        if let Some(idx) = target.rfind(" (") {
-            let byte_str = &target[idx + 2..target.len() - 7];
-            if !byte_str.is_empty() && byte_str.chars().all(|c| c.is_ascii_digit()) {
-                raw = &target[..idx];
-            }
-        }
-    } else if target.ends_with(')') {
-        if let Some(idx) = target.rfind(" (L") {
-            // " (L" is 3 bytes, closing ')' is 1 byte at target.len() - 1
-            if target.len() >= idx + 5 {
-                let inside = &target[idx + 3..target.len() - 1];
-                if inside.chars().next().is_some_and(|c| c.is_ascii_digit())
-                    && inside
-                        .chars()
-                        .all(|c| c.is_ascii_digit() || c == '-' || c == '+' || c == 'L')
-                {
-                    raw = &target[..idx];
-                }
-            }
-        }
-    }
-    normalize_path(raw) == path || target == path
-}
-
-/// True when `call` repeats, verbatim, a call the loop-breaker intercepted on the immediately
-/// preceding action. Insisting wins: a worker that re-issues a refused request has decided it
-/// needs it, and refusing again only spends the turn budget (FINDINGS 13.22, 13.25).
-pub fn is_insist(call: &ToolCall, actions: &[ActionEntry]) -> bool {
-    actions.last().is_some_and(|a| {
-        a.summary.starts_with("intercepted")
-            && a.tool == call.name
-            && a.target == extract_action_target(&call.name, &call.arguments)
-    })
-}
-
-/// Evaluates whether a requested tool call is a redundant file read that should
-/// be intercepted by the loop-breaker guard clause.
-///
-/// Deterministic and zero-latency (Invariant III): operates purely on in-memory
-/// working set cache and action history without shelling out or touching disk.
-///
-/// Interception triggers if:
-/// 1. Tool is `read`, and
-/// 2. Target path is already cached in `working_set.files`, and
-/// 3. The requested line range is fully covered by the cached snippet, and
-/// 4. EITHER the immediately preceding action was also a `read` on this path,
-///    OR the agent has read this path 2+ times in the last 4 actions without an intervening `edit` or `write` on this file.
-pub fn should_intercept_redundant_read(
-    call: &ToolCall,
-    working_set: &crate::working_set::WorkingSet,
-    actions: &[ActionEntry],
-) -> Option<String> {
-    if call.name != "read" {
-        return None;
-    }
-    let raw_path = call.arguments.get("path").and_then(|v| v.as_str())?;
-    let path = normalize_path(raw_path);
-    let cached_file = working_set.files.iter().find(|f| f.path == path)?;
-
-    // Parse requested line range
-    let req_start = call.arguments.get("start_line").and_then(|v| {
-        v.as_u64()
-            .map(|n| n as usize)
-            .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
-    });
-    let req_end = call.arguments.get("end_line").and_then(|v| {
-        v.as_u64()
-            .map(|n| n as usize)
-            .or_else(|| v.as_str().and_then(|s| s.parse::<usize>().ok()))
-    });
-
-    // Check if the requested range is already fully covered by the cached snippet.
-    // If the cached content was distilled with middle lines omitted, only an identical
-    // request is guaranteed to be redundant; sub-slices might target omitted lines.
-    let has_omitted = cached_file.content.contains("lines omitted");
-    let is_covered = if has_omitted {
-        (req_start, req_end) == (cached_file.start_line, cached_file.end_line)
-    } else {
-        match (
-            cached_file.start_line,
-            cached_file.end_line,
-            req_start,
-            req_end,
-        ) {
-            // Full file cached without bounds: any slice or full file is covered
-            (None, None, _, _) => true,
-            // Both cached snippet and request have bounds
-            (Some(c_s), Some(c_e), Some(r_s), Some(r_e)) => r_s >= c_s && r_e <= c_e,
-            (Some(c_s), None, Some(r_s), Some(_)) => r_s >= c_s,
-            (None, Some(c_e), Some(_), Some(r_e)) => r_e <= c_e,
-            (Some(c_s), None, Some(r_s), None) => r_s >= c_s,
-            (None, Some(c_e), None, Some(r_e)) => r_e <= c_e,
-            _ => false,
-        }
-    };
-    if !is_covered {
-        return None;
-    }
-
-    // Check if the immediately preceding tool call was also a read on this path
-    let last_was_same_read = actions
-        .last()
-        .map(|a| a.tool == "read" && target_matches_path(&a.target, path))
-        .unwrap_or(false);
-
-    // Or read this path 2+ times in the last 4 actions without an intervening edit or write to this file
-    let file_modified_since = |a: &ActionEntry| {
-        (a.tool == "edit" || a.tool == "write") && target_matches_path(&a.target, path)
-    };
-    let recent_same_reads = actions
-        .iter()
-        .rev()
-        .take(4)
-        .take_while(|a| !file_modified_since(a))
-        .filter(|a| {
-            a.tool == "read"
-                && target_matches_path(&a.target, path)
-                && !a.summary.starts_with("intercepted")
-        })
-        .count();
-
-    if last_was_same_read || recent_same_reads >= 2 {
-        Some(format!(
-            "[Harness Working Memory Guard]: `{path}` is already loaded in your Active Working Set above. \
-             You do not need to re-read it. Propose your exact edit using `edit` or update your plan in `note`."
-        ))
-    } else {
-        None
-    }
-}
-
-/// Evaluates whether a bash inspection command (such as `git diff` or `git status`) is redundant
-/// and should be intercepted by the loop-breaker guard clause.
-///
-/// Prevents the model from entering post-fix amnesiac loops where it repeatedly calls read-only
-/// inspection commands instead of concluding its turn.
-pub fn should_intercept_redundant_bash(
-    call: &ToolCall,
-    actions: &[ActionEntry],
-    _working_set: &crate::working_set::WorkingSet,
-    verification_cmd: &str,
-) -> Option<String> {
-    if call.name != "bash" {
-        return None;
-    }
-    let raw_cmd = call.arguments.get("command").and_then(|v| v.as_str())?;
-    let cmd = raw_cmd.trim();
-
-    // Guard 1: re-running a command that already exited 0, with no edit since, cannot tell the
-    // worker anything new. Only the IDENTICAL command counts: a different test command passing
-    // says nothing about this one. A target the ledger truncated cannot be compared, so it runs.
-    // Truncation is judged by length, not by a trailing `...`: Go's `./...` ends that way too.
-    if is_test_command(cmd, verification_cmd) {
-        let target = extract_action_target("bash", &call.arguments);
-        let truncated = raw_cmd.replace('\n', " ").chars().count() > 60;
-        let already_passed = !truncated
-            && current_phase_actions(actions)
-                .iter()
-                .rev()
-                .take_while(|a| a.tool != "edit" && a.tool != "write")
-                .any(|a| {
-                    a.tool == "bash"
-                        && a.target == target
-                        && !a.is_error
-                        && !a.summary.starts_with("intercepted")
-                });
-        if already_passed {
-            return Some(format!(
-                "[Harness Working Memory Guard]: `{cmd}` already exited 0 and no file has changed since, \
-                 so it would exit 0 again. If your change is complete, stop calling tools to submit it \
-                 for verification."
-            ));
-        }
-    }
-
-    let is_readonly_inspection = matches!(
-        cmd,
-        "git diff" | "git status" | "git status -s" | "git diff --stat" | "git diff HEAD"
-    );
-    if !is_readonly_inspection {
-        return None;
-    }
-
-    // Check if the immediately preceding tool call was an identical bash command
-    let last_was_same = actions
-        .last()
-        .map(|a| a.tool == "bash" && a.target.trim() == cmd)
-        .unwrap_or(false);
-
-    // Or executed 2+ times in recent actions without an intervening edit or write
-    let recent_same = actions
-        .iter()
-        .rev()
-        .take(4)
-        .take_while(|a| a.tool != "edit" && a.tool != "write")
-        .filter(|a| {
-            a.tool == "bash" && a.target.trim() == cmd && !a.summary.starts_with("intercepted")
-        })
-        .count();
-
-    let verified = verification_passed_since_edit(actions, verification_cmd);
-    if last_was_same || recent_same >= 2 || verified {
-        let advice = if verified {
-            format!(
-                "[Harness Working Memory Guard]: `{cmd}` inspection intercepted: the verification \
-                 command `{}` exited 0 after your last edit. If your change is complete, stop calling \
-                 tools to submit it.",
-                verification_cmd.trim()
-            )
-        } else {
-            format!(
-                "[Harness Working Memory Guard]: `{cmd}` was already executed. \
-                 Review your Active Working Set or Last Test Failure above and apply your fix using `edit`."
-            )
-        };
-        Some(advice)
-    } else {
-        None
     }
 }
 
@@ -1277,14 +845,6 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
 /// # Returns
 /// A single-line summary string describing the outcome.
 pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> String {
-    // Check if the tool invocation was intercepted by the working memory guard
-    if content.starts_with("[Harness Working Memory Guard]") {
-        if tool == "bash" {
-            return "intercepted: redundant inspection".to_string();
-        }
-        return "intercepted: already in working set".to_string();
-    }
-
     // Produce deterministic, bounded status summaries per tool category.
     match tool {
         "read" => {
@@ -1384,153 +944,4 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
             first.chars().take(80).collect()
         }
     }
-}
-
-/// Normalizes file paths for working set lookup and tracking.
-/// Strips leading `./` and whitespace to prevent path mismatches across tools.
-pub fn normalize_path(path: &str) -> &str {
-    let p = path.trim();
-    p.strip_prefix("./").unwrap_or(p)
-}
-
-/// Strips line number prefixes (`{:>6}\t`) generated by the `read` tool.
-///
-/// Ensures the raw file snippet content is stored in memory so that subsequent
-/// `apply_edit` string replacements match accurately across single-line and
-/// multi-line blocks, preserving trailing newlines if present.
-pub fn strip_line_number_prefixes(content: &str) -> String {
-    let mut res = content
-        .lines()
-        .map(|line| {
-            if let Some((num, rest)) = line.split_once('\t') {
-                let num_trimmed = num.trim();
-                // Ensure num is non-empty digits so lines beginning with tabs are not stripped
-                if !num_trimmed.is_empty() && num_trimmed.chars().all(|c| c.is_ascii_digit()) {
-                    return rest;
-                }
-            }
-            line
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // Preserve trailing newline if present in input content
-    if content.ends_with('\n') {
-        res.push('\n');
-    }
-    res
-}
-
-/// Determines if a shell command represents a test execution.
-///
-/// Distinguishes test runners (`cargo test`, `pytest`, `jest`, etc.) and the
-/// orchestrator verification command from benign filesystem or VCS operations
-/// (e.g. `cat tests/foo`, `ls tests/`, `git checkout test-branch`, `grep "test"`,
-/// `npm run build`, `rm -rf tmp || true`).
-pub fn is_test_command(cmd: &str, verification_cmd: &str) -> bool {
-    let trimmed = cmd.trim();
-    let trimmed_verif = verification_cmd.trim();
-
-    // Check exact match of the entire command against verification_cmd first
-    // (supporting compound commands like "cargo test && cargo check", while ignoring
-    // dummy shell defaults like "true" or "false").
-    if !trimmed_verif.is_empty()
-        && trimmed_verif != "true"
-        && trimmed_verif != "false"
-        && trimmed == trimmed_verif
-    {
-        return true;
-    }
-
-    // Split compound commands / pipelines into subcommands
-    for part in trimmed.split(&[';', '&', '|'][..]) {
-        let part_trimmed = part.trim();
-        if part_trimmed.is_empty() {
-            continue;
-        }
-
-        // Exact match against orchestrator verification command for each subcommand
-        // (ignoring trivial shell dummies like "true" or "false" which are defaults in test fixtures)
-        if !trimmed_verif.is_empty()
-            && trimmed_verif != "true"
-            && trimmed_verif != "false"
-            && part_trimmed == trimmed_verif
-        {
-            return true;
-        }
-
-        let tokens: Vec<&str> = part_trimmed.split_whitespace().collect();
-        if tokens.is_empty() {
-            continue;
-        }
-
-        // Skip leading environment variable assignments (e.g. `RUST_BACKTRACE=1 cargo test`)
-        let mut idx = 0;
-        while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
-            idx += 1;
-        }
-        if idx >= tokens.len() {
-            continue;
-        }
-
-        // Helper to find the first non-flag argument after a given token index
-        let find_sub = |start_idx: usize| -> Option<(usize, &str)> {
-            let mut i = start_idx;
-            while i < tokens.len() && (tokens[i].starts_with('-') || tokens[i].starts_with('+')) {
-                i += 1;
-            }
-            tokens.get(i).copied().map(|s| (i, s))
-        };
-
-        // Extract the executable name without directory path (e.g. `./venv/bin/pytest` -> `pytest`)
-        let exe = tokens[idx].rsplit('/').next().unwrap_or(tokens[idx]);
-        match exe {
-            "pytest" | "jest" | "vitest" | "rspec" | "ctest" | "nosetests" | "tox" => return true,
-            "cargo" => {
-                if let Some((_, sub)) = find_sub(idx + 1) {
-                    if sub == "test" || sub == "t" {
-                        return true;
-                    }
-                }
-            }
-            "go" => {
-                if let Some((_, sub)) = find_sub(idx + 1) {
-                    if sub == "test" {
-                        return true;
-                    }
-                }
-            }
-            "npm" | "yarn" | "pnpm" | "bun" => {
-                if let Some((sub_idx, sub)) = find_sub(idx + 1) {
-                    if sub == "test" || sub == "t" {
-                        return true;
-                    }
-                    if sub == "run" {
-                        if let Some((_, run_sub)) = find_sub(sub_idx + 1) {
-                            if run_sub == "test" || run_sub == "t" {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            "python" | "python3" => {
-                for w in &tokens[idx + 1..] {
-                    if *w == "unittest" || *w == "pytest" {
-                        return true;
-                    }
-                }
-            }
-            "make"
-                if tokens[idx + 1..]
-                    .iter()
-                    .any(|&t| t == "test" || t == "check") =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    false
 }

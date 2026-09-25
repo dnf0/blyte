@@ -98,7 +98,6 @@ fn runner<'a>(p: &'a Scripted, root: &Path) -> Runner<'a> {
             max_duration: None,
         },
         rollback: false,
-        loop_breaker: true,
         on_event: None,
     }
 }

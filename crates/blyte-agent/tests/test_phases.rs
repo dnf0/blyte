@@ -101,7 +101,6 @@ fn runner<'a>(p: &'a ScriptedProvider, root: &Path, budget: Budget) -> Runner<'a
         root: root.to_path_buf(),
         budget,
         rollback: true,
-        loop_breaker: true,
         on_event: None,
     }
 }
@@ -306,32 +305,4 @@ fn phases_need_a_git_repository() {
         other => panic!("expected an error, got {other:?}"),
     }
     assert!(phases.is_empty());
-}
-
-#[test]
-fn each_phase_start_is_marked_in_the_action_ledger() {
-    let d = repo();
-    let p = ScriptedProvider::new(vec![
-        write("a.txt", "a\n"),
-        done(),
-        write("b.txt", "b\n"),
-        done(),
-    ]);
-    let mut st = State::new("two steps", "");
-    let (outcome, _, _) = runner(&p, d.path(), budget(2)).run_phases(
-        &mut st,
-        &[
-            phase("first", "test -f a.txt"),
-            phase("second", "test -f b.txt"),
-        ],
-    );
-    assert_eq!(outcome, Outcome::Verified);
-    let markers: Vec<&str> = st
-        .runtime
-        .actions
-        .iter()
-        .filter(|a| a.tool == blyte_agent::run::PHASE_MARKER_TOOL)
-        .map(|a| a.target.as_str())
-        .collect();
-    assert_eq!(markers, vec!["first", "second"]);
 }

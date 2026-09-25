@@ -87,7 +87,6 @@ fn run(context: &dyn ContextStrategy) -> (Outcome, RunReport, Vec<Request>) {
             max_duration: None,
         },
         rollback: false,
-        loop_breaker: false,
         on_event: None,
     };
     let (outcome, report) = runner.run(&mut State::new("read the files", "true"));
