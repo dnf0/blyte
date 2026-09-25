@@ -204,8 +204,10 @@ impl<'a> Runner<'a> {
              ## Goal\n{goal}\n\n\
              ## How completion is decided\n\
              Your work is accepted when `{verify}` exits 0. That command is run for you when \
-             you stop calling tools -- you cannot run it as your final step and you do not \
-             decide the verdict. Do not claim to be finished; simply stop when you believe the \
+             you stop calling tools, and you do not decide the verdict. A failure costs a full \
+             rerun after your fix, so before you stop, run its quick parts yourself \
+             (formatting, lint) together with the tests that cover your change; leave the slow \
+             full run to it. Do not claim to be finished; simply stop when you believe the \
              command will pass, and you will be told.\n\n\
              ## Environment\n{where_}\nAvailable: {bins}\n\n\
              ## Working efficiently\n\
