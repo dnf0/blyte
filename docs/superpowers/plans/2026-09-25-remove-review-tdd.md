@@ -27,29 +27,29 @@
 
 **Files:** `crates/blyte-agent/src/{run.rs,state.rs}`, `crates/blyte-cli/src/{cli.rs,task_runner.rs,report.rs,lib.rs,tdd.rs,repl.rs}`, and tests.
 
-- [ ] **Step 1: Agent (`run.rs`, `state.rs`).**
+- [x] **Step 1: Agent (`run.rs`, `state.rs`).**
   - Delete the review: `fn review`, `REVIEW_SYSTEM`, `MAX_REVIEW_ROUNDS`, `ReviewVerdict`, `ReviewFinding`, the review block in `run_until` (the gate-pass path then simply returns `Outcome::Verified`), and `RunReport.reviews` / `review_rejections`.
   - Delete `Orchestrator.review` (with its doc) from `state.rs`, and its initialisation in `State::new`.
   - Delete multi-phase runs: `pub struct Phase`, `run_phases`, `PhaseResult` (or whatever `run_phases` returns per phase), `commit_checkpoint`, and the scope-only and protect gate logic, with any helpers used only by them.
   - Keep `checkpoint` and `reset_to`: `run_until` uses them for rollback.
-- [ ] **Step 2: CLI.**
+- [x] **Step 2: CLI.**
   - Delete the `--tdd` and `--review` flags, and the `TaskConfig.tdd` / `review` fields and their `From<&Cli>` lines.
   - In `task_runner.rs`, delete `tdd_phases`, the `phases` computation, `state.orchestrator.review = ...`, and the `run_phases` branch. The run is always `runner.run(state)`.
   - Delete `crates/blyte-cli/src/tdd.rs` and `pub mod tdd;`.
   - In `report.rs`, delete `reviews`, `review_rejections`, `phases`, `PhaseRecord`, `with_phases` and anything only they use.
   - `gate_source` becomes `"user"` when `--gate` is set and `"none"` otherwise, and `gated` is `gate.is_some_and(non-empty)`.
   - Remove the removed fields from the REPL's `TaskConfig` literal.
-- [ ] **Step 3: Tests.**
+- [x] **Step 3: Tests.**
   - Delete `crates/blyte-agent/tests/test_review_gate.rs`, `crates/blyte-agent/tests/test_phases.rs` and `crates/blyte-cli/tests/test_tdd_phases.rs`.
   - In `test_run_report.rs`, `test_task_runner.rs`, `test_cli_dispatch.rs` and any other file that no longer compiles, remove the deleted fields and flags from literals and assertions, and delete tests whose only subject was review or TDD.
-- [ ] **Step 4: Check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Then:
+- [x] **Step 4: Check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Then:
 
 ```bash
 git grep -n -E "review_rejections|REVIEW_SYSTEM|MAX_REVIEW_ROUNDS|fn review\b|orchestrator\.review|run_phases|struct Phase\b|PhaseRecord|tdd_phases|--tdd|--review|commit_checkpoint|scope_only" -- crates/
 ```
 
   Expected: no output.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add -A crates/
