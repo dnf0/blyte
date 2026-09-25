@@ -22,7 +22,7 @@
 
 **Files:** `crates/blyte-agent/src/{tools.rs,run.rs,state.rs}`, `crates/blyte-agent/examples/solve.rs`, `crates/blyte-cli/src/{repl.rs,report.rs}` (only if they reference the removed items), and tests.
 
-- [ ] **Step 1: Agent.**
+- [x] **Step 1: Agent.**
   - In `tools.rs`, delete the `note` `ToolSpec` from `specs()`.
   - In `run.rs`:
     - delete the `## Working notes` section of the system prompt (the paragraph that starts `Use \`note\` to record what you learn`), leaving the other sections as they are;
@@ -30,21 +30,21 @@
     - delete the `"note" =>` arms of `extract_action_target` and `extract_action_summary`. A `note` call now falls through to their generic arms, which must still compile and behave for unknown tools.
   - In `state.rs`, delete `pub struct Agent`, the `State.agent` field, its initialisation in `State::new`, `apply_agent_patch`, and docs that describe the Agent region or worker-owned patches. Keep `Orchestrator` and `Runtime`, and update the `State` doc comment to describe two regions.
   - In `examples/solve.rs`, remove the line that prints `state.agent.fields`.
-- [ ] **Step 2: CLI.** If `repl.rs`'s `/state` output, `report.rs`, or anything else references `state.agent`, `apply_agent_patch` or note keys (e.g. `agent_note_keys`), remove those references and any report field that only carried them.
-- [ ] **Step 3: Tests.**
+- [x] **Step 2: CLI.** If `repl.rs`'s `/state` output, `report.rs`, or anything else references `state.agent`, `apply_agent_patch` or note keys (e.g. `agent_note_keys`), remove those references and any report field that only carried them.
+- [x] **Step 3: Tests.**
   - Delete `crates/blyte-agent/tests/test_state_authority.rs`: its subject is the Agent region's patch authority.
   - In `test_state.rs`, delete the test that applies an agent patch.
   - In `test_run.rs`, delete the test that drives the `note` tool.
   - In `test_action_extraction.rs`, delete the `note` cases.
   - Fix any other compile errors minimally, and list them.
-- [ ] **Step 4: Full check.** Run the full check (with `CARGO_BUILD_JOBS=4`). Expected: clean, 0 failed. Then:
+- [x] **Step 4: Full check.** Run the full check (with `CARGO_BUILD_JOBS=4`). Expected: clean, 0 failed. Then:
 
 ```bash
 git grep -n -E '"note"|apply_agent_patch|state\.agent|struct Agent\b|Working notes|agent_note_keys' -- crates/
 ```
 
   Expected: no output.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add -A crates/
@@ -68,11 +68,11 @@ git commit --no-gpg-sign -m "refactor!: remove the note tool and the Agent state
 3. **Dependencies.** For each `[dependencies]` and `[dev-dependencies]` entry of each crate, and each `[workspace.dependencies]` entry, check with `git grep -n -w "<crate_name_with_underscores>" -- crates/<crate>` (and for macros, e.g. `serde::`, `thiserror::`, `#[derive(Error`). Remove any the crate does not use. Remove workspace dependencies no crate uses.
 4. **Stale docs in code.** Delete module or item docs that describe removed features (StateOnly, working set, loop-breaker, daemon, MCP, fold notes, cost cap, journal, notes/Agent region). Do not reword docs of things that stay.
 
-- [ ] **Step 1: Find candidates.** List every `pub fn`, `pub struct`, `pub enum`, `pub const` and `pub mod` in the three crates, and every field of `State`, `Orchestrator`, `Runtime`, `RunReport` and `TaskConfig`. Check each against rules 1–2. Record the dead ones.
-- [ ] **Step 2: Delete** the dead items, their writes, their tests and the stale docs (rules 1, 2 and 4).
-- [ ] **Step 3: Dependencies** (rule 3).
-- [ ] **Step 4: Full check.** Run the full check (with `CARGO_BUILD_JOBS=4`). Expected: clean, 0 failed. Run `cargo run --release -p blyte-agent --example harness_bench -- --turns 200` (local only), and report its output and `find crates -name '*.rs' | xargs wc -l | tail -1`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Find candidates.** List every `pub fn`, `pub struct`, `pub enum`, `pub const` and `pub mod` in the three crates, and every field of `State`, `Orchestrator`, `Runtime`, `RunReport` and `TaskConfig`. Check each against rules 1–2. Record the dead ones.
+- [x] **Step 2: Delete** the dead items, their writes, their tests and the stale docs (rules 1, 2 and 4).
+- [x] **Step 3: Dependencies** (rule 3).
+- [x] **Step 4: Full check.** Run the full check (with `CARGO_BUILD_JOBS=4`). Expected: clean, 0 failed. Run `cargo run --release -p blyte-agent --example harness_bench -- --turns 200` (local only), and report its output and `find crates -name '*.rs' | xargs wc -l | tail -1`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add -A Cargo.toml crates/
