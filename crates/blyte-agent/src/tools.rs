@@ -466,6 +466,17 @@ fn execute_unbounded(
         },
         "glob" => {
             let pattern = s("pattern");
+            // A local workspace expands in-process; other executors, and patterns the native
+            // expansion does not emulate, use the shell as before.
+            if fs.is_local() {
+                if let Some(hits) = crate::search::glob_paths(root, &pattern, MAX_MATCHES) {
+                    return if hits.is_empty() {
+                        ToolOutcome::ok(format!("no files match {pattern}"))
+                    } else {
+                        ToolOutcome::ok(format!("{} file(s):\n{}", hits.len(), hits.join("\n")))
+                    };
+                }
+            }
             // Delegated to the shell rather than a glob crate so that `**`, brace expansion and
             // character classes behave exactly as the model expects from a terminal.
             // When bash has globstar (Linux / bash 4+), use it. On platforms where bash lacks

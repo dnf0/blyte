@@ -440,14 +440,14 @@ impl blyte_agent::fs::Fs for NotLocal {
 
 #[test]
 fn search_tools_also_go_through_the_seam() {
-    // glob and grep shell out too. Routing bash but not these would mean a containerised run
-    // searched the host's files while running the container's tests.
+    // A container's files are not local (`Fs::is_local` is false), so glob, like grep, must go
+    // through its executor. A local workspace is searched in-process instead (test_native_glob).
     let d = ws();
     let fake = FakeShell::default();
     execute(
         d.path(),
         &fake,
-        &LocalFs,
+        &NotLocal,
         "glob",
         &json!({"pattern": "**/*.rs"}),
     );
