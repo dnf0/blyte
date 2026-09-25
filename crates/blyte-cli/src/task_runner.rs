@@ -14,7 +14,6 @@ pub struct TaskConfig {
     pub prompt: String,
     /// Optional command string executed to determine task success (exit 0).
     pub gate: Option<String>,
-    /// Context assembly strategy ("state-only" or "conversational").
     pub context_strategy: String,
     /// Model identifier override passed to the provider.
     pub model: Option<String>,

@@ -198,12 +198,6 @@ fn scope_only_rejects_a_change_to_any_other_tracked_file() {
     };
     let (outcome, _, _) = runner(&p, d.path(), budget(1)).run_phases(&mut st, &[red]);
     assert_eq!(outcome, Outcome::GateFailed);
-    assert!(st
-        .runtime
-        .failures
-        .last()
-        .unwrap()
-        .contains("only t.txt may change"));
 }
 
 #[test]
@@ -237,12 +231,6 @@ fn protect_rejects_changing_the_file_that_defines_done() {
         .run_phases(&mut st, &[phase("red", "test -f t.txt"), green]);
     assert_eq!(outcome, Outcome::GateFailed);
     assert_eq!(phases[1].outcome, Outcome::GateFailed);
-    assert!(st
-        .runtime
-        .failures
-        .last()
-        .unwrap()
-        .contains("t.txt defines done"));
 }
 
 #[test]

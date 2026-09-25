@@ -298,11 +298,7 @@ impl<'a> Runner<'a> {
              ## Working efficiently\n\
              Independent reads, searches and commands can be issued as several tool calls in one \
              turn: they run in order and you see every result together. Batch them whenever one \
-             does not depend on another's result; every turn you save is a full model call.\n\n\
-             ## Working notes\n\
-             Use `note` to record what you learn: the cause once you find it, what you ruled \
-             out, which files matter. Your notes persist across turns and are the only thing \
-             guaranteed to.\n",
+             does not depend on another's result; every turn you save is a full model call.\n",
             goal = state.orchestrator.goal,
             verify = state.orchestrator.verification_cmd,
             where_ = self.shell.describe(),
@@ -401,9 +397,6 @@ impl<'a> Runner<'a> {
         Some(feedback)
     }
 
-    /// Ask the worker what to keep from messages `first..=last`, which are about to be folded.
-    /// `prefix` is the previous request's messages plus everything since, and the system prompt
-    /// and tools are the loop's own, so all but the newest turn is read from cache. Any failure
     fn checkpoint(&self) -> Option<String> {
         let out = self
             .shell
@@ -623,21 +616,13 @@ impl<'a> Runner<'a> {
                 for call in &resp.tool_calls {
                     report.tool_calls += 1;
 
-                    // `note` is the loop's, not the tool layer's: it mutates state, and only
-                    // the agent region can be reached from here.
-                    let outcome = if call.name == "note" {
-                        let patch = call.arguments.get("patch").cloned().unwrap_or_default();
-                        state.apply_agent_patch(&patch);
-                        crate::tools::ToolOutcome {
-                            content: format!(
-                                "recorded; your state now has {} field(s)",
-                                state.agent.fields.len()
-                            ),
-                            is_error: false,
-                        }
-                    } else {
-                        tools::execute(&self.root, self.shell, self.fs, &call.name, &call.arguments)
-                    };
+                    let outcome = tools::execute(
+                        &self.root,
+                        self.shell,
+                        self.fs,
+                        &call.name,
+                        &call.arguments,
+                    );
 
                     let summary = outcome
                         .content
@@ -684,7 +669,6 @@ impl<'a> Runner<'a> {
 
             // --- the model stopped calling tools: the runtime decides -----------------------
             report.gate_attempts += 1;
-            state.runtime.attempts += 1;
             let (passed, output) = self.run_gate(state);
             self.emit(Event::Gate {
                 attempt: report.gate_attempts,
@@ -705,7 +689,6 @@ impl<'a> Runner<'a> {
                 return (Outcome::Verified, report);
             }
 
-            state.runtime.failures.push(output.clone());
             if self.rollback {
                 if let Some(base) = &baseline {
                     self.reset_to(base);
@@ -815,12 +798,6 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
                 return format!("pattern '{pattern}'");
             }
         }
-        "note" => {
-            // Note patches are summarized by the number of state keys modified.
-            if let Some(patch) = args.get("patch").and_then(|v| v.as_object()) {
-                return format!("patch ({} keys)", patch.len());
-            }
-        }
         _ => {}
     }
 
@@ -927,15 +904,6 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
                 // Count matching occurrences found in content search.
                 let count = content.lines().filter(|l| !l.trim().is_empty()).count();
                 format!("{count} matches found")
-            }
-        }
-        "note" => {
-            // Surface the first line of the note confirmation message.
-            let first = content.lines().next().unwrap_or("recorded");
-            if first.is_empty() {
-                "recorded".to_string()
-            } else {
-                first.to_string()
             }
         }
         _ => {

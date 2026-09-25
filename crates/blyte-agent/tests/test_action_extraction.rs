@@ -172,29 +172,6 @@ fn test_grep_target_and_summary() {
 }
 
 #[test]
-fn test_note_target_and_summary() {
-    // 7. note: key count, status string
-    let target = extract_action_target(
-        "note",
-        &json!({"patch": {"findings": "root cause", "fixed": true}}),
-    );
-    assert_eq!(target, "patch (2 keys)");
-
-    let target_empty = extract_action_target("note", &json!({"patch": {}}));
-    assert_eq!(target_empty, "patch (0 keys)");
-
-    let summary = extract_action_summary(
-        "note",
-        "recorded; your state now has 3 field(s)\nmore info",
-        false,
-    );
-    assert_eq!(summary, "recorded; your state now has 3 field(s)");
-
-    let summary_empty = extract_action_summary("note", "", false);
-    assert_eq!(summary_empty, "recorded");
-}
-
-#[test]
 fn test_fallback_target_and_summary() {
     // Fallback target: first string argument value found or tool name
     let target_string_arg = extract_action_target("custom_tool", &json!({"query": "SELECT 1"}));

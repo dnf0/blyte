@@ -72,7 +72,6 @@ pub struct RunRecord {
     /// Per-call usage (see `blyte_agent::run::TurnUsage`).
     pub turn_usage: Vec<blyte_agent::run::TurnUsage>,
     pub usage: UsageRecord,
-    pub agent_note_keys: Vec<String>,
 }
 
 impl RunRecord {
@@ -109,7 +108,6 @@ impl RunRecord {
             fold_budget: config.fold_budget,
             turn_usage: Vec::new(),
             usage: UsageRecord::default(),
-            agent_note_keys: Vec::new(),
         }
     }
 
@@ -131,8 +129,6 @@ impl RunRecord {
         elapsed: Duration,
     ) -> Self {
         let (outcome_name, error) = outcome_name(outcome);
-        let mut agent_note_keys: Vec<String> = state.agent.fields.keys().cloned().collect();
-        agent_note_keys.sort();
         Self {
             outcome: outcome_name.into(),
             error,
@@ -153,7 +149,6 @@ impl RunRecord {
                 output: report.usage.output,
                 thinking: report.usage.thinking,
             },
-            agent_note_keys,
             ..Self::base(config, elapsed)
         }
     }

@@ -41,7 +41,6 @@ pub struct ReplSession {
     pub max_gates: usize,
     pub rollback: bool,
     pub state: blyte_agent::state::State,
-    pub history: Vec<blyte_provider::Message>,
 }
 
 impl ReplSession {
@@ -65,7 +64,6 @@ impl ReplSession {
             max_gates: config.max_gates,
             rollback: config.rollback,
             state,
-            history: Vec::new(),
         }
     }
 }
@@ -228,7 +226,7 @@ pub fn handle_repl_command<W: Write>(
                 .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
-                    "  /state        - Inspect SKILL.state (Orchestrator, Runtime, Agent)"
+                    "  /state        - Inspect SKILL.state (Orchestrator, Runtime)"
                 )
                 .map_err(|e| e.to_string())?;
                 writeln!(
@@ -382,11 +380,6 @@ pub fn handle_repl_command<W: Write>(
                     .map_err(|e| e.to_string())?;
                 writeln!(writer, "Runtime:\n{}", rt).map_err(|e| e.to_string())?;
 
-                // Render agent domain state: epistemic ledger notes and hypothesis scratchpad
-                let agent = serde_json::to_string_pretty(&session.state.agent)
-                    .map_err(|e| e.to_string())?;
-                writeln!(writer, "Agent:\n{}", agent).map_err(|e| e.to_string())?;
-
                 Ok(ReplControl::Handled)
             }
             "/diff" => {
@@ -429,9 +422,7 @@ pub fn handle_repl_command<W: Write>(
                 Ok(ReplControl::Handled)
             }
             "/clear" => {
-                session.history.clear();
                 session.state.runtime = blyte_agent::state::Runtime::default();
-                session.state.agent = blyte_agent::state::Agent::default();
                 writeln!(writer, "Session history cleared and working state reset.")
                     .map_err(|e| e.to_string())?;
                 Ok(ReplControl::Handled)
@@ -478,10 +469,6 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
             ReplControl::SubmitPrompt(prompt) => {
                 writeln!(writer, "Dispatching turn for prompt: {}", prompt)
                     .map_err(|e| e.to_string())?;
-                session
-                    .history
-                    .push(blyte_provider::Message::User(prompt.clone()));
-                session.state.runtime.attempts += 1;
                 session.state.orchestrator.goal = prompt.clone();
                 if let Some(ref g) = session.gate {
                     session.state.orchestrator.verification_cmd = g.clone();

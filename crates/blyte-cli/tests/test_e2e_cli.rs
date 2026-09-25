@@ -72,5 +72,4 @@ fn test_cli_interactive_repl_stdin_driving() {
     assert!(stdout.contains("=== Blyte SKILL.state ==="));
     assert!(stdout.contains("Orchestrator:"));
     assert!(stdout.contains("Runtime:"));
-    assert!(stdout.contains("Agent:"));
 }

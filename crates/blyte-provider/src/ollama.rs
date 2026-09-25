@@ -135,11 +135,6 @@ impl Ollama {
         self.api_key.as_deref()
     }
 
-    /// Returns the active model identifier without provider prefix.
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
     /// Serializes a normalised [`Request`] into Ollama's `POST /chat` JSON body.
     ///
     /// # Parameters
