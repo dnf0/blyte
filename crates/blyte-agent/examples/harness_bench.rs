@@ -3,7 +3,7 @@
 //!
 //!   cargo run --release -p blyte-agent --example harness_bench -- [--turns N] [--image IMG] [--out FILE] [--legacy]
 //!
-//! Local mode runs tools on a temporary copy of this repository's `crates/`. With `--image`, the
+//! Local mode runs tools on a temporary copy of the git-tracked files in this repository's `crates/`. With `--image`, the
 //! copy is bind-mounted at /work in a fresh container of IMG, removed afterwards.
 
 use std::collections::BTreeMap;
@@ -81,16 +81,22 @@ impl Provider for Replay {
     }
 }
 
-fn copy_dir(src: &Path, dst: &Path) {
-    std::fs::create_dir_all(dst).unwrap();
-    for e in std::fs::read_dir(src).unwrap() {
-        let e = e.unwrap();
-        let (s, d) = (e.path(), dst.join(e.file_name()));
-        if e.file_type().unwrap().is_dir() {
-            if e.file_name() != "target" {
-                copy_dir(&s, &d);
-            }
-        } else {
+/// Copy the git-tracked files under `repo` that start with `prefix`, so the fixture is the same
+/// for every checkout: untracked leftovers (logs, build output) doubled the tree once and made
+/// full-tree searches look slower than they were.
+fn copy_tracked(repo: &Path, prefix: &str, dst: &Path) {
+    let out = Command::new("git")
+        .args(["ls-files", "-z", "--", prefix])
+        .current_dir(repo)
+        .output()
+        .expect("git ls-files");
+    for rel in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+        let rel = String::from_utf8_lossy(rel);
+        let (s, d) = (repo.join(rel.as_ref()), dst.join(rel.as_ref()));
+        if let Some(parent) = d.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        if s.is_file() {
             std::fs::copy(&s, &d).unwrap();
         }
     }
@@ -124,8 +130,8 @@ fn main() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let tmp = tempfile::tempdir().unwrap();
     let fixture = tmp.path().join("work");
-    copy_dir(&repo.join("crates"), &fixture.join("crates"));
-    std::fs::copy(repo.join("Cargo.toml"), fixture.join("Cargo.toml")).unwrap();
+    copy_tracked(&repo, "crates", &fixture);
+    copy_tracked(&repo, "Cargo.toml", &fixture);
     std::fs::create_dir_all(fixture.join("scratch")).unwrap();
     let git = |a: &[&str]| {
         Command::new("git")
