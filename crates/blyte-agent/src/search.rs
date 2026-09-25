@@ -78,13 +78,9 @@ pub fn grep_lines(
     Ok(out)
 }
 
-/// Paths matching a shell glob, as bash expands it with `globstar`, `dotglob` and `nullglob`,
-/// relative to `root`: `**` crosses directories, `*` matches dotfiles, directories match too, and
-/// symlinked directories are not followed. `None` for patterns this does not emulate exactly
-/// (absolute, `.` or `..` components, or a trailing `/`); callers send those to the shell.
-/// Sorted bytewise, at most `max`. No process is spawned: a shell glob cost 26 ms locally and
-/// 84 ms in a container (harness_bench).
-pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>> {
+/// The glob matcher shared by local and container globs. `None` for patterns not handled here
+/// (absolute, `.` or `..` components, a trailing `/`); callers send those to the shell.
+fn glob_matcher(pattern: &str) -> Option<globset::GlobMatcher> {
     if pattern.is_empty()
         || pattern.starts_with('/')
         || pattern.ends_with('/')
@@ -92,7 +88,27 @@ pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>>
     {
         return None;
     }
-    let is_meta = |c: &str| c.contains(['*', '?', '[', '{']);
+    Some(
+        globset::GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .backslash_escape(true)
+            .build()
+            .ok()?
+            .compile_matcher(),
+    )
+}
+
+fn is_meta(s: &str) -> bool {
+    s.contains(['*', '?', '[', '{'])
+}
+
+/// Paths under `root` matching a glob, fd/ripgrep style: `.gitignore`d files (in a git
+/// repository), `.ignore` rules and `.git` are skipped; other dotfiles are kept; `**` crosses
+/// directories; directories match too; symlinks are not followed. Sorted bytewise, at most `max`.
+/// `None` for patterns not handled here. A bash `**` walked `target/` and `node_modules`: 273 ms
+/// for `**/*.rs` at a Rust repository's root, and results full of build artefacts.
+pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>> {
+    let matcher = glob_matcher(pattern)?;
     if !is_meta(pattern) {
         return Some(if root.join(pattern).exists() {
             vec![pattern.to_string()]
@@ -100,12 +116,6 @@ pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>>
             Vec::new()
         });
     }
-    let matcher = globset::GlobBuilder::new(pattern)
-        .literal_separator(true)
-        .backslash_escape(true)
-        .build()
-        .ok()?
-        .compile_matcher();
     // Walk from the pattern's literal leading directories, only as deep as it can reach.
     let comps: Vec<&str> = pattern.split('/').collect();
     let lit = comps[..comps.len() - 1]
@@ -119,9 +129,9 @@ pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>>
         return Some(Vec::new());
     }
     let mut walk = WalkBuilder::new(&base);
-    walk.standard_filters(false)
-        .hidden(false)
-        .follow_links(false);
+    walk.hidden(false)
+        .follow_links(false)
+        .filter_entry(|e| e.file_name() != ".git");
     if !pattern.contains("**") {
         walk.max_depth(Some(comps.len() - lit));
     }
@@ -137,6 +147,32 @@ pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>>
         })
         .collect();
     hits.sort();
+    hits.truncate(max);
+    Some(hits)
+}
+
+/// Paths from a newline-separated file listing (e.g. `git ls-files`) matching a glob, with the
+/// listed files' ancestor directories as candidates too, so `src/*` still shows `src/deep`. The
+/// container route: one command lists the repository, matching happens here with the same rules
+/// as [`glob_paths`]. Sorted bytewise, at most `max`. `None` for patterns not handled here.
+pub fn glob_filter(listing: &str, pattern: &str, max: usize) -> Option<Vec<String>> {
+    let matcher = glob_matcher(pattern)?;
+    let mut candidates = std::collections::BTreeSet::new();
+    for line in listing.lines().map(str::trim_end).filter(|l| !l.is_empty()) {
+        let mut p = Path::new(line);
+        candidates.insert(line.to_string());
+        while let Some(parent) = p.parent() {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            candidates.insert(parent.to_string_lossy().into_owned());
+            p = parent;
+        }
+    }
+    let mut hits: Vec<String> = candidates
+        .into_iter()
+        .filter(|c| matcher.is_match(Path::new(c)))
+        .collect();
     hits.truncate(max);
     Some(hits)
 }

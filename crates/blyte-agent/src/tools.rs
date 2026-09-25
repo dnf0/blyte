@@ -276,7 +276,8 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "glob".into(),
-            description: "Find files by glob pattern, e.g. `src/**/*.rs`. Fast, and the right \
+            description: "Find files by glob pattern, e.g. `src/**/*.rs`. Respects .gitignore; \
+                          `.git` is skipped. Fast, and the right \
                           first move when you do not know where something lives."
                 .into(),
             parameters: json!({"type":"object","properties":{
@@ -466,15 +467,32 @@ fn execute_unbounded(
         },
         "glob" => {
             let pattern = s("pattern");
-            // A local workspace expands in-process; other executors, and patterns the native
-            // expansion does not emulate, use the shell as before.
+            // .gitignore-aware, fd/ripgrep style. A local workspace expands in-process; a
+            // container lists its repository with one `git ls-files` and matches here. Outside a
+            // git repository, or for patterns not handled here, the shell glob below runs as before.
+            let outcome = |hits: Vec<String>| {
+                if hits.is_empty() {
+                    ToolOutcome::ok(format!("no files match {pattern}"))
+                } else {
+                    ToolOutcome::ok(format!("{} file(s):\n{}", hits.len(), hits.join("\n")))
+                }
+            };
             if fs.is_local() {
                 if let Some(hits) = crate::search::glob_paths(root, &pattern, MAX_MATCHES) {
-                    return if hits.is_empty() {
-                        ToolOutcome::ok(format!("no files match {pattern}"))
-                    } else {
-                        ToolOutcome::ok(format!("{} file(s):\n{}", hits.len(), hits.join("\n")))
-                    };
+                    return outcome(hits);
+                }
+            } else if let Ok(o) = shell.exec(
+                "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+                 git -c core.quotePath=off ls-files -co --exclude-standard; \
+                 else echo __BLYTE_NO_GIT__; fi",
+                root,
+                COMMAND_TIMEOUT,
+            ) {
+                if o.exit_code == 0 && !o.stdout.starts_with("__BLYTE_NO_GIT__") {
+                    if let Some(hits) = crate::search::glob_filter(&o.stdout, &pattern, MAX_MATCHES)
+                    {
+                        return outcome(hits);
+                    }
                 }
             }
             // Delegated to the shell rather than a glob crate so that `**`, brace expansion and
