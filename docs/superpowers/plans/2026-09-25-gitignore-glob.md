@@ -30,7 +30,7 @@
 - Replace: `crates/blyte-agent/tests/test_native_glob.rs`
 - Modify (one assertion): `crates/blyte-agent/tests/test_tools.rs`
 
-- [ ] **Step 1: Replace the glob tests.** Overwrite `crates/blyte-agent/tests/test_native_glob.rs` with:
+- [x] **Step 1: Replace the glob tests.** Overwrite `crates/blyte-agent/tests/test_native_glob.rs` with:
 
 ```rust
 //! `glob` follows fd/ripgrep conventions: `.gitignore`d files and `.git` are skipped, other
@@ -163,9 +163,9 @@ fn outside_a_git_repository_the_container_route_falls_back_to_the_shell() {
 }
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_native_glob`. Expected: a compile error, because `glob_filter` does not exist.
+- [x] **Step 2: Run to confirm they fail.** Run: `cargo test -p blyte-agent --test test_native_glob`. Expected: a compile error, because `glob_filter` does not exist.
 
-- [ ] **Step 3: Search functions.** In `crates/blyte-agent/src/search.rs`:
+- [x] **Step 3: Search functions.** In `crates/blyte-agent/src/search.rs`:
   1. Replace the whole `glob_paths` function, including its doc comment, with:
 
 ```rust
@@ -271,7 +271,7 @@ pub fn glob_filter(listing: &str, pattern: &str, max: usize) -> Option<Vec<Strin
 
   (`BTreeSet` iteration is already bytewise-sorted, so `glob_filter` needs no separate sort.)
 
-- [ ] **Step 4: The `glob` tool.** In `crates/blyte-agent/src/tools.rs`:
+- [x] **Step 4: The `glob` tool.** In `crates/blyte-agent/src/tools.rs`:
   1. In `specs()`, change the `glob` tool's description to: `"Find files by glob pattern, e.g. `src/**/*.rs`. Respects .gitignore; `.git` is skipped. Fast, and the right first move when you do not know where something lives."` (as a Rust string: keep the existing `\` line-continuation style).
   2. In the `"glob" =>` arm, replace the block that begins `// A local workspace expands in-process;` (the `if fs.is_local() { ... }` block added by #64) with:
 
@@ -306,13 +306,13 @@ pub fn glob_filter(listing: &str, pattern: &str, max: usize) -> Option<Vec<Strin
             }
 ```
 
-- [ ] **Step 5: The seam test.** In `crates/blyte-agent/tests/test_tools.rs`, in `search_tools_also_go_through_the_seam`, change the assertion `assert!(seen.iter().any(|c| c.contains("*.rs")));` to `assert!(seen.iter().any(|c| c.contains("ls-files") || c.contains("*.rs")));` and add a comment above it: `// glob lists a container's repository with git ls-files (or falls back to a shell glob).` This is the only permitted edit to that file.
+- [x] **Step 5: The seam test.** In `crates/blyte-agent/tests/test_tools.rs`, in `search_tools_also_go_through_the_seam`, change the assertion `assert!(seen.iter().any(|c| c.contains("*.rs")));` to `assert!(seen.iter().any(|c| c.contains("ls-files") || c.contains("*.rs")));` and add a comment above it: `// glob lists a container's repository with git ls-files (or falls back to a shell glob).` This is the only permitted edit to that file.
 
-- [ ] **Step 6: Run the tests.** Run: `cargo test -p blyte-agent --test test_native_glob --test test_tools --test test_native_grep`. Expected: all pass (6 in `test_native_glob`). If `ignored_files_and_dot_git_are_skipped_and_dotfiles_kept` fails, report the actual vectors verbatim and stop.
+- [x] **Step 6: Run the tests.** Run: `cargo test -p blyte-agent --test test_native_glob --test test_tools --test test_native_grep`. Expected: all pass (6 in `test_native_glob`). If `ignored_files_and_dot_git_are_skipped_and_dotfiles_kept` fails, report the actual vectors verbatim and stop.
 
-- [ ] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
+- [x] **Step 7: Full check.** Run: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`. Expected: clean, 0 failed. Run `cargo fmt --all` first if formatting differs.
 
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
 
 ```bash
 git add crates/
