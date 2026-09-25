@@ -36,6 +36,8 @@ fn outcome_name(outcome: &Outcome) -> (&'static str, Option<String>) {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RunRecord {
     pub schema_version: u32,
+    /// The commit this blyte was built from (`build.rs`), or `unknown`.
+    pub harness_build: String,
     pub outcome: String,
     pub error: Option<String>,
     pub model_requested: Option<String>,
@@ -67,6 +69,7 @@ impl RunRecord {
         let gated = config.gate.as_deref().is_some_and(|g| !g.trim().is_empty());
         Self {
             schema_version: SCHEMA_VERSION,
+            harness_build: env!("BLYTE_BUILD").into(),
             outcome: "error".into(),
             error: None,
             model_requested: config.model.clone(),

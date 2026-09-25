@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug, PartialEq)]
 #[command(
     name = "blyte",
-    version = "0.1.0",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BLYTE_BUILD"), ")"),
     about = "Blyte: Autonomous agent harness with deterministic state and verification gates"
 )]
 pub struct Cli {
