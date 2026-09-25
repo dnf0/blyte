@@ -12,7 +12,7 @@ pub struct Cli {
     #[arg(index = 1)]
     pub prompt: Option<String>,
 
-    /// Verification gate command (e.g. 'pytest', 'cargo test')
+    /// Verification gate command (e.g. 'pytest', 'cargo test'). Several steps may be given one per line: every step runs and all failures are reported together.
     #[arg(short, long)]
     pub gate: Option<String>,
 

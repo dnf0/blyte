@@ -213,19 +213,46 @@ impl<'a> Runner<'a> {
              turn: they run in order and you see every result together. Batch them whenever one \
              does not depend on another's result; every turn you save is a full model call.\n",
             goal = state.orchestrator.goal,
-            verify = state.orchestrator.verification_cmd,
+            verify = gate_steps(&state.orchestrator.verification_cmd).join(" && "),
             where_ = self.shell.describe(),
             bins = bins,
         )
     }
 
     /// Run the verification command. Runtime-only: nothing in the tool surface reaches this.
+    ///
+    /// A gate of several lines is several steps. Every step runs even after one fails, and all
+    /// failures come back in one message: with `fmt && clippy && test` a shadow run found the
+    /// clippy failure only after fixing the fmt one, a whole extra gate round of 7 turns.
     fn run_gate(&self, state: &State) -> (bool, String) {
-        match self.shell.exec(
-            &state.orchestrator.verification_cmd,
-            &self.root,
-            Duration::from_secs(1800),
-        ) {
+        let steps = gate_steps(&state.orchestrator.verification_cmd);
+        if steps.len() <= 1 {
+            return self.run_step(&state.orchestrator.verification_cmd);
+        }
+        let failures: Vec<String> = steps
+            .iter()
+            .filter_map(|step| {
+                let (passed, output) = self.run_step(step);
+                (!passed).then(|| format!("$ {step}\n{output}"))
+            })
+            .collect();
+        if failures.is_empty() {
+            return (true, "exit 0".into());
+        }
+        let body = tools::bound_output(&failures.join("\n\n"));
+        (
+            false,
+            format!(
+                "{} of {} steps failed\n\n{body}",
+                failures.len(),
+                steps.len()
+            ),
+        )
+    }
+
+    /// Run one gate command: exit status and its bounded output.
+    fn run_step(&self, cmd: &str) -> (bool, String) {
+        match self.shell.exec(cmd, &self.root, Duration::from_secs(1800)) {
             Ok(o) => {
                 let body = tools::bound_output(o.merged().trim_end());
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
@@ -454,6 +481,14 @@ impl<'a> Runner<'a> {
         }
         (Outcome::BudgetExhausted, report)
     }
+}
+
+/// The steps of a gate: its non-blank lines, trimmed.
+fn gate_steps(gate: &str) -> Vec<&str> {
+    gate.lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Extracts a concise, human-readable target descriptor from a tool call's arguments.
