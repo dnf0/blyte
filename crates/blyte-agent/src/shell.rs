@@ -19,7 +19,7 @@
 //! executor, so a container deployment reports what is reachable inside the container rather
 //! than what happens to be installed on the host.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -90,7 +90,6 @@ pub trait Shell: Send + Sync {
 /// or an error message if the process cannot be spawned or waited on. On timeout, returns
 /// exit code 124 with a notice appended to stderr.
 fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
-    use std::io::Read;
     use std::process::Stdio;
 
     // The deadline is ENFORCED, not advisory.
@@ -226,73 +225,6 @@ impl Shell for ContainerShell {
     }
 }
 
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Standard base64 with padding: how commands and outputs cross a session, so no quoting or
-/// framing can break the protocol.
-pub fn b64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
-        out.push(B64[((n >> 18) & 63) as usize] as char);
-        out.push(B64[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            B64[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            B64[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
-/// Decode standard base64, ignoring whitespace. `None` if malformed.
-pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    let val = |c: u8| -> Option<u32> {
-        match c {
-            b'A'..=b'Z' => Some((c - b'A') as u32),
-            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
-            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    };
-    let bytes: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for q in bytes.chunks(4) {
-        let pad = q.iter().rev().take_while(|&&c| c == b'=').count();
-        if pad > 2 {
-            return None;
-        }
-        let mut n = 0u32;
-        for (i, &c) in q.iter().enumerate() {
-            let v = if i >= 4 - pad { 0 } else { val(c)? };
-            n = (n << 6) | v;
-        }
-        out.push((n >> 16) as u8);
-        if pad < 2 {
-            out.push((n >> 8) as u8);
-        }
-        if pad < 1 {
-            out.push(n as u8);
-        }
-    }
-    Some(out)
-}
-
 /// Single-quote for a POSIX shell.
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -363,18 +295,35 @@ pub enum RunResult {
     },
 }
 
-/// One long-lived `bash -l`. Each command's stdout and stderr go to their own files and come
-/// back base64-encoded on one marker line, so neither quoting nor background jobs can break
-/// the framing.
+/// One long-lived `bash -l`. A command arrives through a heredoc read by the `read` builtin; its
+/// stdout and stderr go to their own files and come back with one `printf` behind a header of
+/// byte lengths. Only the command itself runs as a process: the previous protocol spawned about
+/// six helpers per command (`base64`, `tr`, `rm`), about 25 ms on macOS.
 pub struct Session {
     child: Child,
     stdin: ChildStdin,
-    lines: Receiver<String>,
+    chunks: Receiver<Vec<u8>>,
+    buf: Vec<u8>,
     tmp: String,
     next: u64,
+    nonce: String,
 }
 
 const READY: &str = "__BLYTE_READY__ ";
+
+/// A per-process token for heredoc delimiters, so no command or file content can end one early.
+fn nonce() -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{t:x}{:x}", std::process::id())
+}
+
+enum ReadErr {
+    Timeout,
+    Closed,
+}
 
 impl Session {
     pub fn start(launcher: &Launcher) -> Result<Session, String> {
@@ -391,41 +340,40 @@ impl Session {
             .spawn()
             .map_err(|e| format!("cannot start a shell session: {e}"))?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
-        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let mut stdout = child.stdout.take().ok_or("no stdout")?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
+            let mut chunk = vec![0u8; 64 * 1024];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(chunk[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });
         let mut s = Session {
             child,
             stdin,
-            lines: rx,
+            chunks: rx,
+            buf: Vec::new(),
             tmp: String::new(),
             next: 0,
+            nonce: nonce(),
         };
         s.send(
             "__blyte_t=$(mktemp -d 2>/dev/null || { mkdir -p /tmp/blyte.$$ && echo /tmp/blyte.$$; }); \
-             if command -v base64 >/dev/null 2>&1; then echo \"__BLYTE_READY__ $__blyte_t\"; \
-             else echo __BLYTE_NO_BASE64__; fi\n",
+             echo \"__BLYTE_READY__ $__blyte_t\"\n",
         )?;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            match s
-                .lines
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
+            match s.read_line(deadline) {
                 Ok(l) if l.starts_with(READY) => {
                     s.tmp = l[READY.len()..].trim().to_string();
                     return Ok(s);
-                }
-                Ok(l) if l.starts_with("__BLYTE_NO_BASE64__") => {
-                    s.kill();
-                    return Err("no base64 in the execution environment".into());
                 }
                 Ok(_) => continue, // profile output on stdout
                 Err(_) => {
@@ -441,6 +389,39 @@ impl Session {
             .write_all(script.as_bytes())
             .and_then(|_| self.stdin.flush())
             .map_err(|e| format!("the shell session closed: {e}"))
+    }
+
+    fn fill(&mut self, deadline: Instant) -> Result<(), ReadErr> {
+        match self
+            .chunks
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(c) => {
+                self.buf.extend_from_slice(&c);
+                Ok(())
+            }
+            Err(RecvTimeoutError::Timeout) => Err(ReadErr::Timeout),
+            Err(RecvTimeoutError::Disconnected) => Err(ReadErr::Closed),
+        }
+    }
+
+    /// The next line of session output, without its newline.
+    fn read_line(&mut self, deadline: Instant) -> Result<String, ReadErr> {
+        loop {
+            if let Some(i) = self.buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.buf.drain(..=i).collect();
+                return Ok(String::from_utf8_lossy(&line[..i]).into_owned());
+            }
+            self.fill(deadline)?;
+        }
+    }
+
+    /// Exactly `n` bytes of session output.
+    fn read_exact(&mut self, n: usize, deadline: Instant) -> Result<Vec<u8>, ReadErr> {
+        while self.buf.len() < n {
+            self.fill(deadline)?;
+        }
+        Ok(self.buf.drain(..n).collect())
     }
 
     /// Kill the session and everything it started.
@@ -467,53 +448,59 @@ impl Session {
             format!("{}/{id}.o", self.tmp),
             format!("{}/{id}.e", self.tmp),
         );
-        let decoded = format!(
-            "\"$(printf %s {} | base64 -d)\"",
-            b64_encode(command.as_bytes())
-        );
-        let body = match cwd {
-            Some(d) => format!("( cd {} && eval {decoded} )", quote(&d.to_string_lossy())),
-            None => format!("eval {decoded}"),
-        };
         let (qo, qe) = (quote(&out), quote(&err));
+        let delim = format!("__BLYTE_CMD_{id}_{}__", self.nonce);
+        let body = match cwd {
+            Some(d) => format!(
+                "( cd {} && eval \"$__blyte_c\" )",
+                quote(&d.to_string_lossy())
+            ),
+            None => "eval \"$__blyte_c\"".to_string(),
+        };
+        // `|| true` on the protocol's own reads: a model's `set -e` must not end the session
+        // because `read` reports end of input. LC_ALL=C makes `${#var}` count bytes; the
+        // model's LC_ALL is put back afterwards.
         let script = format!(
-            "{body} </dev/null >{qo} 2>{qe}; __blyte_r=$?; \
-             printf '__BLYTE_{id}__ %s %s %s\\n' \"$__blyte_r\" \
-             \"$(base64 < {qo} | tr -d '\\n')\" \"$(base64 < {qe} | tr -d '\\n')\"; \
-             rm -f {qo} {qe}\n"
+            "IFS= read -r -d '' __blyte_c <<'{delim}' || true\n{command}\n{delim}\n\
+             {body} </dev/null >{qo} 2>{qe}; __blyte_r=$?; \
+             IFS= read -r -d '' __blyte_o <{qo} || true; \
+             IFS= read -r -d '' __blyte_e <{qe} || true; \
+             __blyte_l=${{LC_ALL-__blyte_unset__}}; LC_ALL=C; \
+             printf '__BLYTE_{id}__ %s %s %s\\n%s%s' \"$__blyte_r\" \"${{#__blyte_o}}\" \
+             \"${{#__blyte_e}}\" \"$__blyte_o\" \"$__blyte_e\"; \
+             if [ \"$__blyte_l\" = __blyte_unset__ ]; then unset LC_ALL; else LC_ALL=$__blyte_l; fi; \
+             unset __blyte_c __blyte_o __blyte_e __blyte_l\n"
         );
         if self.send(&script).is_err() {
             return RunResult::Died { out, err };
         }
         let marker = format!("__BLYTE_{id}__ ");
         let deadline = Instant::now() + timeout;
-        loop {
-            match self
-                .lines
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
+        let fail = |e: ReadErr, out: String, err: String| match e {
+            ReadErr::Timeout => RunResult::TimedOut { out, err },
+            ReadErr::Closed => RunResult::Died { out, err },
+        };
+        let header = loop {
+            match self.read_line(deadline) {
                 Ok(l) => {
-                    let Some(rest) = l.strip_prefix(&marker) else {
-                        continue;
-                    };
-                    let mut f = rest.splitn(3, ' ');
-                    let exit_code = f.next().and_then(|x| x.trim().parse().ok()).unwrap_or(-1);
-                    let dec = |x: Option<&str>| {
-                        x.and_then(b64_decode)
-                            .map(|b| String::from_utf8_lossy(&b).into_owned())
-                            .unwrap_or_default()
-                    };
-                    let stdout = dec(f.next());
-                    let stderr = dec(f.next());
-                    return RunResult::Done(Output {
-                        stdout,
-                        stderr,
-                        exit_code,
-                    });
+                    if let Some(rest) = l.strip_prefix(&marker) {
+                        break rest.to_string();
+                    }
                 }
-                Err(RecvTimeoutError::Timeout) => return RunResult::TimedOut { out, err },
-                Err(RecvTimeoutError::Disconnected) => return RunResult::Died { out, err },
+                Err(e) => return fail(e, out, err),
             }
+        };
+        let mut f = header.split(' ');
+        let exit_code = f.next().and_then(|x| x.parse().ok()).unwrap_or(-1);
+        let no: usize = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let ne: usize = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        match self.read_exact(no + ne, deadline) {
+            Ok(bytes) => RunResult::Done(Output {
+                stdout: String::from_utf8_lossy(&bytes[..no]).into_owned(),
+                stderr: String::from_utf8_lossy(&bytes[no..]).into_owned(),
+                exit_code,
+            }),
+            Err(e) => fail(e, out, err),
         }
     }
 

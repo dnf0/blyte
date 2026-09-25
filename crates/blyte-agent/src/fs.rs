@@ -127,7 +127,7 @@ impl Fs for ContainerFs {
 
 /// Files reached through a persistent session: the container counterpart of [`LocalFs`] at a
 /// round trip of a few milliseconds, instead of 2-5 `docker exec` per operation (a container
-/// `edit` cost about 300 ms). Content crosses base64-encoded, so no byte is interpreted on the
+/// `edit` cost about 300 ms). Content crosses through a heredoc read by the `read` builtin, so no byte is interpreted on the
 /// way. Falls back to [`ContainerFs`] (or [`LocalFs`] for a local launcher) when no session can
 /// start. Error messages match [`ContainerFs`].
 pub struct SessionFs {
@@ -187,9 +187,19 @@ impl Fs for SessionFs {
         } else {
             format!("mkdir -p -- {} && ", sh_quote(&dir))
         };
+        // Content through a heredoc read by the `read` builtin: no process, no encoding. The
+        // heredoc adds one final newline, which is stripped, so the bytes are exact.
+        let delim = format!(
+            "__BLYTE_CONTENT_{}_{}__",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
         let cmd = format!(
-            "{mkdir}printf %s {} | base64 -d > {}",
-            crate::shell::b64_encode(content.as_bytes()),
+            "IFS= read -r -d '' __blyte_w <<'{delim}' || true\n{content}\n{delim}\n\
+             __blyte_w=${{__blyte_w%$'\\n'}}; {mkdir}printf %s \"$__blyte_w\" > {}",
             sh_quote(&p)
         );
         match self.run(&cmd) {
