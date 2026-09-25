@@ -283,7 +283,12 @@ fn a_provider_error_is_reported_as_an_error_not_as_failed_work() {
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
-        budget: Budget::default(),
+        // A transport error is transient, so without a deadline this test slept through the
+        // whole retry schedule (2+4+8+16+32+60 s): 122 of the suite's 136 s, paid on every gate.
+        budget: Budget {
+            max_duration: Some(std::time::Duration::from_secs(1)),
+            ..Budget::default()
+        },
         rollback: false,
         on_event: None,
     };
