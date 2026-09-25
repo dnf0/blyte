@@ -234,7 +234,6 @@ fn main() {
                 max_duration: None,
             },
             rollback: false,
-            loop_breaker: false,
             on_event: Some(&on_event),
         };
         let _ = runner.run(&mut State::new("benchmark", "true"));

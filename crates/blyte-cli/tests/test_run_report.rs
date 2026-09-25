@@ -6,8 +6,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use blyte_agent::run::{Outcome, RunReport};
-use blyte_agent::state::{ActionEntry, State};
-use blyte_cli::report::{count_insists, count_interceptions, RunRecord};
+use blyte_agent::state::State;
+use blyte_cli::report::RunRecord;
 use blyte_cli::task_runner::TaskConfig;
 use blyte_provider::Usage;
 use serde_json::json;
@@ -23,7 +23,6 @@ fn config() -> TaskConfig {
         max_gates: 5,
         rollback: true,
         root: PathBuf::from("."),
-        loop_breaker: false,
         container_workdir: "/app".into(),
         max_seconds: Some(600),
         report: None,
@@ -31,42 +30,6 @@ fn config() -> TaskConfig {
         review: false,
         fold_budget: None,
     }
-}
-
-fn action(tool: &str, target: &str, summary: &str) -> ActionEntry {
-    ActionEntry {
-        turn: 1,
-        tool: tool.into(),
-        target: target.into(),
-        summary: summary.into(),
-        is_error: false,
-    }
-}
-
-#[test]
-fn interceptions_are_counted_by_kind() {
-    let actions = vec![
-        action("read", "a.py", "intercepted: already in working set"),
-        action("read", "b.py", "intercepted: already in working set"),
-        action("bash", "git status", "intercepted: redundant inspection"),
-        action("read", "a.py", "2 lines read"),
-    ];
-    let i = count_interceptions(&actions);
-    assert_eq!((i.read, i.bash), (2, 1));
-}
-
-#[test]
-fn an_insist_is_a_served_repeat_of_the_intercepted_call() {
-    let actions = vec![
-        action("read", "a.py", "2 lines read"),
-        action("read", "a.py", "intercepted: already in working set"),
-        action("read", "a.py", "2 lines read"),
-        action("bash", "git status", "intercepted: redundant inspection"),
-        action("bash", "git diff", "exit 0"),
-        action("read", "b.py", "intercepted: already in working set"),
-        action("read", "b.py", "intercepted: already in working set"),
-    ];
-    assert_eq!(count_insists(&actions), 1);
 }
 
 #[test]
@@ -83,7 +46,6 @@ fn an_error_record_has_zeroed_counters_and_no_model_id() {
     assert_eq!(v["model_requested"], "gemini-3.8-flash-high");
     assert!(v["model_id"].is_null());
     assert_eq!(v["context"], "folded");
-    assert_eq!(v["loop_breaker"], false);
     assert_eq!(v["gated"], false);
     assert_eq!(v["container"], "abc123");
     assert_eq!(v["container_workdir"], "/app");
@@ -97,8 +59,6 @@ fn an_error_record_has_zeroed_counters_and_no_model_id() {
         v["usage"],
         json!({"input": 0, "cached": 0, "output": 0, "thinking": 0})
     );
-    assert_eq!(v["interceptions"], json!({"read": 0, "bash": 0}));
-    assert_eq!(v["insists"], 0);
     assert_eq!(v["agent_note_keys"], json!([]));
 }
 
@@ -114,11 +74,6 @@ fn a_completed_run_maps_every_field() {
         .fields
         .insert("hypothesis".into(), json!("off by one"));
     state.runtime.rollbacks = 2;
-    state.runtime.actions = vec![
-        action("read", "a.py", "2 lines read"),
-        action("read", "a.py", "intercepted: already in working set"),
-        action("read", "a.py", "2 lines read"),
-    ];
     let report = RunReport {
         outcome_turns: 7,
         usage: Usage {
@@ -156,8 +111,6 @@ fn a_completed_run_maps_every_field() {
         v["usage"],
         json!({"input": 100, "cached": 50, "output": 20, "thinking": 5})
     );
-    assert_eq!(v["interceptions"], json!({"read": 1, "bash": 0}));
-    assert_eq!(v["insists"], 1);
     assert_eq!(v["agent_note_keys"], json!(["hypothesis", "next_step"]));
 }
 
@@ -198,7 +151,6 @@ fn the_binary_writes_a_report_when_the_provider_cannot_start() {
             "gemini-3.8-flash-high",
             "--context",
             "folded",
-            "--no-loop-breaker",
             "--container-workdir",
             "/app",
             "--max-seconds",
@@ -221,7 +173,6 @@ fn the_binary_writes_a_report_when_the_provider_cannot_start() {
     assert_eq!(v["model_requested"], "gemini-3.8-flash-high");
     assert!(v["model_id"].is_null());
     assert_eq!(v["context"], "folded");
-    assert_eq!(v["loop_breaker"], false);
     assert_eq!(v["gated"], false);
     assert!(v["container"].is_null());
     assert_eq!(v["container_workdir"], "/app");

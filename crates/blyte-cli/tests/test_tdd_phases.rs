@@ -20,7 +20,6 @@ fn config() -> TaskConfig {
         max_gates: 5,
         rollback: true,
         root: PathBuf::from("."),
-        loop_breaker: true,
         container_workdir: "/workspace".into(),
         max_seconds: None,
         report: None,

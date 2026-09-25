@@ -387,28 +387,6 @@ pub fn handle_repl_command<W: Write>(
                     .map_err(|e| e.to_string())?;
                 writeln!(writer, "Agent:\n{}", agent).map_err(|e| e.to_string())?;
 
-                // Human-readable working memory summary: display active cached file snippets and turns
-                if !session.state.runtime.working_set.files.is_empty() {
-                    writeln!(writer, "Active Working Set:").map_err(|e| e.to_string())?;
-                    for file in &session.state.runtime.working_set.files {
-                        let lines_info = match (file.start_line, file.end_line) {
-                            (Some(s), Some(e)) => format!(" (lines {s}-{e})"),
-                            _ => String::new(),
-                        };
-                        writeln!(
-                            writer,
-                            "  - `{}`{} [turn {}]",
-                            file.path, lines_info, file.last_accessed_turn
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
-                }
-
-                // Grounding telemetry summary: surface recent failure output directly for interactive inspection
-                if let Some(ref failure) = session.state.runtime.working_set.last_failure {
-                    writeln!(writer, "Last Test Failure:\n{}", failure)
-                        .map_err(|e| e.to_string())?;
-                }
                 Ok(ReplControl::Handled)
             }
             "/diff" => {
@@ -520,7 +498,6 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     max_gates: session.max_gates,
                     rollback: session.rollback,
                     root: session.repo_root.clone(),
-                    loop_breaker: true,
                     container_workdir: "/workspace".into(),
                     max_seconds: None,
                     report: None,
