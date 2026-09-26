@@ -112,6 +112,8 @@ pub struct RunReport {
     pub turn_usage: Vec<TurnUsage>,
     /// Wall time of each gate attempt, in order.
     pub gate_ms: Vec<u64>,
+    /// Gate output for each failed attempt, bounded to 4,000 characters.
+    pub gate_failures: Vec<String>,
     /// Calls per tool name.
     pub tool_counts: BTreeMap<String, u32>,
 }
@@ -245,23 +247,30 @@ impl<'a> Runner<'a> {
         if steps.len() <= 1 {
             return self.run_step(&state.orchestrator.verification_cmd);
         }
-        let failures: Vec<String> = steps
-            .iter()
-            .filter_map(|step| {
-                let (passed, output) = self.run_step(step);
-                (!passed).then(|| format!("$ {step}\n{output}"))
-            })
-            .collect();
+        let mut failures = Vec::new();
+        let mut failed_steps = Vec::new();
+        for &step in &steps {
+            let (passed, output) = self.run_step(step);
+            if !passed {
+                failed_steps.push(step);
+                failures.push(format!("$ {step}\n{output}"));
+            }
+        }
         if failures.is_empty() {
             return (true, "exit 0".into());
         }
-        let body = tools::bound_output(&failures.join("\n\n"));
+        let body = tools::bound_output_with(
+            &failures.join("\n\n"),
+            tools::OUTPUT_LINE_BUDGET,
+            tools::MAX_OUTPUT_CHARS,
+        );
         (
             false,
             format!(
-                "{} of {} steps failed\n\n{body}",
+                "{} of {} steps failed: {}\n\n{body}",
                 failures.len(),
-                steps.len()
+                steps.len(),
+                failed_steps.join(", ")
             ),
         )
     }
@@ -270,7 +279,11 @@ impl<'a> Runner<'a> {
     fn run_step(&self, cmd: &str) -> (bool, String) {
         match self.shell.exec(cmd, &self.root, Duration::from_secs(1800)) {
             Ok(o) => {
-                let body = tools::bound_output(o.merged().trim_end());
+                let body = tools::bound_output_with(
+                    o.merged().trim_end(),
+                    tools::OUTPUT_LINE_BUDGET,
+                    tools::MAX_OUTPUT_CHARS,
+                );
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
             }
             // A gate that cannot execute has not passed. Treating an error as success is how
@@ -479,6 +492,7 @@ impl<'a> Runner<'a> {
             if passed {
                 return (Outcome::Verified, report);
             }
+            report.gate_failures.push(cut_gate_output(&output));
 
             if self.rollback {
                 if let Some(base) = &baseline {
@@ -518,6 +532,19 @@ fn gate_steps(gate: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Cuts gate output to its first 4,000 characters, appending `…` when cut.
+fn cut_gate_output(output: &str) -> String {
+    const MAX_CHARS: usize = 4_000;
+    match output.char_indices().nth(MAX_CHARS) {
+        Some((idx, _)) => {
+            let mut cut = output[..idx].to_string();
+            cut.push('…');
+            cut
+        }
+        None => output.to_string(),
+    }
 }
 
 /// Extracts a concise, human-readable target descriptor from a tool call's arguments.
