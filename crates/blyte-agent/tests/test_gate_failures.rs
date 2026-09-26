@@ -70,7 +70,11 @@ fn the_multi_step_summary_names_the_failing_steps() {
 
 #[test]
 fn long_output_is_cut() {
-    let rep = run("printf 'x%.0s' $(seq 1 20000); exit 1", 1);
+    // Many ordinary lines: gate output keeps the 500-character line cap, so length comes from lines.
+    let rep = run(
+        "for i in $(seq 1 300); do echo \"line $i $(printf 'x%.0s' $(seq 1 60))\"; done; exit 1",
+        1,
+    );
     assert!(
         rep.gate_failures[0].chars().count() <= 4_001,
         "{}",

@@ -259,11 +259,7 @@ impl<'a> Runner<'a> {
         if failures.is_empty() {
             return (true, "exit 0".into());
         }
-        let body = tools::bound_output_with(
-            &failures.join("\n\n"),
-            tools::OUTPUT_LINE_BUDGET,
-            tools::MAX_OUTPUT_CHARS,
-        );
+        let body = tools::bound_output(&failures.join("\n\n"));
         (
             false,
             format!(
@@ -279,11 +275,7 @@ impl<'a> Runner<'a> {
     fn run_step(&self, cmd: &str) -> (bool, String) {
         match self.shell.exec(cmd, &self.root, Duration::from_secs(1800)) {
             Ok(o) => {
-                let body = tools::bound_output_with(
-                    o.merged().trim_end(),
-                    tools::OUTPUT_LINE_BUDGET,
-                    tools::MAX_OUTPUT_CHARS,
-                );
+                let body = tools::bound_output(o.merged().trim_end());
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
             }
             // A gate that cannot execute has not passed. Treating an error as success is how
