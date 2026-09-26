@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Blyte unified interactive agent harness and state engine runner."
+description = "The blyte coding-agent harness: headless runs with a sealed verification gate, and a REPL."
 
 [lib]
 name = "blyte_cli"
