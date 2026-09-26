@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(
     name = "blyte",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BLYTE_BUILD"), ")"),
-    about = "Blyte: Autonomous agent harness with deterministic state and verification gates"
+    about = "A lean coding-agent harness with a sealed verification gate"
 )]
 pub struct Cli {
     /// Direct task prompt to run in single-shot / headless mode
