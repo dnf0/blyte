@@ -21,6 +21,7 @@
 pub mod anthropic;
 pub mod gemini;
 pub mod ollama;
+pub mod openai;
 pub mod registry;
 
 pub use registry::{detect_provider_kind, discover_all_models, resolve_provider, ProviderKind};

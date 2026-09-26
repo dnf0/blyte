@@ -36,6 +36,9 @@ pub const HARNESS_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OLLAMA_API_KEY",
     "OLLAMA_HOST",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
 ];
 
 /// Remove the harness's own variables from a command about to run on this machine.
