@@ -461,41 +461,17 @@ fn execute_unbounded(
                 },
             }
         }
-        "bash" => {
-            let cmd = s("command");
-            match shell.exec_user(&cmd, root, COMMAND_TIMEOUT) {
-                Ok(o) => {
-                    let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
-                    // Exit code always stated: a non-zero exit with quiet output reads as success.
-                    let mut content = format!("exit {}\n{body}", o.exit_code);
-                    if o.exit_code == 0 && runs_git_commit(&cmd) {
-                        if let Ok(footer) = shell.exec_user(
-                            "git log -1 --stat --format='%h %s' && { s=$(git status --short); if [ -n \"$s\" ]; then printf '%s\\n' \"$s\"; else echo 'working tree clean'; fi; }",
-                            root,
-                            COMMAND_TIMEOUT,
-                        ) {
-                            if footer.exit_code == 0 {
-                                let f = footer.merged();
-                                let trimmed = f.trim_end();
-                                if !trimmed.is_empty() {
-                                    if !content.ends_with('\n') {
-                                        content.push('\n');
-                                    }
-                                    content.push_str("[after commit]\n");
-                                    content.push_str(trimmed);
-                                    content.push('\n');
-                                }
-                            }
-                        }
-                    }
-                    ToolOutcome {
-                        content,
-                        is_error: o.exit_code != 0,
-                    }
+        "bash" => match shell.exec_user(&s("command"), root, COMMAND_TIMEOUT) {
+            Ok(o) => {
+                let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
+                // Exit code always stated: a non-zero exit with quiet output reads as success.
+                ToolOutcome {
+                    content: format!("exit {}\n{body}", o.exit_code),
+                    is_error: o.exit_code != 0,
                 }
-                Err(e) => ToolOutcome::err(e),
             }
-        }
+            Err(e) => ToolOutcome::err(e),
+        },
         "glob" => {
             let pattern = s("pattern");
             // .gitignore-aware, fd/ripgrep style. A local workspace expands in-process; a
@@ -606,69 +582,4 @@ fn execute_unbounded(
         }
         other => ToolOutcome::err(format!("unknown tool: {other}")),
     }
-}
-
-/// Appends repository state after a commit so the model does not spend follow-up turns
-/// running `git log -1` and `git status`, which took ~12% of turns in shadow runs.
-fn runs_git_commit(cmd: &str) -> bool {
-    let mut words = Vec::new();
-    let mut cur = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-
-    for ch in cmd.chars() {
-        if escape {
-            escape = false;
-            cur.push(ch);
-            continue;
-        }
-        if ch == '\\' && !in_single {
-            escape = true;
-            continue;
-        }
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-        if in_double {
-            if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-        match ch {
-            '\'' => {
-                in_single = true;
-                if !cur.is_empty() {
-                    words.push(std::mem::take(&mut cur));
-                }
-            }
-            '"' => {
-                in_double = true;
-                if !cur.is_empty() {
-                    words.push(std::mem::take(&mut cur));
-                }
-            }
-            ';' | '&' | '|' | '(' | ')' | '`' => {
-                if !cur.is_empty() {
-                    words.push(std::mem::take(&mut cur));
-                }
-                words.push(ch.to_string());
-            }
-            c if c.is_whitespace() => {
-                if !cur.is_empty() {
-                    words.push(std::mem::take(&mut cur));
-                }
-            }
-            c => cur.push(c),
-        }
-    }
-    if !cur.is_empty() {
-        words.push(cur);
-    }
-
-    words.windows(2).any(|w| w[0] == "git" && w[1] == "commit")
 }
