@@ -4,7 +4,12 @@
 
 **Goal:** `read` keeps lines up to 2,000 characters whole (`READ_LINE_CHARS`) instead of clipping them at 500. Command output (`bash`, `grep`, `glob`) keeps the 500-character line cap. The 60,000-character cap per result is unchanged.
 
-**Why (shadow run S7, 2026-09-26):** the S7 plan's two key contract lines were 640 and 578 characters long. `read` clipped both at 500, the model re-read them with `sed`, which is command output and clipped the same way, and it spent three turns and never saw the whole spec. The 500-character cap exists for minified files and huge grep matches in command output; a file the model explicitly asked to read is the point, not noise (the same reasoning that gave `read` its larger line budget in #71). Markdown plans and prose routinely have long unwrapped lines.
+**Why (shadow run S7, 2026-09-26):** the S7 plan's two key contract lines were 640 and 578
+characters long. `read` clipped both at 500, the model re-read them with `sed`, which is command
+output and clipped the same way, and it spent three turns and never saw the whole spec. The
+500-character cap exists for minified files and huge grep matches in command output; a file the
+model explicitly asked to read is the point, not noise (the same reasoning that gave `read` its
+larger line budget in #71). Markdown plans and prose routinely have long unwrapped lines.
 
 **Tech Stack:** Rust 2021.
 
