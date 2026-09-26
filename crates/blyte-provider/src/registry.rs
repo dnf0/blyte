@@ -15,6 +15,10 @@ pub enum ProviderKind {
     Anthropic,
     /// Ollama local or Cloud hosted models (e.g., `qwen2.5-coder:32b`, `llama3.3:70b`).
     Ollama,
+    /// OpenAI models (e.g., `gpt-5.5`).
+    OpenAi,
+    /// OpenRouter routed models (e.g., `meta/muse-spark-1.3`).
+    OpenRouter,
 }
 
 /// Detects the target [`ProviderKind`] based on model naming conventions or environment credentials.
@@ -31,6 +35,12 @@ pub enum ProviderKind {
 pub fn detect_provider_kind(model: Option<&str>) -> ProviderKind {
     // 1. Inspect explicit prefix or well-known model family patterns
     if let Some(m) = model {
+        if m.starts_with("openai/") || m == "openai" {
+            return ProviderKind::OpenAi;
+        }
+        if m.starts_with("openrouter/") || m == "openrouter" {
+            return ProviderKind::OpenRouter;
+        }
         if m.starts_with("claude") || m.starts_with("anthropic/") || m == "anthropic" {
             return ProviderKind::Anthropic;
         }
@@ -49,6 +59,10 @@ pub fn detect_provider_kind(model: Option<&str>) -> ProviderKind {
         ProviderKind::Anthropic
     } else if std::env::var("OLLAMA_API_KEY").is_ok() || std::env::var("OLLAMA_HOST").is_ok() {
         ProviderKind::Ollama
+    } else if std::env::var("OPENAI_API_KEY").is_ok() || std::env::var("OPENAI_BASE_URL").is_ok() {
+        ProviderKind::OpenAi
+    } else if std::env::var("OPENROUTER_API_KEY").is_ok() {
+        ProviderKind::OpenRouter
     } else {
         // Default baseline fallback is Gemini
         ProviderKind::Gemini
@@ -72,9 +86,14 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
 
     // Strip provider prefix from model string if present, treating bare provider names as default
     let clean_model = match model {
-        Some("anthropic") | Some("ollama") | Some("gemini") => None,
+        Some("anthropic") | Some("ollama") | Some("gemini") | Some("openai")
+        | Some("openrouter") => None,
         Some(m) => {
-            let stripped = if let Some(s) = m.strip_prefix("anthropic/") {
+            let stripped = if let Some(s) = m.strip_prefix("openai/") {
+                s
+            } else if let Some(s) = m.strip_prefix("openrouter/") {
+                s
+            } else if let Some(s) = m.strip_prefix("anthropic/") {
                 s
             } else if let Some(s) = m.strip_prefix("gemini/") {
                 s
@@ -115,6 +134,20 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
             }
             Ok(Box::new(p))
         }
+        ProviderKind::OpenAi => {
+            let mut p = crate::openai::OpenAi::openai_from_env()?;
+            if let Some(m) = clean_model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
+        ProviderKind::OpenRouter => {
+            let mut p = crate::openai::OpenAi::openrouter_from_env()?;
+            if let Some(m) = clean_model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
     }
 }
 
@@ -141,6 +174,14 @@ pub fn discover_all_models() -> Vec<(String, Result<Vec<ModelInfo>, ProviderErro
         match crate::ollama::Ollama::from_env() {
             Ok(p) => ("Ollama Cloud".to_string(), p.list_models()),
             Err(e) => ("Ollama Cloud".to_string(), Err(e)),
+        },
+        match crate::openai::OpenAi::openai_from_env() {
+            Ok(p) => ("OpenAI".to_string(), p.list_models()),
+            Err(e) => ("OpenAI".to_string(), Err(e)),
+        },
+        match crate::openai::OpenAi::openrouter_from_env() {
+            Ok(p) => ("OpenRouter".to_string(), p.list_models()),
+            Err(e) => ("OpenRouter".to_string(), Err(e)),
         },
     ]
 }

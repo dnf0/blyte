@@ -17,6 +17,9 @@ fn clear_provider_env() {
     std::env::remove_var("ANTHROPIC_API_KEY");
     std::env::remove_var("OLLAMA_API_KEY");
     std::env::remove_var("OLLAMA_HOST");
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("OPENAI_BASE_URL");
+    std::env::remove_var("OPENROUTER_API_KEY");
     std::env::remove_var("BLYTE_MODEL");
 }
 
@@ -175,14 +178,20 @@ fn test_discover_all_models_enumerates_providers() {
     let _guard = ENV_LOCK.lock().unwrap();
     clear_provider_env();
 
-    // Without credentials, discovery should report all 3 providers with missing key errors
+    // Without credentials, discovery should report all 5 providers with missing key errors
     let results = discover_all_models();
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.len(), 5);
 
     let provider_names: Vec<&str> = results.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         provider_names,
-        vec!["Google Gemini", "Anthropic Claude", "Ollama Cloud"]
+        vec![
+            "Google Gemini",
+            "Anthropic Claude",
+            "Ollama Cloud",
+            "OpenAI",
+            "OpenRouter"
+        ]
     );
 
     for (name, res) in results {
