@@ -8,8 +8,8 @@
 //! - An assistant turn issues tool calls via `{"type": "tool_use", "id": "...", "name": "...", "input": {...}}`.
 //! - The next user turn responds via `{"type": "tool_result", "tool_use_id": "...", "content": "...", "is_error": bool}`.
 //! - The system prompt is passed as a top-level string field `"system"`, outside the `messages` array.
-//! - Prompt caching is tracked via `cache_read_input_tokens`, which must be deducted from `input_tokens`
-//!   to avoid double-counting cached tokens against fresh input costs.
+//! - Prompt caching marks cache breakpoints on the last tool and the newest message block; cache
+//!   writes count as input tokens, and cache reads are tracked via `cache_read_input_tokens`.
 
 use serde_json::{json, Value};
 
@@ -38,6 +38,20 @@ pub struct Anthropic {
 }
 
 impl Anthropic {
+    /// Constructs an Anthropic provider instance with an explicit API key and default model.
+    ///
+    /// # Parameters
+    /// - `api_key`: Anthropic API credential string.
+    ///
+    /// # Returns
+    /// An initialized [`Anthropic`] instance.
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            model: DEFAULT_MODEL.into(),
+        }
+    }
+
     /// Constructs an Anthropic provider instance from environment variables.
     ///
     /// Reads `ANTHROPIC_API_KEY` for authentication credentials and optionally `BLYTE_MODEL`
@@ -152,6 +166,14 @@ impl Anthropic {
             }
         }
 
+        if let Some(last_msg) = messages.last_mut() {
+            if let Some(content) = last_msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                if let Some(last_block) = content.last_mut() {
+                    last_block["cache_control"] = json!({"type": "ephemeral"});
+                }
+            }
+        }
+
         let mut body = json!({
             "model": self.model,
             "max_tokens": req.max_output_tokens.unwrap_or(8192),
@@ -165,7 +187,7 @@ impl Anthropic {
 
         // Tools are converted to input_schema objects, or omitted entirely if empty.
         if !req.tools.is_empty() {
-            let tools_json: Vec<Value> = req
+            let mut tools_json: Vec<Value> = req
                 .tools
                 .iter()
                 .map(|t| {
@@ -176,6 +198,9 @@ impl Anthropic {
                     })
                 })
                 .collect();
+            if let Some(last_tool) = tools_json.last_mut() {
+                last_tool["cache_control"] = json!({"type": "ephemeral"});
+            }
             body["tools"] = json!(tools_json);
         }
 
@@ -238,14 +263,16 @@ impl Anthropic {
             }
         }
 
-        // Account for token usage. In Anthropic's Messages API, input_tokens already captures
-        // non-cached fresh tokens, while cache_read_input_tokens captures prompt cache reads.
+        // Account for token usage. In Anthropic's Messages API, input_tokens captures fresh
+        // tokens and cache_creation_input_tokens captures cache writes; both count as input.
+        // cache_read_input_tokens captures prompt cache reads.
         if let Some(u) = v.get("usage") {
             let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
             let input_tokens = n("input_tokens");
+            let cache_creation = n("cache_creation_input_tokens");
             let cache_read = n("cache_read_input_tokens");
             out.usage = Usage {
-                input: input_tokens,
+                input: input_tokens + cache_creation,
                 cached: cache_read,
                 output: n("output_tokens"),
                 thinking: 0,
