@@ -36,19 +36,27 @@ person or an orchestrating agent.
 
 ## Evidence
 
-**Paired shadow runs** (blyte and agy implement the same plan task from the same commit, run
-together, both checked by the repository's full check). Blyte is developed this way: each of these
-tasks was a change to blyte itself.
+**Paired shadow runs.** blyte and agy implement the same plan task from the same commit, side by
+side, and both results are checked by the repository's full check and reviewed. Every change to
+blyte (and to its evaluation repo) is made this way, and every run goes into a ledger.
 
-| task | agy | blyte | blyte ÷ agy (time, cost) |
-|---|---|---|---|
-| `read` returns whole files | 382 s, $0.47 | 266 s, $0.25 | 0.70×, 0.54× |
-| gate reports every failure | 460 s, $0.35 | 368 s, $0.24 | 0.80×, 0.70× |
-| read from the top returns the whole file | 320 s, $0.30 | 349 s, $0.16 | 1.09×, 0.55× |
-| quick checks before stopping | 138 s, $0.16 | 89 s, $0.11 | 0.64×, 0.69× |
+| task | agy | blyte | blyte ÷ agy (time, cost) | result |
+|---|---|---|---|---|
+| `read` returns whole files | 382 s, $0.47 | 266 s, $0.25 | 0.70×, 0.54× | identical diffs |
+| gate reports every failure | 460 s, $0.35 | 368 s, $0.24 | 0.80×, 0.70× | identical diffs |
+| read from the top returns the whole file | 320 s, $0.30 | 349 s, $0.16 | 1.09×, 0.55× | identical diffs |
+| quick checks before stopping | 138 s, $0.16 | 89 s, $0.11 | 0.64×, 0.69× | identical diffs |
+| build stamp in `--version` and reports | 160 s, $0.21 | 89 s, $0.18 | 0.56×, 0.83× | identical diffs |
+| eval: remove the MCP arms (−2,680 lines) | 481 s, $0.98 | 288 s, $0.76 | 0.60×, 0.78× | blyte's code better, wrong commit message |
+| eval: remove the daemon and relay arms (−3,510) | 492 s, $0.71 | 231 s, $0.47 | 0.47×, 0.66× | blyte better (agy dropped valid tests) |
+| eval: remove the state-engine arms (−2,780) | 1030 s, $1.64 | 300 s, $0.84 | 0.29×, 0.51× | blyte merged; agy stopped on a plan gap |
+| run telemetry in the report | 394 s, $0.77 | 237 s, $0.42 | 0.60×, 0.55× | same logic; agy's merged (doc comments) |
+| eval: remove 34 dead launch scripts | 249 s, $0.36 | 116 s, $0.26 | 0.47×, 0.72× | identical |
 
-All four pairs produced byte-identical diffs and passed the check. Median: 0.75× the time, 0.60×
-the cost.
+Ten pairs, two repositories, Rust and Python: blyte took a median **0.60× the time and 0.66× the
+cost**, was cheaper in all ten and faster in nine. Its result was mergeable as-is in nine of ten
+(agy: seven of ten). The last two pairs ran with both prompts on identical rules, and came out level
+on quality.
 
 **Benchmark tasks**, measured with `superstate-eval` (same model, tasks and sealed grader), 3 runs
 per cell:
