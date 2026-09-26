@@ -52,11 +52,20 @@ blyte (and to its evaluation repo) is made this way, and every run goes into a l
 | eval: remove the state-engine arms (−2,780) | 1030 s, $1.64 | 300 s, $0.84 | 0.29×, 0.51× | blyte merged; agy stopped on a plan gap |
 | run telemetry in the report | 394 s, $0.77 | 237 s, $0.42 | 0.60×, 0.55× | same logic; agy's merged (doc comments) |
 | eval: remove 34 dead launch scripts | 249 s, $0.36 | 116 s, $0.26 | 0.47×, 0.72× | identical |
+| OpenAI-compatible provider | 563 s, $0.73 | 256 s, $0.56 | 0.45×, 0.77× | equal; blyte's merged |
+| `read` keeps long lines | 292 s, $0.42 | 113 s, $0.19 | 0.39×, 0.45× | identical diffs |
+| commit footer (an experiment, later removed) | 732 s, $1.10 | 266 s, $0.52 | 0.36×, 0.47× | equal |
+| Anthropic prompt caching | 372 s, $0.51 | 130 s, $0.24 | 0.35×, 0.47× | near-identical |
+| eval: time in the harness comparison | 1661 s, $0.74 | 3024 s, $0.47 | 1.82×, 0.64× | agy's merged: blyte's run cleared a host cache after a gate failure |
+| remove the commit footer | 216 s, $0.30 | 112 s, $0.19 | 0.52×, 0.63× | blyte's clean revert merged |
+| blyte states the workspace boundary | 300 s, $0.41 | 109 s, $0.16 | 0.36×, 0.39× | identical |
+| keep failed gate output in the report | 840 s, $1.36 | 365 s, $1.00 | 0.43×, 0.74× | equal; both needed a plan fix |
 
-Ten pairs, two repositories, Rust and Python: blyte took a median **0.60× the time and 0.66× the
-cost**, was cheaper in all ten and faster in nine. Its result was mergeable as-is in nine of ten
-(agy: seven of ten). The last two pairs ran with both prompts on identical rules, and came out level
-on quality.
+Eighteen pairs, two repositories, Rust and Python: blyte took a median **0.49× the time and 0.63×
+the cost**, was cheaper in all eighteen and faster in sixteen. Its result was mergeable as-is in 15
+of 18 (agy: 13 of 18). Since the two prompts were put on identical rules (from "run telemetry"
+on), quality has been level; the one serious miss was blyte's (the host-cache detour), which led to
+the workspace-boundary rule now built into blyte.
 
 **Benchmark tasks**, measured with `superstate-eval` (same model, tasks and sealed grader), 3 runs
 per cell:
