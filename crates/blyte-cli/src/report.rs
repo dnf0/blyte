@@ -4,6 +4,7 @@
 //! reads exactly this shape. Every field is always written, because a zero is a measurement and
 //! an absent key is a bug. Schema: docs/superpowers/specs/2026-09-23-native-harness-eval-surface-design.md
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -62,6 +63,11 @@ pub struct RunRecord {
     /// Per-call usage (see `blyte_agent::run::TurnUsage`).
     pub turn_usage: Vec<blyte_agent::run::TurnUsage>,
     pub usage: UsageRecord,
+    pub gate_ms: Vec<u64>,
+    pub tool_counts: BTreeMap<String, u32>,
+    pub model_seconds: f64,
+    pub tools_seconds: f64,
+    pub gate_seconds: f64,
 }
 
 impl RunRecord {
@@ -90,6 +96,11 @@ impl RunRecord {
             fold_budget: config.fold_budget,
             turn_usage: Vec::new(),
             usage: UsageRecord::default(),
+            gate_ms: Vec::new(),
+            tool_counts: BTreeMap::new(),
+            model_seconds: 0.0,
+            tools_seconds: 0.0,
+            gate_seconds: 0.0,
         }
     }
 
@@ -111,6 +122,9 @@ impl RunRecord {
         elapsed: Duration,
     ) -> Self {
         let (outcome_name, error) = outcome_name(outcome);
+        let model_ms: u64 = report.turn_usage.iter().map(|t| t.model_ms).sum();
+        let tools_ms: u64 = report.turn_usage.iter().map(|t| t.tools_ms).sum();
+        let gate_ms_sum: u64 = report.gate_ms.iter().sum();
         Self {
             outcome: outcome_name.into(),
             error,
@@ -129,6 +143,11 @@ impl RunRecord {
                 output: report.usage.output,
                 thinking: report.usage.thinking,
             },
+            gate_ms: report.gate_ms.clone(),
+            tool_counts: report.tool_counts.clone(),
+            model_seconds: model_ms as f64 / 1000.0,
+            tools_seconds: tools_ms as f64 / 1000.0,
+            gate_seconds: gate_ms_sum as f64 / 1000.0,
             ..Self::base(config, elapsed)
         }
     }
