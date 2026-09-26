@@ -76,6 +76,7 @@ fn a_completed_run_maps_every_field() {
         gate_attempts: 2,
         provider_retries: 0,
         turn_usage: Vec::new(),
+        ..Default::default()
     };
     let r = RunRecord::from_run(
         &config(),

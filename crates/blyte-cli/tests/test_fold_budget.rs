@@ -33,6 +33,7 @@ fn the_fold_budget_and_turn_usage_reach_the_report() {
             appended: false,
             new_chars: 40,
             fold_budget: None,
+            ..Default::default()
         }],
         ..Default::default()
     };

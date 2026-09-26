@@ -19,6 +19,7 @@
 //! solve (EXP-059). Rollback is on by default and switchable, because it is not free -- one run
 //! reset a worker's committed feature five times (FINDINGS 13.2).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -79,6 +80,12 @@ pub struct TurnUsage {
     /// The fold budget in force for this call, for strategies that fold.
     #[serde(default)]
     pub fold_budget: Option<usize>,
+    /// Wall time of this turn's model call, including any provider retries and their waits.
+    #[serde(default)]
+    pub model_ms: u64,
+    /// Wall time spent executing this turn's tool calls (0 for a turn with none).
+    #[serde(default)]
+    pub tools_ms: u64,
 }
 
 /// Characters a message contributes to a prompt, as the context strategies size them.
@@ -103,6 +110,10 @@ pub struct RunReport {
     pub provider_retries: u32,
     /// One entry per main-loop model call, in order.
     pub turn_usage: Vec<TurnUsage>,
+    /// Wall time of each gate attempt, in order.
+    pub gate_ms: Vec<u64>,
+    /// Calls per tool name.
+    pub tool_counts: BTreeMap<String, u32>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -329,6 +340,7 @@ impl<'a> Runner<'a> {
             last_sent = Some(req.messages.clone());
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.
+            let model_start = std::time::Instant::now();
             let mut attempt = 0;
             let resp = loop {
                 match self.provider.complete(&req) {
@@ -349,6 +361,7 @@ impl<'a> Runner<'a> {
                     Err(e) => return (Outcome::Error(e.to_string()), report),
                 }
             };
+            let model_ms = model_start.elapsed().as_millis() as u64;
             report.usage.input += resp.usage.input;
             report.usage.cached += resp.usage.cached;
             report.usage.output += resp.usage.output;
@@ -363,6 +376,8 @@ impl<'a> Runner<'a> {
                 appended,
                 new_chars,
                 fold_budget,
+                model_ms,
+                tools_ms: 0,
             });
 
             if resp.text.trim().is_empty() && resp.tool_calls.is_empty() {
@@ -378,6 +393,7 @@ impl<'a> Runner<'a> {
 
             // --- the model is still working -------------------------------------------------
             if !resp.tool_calls.is_empty() {
+                let tools_start = std::time::Instant::now();
                 // A turn's calls are recorded together, then its results together, in call
                 // order. Providers encode one model turn carrying several calls and one reply
                 // carrying their results; interleaving them split a parallel batch into turns
@@ -392,6 +408,7 @@ impl<'a> Runner<'a> {
                 }
                 for call in &resp.tool_calls {
                     report.tool_calls += 1;
+                    *report.tool_counts.entry(call.name.clone()).or_default() += 1;
 
                     let outcome = tools::execute(
                         &self.root,
@@ -441,12 +458,16 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
                 }
+                report.turn_usage.last_mut().unwrap().tools_ms =
+                    tools_start.elapsed().as_millis() as u64;
                 continue;
             }
 
             // --- the model stopped calling tools: the runtime decides -----------------------
             report.gate_attempts += 1;
+            let gate_start = std::time::Instant::now();
             let (passed, output) = self.run_gate(state);
+            report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             self.emit(Event::Gate {
                 attempt: report.gate_attempts,
                 passed,
