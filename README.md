@@ -92,9 +92,19 @@ blyte "make the migration idempotent" --gate "pytest tests/test_migrations.py" \
 blyte
 ```
 
-Credentials: `GEMINI_API_KEY` (default provider), `ANTHROPIC_API_KEY`, or `OLLAMA_API_KEY`.
-`BLYTE_MODEL` or `--model` picks the model; a `-low`/`-medium`/`-high` suffix sets Gemini's
-thinking level (e.g. `gemini-3.8-flash-high`).
+**Providers.** `BLYTE_MODEL` or `--model` picks the model, and its name picks the provider:
+
+| model name | provider | credentials |
+|---|---|---|
+| `gemini-3.8-flash-high` (default) | Google Gemini; `-low`/`-medium`/`-high` sets the thinking level | `GEMINI_API_KEY` |
+| `claude-…` or `anthropic/…` | Anthropic | `ANTHROPIC_API_KEY` |
+| `openai/<model>` | any OpenAI-compatible API: OpenAI, or a local vLLM / LM Studio server | `OPENAI_API_KEY`, `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) |
+| `openrouter/<vendor>/<model>` | OpenRouter (Claude, Muse Spark, free models, …) | `OPENROUTER_API_KEY` |
+| `<name>:<tag>` or `ollama/…` | Ollama, local or cloud; thinking off unless the name ends in `+think` | `OLLAMA_HOST` (e.g. `http://localhost:11434`) or `OLLAMA_API_KEY` |
+
+A local model needs its context set above blyte's fold budget: start Ollama with
+`OLLAMA_CONTEXT_LENGTH=32768` and run blyte with `--fold-budget 16000`. Provider credentials never
+reach the commands the model runs.
 
 Run `blyte --help` for every flag. REPL commands: `/help`, `/model`, `/gate`, `/state`, `/diff`,
 `/workspace`, `/clear`, `/exit`.
