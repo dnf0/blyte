@@ -9,6 +9,7 @@
 //! - A tool response is sent via `{"role": "tool", "content": "..."}`.
 //! - The system prompt is passed as an initial message with `{"role": "system", "content": "..."}` within the messages array.
 //! - Model discovery is performed via `GET /api/tags` parsing the `models` array and details.
+//! - Thinking is off unless the model name ends in `+think`.
 
 use serde_json::{json, Value};
 
@@ -31,14 +32,46 @@ fn normalize_api_root(raw: &str) -> String {
     }
 }
 
+/// Strips optional `ollama/` namespace prefix and `+think` suffix from the model name,
+/// returning the cleaned wire model identifier and whether thinking was requested.
+fn parse_model(raw: &str) -> (String, bool) {
+    let stripped = raw.strip_prefix("ollama/").unwrap_or(raw);
+    if let Some(base) = stripped.strip_suffix("+think") {
+        (base.to_string(), true)
+    } else {
+        (stripped.to_string(), false)
+    }
+}
+
 /// Ollama Cloud and local/remote endpoint provider adapter.
 pub struct Ollama {
     api_key: Option<String>,
     api_root: String,
     model: String,
+    think: bool,
 }
 
 impl Ollama {
+    /// Constructs an Ollama provider instance from environment variables, falling back to defaults.
+    ///
+    /// Reads `OLLAMA_API_KEY` (optional), `OLLAMA_HOST` (optional, defaults to `https://ollama.com/api`),
+    /// and `BLYTE_MODEL` (optional, defaults to `qwen2.5-coder:32b`). Never fails: when neither
+    /// `OLLAMA_API_KEY` nor `OLLAMA_HOST` is set, an unauthenticated instance with default API root is created.
+    ///
+    /// # Returns
+    /// An initialized [`Ollama`] instance.
+    pub fn from_env_or_default() -> Self {
+        let api_key = std::env::var("OLLAMA_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty());
+
+        let host = std::env::var("OLLAMA_HOST")
+            .ok()
+            .filter(|h| !h.trim().is_empty());
+
+        Self::from_parts(api_key, host)
+    }
+
     /// Constructs an Ollama provider instance from environment variables.
     ///
     /// Reads `OLLAMA_API_KEY` (optional for local hosts, required for Ollama Cloud),
@@ -66,6 +99,10 @@ impl Ollama {
             return Err(ProviderError::MissingKey("OLLAMA_API_KEY"));
         }
 
+        Ok(Self::from_parts(api_key, host))
+    }
+
+    fn from_parts(api_key: Option<String>, host: Option<String>) -> Self {
         // Default to Ollama Cloud API root when no host override is specified.
         let api_root = host
             .map(|h| normalize_api_root(&h))
@@ -73,16 +110,14 @@ impl Ollama {
 
         // Strip any provider prefix to keep wire requests clean while accepting uniform IDs.
         let raw_model = std::env::var("BLYTE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        let model = raw_model
-            .strip_prefix("ollama/")
-            .unwrap_or(&raw_model)
-            .to_string();
+        let (model, think) = parse_model(&raw_model);
 
-        Ok(Self {
+        Self {
             api_key,
             api_root,
             model,
-        })
+            think,
+        }
     }
 
     /// Sets the model identifier to use for completion requests.
@@ -93,8 +128,9 @@ impl Ollama {
     /// # Returns
     /// The updated [`Ollama`] instance.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        let m = model.into();
-        self.model = m.strip_prefix("ollama/").unwrap_or(&m).to_string();
+        let (model, think) = parse_model(&model.into());
+        self.model = model;
+        self.think = think;
         self
     }
 
@@ -202,6 +238,7 @@ impl Ollama {
         let mut body = json!({
             "model": self.model,
             "stream": false,
+            "think": self.think,
             "messages": messages,
         });
 
