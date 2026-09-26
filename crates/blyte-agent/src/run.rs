@@ -221,6 +221,9 @@ impl<'a> Runner<'a> {
              full run to it. Do not claim to be finished; simply stop when you believe the \
              command will pass, and you will be told.\n\n\
              ## Environment\n{where_}\nAvailable: {bins}\n\n\
+             Change nothing outside the repository: no caches, other repositories, \
+             home-directory files or system settings. If something outside it blocks you \
+             (disk space, network, a missing tool), say so and stop.\n\n\
              ## Working efficiently\n\
              Independent reads, searches and commands can be issued as several tool calls in one \
              turn: they run in order and you see every result together. Batch them whenever one \
@@ -499,7 +502,10 @@ impl<'a> Runner<'a> {
                 ""
             };
             history.push(Message::User(format!(
-                "Verification did not pass.\n\n{output}{reset_note}"
+                "Verification did not pass.\n\n{output}\n\n\
+                 If the failure is caused by your change, fix your change, not the machine. \
+                 If it is not caused by your change (disk space, network, a missing service), \
+                 say so and stop.{reset_note}"
             )));
         }
         (Outcome::BudgetExhausted, report)
