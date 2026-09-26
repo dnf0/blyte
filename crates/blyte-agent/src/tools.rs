@@ -39,22 +39,25 @@ pub const MAX_MATCHES: usize = 200;
 /// never catches: a single grep over node_modules overflowed a 1,048,576-token request.
 pub const MAX_LINE_CHARS: usize = 500;
 
+/// Longest line `read` keeps whole. Larger than `MAX_LINE_CHARS` because a file the model asked
+/// for is the point, not noise: a plan's 640-character contract line was clipped at 500 and the
+/// model spent three turns failing to see it. Minified files are still clipped, here and by
+/// `MAX_OUTPUT_CHARS`.
+pub const READ_LINE_CHARS: usize = 2_000;
+
 /// Most characters a single tool result may carry (about 15K tokens), after line clipping and
 /// line distillation. The final guarantee that one result cannot swamp the context.
 pub const MAX_OUTPUT_CHARS: usize = 60_000;
 
-/// `bound_output` with a caller-chosen line budget (`read` uses `READ_LINE_BUDGET`).
-pub fn bound_output_lines(text: &str, line_budget: usize) -> String {
+/// `bound_output_lines` with a caller-chosen line length (`read` uses `READ_LINE_CHARS`).
+pub fn bound_output_with(text: &str, line_budget: usize, line_chars: usize) -> String {
     let clipped: Vec<String> = text
         .lines()
         .map(|l| {
             let n = l.chars().count();
-            if n > MAX_LINE_CHARS {
-                let head: String = l.chars().take(MAX_LINE_CHARS).collect();
-                format!(
-                    "{head} …[{} more chars clipped by blyte]",
-                    n - MAX_LINE_CHARS
-                )
+            if n > line_chars {
+                let head: String = l.chars().take(line_chars).collect();
+                format!("{head} …[{} more chars clipped by blyte]", n - line_chars)
             } else {
                 l.to_string()
             }
@@ -77,6 +80,11 @@ pub fn bound_output_lines(text: &str, line_budget: usize) -> String {
         "{head}\n\n[... {} chars elided by blyte ...]\n\n{tail}",
         total - head_n - tail_n
     )
+}
+
+/// `bound_output` with a caller-chosen line budget (`read` uses `READ_LINE_BUDGET`).
+pub fn bound_output_lines(text: &str, line_budget: usize) -> String {
+    bound_output_with(text, line_budget, MAX_LINE_CHARS)
 }
 
 /// Bound a tool's output by size: clip over-long lines, distil to `OUTPUT_LINE_BUDGET` lines,
@@ -352,12 +360,11 @@ pub fn execute(
     args: &Value,
 ) -> ToolOutcome {
     let mut outcome = execute_unbounded(root, shell, fs, name, args);
-    let line_budget = if name == "read" {
-        READ_LINE_BUDGET
+    outcome.content = if name == "read" {
+        bound_output_with(&outcome.content, READ_LINE_BUDGET, READ_LINE_CHARS)
     } else {
-        OUTPUT_LINE_BUDGET
+        bound_output_lines(&outcome.content, OUTPUT_LINE_BUDGET)
     };
-    outcome.content = bound_output_lines(&outcome.content, line_budget);
     outcome
 }
 
