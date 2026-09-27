@@ -19,6 +19,7 @@
 //! unrepresentable.
 
 pub mod anthropic;
+pub mod chatgpt;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
