@@ -46,9 +46,15 @@ fn main() {
                                 }
                             }
                         }
-                        println!(
-                            "ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
-                        );
+                        if no_default {
+                            println!(
+                                "to use it, ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
+                            );
+                        } else {
+                            println!(
+                                "Claude Code now plans and reviews, and delegates implementation to blyte, in parallel, by default"
+                            );
+                        }
                         std::process::exit(0);
                     }
                     Err(e) => {
