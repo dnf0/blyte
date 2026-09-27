@@ -90,6 +90,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         report: None,
         fold_budget: None,
         sandbox: "on".into(),
+        network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
     };
@@ -127,6 +128,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         report: None,
         fold_budget: None,
         sandbox: "on".into(),
+        network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
     };
@@ -153,6 +155,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         report: None,
         fold_budget: None,
         sandbox: "on".into(),
+        network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
     };
@@ -190,6 +193,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         report: None,
         fold_budget: None,
         sandbox: "on".into(),
+        network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
     };

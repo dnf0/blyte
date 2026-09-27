@@ -491,6 +491,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     report: None,
                     fold_budget: None,
                     sandbox: "on".into(),
+                    network: "on".into(),
                     allow_read: Vec::new(),
                     pass_env: Vec::new(),
                 };

@@ -39,6 +39,8 @@ pub struct TaskConfig {
     pub fold_budget: Option<usize>,
     /// Sandbox local command execution mode (`--sandbox`).
     pub sandbox: String,
+    /// Network outbound mode for commands (`--network`).
+    pub network: String,
     /// Paths permitted for reading despite credential deny-list (`--allow-read`).
     pub allow_read: Vec<PathBuf>,
     /// Environment variables permitted to pass to commands despite looking like credentials (`--pass-env`).
@@ -67,10 +69,37 @@ impl From<&crate::cli::Cli> for TaskConfig {
             report: cli.report.clone(),
             fold_budget: cli.fold_budget,
             sandbox: cli.sandbox.clone(),
+            network: cli.network.clone(),
             allow_read: cli.allow_read.clone(),
             pass_env: cli.pass_env.clone(),
         }
     }
+}
+
+/// Validates network configuration against the environment and active flags.
+///
+/// Refuses `--network=off` when running with `--container`, when `--sandbox=off`,
+/// when the sandbox is unavailable, or on Linux when `landlock_abi() < 4`.
+pub fn check_network_mode(config: &TaskConfig) -> Result<(), String> {
+    if config.network == "off" {
+        if config.container.is_some() {
+            return Err(
+                "--network=off is not supported with --container; set the container's network instead"
+                    .into(),
+            );
+        }
+        if config.sandbox != "on" {
+            return Err("--network=off needs the sandbox".into());
+        }
+        #[cfg(target_os = "linux")]
+        if blyte_agent::sandbox::landlock_abi() < 4 {
+            return Err("--network=off on Linux needs Linux 6.7 or later".into());
+        }
+        if !blyte_agent::sandbox::available() {
+            return Err("--network=off needs the sandbox, but the sandbox is unavailable".into());
+        }
+    }
+    Ok(())
 }
 
 /// Executes an autonomous solver run using the provided task configuration and live stdout.
@@ -124,6 +153,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     state: &mut blyte_agent::state::State,
     writer: &mut W,
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
+    check_network_mode(config)?;
     let started = std::time::Instant::now();
     // 1. Initialize LLM provider from environment credentials or model specification.
     // If credentials for the detected provider are missing, produce a clear error indicating which key to set.
@@ -185,11 +215,19 @@ pub fn run_task_with_state_and_writer<W: Write>(
             }
             let shell = if config.sandbox == "on" {
                 if blyte_agent::sandbox::available() {
-                    let profile =
-                        blyte_agent::sandbox::default_profile(&config.root, &config.allow_read);
+                    let profile = blyte_agent::sandbox::default_profile_net(
+                        &config.root,
+                        &config.allow_read,
+                        config.network == "on",
+                    );
                     if matches!(profile, blyte_agent::sandbox::Profile::Landlock(_)) {
                         eprintln!(
                             "blyte: on Linux the sandbox restricts writes only; credential reads are not blocked"
+                        );
+                    }
+                    if matches!(profile, blyte_agent::sandbox::Profile::LandlockOffline(_)) {
+                        eprintln!(
+                            "blyte: on Linux --network=off blocks TCP connections only (localhost included); UDP and the Docker socket are not blocked"
                         );
                     }
                     blyte_agent::shell::PersistentShell::local_sandboxed(

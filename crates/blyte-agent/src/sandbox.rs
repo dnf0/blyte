@@ -10,6 +10,13 @@
 //! - On Linux, Landlock restricts writes only. Because Landlock can only allow beneath paths
 //!   and cannot carve out forbidden subdirectories (e.g. `~/.ssh`) from a readable home,
 //!   the credential read-deny is macOS-only. The harness environment filter applies on both platforms.
+//!
+//! # Network isolation (`--network=off`)
+//!
+//! - On macOS, Seatbelt denies outbound network connections while allowing loopback (`localhost:*`)
+//!   and Unix domain sockets, then explicitly denies known Docker daemon sockets.
+//! - On Linux, Landlock (ABI >= 4, Linux 6.7+) handles TCP connection restriction (`AccessNet::ConnectTcp`),
+//!   denying all outbound TCP connections (including localhost). UDP and Unix sockets are not restricted by Landlock.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +27,8 @@ pub enum Profile {
     Seatbelt(String),
     /// A list of write-allowed directory paths for Landlock on Linux.
     Landlock(Vec<PathBuf>),
+    /// A list of write-allowed directory paths for Landlock on Linux, blocking outbound TCP connections.
+    LandlockOffline(Vec<PathBuf>),
 }
 
 impl From<String> for Profile {
@@ -34,6 +43,25 @@ impl From<&str> for Profile {
     }
 }
 
+/// Returns the Landlock ABI version supported by the running kernel, or 0 if unsupported or on other platforms.
+#[cfg(target_os = "linux")]
+pub fn landlock_abi() -> i64 {
+    unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            1u32,
+        ) as i64
+    }
+}
+
+/// Returns the Landlock ABI version supported by the running kernel, or 0 if unsupported or on other platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn landlock_abi() -> i64 {
+    0
+}
+
 /// Returns whether sandbox execution is available on this system.
 ///
 /// On macOS, returns true when `/usr/bin/sandbox-exec` is present on disk.
@@ -46,14 +74,7 @@ pub fn available() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        unsafe {
-            libc::syscall(
-                libc::SYS_landlock_create_ruleset,
-                std::ptr::null::<libc::c_void>(),
-                0usize,
-                1u32,
-            ) >= 1
-        }
+        landlock_abi() >= 1
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -61,11 +82,16 @@ pub fn available() -> bool {
     }
 }
 
+/// Escapes a path for inclusion in an SBPL rule.
+fn escape_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Canonicalises when possible and escapes a path for inclusion in an SBPL subpath rule.
 fn escape_subpath(path: &Path) -> String {
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let s = canon.to_string_lossy();
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    escape_path(&canon)
 }
 
 /// Generates an SBPL (Seatbelt Profile Language) profile denying file writes outside allowed paths.
@@ -212,6 +238,46 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
     allowed
 }
 
+/// Returns the standard Unix socket paths used by Docker and container runtimes.
+pub fn docker_sockets(home: &Path) -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/var/run/docker.sock"),
+        home.join(".docker/run/docker.sock"),
+        home.join(".colima/default/docker.sock"),
+        home.join(".orbstack/run/docker.sock"),
+    ]
+}
+
+/// Augments an SBPL profile string with network-denial rules, allowing loopback and unix sockets,
+/// then denying the specified Docker unix sockets (and their canonicalised paths if different).
+pub fn offline(mut profile: String, docker_sockets: &[PathBuf]) -> String {
+    profile.push_str(
+        r#"(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (remote unix-socket))"#,
+    );
+    if !docker_sockets.is_empty() {
+        let mut paths = Vec::new();
+        for s in docker_sockets {
+            if !paths.contains(s) {
+                paths.push(s.clone());
+            }
+            if let Ok(canon) = s.canonicalize() {
+                if canon != *s && !paths.contains(&canon) {
+                    paths.push(canon);
+                }
+            }
+        }
+        profile.push_str("(deny network-outbound");
+        for p in paths {
+            let escaped = escape_path(&p);
+            profile.push_str(&format!(
+                r#" (remote unix-socket (path-literal "{escaped}"))"#
+            ));
+        }
+        profile.push(')');
+    }
+    profile
+}
+
 /// Returns the default sandbox profile for the current platform.
 ///
 /// On macOS, returns an SBPL profile denying writes outside `default_allowed` and reads under credential stores.
@@ -232,21 +298,65 @@ pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
     }
 }
 
+/// Returns the default sandbox profile with network configuration.
+///
+/// When `network` is true, returns the same profile as [`default_profile`].
+/// When `network` is false, returns an offline profile denying outbound network connections.
+pub fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
+    if network {
+        return default_profile(root, allow_read);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let base = match default_profile(root, allow_read) {
+            Profile::Seatbelt(s) => s,
+            _ => unreachable!(),
+        };
+        let socks = match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
+            _ => Vec::new(),
+        };
+        Profile::Seatbelt(offline(base, &socks))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = allow_read;
+        Profile::LandlockOffline(default_allowed(root))
+    }
+}
+
 /// Sets up Landlock sandbox rules in the child process before exec.
 #[cfg(target_os = "linux")]
 pub(crate) fn landlock_pre_exec(
     cmd: &mut std::process::Command,
     allowed: &[PathBuf],
+    block_tcp: bool,
 ) -> std::io::Result<()> {
     use landlock::{
-        path_beneath_rules, AccessFs, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, ABI,
+        path_beneath_rules, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetCreated,
+        RulesetCreatedAttr, ABI,
     };
     use std::os::unix::process::CommandExt;
     use std::sync::Mutex;
 
-    let ruleset: RulesetCreated = Ruleset::default()
+    if block_tcp && landlock_abi() < 4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "needs Linux 6.7 or later",
+        ));
+    }
+
+    let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_write(ABI::V5))
-        .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)?;
+
+    if block_tcp {
+        ruleset = ruleset
+            .handle_access(AccessNet::ConnectTcp)
+            .map_err(std::io::Error::other)?;
+    }
+
+    let ruleset: RulesetCreated = ruleset
         .create()
         .map_err(std::io::Error::other)?
         .add_rules(path_beneath_rules(allowed, AccessFs::from_write(ABI::V5)))
