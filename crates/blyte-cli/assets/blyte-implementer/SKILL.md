@@ -1,6 +1,6 @@
 ---
 name: blyte-implementer
-description: Use by default whenever you would otherwise write the code yourself for a change in a git repository that has a check command (tests, lint): plan the change, split it into precise tasks, dispatch each to blyte (`blyte dispatch`, in its own worktree, on a cheaper model, with the check as its gate), independent tasks in parallel, then verify every result yourself and merge. Skip it for design discussions, ambiguous requirements, one-line edits, and anything with no check.
+description: Use by default whenever you would otherwise write the code yourself for a change in a git repository that has a check command (tests, lint): plan the change, split it into independent tasks and dispatch them to blyte in parallel (`blyte dispatch`, one worktree each, on a cheaper model, with the check as the gate), then verify every result yourself and merge. Skip it for design discussions, ambiguous requirements, one-line edits, and anything with no check.
 ---
 
 # blyte as your implementer
@@ -16,14 +16,19 @@ anything, and the repository has a check that would catch a wrong result. Keep f
 design decisions, ambiguous requirements, one-line edits, anything with no check, and anything
 touching credentials, deployment or other repositories.
 
-## 1. Plan, and split for parallel work
+## 1. Plan for parallel work (the default)
 
-Break the change into tasks of one commit each. Then sort them:
+Parallel is the default: it is how this workflow saves time. Break the change into tasks of
+one commit each, arranged so that as many as possible touch disjoint files, then sort them:
 
 - **Independent tasks** touch disjoint files and do not depend on each other: they run in parallel.
 - **Dependent tasks** need an earlier task's result: they run after it, based on its branch
   (`--base wip/T1`).
 - **Coupled tasks** (task 2 cannot pass its checks without task 1) are one task.
+
+Dispatch every independent task at once. Run tasks one after another only when one needs
+another's result. A plan with a single task is fine for a single change; do not split work
+artificially just to run it in parallel.
 
 ## 2. Write each task
 

@@ -72,13 +72,17 @@ fn install_default_writes_claude_md_and_uninstall_removes_both() {
 }
 
 #[test]
-fn install_without_default_leaves_claude_md_alone() {
+fn install_with_no_default_leaves_claude_md_alone() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     assert_eq!(
-        blyte(cwd.path(), home.path(), &["skill", "install"])
-            .status
-            .code(),
+        blyte(
+            cwd.path(),
+            home.path(),
+            &["skill", "install", "--no-default"]
+        )
+        .status
+        .code(),
         Some(0)
     );
     assert!(!home.path().join(".claude/CLAUDE.md").exists());

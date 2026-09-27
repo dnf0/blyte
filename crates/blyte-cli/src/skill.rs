@@ -5,12 +5,13 @@ pub const SKILL_MD: &str = include_str!("../assets/blyte-implementer/SKILL.md");
 
 pub const DEFAULT_BLOCK: &str = "\
 <!-- blyte:default -->
-## Implementation: delegate to blyte
+## Implementation: delegate to blyte, in parallel
 
 For code changes in a git repository that has a check command (tests, lint), plan and review
-the work yourself and delegate the implementation to blyte with the `blyte-implementer` skill
-(`blyte dispatch`), running independent tasks in parallel. Keep for yourself: design decisions,
-ambiguous requirements, one-line edits, and anything with no check.
+the work yourself and delegate the implementation to blyte with the `blyte-implementer` skill.
+Split the work into independent tasks and dispatch them in parallel (`blyte dispatch`, one
+worktree each); run tasks one after another only when one depends on another. Keep for
+yourself: design decisions, ambiguous requirements, one-line edits, and anything with no check.
 <!-- /blyte:default -->";
 
 const START_MARKER: &str = "<!-- blyte:default -->";
@@ -106,7 +107,7 @@ pub fn remove_default_block(text: &str) -> String {
     format!("{prefix_clean}{suffix}")
 }
 
-pub fn install(project: bool, force: bool, default: bool) -> Result<PathBuf, String> {
+pub fn install(project: bool, force: bool, no_default: bool) -> Result<PathBuf, String> {
     let dir = skill_dir(project)?;
     let skill_path = dir.join("SKILL.md");
 
@@ -126,7 +127,7 @@ pub fn install(project: bool, force: bool, default: bool) -> Result<PathBuf, Str
     std::fs::write(&skill_path, SKILL_MD)
         .map_err(|e| format!("failed to write {}: {e}", skill_path.display()))?;
 
-    if default {
+    if !no_default {
         let md_path = claude_md_path(project)?;
         if let Some(parent) = md_path.parent() {
             std::fs::create_dir_all(parent)

@@ -32,11 +32,12 @@ fn main() {
                 blyte_cli::cli::SkillAction::Install {
                     project,
                     force,
-                    default,
-                } => match blyte_cli::skill::install(project, force, default) {
+                    default: _,
+                    no_default,
+                } => match blyte_cli::skill::install(project, force, no_default) {
                     Ok(path) => {
                         println!("installed {}", path.display());
-                        if default {
+                        if !no_default {
                             match blyte_cli::skill::claude_md_path(project) {
                                 Ok(md_path) => println!("updated {}", md_path.display()),
                                 Err(e) => {
@@ -46,8 +47,8 @@ fn main() {
                             }
                         }
                         println!(
-                                "ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
-                            );
+                            "ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
+                        );
                         std::process::exit(0);
                     }
                     Err(e) => {
