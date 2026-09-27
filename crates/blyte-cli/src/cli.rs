@@ -79,4 +79,8 @@ pub struct Cli {
         value_parser = ["on", "off"]
     )]
     pub sandbox: String,
+
+    /// Let sandboxed commands read this path despite the credential deny-list (repeatable)
+    #[arg(long = "allow-read")]
+    pub allow_read: Vec<PathBuf>,
 }
