@@ -27,6 +27,7 @@ use blyte_provider::{Message, Provider, ProviderError, Request, Usage};
 
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
+use crate::gate_slots;
 use crate::shell::Shell;
 use crate::state::State;
 use crate::tools;
@@ -112,6 +113,8 @@ pub struct RunReport {
     pub turn_usage: Vec<TurnUsage>,
     /// Wall time of each gate attempt, in order.
     pub gate_ms: Vec<u64>,
+    /// Time spent waiting for a gate slot on each attempt, in order (0 when acquired at once).
+    pub gate_wait_ms: Vec<u64>,
     /// Gate output for each failed attempt, bounded to 4,000 characters.
     pub gate_failures: Vec<String>,
     /// Calls per tool name.
@@ -308,10 +311,30 @@ impl<'a> Runner<'a> {
     /// A gate of several lines is several steps. Every step runs even after one fails, and all
     /// failures come back in one message: with `fmt && clippy && test` a shadow run found the
     /// clippy failure only after fixing the fmt one, a whole extra gate round of 7 turns.
-    fn run_gate(&self, state: &State) -> (bool, String) {
+    fn run_gate(&self, state: &State) -> (bool, String, u64) {
+        let max_slots = gate_slots::slots();
+        let slot_dir = gate_slots::slot_dir();
+        let (_guard, wait_ms) =
+            match gate_slots::acquire(max_slots, &slot_dir, Duration::from_millis(500)) {
+                Ok((guard, waited)) => {
+                    if !waited.is_zero() {
+                        eprintln!(
+                            "gate: waited {}s for a gate slot ({max_slots} in use)",
+                            waited.as_secs()
+                        );
+                    }
+                    (Some(guard), waited.as_millis() as u64)
+                }
+                Err(e) => {
+                    eprintln!("gate: slot acquisition failed: {e}");
+                    (None, 0)
+                }
+            };
+
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         if steps.len() <= 1 {
-            return self.run_step(&state.orchestrator.verification_cmd);
+            let (passed, output) = self.run_step(&state.orchestrator.verification_cmd);
+            return (passed, output, wait_ms);
         }
         let mut failures = Vec::new();
         let mut failed_steps = Vec::new();
@@ -323,7 +346,7 @@ impl<'a> Runner<'a> {
             }
         }
         if failures.is_empty() {
-            return (true, "exit 0".into());
+            return (true, "exit 0".into(), wait_ms);
         }
         let body = tools::bound_output(&failures.join("\n\n"));
         (
@@ -334,6 +357,7 @@ impl<'a> Runner<'a> {
                 steps.len(),
                 failed_steps.join(", ")
             ),
+            wait_ms,
         )
     }
 
@@ -556,8 +580,9 @@ impl<'a> Runner<'a> {
             // --- the model stopped calling tools: the runtime decides -----------------------
             report.gate_attempts += 1;
             let gate_start = std::time::Instant::now();
-            let (passed, output) = self.run_gate(state);
+            let (passed, output, wait_ms) = self.run_gate(state);
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
+            report.gate_wait_ms.push(wait_ms);
             self.emit(Event::Gate {
                 attempt: report.gate_attempts,
                 passed,
