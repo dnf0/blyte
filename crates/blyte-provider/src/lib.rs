@@ -2,8 +2,9 @@
 //!
 //! # Why a trait from the first commit
 //!
-//! Gemini is the only implementation today because that is where the credits are and it is the
-//! model the EXP-081 baseline ran on, which keeps the comparison honest. But the wire formats
+//! Gemini came first, because that is where the credits were and it is the model the EXP-081
+//! baseline ran on, which kept the comparison honest; Anthropic, OpenAI-compatible, Ollama and
+//! ChatGPT followed. The wire formats
 //! differ in shape, not just in spelling -- Anthropic sends `tool_use` content blocks and
 //! expects `tool_result`; Gemini sends `functionCall` parts and expects `functionResponse` --
 //! so anything above this layer that touches a provider's own vocabulary has to be rewritten

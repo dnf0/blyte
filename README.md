@@ -17,12 +17,14 @@ frontier harness), then hand each well-specified task to blyte running on a chea
 does the work in its own git worktree, and the repository's own check, run as a **sealed gate**,
 decides whether it is done. The frontier model reviews the diff and merges.
 
-```
-Claude Code (frontier model)                blyte (cheap model, e.g. Gemini Flash)
-  plan → write the task + its tests  ─────▶   implement in .wt/<id>, commit
-                                              gate: your check command → pass / fail
-  review the diff and the report  ◀─────────  outcome, gate failures, turns, cost
-  merge, or send a follow-up
+```mermaid
+flowchart LR
+    F["Frontier model<br/>(Claude Code)"] -- "task + its tests" --> B["blyte<br/>(cheap model)"]
+    B -- "implement, commit" --> G{{"gate: your check"}}
+    G -- "fail: every failure, retry" --> B
+    G -- pass --> R["JSON summary<br/>outcome · commits · cost"]
+    R --> F
+    F -- "review the diff, merge" --> M[("main")]
 ```
 
 Your frontier tokens go on the parts that need judgement: planning and review. The typing,

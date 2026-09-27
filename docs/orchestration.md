@@ -5,13 +5,24 @@ hands each well-specified task to blyte, which **implements** it on a cheaper mo
 repository's check command, run by blyte as its sealed gate, decides whether the work is done. The
 frontier model then verifies the result and merges it.
 
-```
- frontier model (orchestrator)            blyte (implementer, cheaper model)
- ─────────────────────────────            ──────────────────────────────────
- write the task, with tests  ───────────▶  implement in .wt/<id>, run quick checks, commit
-                                           gate: the repository's check  ──▶ pass / fail + output
- read the report and the diff ◀──────────  report: outcome, gate failures, turns, cost
- merge, or send a follow-up task
+```mermaid
+sequenceDiagram
+    participant F as Frontier model (Claude Code)
+    participant B as blyte (cheap model)
+    participant G as Gate (your check)
+    F->>F: plan, write the task and its tests
+    F->>B: blyte dispatch T1 task.md --gate ...
+    B->>B: implement in .wt/T1, run quick checks, commit
+    B->>G: run every step
+    alt a step fails
+        G-->>B: all the failures
+        B->>B: fix, commit again
+    else every step passes
+        G-->>B: pass
+    end
+    B-->>F: JSON: outcome, commits, final_message, cost
+    F->>F: blyte review T1 --diff, then verify
+    F->>F: merge, or send a follow-up task
 ```
 
 ## Why it works

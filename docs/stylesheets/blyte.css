@@ -134,3 +134,23 @@
 .md-typeset h1 + h2 { border-top: 0; padding-top: 0; }
 .b-card code { white-space: nowrap; }
 .b-card-wide { grid-column: 1 / -1; border-left: 3px solid var(--b-rust); }
+
+/* Mermaid diagrams in the palette. */
+[data-md-color-scheme="default"], [data-md-color-scheme="slate"] {
+  --md-mermaid-font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --md-mermaid-node-bg-color: var(--b-panel);
+  --md-mermaid-node-fg-color: var(--b-ink);
+  --md-mermaid-edge-color: var(--b-rust);
+  --md-mermaid-label-bg-color: var(--b-ground);
+  --md-mermaid-label-fg-color: var(--b-muted);
+  --md-mermaid-sequence-actor-bg-color: var(--b-panel);
+  --md-mermaid-sequence-actor-fg-color: var(--b-ink);
+  --md-mermaid-sequence-actor-border-color: var(--b-line);
+  --md-mermaid-sequence-actor-line-color: var(--b-line);
+  --md-mermaid-sequence-message-fg-color: var(--b-ink);
+  --md-mermaid-sequence-message-line-color: var(--b-rust);
+  --md-mermaid-sequence-note-bg-color: var(--b-rust-soft);
+  --md-mermaid-sequence-note-fg-color: var(--b-ink);
+  --md-mermaid-sequence-note-border-color: var(--b-rust);
+}
+.md-typeset .mermaid { margin: 1.2em 0; }

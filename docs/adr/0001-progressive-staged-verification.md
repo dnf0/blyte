@@ -1,6 +1,10 @@
 # ADR 0001: Progressive Staged Verification & Regression Quarantine
 
-**Status:** Proposed  
+> **Superseded.** This records a design that was built, measured and removed: the MCP server, the
+> state engine, the worktree engine and the daemon described here no longer exist. Kept as a
+> record of the decision. The current architecture is [ADR 0003](0003-one-loop-implementer.md).
+
+**Status:** Superseded by [ADR 0003](0003-one-loop-implementer.md) (2026-09-27)  
 **Date:** 2026-09-12  
 **Deciders:** Core Engineering Team  
 **Consulted:** Blyte Architecture, Agent Rules System  
@@ -26,30 +30,15 @@ We will implement **Progressive Staged Verification** across `blyte_core`, `blyt
 
 Verification is structured into a two-tier hierarchy tied directly to git worktree lifecycle states:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        TIER 1: Milestone Micro-Gate                    │
-│  Trigger: `state_next` / `state_exec` on intermediate steps (1 .. N-1)  │
-├────────────────────────────────────────────────────────────────────────┤
-│  • Target: Newly introduced tests (F2P) + Touched Unit Tests (< 15s)   │
-│  • Execution Environment: Quarantined isolated worktree (`.wt/<branch>`)│
-│  • Gate Logic: Verifies active milestone hypothesis rapidly.           │
-│  • Failure Mode: In-band failure, workspace remains isolated.          │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ (All milestones pass Tier 1)
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                     TIER 2: Pre-Merge Acceptance Gate                  │
-│  Trigger: `worktree_merge` / Final task completion (`state_next`)      │
-├────────────────────────────────────────────────────────────────────────┤
-│  • Target: Comprehensive Regression Suite (Full P2P + F2P, 5-15m)      │
-│  • Gate Logic: Hard gate checking zero regressions across entire repo. │
-│  • On Pass: Merges branch cleanly into base, cleans worktree, completes│
-│  • On Fail:                                                            │
-│      - MERGE IS BLOCKED. Base branch remains untouched.                │
-│      - Regressions quarantined in `.wt/<branch>`.                     │
-│      - Failing test outputs returned to agent for remediation.         │
-└────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    T1["<b>Tier 1: milestone micro-gate</b><br/>Trigger: state_next / state_exec on intermediate steps (1 .. N-1)<br/>Target: newly introduced tests (F2P) + touched unit tests (under 15 s)<br/>Runs in the quarantined worktree .wt/&lt;branch&gt;<br/>Verifies the active milestone hypothesis rapidly<br/>Failure: in-band; the workspace remains isolated"]
+    T2["<b>Tier 2: pre-merge acceptance gate</b><br/>Trigger: worktree_merge / final task completion (state_next)<br/>Target: comprehensive regression suite (full P2P + F2P, 5-15 min)<br/>Hard gate: zero regressions across the entire repository"]
+    P["<b>On pass</b><br/>Merge the branch into base, clean the worktree, complete"]
+    X["<b>On fail</b><br/>Merge is blocked; the base branch stays untouched<br/>Regressions quarantined in .wt/&lt;branch&gt;<br/>Failing test output returned to the agent for remediation"]
+    T1 -- "all milestones pass Tier 1" --> T2
+    T2 --> P
+    T2 --> X
 ```
 
 ---

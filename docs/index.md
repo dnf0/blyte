@@ -10,9 +10,14 @@ frontier harness, then hand each well-specified task to blyte running on a cheap
 works in its own git worktree, your check command decides when the task is done, and the frontier
 model reviews the result and merges it.
 
-```
-frontier model:  plan → task + tests ──▶ blyte (cheap model): implement, gate, commit
-frontier model:  review diff + report ◀── outcome, gate failures, turns, cost
+```mermaid
+flowchart LR
+    F["Frontier model<br/>(Claude Code)"] -- "task + its tests" --> B["blyte<br/>(cheap model)"]
+    B -- "implement, commit" --> G{{"gate: your check"}}
+    G -- "fail: every failure, retry" --> B
+    G -- pass --> R["JSON summary<br/>outcome · commits · cost"]
+    R --> F
+    F -- "review the diff, merge" --> M[("main")]
 ```
 
 ## Set up in four steps
@@ -61,5 +66,5 @@ the frontier model or person driving it: see [the workflow](orchestration.md).
 
 - [Manifesto](manifesto.md): the design rules and why they exist.
 - [Evidence](evidence.md): how blyte has been measured, and the caveats.
-- [Architecture decisions](adr/0001-progressive-staged-verification.md) and
+- [The architecture decision](adr/0003-one-loop-implementer.md) and
   [research notes](research/2026-09-24-harness-research.md).
