@@ -72,7 +72,7 @@ nav:
   - Guide:
       - Getting started: getting-started.md
       - "The workflow: plan, delegate, review": orchestration.md
-      - Writing tasks for blyte: writing-tasks.md
+      - How tasks are written: writing-tasks.md
       - Running tasks: usage.md
       - Providers: providers.md
       - Security and the sandbox: security.md

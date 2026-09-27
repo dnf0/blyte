@@ -47,7 +47,7 @@ flowchart LR
 <div class="b-cards">
 <a class="b-card b-card-wide" href="orchestration/"><strong>The workflow: plan, delegate, review</strong><span>How Claude Code (or any orchestrator) hands tasks to blyte, verifies them and merges; when to delegate and when not to.</span></a>
 <a class="b-card" href="getting-started/"><strong>Get set up</strong><span>Install, choose a model, connect Claude Code, delegate a first task.</span></a>
-<a class="b-card" href="writing-tasks/"><strong>Write tasks blyte gets right</strong><span>The template, the tests, checking a task before sending it, sizing.</span></a>
+<a class="b-card" href="writing-tasks/"><strong>What makes a good task</strong><span>What the agent writes for blyte, and why: the template, the tests, checks, sizing.</span></a>
 <a class="b-card" href="usage/"><strong>Tune a run</strong><span>Gates with several steps, budgets, rollback, containers, standalone use.</span></a>
 <a class="b-card" href="providers/"><strong>Choose the implementer model</strong><span>What has been measured, the six providers, credentials, retries, cost.</span></a>
 <a class="b-card" href="security/"><strong>Know what commands can touch</strong><span>The sandbox on macOS and Linux, credential reads, the environment filter, <code>--network=off</code>.</span></a>

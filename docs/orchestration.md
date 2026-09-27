@@ -60,7 +60,7 @@ there is no check, or it touches credentials, deployment or other repositories.
 In practice the pattern pays off most when tasks are **specified precisely**: the files involved,
 the names and signatures that matter, the tests (written out), and the exact commit message. The
 more of the thinking is in the task, the less the implementer has to guess.
-[Writing tasks for blyte](writing-tasks.md) covers this in detail.
+[How tasks are written](writing-tasks.md) covers what the agent writes, in detail.
 
 ## The workflow
 
@@ -188,7 +188,7 @@ whole workflow has **not yet been run end to end under Codex**.
 
 ## Next
 
-- [Writing tasks for blyte](writing-tasks.md): the template, what to put in, how to check a task
+- [How tasks are written](writing-tasks.md): what the agent writes for blyte: the template, what to put in, how to check a task
   before sending it, sizing, and what to keep for yourself.
 - [Providers](providers.md#choosing-an-implementer-model): choosing the implementer's model.
 - [Run reports](reports.md): everything in the report the orchestrator reads.
