@@ -1,7 +1,28 @@
 //! Machine-wide gate slots so parallel dispatches do not all build and test at once.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// Environment variable set on gate commands so nested runs skip slot acquisition.
+pub const IN_GATE_ENV: &str = "__BLYTE_IN_GATE";
+
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable machine-wide gate slots for this process.
+pub fn enable() {
+    ENABLED.store(true, Ordering::SeqCst);
+}
+
+/// Returns whether machine-wide gate slots are enabled for this process.
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::SeqCst)
+}
+
+/// Returns whether this process is running inside an enclosing gate command.
+pub fn nested() -> bool {
+    std::env::var_os(IN_GATE_ENV).is_some()
+}
 
 /// Returns the maximum number of simultaneous gate slots allowed machine-wide.
 ///
