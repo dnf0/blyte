@@ -34,7 +34,10 @@ change.
 
 ## 2. Dispatch
 
-From the repository's main checkout, in the background (you are notified when it exits):
+From the repository's main checkout. A dispatch takes minutes. In an interactive session, run it
+in the background and carry on (you are notified when it exits). In a one-shot or headless
+session (for example `claude -p`), run it in the foreground: a background command dies when the
+session ends, and the dispatch with it.
 
 ```bash
 blyte dispatch T1 /abs/path/task-T1.md --gate 'cargo fmt --all --check
