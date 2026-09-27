@@ -1,6 +1,6 @@
 //! `blyte dispatch` and `blyte review` commands.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -206,6 +206,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let _ = std::fs::create_dir_all(&wt_parent);
     let log_path = wt_parent.join(format!("{}.log", args.id));
     let report_path = wt_parent.join(format!("{}.report.json", args.id));
+    if report_path.exists() {
+        let _ = std::fs::remove_file(&report_path);
+    }
 
     let log_file = match std::fs::File::create(&log_path) {
         Ok(f) => f,
@@ -262,7 +265,32 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     cmd.arg("--");
     cmd.arg(wrap_task(&task_content));
 
-    let _ = cmd.status();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error spawning child process: {e}");
+            return 2;
+        }
+    };
+
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let start_json = serde_json::json!({
+        "id": args.id,
+        "pid": child.id(),
+        "started_at": started_at,
+        "task_file": args.task_file.display().to_string(),
+        "gate": gate,
+    });
+    let start_path = wt_parent.join(format!("{}.start.json", args.id));
+    if let Ok(json_str) = serde_json::to_string_pretty(&start_json) {
+        let _ = std::fs::write(&start_path, json_str + "\n");
+    }
+
+    let _ = child.wait();
 
     // 5. Read report, commits and changed files
     let log_out = Command::new("git")
@@ -530,4 +558,246 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     }
 
     0
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            while let Some(&next_c) = chars.peek() {
+                chars.next();
+                if ('\x40'..='\x7e').contains(&next_c) {
+                    break;
+                }
+                if next_c == '\n' || next_c == '\x1b' {
+                    out.push(next_c);
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogProgress {
+    pub turn: u32,
+    pub last_tool: Option<String>,
+    pub gate_attempts: u32,
+    pub gate_passed: bool,
+}
+
+pub fn parse_log(log: &str) -> LogProgress {
+    let cleaned = strip_ansi(log);
+    let mut turn: u32 = 0;
+    let mut last_tool: Option<String> = None;
+    let mut gate_attempts: u32 = 0;
+    let mut gate_passed: bool = false;
+
+    for line in cleaned.lines() {
+        if let Some(rest) = line.strip_prefix("[Turn ") {
+            if let Some((n_str, _)) = rest.split_once(']') {
+                if let Ok(n) = n_str.trim().parse::<u32>() {
+                    turn = turn.max(n);
+                }
+            }
+        }
+
+        if let Some(tool) = line.strip_prefix("● ") {
+            let truncated = if tool.chars().count() > 200 {
+                tool.chars().take(200).collect()
+            } else {
+                tool.to_string()
+            };
+            last_tool = Some(truncated);
+        }
+
+        if line.starts_with("✓ Gate passed") {
+            gate_attempts += 1;
+            gate_passed = true;
+        } else if line.starts_with("✗ Gate failed") {
+            gate_attempts += 1;
+            gate_passed = false;
+        }
+    }
+
+    LogProgress {
+        turn,
+        last_tool,
+        gate_attempts,
+        gate_passed,
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatusOutput {
+    pub id: String,
+    pub state: String,
+    pub elapsed_s: u64,
+    pub turn: u32,
+    pub last_tool: Option<String>,
+    pub gate_attempts: u32,
+    pub gate_passed: bool,
+    pub outcome: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub final_message: Option<String>,
+}
+
+pub fn run_status(id: &str, json: bool) -> i32 {
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output();
+    let Ok(out) = out else {
+        eprintln!("error: git not found");
+        return 2;
+    };
+    if !out.status.success() {
+        eprintln!("error: not a git repository");
+        return 2;
+    }
+    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+
+    let start_path = root.join(".wt").join(format!("{id}.start.json"));
+    if !start_path.exists() {
+        eprintln!("no dispatch {id} here");
+        return 2;
+    }
+
+    let start_record: serde_json::Value = match std::fs::read_to_string(&start_path) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error parsing {}: {e}", start_path.display());
+                return 2;
+            }
+        },
+        Err(e) => {
+            eprintln!("error reading {}: {e}", start_path.display());
+            return 2;
+        }
+    };
+
+    let pid = start_record
+        .get("pid")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as libc::pid_t);
+    let started_at = start_record
+        .get("started_at")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let is_alive = if let Some(pid) = pid {
+        if pid > 0 {
+            let ret = unsafe { libc::kill(pid, 0) };
+            if ret == 0 {
+                true
+            } else {
+                std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let report_path = root.join(".wt").join(format!("{id}.report.json"));
+    let report_exists = report_path.exists();
+
+    let state = if report_exists {
+        "finished"
+    } else if is_alive {
+        "running"
+    } else {
+        "dead"
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let (outcome, cost_usd, final_message, report_duration) = if state == "finished" {
+        if let Ok(content) = std::fs::read_to_string(&report_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                let outcome = v.get("outcome").and_then(|x| x.as_str()).map(String::from);
+                let cost_usd = v.get("cost_usd").and_then(|x| x.as_f64());
+                let final_message = v.get("final_message").and_then(|x| x.as_str()).map(|s| {
+                    if s.chars().count() > 500 {
+                        s.chars().take(500).collect()
+                    } else {
+                        s.to_string()
+                    }
+                });
+                let duration = v.get("duration_seconds").and_then(|x| x.as_f64());
+                (outcome, cost_usd, final_message, duration)
+            } else {
+                (None, None, None, None)
+            }
+        } else {
+            (None, None, None, None)
+        }
+    } else {
+        (None, None, None, None)
+    };
+
+    let elapsed_s = if state == "finished" {
+        report_duration
+            .map(|d| d.round() as u64)
+            .unwrap_or_else(|| now.saturating_sub(started_at))
+    } else {
+        now.saturating_sub(started_at)
+    };
+
+    let log_path = root.join(".wt").join(format!("{id}.log"));
+    let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let progress = parse_log(&log_content);
+
+    if json {
+        let status_obj = StatusOutput {
+            id: id.to_string(),
+            state: state.to_string(),
+            elapsed_s,
+            turn: progress.turn,
+            last_tool: progress.last_tool,
+            gate_attempts: progress.gate_attempts,
+            gate_passed: progress.gate_passed,
+            outcome,
+            cost_usd,
+            final_message,
+        };
+        let json_str = serde_json::to_string_pretty(&status_obj).unwrap();
+        println!("{json_str}");
+    } else {
+        println!("id: {id}");
+        println!("state: {state}");
+        println!("elapsed_s: {elapsed_s}");
+        println!("turn: {}", progress.turn);
+        println!(
+            "last_tool: {}",
+            progress.last_tool.as_deref().unwrap_or("none")
+        );
+        println!("gate_attempts: {}", progress.gate_attempts);
+        println!("gate_passed: {}", progress.gate_passed);
+        if state == "finished" {
+            if let Some(ref o) = outcome {
+                println!("outcome: {o}");
+            }
+            if let Some(c) = cost_usd {
+                println!("cost_usd: {c}");
+            }
+            if let Some(ref msg) = final_message {
+                println!("final_message: {msg}");
+            }
+        }
+    }
+
+    match state {
+        "running" | "finished" => 0,
+        _ => 1,
+    }
 }

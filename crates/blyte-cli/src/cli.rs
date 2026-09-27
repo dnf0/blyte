@@ -15,6 +15,12 @@ pub enum Command {
     Dispatch(DispatchArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
     Review(ReviewArgs),
+    /// Show what a dispatch is doing
+    Status {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Install or print the Claude Code skill for the plan, delegate, review workflow
     Skill(SkillArgs),
 }

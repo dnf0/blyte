@@ -78,6 +78,10 @@ blyte dispatch T2 /abs/task-T2.md --gate '...' > .wt/T2.json &
 wait
 ```
 
+**A long dispatch:** `blyte status T1` shows whether it is still running, the current turn, the
+last command and gate attempts. A run that is `dead`, or many turns in with no gate attempt,
+is worth a look at its log (`.wt/T1.log`) before you wait longer.
+
 **Under Codex:** run `blyte dispatch` and `blyte review` outside Codex's sandbox (request
 escalated permissions for them; `blyte skill install --harness codex` pre-approves exactly these
 two commands). They need the network to reach blyte's model, and blyte applies its own sandbox
