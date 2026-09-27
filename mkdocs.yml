@@ -30,6 +30,8 @@ theme:
       toggle:
         icon: material/weather-sunny
         name: Light mode
+  logo: assets/blyte-mark.svg
+  favicon: assets/favicon.svg
   icon:
     repo: fontawesome/brands/github
   features:

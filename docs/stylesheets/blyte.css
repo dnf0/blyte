@@ -57,9 +57,9 @@
   font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
   font-weight: 900; font-variation-settings: "wdth" 125; letter-spacing: -.02em; font-size: 1.05rem;
 }
-.md-header__topic:first-child .md-ellipsis::after { content: "."; color: var(--b-rust); margin-left: .02em; }
-.md-header__button.md-logo { display: none; }
-@media screen and (min-width: 76.25em) { .md-header__title { margin-left: .4rem; } }
+.md-header__button.md-logo img { height: 1.4rem; width: 1.4rem; }
+[data-md-color-scheme="slate"] .md-header__button.md-logo img { content: url("../assets/blyte-mark-dark.svg"); }
+.md-header__title { margin-left: .1rem !important; }
 .md-tabs { background: var(--b-ground); color: var(--b-ink); border-bottom: 1px solid var(--b-line); }
 .md-tabs__link--active, .md-tabs__link:hover { color: var(--b-rust); }
 .md-search__form { background: var(--b-panel); }
