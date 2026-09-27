@@ -71,8 +71,9 @@ Outward-facing: confirm with the user immediately before step 1.
    Terminal-Bench / DeepSWE task material before publishing it, or keep the eval repo private.
 4. **Community files:** `SECURITY.md` (added with the docs overhaul), a code of conduct, issue and
    PR templates.
-5. **Docs hosting:** GitHub Pages from `mkdocs gh-deploy` (Pages on a private repo needs a paid
-   plan; enable it when the repo goes public).
+5. **Docs hosting:** see [the hosting plan](2026-09-27-docs-hosting.md): an internal S3 +
+   CloudFront site first, then the public home (S3 with a public domain, or GitHub Pages with a
+   custom domain) at release.
 6. **Publishing:** replace the crates.io placeholders with real releases through the existing
    `cd.yml` (dry run first); `release-plz.toml` currently has `publish = false`.
 7. **README claims:** the A/B and FrontierHarness numbers carry their caveats in the README;
