@@ -152,9 +152,57 @@ pub enum Event<'e> {
 /// Retries allowed for one model call before a transient failure ends the run.
 pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
+fn parse_resets_in_seconds(body: &str) -> Option<u64> {
+    let key = "\"resets_in_seconds\"";
+    let pos = body.find(key)?;
+    let rest = body[pos + key.len()..].trim_start();
+    let after_colon = rest.strip_prefix(':')?.trim_start();
+    let digits: String = after_colon
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Identifies provider errors caused by an exhausted usage quota (as opposed to a transient
+/// burst rate limit). Returns `Some(message)` describing the exhaustion and reset duration if known.
+pub fn quota_exhausted(e: &ProviderError) -> Option<String> {
+    let ProviderError::Api { status: 429, body } = e else {
+        return None;
+    };
+    let resets_in_seconds = parse_resets_in_seconds(body);
+    let is_quota = body.contains("usage_limit_reached")
+        || body.contains("insufficient_quota")
+        || body.contains("PerDay")
+        || resets_in_seconds.is_some_and(|s| s > 300);
+
+    if !is_quota {
+        return None;
+    }
+
+    let mut msg = "usage quota exhausted; not retrying".to_string();
+    if let Some(secs) = resets_in_seconds {
+        let human = if secs >= 86400 {
+            format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+        } else if secs >= 3600 {
+            format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+        } else {
+            format!("{}m", secs / 60)
+        };
+        msg.push_str(&format!(" (resets in {human})"));
+    }
+    Some(msg)
+}
+
 /// Transient provider failures worth waiting out: rate limits, overload, server errors and
 /// dropped connections. Anything else (a malformed request, a bad key) fails the run at once.
 pub fn is_transient(e: &ProviderError) -> bool {
+    if quota_exhausted(e).is_some() {
+        return false;
+    }
     match e {
         ProviderError::Api { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
         ProviderError::Transport(_) => true,
@@ -390,7 +438,13 @@ impl<'a> Runner<'a> {
                         );
                         std::thread::sleep(wait);
                     }
-                    Err(e) => return (Outcome::Error(e.to_string()), report),
+                    Err(e) => {
+                        let err_msg = match quota_exhausted(&e) {
+                            Some(msg) => format!("{msg}: {e}"),
+                            None => e.to_string(),
+                        };
+                        return (Outcome::Error(err_msg), report);
+                    }
                 }
             };
             let model_ms = model_start.elapsed().as_millis() as u64;

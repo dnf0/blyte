@@ -51,10 +51,19 @@ fn a_valid_login_is_reused_and_the_account_id_comes_from_the_token_when_absent()
 }
 
 #[test]
+fn an_auth_json_with_no_tokens_object_is_an_auth_error() {
+    let h = home(json!({}));
+    assert!(matches!(
+        ChatGpt::from_codex_home(h.path(), NOW),
+        Err(ProviderError::Auth(_))
+    ));
+}
+
+#[test]
 fn a_token_about_to_expire_is_refused_with_how_to_refresh_it() {
     let h = home(json!({"tokens": {"access_token": jwt(NOW + 60, "a"), "account_id": "a"}}));
     match ChatGpt::from_codex_home(h.path(), NOW) {
-        Err(ProviderError::Parse(m)) => {
+        Err(ProviderError::Auth(m)) => {
             assert!(m.contains("run any codex command to refresh"), "{m}")
         }
         Err(e) => panic!("wrong error: {e:?}"),

@@ -26,7 +26,7 @@ impl ChatGpt {
     /// Loads credentials from the specified Codex home directory.
     ///
     /// Reads `<home>/auth.json`. Returns [`ProviderError::MissingKey`] with `"CODEX_HOME"`
-    /// if the file is missing or unreadable. Returns [`ProviderError::Parse`] if the
+    /// if the file is missing or unreadable. Returns [`ProviderError::Auth`] if the
     /// access token is missing, the account ID cannot be determined from either the JSON
     /// or the JWT payload claims, or if the token expires within 300 seconds of `now_unix`.
     pub fn from_codex_home(home: &Path, now_unix: u64) -> Result<Self, ProviderError> {
@@ -35,42 +35,42 @@ impl ChatGpt {
             .map_err(|_| ProviderError::MissingKey("CODEX_HOME"))?;
 
         let auth_json: Value = serde_json::from_str(&content)
-            .map_err(|e| ProviderError::Parse(format!("failed to parse auth.json: {e}")))?;
+            .map_err(|e| ProviderError::Auth(format!("failed to parse auth.json: {e}")))?;
 
-        let tokens = auth_json.get("tokens").ok_or_else(|| {
-            ProviderError::Parse("missing tokens object in auth.json".to_string())
-        })?;
+        let tokens = auth_json
+            .get("tokens")
+            .ok_or_else(|| ProviderError::Auth("missing tokens object in auth.json".to_string()))?;
 
         let access_token = tokens
             .get("access_token")
             .and_then(|t| t.as_str())
             .filter(|t| !t.trim().is_empty())
-            .ok_or_else(|| ProviderError::Parse("missing access_token in auth.json".to_string()))?;
+            .ok_or_else(|| ProviderError::Auth("missing access_token in auth.json".to_string()))?;
 
         // Parse JWT payload: header.payload.signature
         let parts: Vec<&str> = access_token.split('.').collect();
         if parts.len() < 2 {
-            return Err(ProviderError::Parse(
+            return Err(ProviderError::Auth(
                 "invalid access_token JWT format in auth.json".to_string(),
             ));
         }
 
         let payload_bytes = decode_b64url(parts[1])
-            .map_err(|e| ProviderError::Parse(format!("failed to decode JWT payload: {e}")))?;
+            .map_err(|e| ProviderError::Auth(format!("failed to decode JWT payload: {e}")))?;
 
         let payload_json: Value = serde_json::from_slice(&payload_bytes)
-            .map_err(|e| ProviderError::Parse(format!("failed to parse JWT payload JSON: {e}")))?;
+            .map_err(|e| ProviderError::Auth(format!("failed to parse JWT payload JSON: {e}")))?;
 
         // Token expiry check: exp claim in JWT payload
         let exp = payload_json
             .get("exp")
             .and_then(|e| e.as_u64())
             .ok_or_else(|| {
-                ProviderError::Parse("missing exp claim in access_token JWT".to_string())
+                ProviderError::Auth("missing exp claim in access_token JWT".to_string())
             })?;
 
         if exp <= now_unix.saturating_add(300) {
-            return Err(ProviderError::Parse(
+            return Err(ProviderError::Auth(
                 "ChatGPT login token expired or expiring soon; run any codex command to refresh your ChatGPT login"
                     .to_string(),
             ));
@@ -93,9 +93,7 @@ impl ChatGpt {
         }
 
         let account_id = account_id.ok_or_else(|| {
-            ProviderError::Parse(
-                "missing account_id in auth.json tokens and JWT claims".to_string(),
-            )
+            ProviderError::Auth("missing account_id in auth.json tokens and JWT claims".to_string())
         })?;
 
         Ok(Self {
