@@ -108,3 +108,22 @@ fn grep_tool_centres_excerpt_in_directory_search() {
         .expect("must contain match line");
     assert!(match_line.starts_with("./minified.json:1:"), "{match_line}");
 }
+
+#[test]
+fn every_match_in_a_long_line_is_shown_not_just_the_first() {
+    use blyte_agent::tools::excerpt_matches;
+    // sanitize-git-repo: an innocent hf_cache_dir early in the line, the secret far later.
+    let text = format!(
+        "{}args.hf_cache_dir{}\"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\"{}",
+        "a ".repeat(150),
+        ", b".repeat(5_000),
+        ", c".repeat(2_000)
+    );
+    let re = regex::Regex::new("hf_[A-Za-z0-9]+").unwrap();
+    let found: Vec<(usize, usize)> = re.find_iter(&text).map(|m| (m.start(), m.end())).collect();
+    assert_eq!(found.len(), 2);
+    let e = excerpt_matches(&text, &found, 500);
+    assert!(e.contains("hf_cache"), "{e}");
+    assert!(e.contains("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"), "{e}");
+    assert!(e.chars().count() < 700, "{}", e.chars().count());
+}

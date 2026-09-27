@@ -178,6 +178,61 @@ pub fn excerpt_around(text: &str, start: usize, end: usize, max: usize) -> Strin
     out
 }
 
+/// Most matches `excerpt_matches` shows from one line.
+const MAX_EXCERPTS_PER_LINE: usize = 5;
+
+/// An excerpt of a long `text` showing every match in `found` (byte ranges, in order; at most
+/// `MAX_EXCERPTS_PER_LINE`) with some context each, within about `max` characters. One match is
+/// `excerpt_around`. On sanitize-git-repo the first match in a 21,367-character line was an
+/// innocent `hf_cache_dir`; the secret was 15,000 characters later.
+pub fn excerpt_matches(text: &str, found: &[(usize, usize)], max: usize) -> String {
+    if found.len() <= 1 || text.chars().count() <= max {
+        return match found.first() {
+            Some(&(s, e)) => excerpt_around(text, s, e, max),
+            None => text.to_string(),
+        };
+    }
+    let shown = &found[..found.len().min(MAX_EXCERPTS_PER_LINE)];
+    let match_chars: usize = shown.iter().map(|&(s, e)| text[s..e].chars().count()).sum();
+    let context = max.saturating_sub(match_chars) / (2 * shown.len());
+    // Char-index windows around each match, merged where they overlap.
+    let to_char = |b: usize| text[..b].chars().count();
+    let total = text.chars().count();
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for &(s, e) in shown {
+        let (cs, ce) = (to_char(s), to_char(e));
+        let w = (cs.saturating_sub(context), (ce + context).min(total));
+        match windows.last_mut() {
+            Some(last) if w.0 <= last.1 => last.1 = last.1.max(w.1),
+            _ => windows.push(w),
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut pos = 0;
+    for (i, &(a, b)) in windows.iter().enumerate() {
+        if a > pos {
+            if i == 0 {
+                out.push_str(&format!("…[{} chars] ", a - pos));
+            } else {
+                out.push_str(&format!(" …[{} chars] ", a - pos));
+            }
+        }
+        out.extend(&chars[a..b]);
+        pos = b;
+    }
+    if pos < total {
+        out.push_str(&format!(" …[{} chars]", total - pos));
+    }
+    if found.len() > shown.len() {
+        out.push_str(&format!(
+            " [{} more matches in this line]",
+            found.len() - shown.len()
+        ));
+    }
+    out
+}
+
 fn split_grep_prefix(line: &str) -> (&str, &str) {
     static PREFIX_RE: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"^(\d+:\d+:|\d+:|.*?:\d+:)").unwrap());
@@ -678,11 +733,12 @@ fn execute_unbounded(
                         return line;
                     };
                     let (prefix, rest) = split_grep_prefix(&line);
-                    if let Some(m) = re.find(rest) {
-                        let excerpt = excerpt_around(rest, m.start(), m.end(), MAX_LINE_CHARS);
-                        format!("{prefix}{excerpt}")
-                    } else {
+                    let found: Vec<(usize, usize)> =
+                        re.find_iter(rest).map(|m| (m.start(), m.end())).collect();
+                    if found.is_empty() {
                         line
+                    } else {
+                        format!("{prefix}{}", excerpt_matches(rest, &found, MAX_LINE_CHARS))
                     }
                 })
                 .collect();
