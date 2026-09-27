@@ -31,8 +31,18 @@ person or an orchestrating agent.
 - **Bounded output.** No single tool result can flood the context (500-character lines, 60K
   characters per result). Command output keeps 400 lines; `read` returns whole files up to 2,000
   lines, because every extra turn re-sends the prompt.
-- **Honest telemetry.** `--report` writes a JSON record per run: outcome, turns, true cost, and
-  per-call usage split into cache hits and misses.
+- **Honest telemetry.** `--report` writes a JSON record per run: outcome, turns, true cost,
+  per-call usage split into cache hits and misses, and the run's security settings. `--max-cost`
+  stops a run once its list-price spend reaches a cap.
+- **Sandboxed by default** (`--sandbox=off` to disable). Commands run on the host cannot:
+  - write outside the workspace, its git directory, temp directories and tool caches (macOS
+    Seatbelt; Linux Landlock);
+  - read credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`, keychains, browser profiles, …) or
+    any `.env` (macOS only; `--allow-read PATH` grants a path back);
+  - see environment variables that look like credentials (`*_TOKEN`, `*_KEY`, URLs with passwords;
+    `--pass-env NAME` keeps one);
+  - with `--network=off`, connect out (macOS: localhost and DNS still work, Docker is refused;
+    Linux 6.7+: every TCP connect is blocked).
 
 ## Evidence
 
@@ -60,12 +70,26 @@ blyte (and to its evaluation repo) is made this way, and every run goes into a l
 | remove the commit footer | 216 s, $0.30 | 112 s, $0.19 | 0.52×, 0.63× | blyte's clean revert merged |
 | blyte states the workspace boundary | 300 s, $0.41 | 109 s, $0.16 | 0.36×, 0.39× | identical |
 | keep failed gate output in the report | 840 s, $1.36 | 365 s, $1.00 | 0.43×, 0.74× | equal; both needed a plan fix |
+| eval: CI workflow | 561 s, $0.46 | 125 s, $0.21 | 0.22×, 0.45× | equal |
+| eval: offline agent, online grader | 572 s, $0.98 | 303 s, $0.73 | 0.53×, 0.74× | equal |
+| honest completion prompt when ungated | 255 s, $0.34 | 118 s, $0.15 | 0.46×, 0.44× | equal |
+| ChatGPT-login provider | 714 s, $1.12 | 407 s, $0.80 | 0.57×, 0.72× | equal |
+| macOS write sandbox | 767 s, $1.51 | 1414 s, $4.30 | 1.84×, 2.85× | agy's merged: blyte's session broke when its temp directory was deleted (a harness bug, fixed next) |
+| session recreates its temp directory | 253 s, $0.34 | 291 s, $0.44 | 1.15×, 1.29× | equal |
+| `--max-cost` | 514 s, $1.01 | 400 s, $0.98 | 0.78×, 0.97× | agy's merged: blyte edited an existing test |
+| sandbox refuses credential reads | 453 s, $0.72 | 186 s, $0.46 | 0.41×, 0.63× | equal; both needed a compatibility fix |
+| withhold credential-looking env vars | 549 s, $0.91 | 237 s, $0.54 | 0.43×, 0.60× | equal |
+| Linux Landlock sandbox | 632 s, $1.18 | 288 s, $0.71 | 0.46×, 0.60× | equal |
+| quota fails fast; login errors | 398 s, $0.60 | 207 s, $0.39 | 0.52×, 0.64× | equal |
+| `--network=off` | 907 s, $1.51 | 293 s, $0.79 | 0.32×, 0.52× | equal; blyte's commit message fixed |
+| security settings in the report | 476 s, $0.81 | 177 s, $0.37 | 0.37×, 0.46× | equal |
 
-Eighteen pairs, two repositories, Rust and Python: blyte took a median **0.49× the time and 0.63×
-the cost**, was cheaper in all eighteen and faster in sixteen. Its result was mergeable as-is in 15
-of 18 (agy: 13 of 18). Since the two prompts were put on identical rules (from "run telemetry"
-on), quality has been level; the one serious miss was blyte's (the host-cache detour), which led to
-the workspace-boundary rule now built into blyte.
+Thirty-one pairs, two repositories, Rust and Python (the table shows a selection; the ledger has
+all of them): blyte took a median **0.47× the time and 0.63× the cost**, was cheaper in 29 of 31
+and faster in 27. Its result was mergeable as-is in 24 of 31 (agy: 26 of 31; "mergeable" includes
+equivalent results that were not merged because the other was faster). Quality has been level since
+the two prompts were put on identical rules; blyte's two serious misses (a host-cache detour, and a
+session broken by a deleted temp directory) each led to a harness fix now built into blyte.
 
 **FrontierHarness tasks** (one run, 2026-09-27): on the 27 of FrontierHarness v1.0's 30 tasks that
 could be matched, blyte with Gemini 3.8 Flash passed **19/27 (70%)**; the best published Kimi K3
@@ -116,6 +140,7 @@ blyte
 | `openai/<model>` | any OpenAI-compatible API: OpenAI, or a local vLLM / LM Studio server | `OPENAI_API_KEY`, `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) |
 | `openrouter/<vendor>/<model>` | OpenRouter (Claude, Muse Spark, free models, …) | `OPENROUTER_API_KEY` |
 | `<name>:<tag>` or `ollama/…` | Ollama, local or cloud; thinking off unless the name ends in `+think` | `OLLAMA_HOST` (e.g. `http://localhost:11434`) or `OLLAMA_API_KEY` |
+| `chatgpt/<model>` (e.g. `chatgpt/gpt-5.5`) | a ChatGPT subscription, through the Codex CLI's login | `~/.codex/auth.json` from `codex login` (read only, never refreshed) |
 
 A local model needs its context set above blyte's fold budget: start Ollama with
 `OLLAMA_CONTEXT_LENGTH=32768` and run blyte with `--fold-budget 16000`. Provider credentials never
