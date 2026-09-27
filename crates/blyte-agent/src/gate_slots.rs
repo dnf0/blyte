@@ -5,8 +5,11 @@ use std::time::{Duration, Instant};
 
 /// Returns the maximum number of simultaneous gate slots allowed machine-wide.
 ///
-/// Configured via `BLYTE_GATE_SLOTS` when set to an integer ≥ 1. Defaults to a quarter of
-/// available parallelism, at least 1.
+/// Configured via `BLYTE_GATE_SLOTS` when set to an integer ≥ 1. Defaults to an eighth of the
+/// available parallelism, at least 1. Measured 2026-09-27 on 12 cores, three cold `cargo test`
+/// builds: all at once finished at 33/33/49 s, one at a time at 14/30/47 s. The same total, but
+/// the first result 2.4x sooner and the mean 21% sooner, because cargo already uses every core.
+/// A quarter of the cores (3 here) would never have queued them.
 pub fn slots() -> usize {
     if let Ok(val) = std::env::var("BLYTE_GATE_SLOTS") {
         if let Ok(n) = val.parse::<usize>() {
@@ -16,7 +19,7 @@ pub fn slots() -> usize {
         }
     }
     std::thread::available_parallelism()
-        .map(|n| n.get() / 4)
+        .map(|n| n.get() / 8)
         .unwrap_or(1)
         .max(1)
 }

@@ -8,7 +8,7 @@ full builds and test suites) take a machine-wide slot, so three runs do not all 
 
 **Why (2026-09-27):** parallel dispatch is now the default. In a Rust repository each worktree
 has its own `target/`, so three simultaneous gates are three full builds competing for the same
-cores. A slot limit (default: a quarter of the cores, at least one) queues gates briefly instead.
+cores. A slot limit (default: an eighth of the cores, at least one; see the measurement in `gate_slots.rs`) queues gates briefly instead.
 
 **Tech Stack:** Rust, `libc::flock` (`libc` is already a unix dependency of `blyte-agent`).
 
@@ -32,7 +32,7 @@ cores. A slot limit (default: a quarter of the cores, at least one) queues gates
 
 - `gate_slots.rs` (`pub mod gate_slots;`):
   - `pub fn slots() -> usize`: `BLYTE_GATE_SLOTS` when it parses to an integer ≥ 1, otherwise
-    `max(1, std::thread::available_parallelism() / 4)` (1 if that call fails).
+    `max(1, std::thread::available_parallelism() / 8)` (measured default; originally `/ 4`) (1 if that call fails).
   - `pub fn slot_dir() -> PathBuf`: `BLYTE_GATE_SLOT_DIR` when set and non-empty, otherwise
     `std::env::temp_dir().join("blyte-gate-slots")`.
   - `pub struct SlotGuard { … }` holding the open lock file (and `pub fn index(&self) -> usize`);
