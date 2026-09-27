@@ -21,6 +21,7 @@ fn clear_provider_env() {
     std::env::remove_var("OPENAI_BASE_URL");
     std::env::remove_var("OPENROUTER_API_KEY");
     std::env::remove_var("BLYTE_MODEL");
+    std::env::remove_var("CODEX_HOME");
 }
 
 #[test]
@@ -177,10 +178,12 @@ fn test_resolve_provider_with_credentials_and_prefix_stripping() {
 fn test_discover_all_models_enumerates_providers() {
     let _guard = ENV_LOCK.lock().unwrap();
     clear_provider_env();
+    let temp_codex = tempfile::tempdir().unwrap();
+    std::env::set_var("CODEX_HOME", temp_codex.path());
 
-    // Without credentials, discovery should report all 5 providers with missing key errors
+    // Without credentials, discovery should report all 6 providers with missing key errors
     let results = discover_all_models();
-    assert_eq!(results.len(), 5);
+    assert_eq!(results.len(), 6);
 
     let provider_names: Vec<&str> = results.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
@@ -190,7 +193,8 @@ fn test_discover_all_models_enumerates_providers() {
             "Anthropic Claude",
             "Ollama Cloud",
             "OpenAI",
-            "OpenRouter"
+            "OpenRouter",
+            "ChatGPT",
         ]
     );
 
@@ -200,4 +204,6 @@ fn test_discover_all_models_enumerates_providers() {
             other => panic!("expected MissingKey for {name}, got: {other:?}"),
         }
     }
+
+    clear_provider_env();
 }

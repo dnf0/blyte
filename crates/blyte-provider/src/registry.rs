@@ -19,6 +19,8 @@ pub enum ProviderKind {
     OpenAi,
     /// OpenRouter routed models (e.g., `meta/muse-spark-1.3`).
     OpenRouter,
+    /// ChatGPT subscription models via Codex CLI login (e.g., `chatgpt/gpt-5.5`).
+    ChatGpt,
 }
 
 /// Detects the target [`ProviderKind`] based on model naming conventions or environment credentials.
@@ -35,6 +37,9 @@ pub enum ProviderKind {
 pub fn detect_provider_kind(model: Option<&str>) -> ProviderKind {
     // 1. Inspect explicit prefix or well-known model family patterns
     if let Some(m) = model {
+        if m.starts_with("chatgpt/") || m == "chatgpt" {
+            return ProviderKind::ChatGpt;
+        }
         if m.starts_with("openai/") || m == "openai" {
             return ProviderKind::OpenAi;
         }
@@ -87,9 +92,11 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
     // Strip provider prefix from model string if present, treating bare provider names as default
     let clean_model = match model {
         Some("anthropic") | Some("ollama") | Some("gemini") | Some("openai")
-        | Some("openrouter") => None,
+        | Some("openrouter") | Some("chatgpt") => None,
         Some(m) => {
-            let stripped = if let Some(s) = m.strip_prefix("openai/") {
+            let stripped = if let Some(s) = m.strip_prefix("chatgpt/") {
+                s
+            } else if let Some(s) = m.strip_prefix("openai/") {
                 s
             } else if let Some(s) = m.strip_prefix("openrouter/") {
                 s
@@ -148,6 +155,13 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
             }
             Ok(Box::new(p))
         }
+        ProviderKind::ChatGpt => {
+            let mut p = crate::chatgpt::ChatGpt::from_env()?;
+            if let Some(m) = clean_model {
+                p = p.with_model(m);
+            }
+            Ok(Box::new(p))
+        }
     }
 }
 
@@ -182,6 +196,10 @@ pub fn discover_all_models() -> Vec<(String, Result<Vec<ModelInfo>, ProviderErro
         match crate::openai::OpenAi::openrouter_from_env() {
             Ok(p) => ("OpenRouter".to_string(), p.list_models()),
             Err(e) => ("OpenRouter".to_string(), Err(e)),
+        },
+        match crate::chatgpt::ChatGpt::from_env() {
+            Ok(p) => ("ChatGPT".to_string(), p.list_models()),
+            Err(e) => ("ChatGPT".to_string(), Err(e)),
         },
     ]
 }
