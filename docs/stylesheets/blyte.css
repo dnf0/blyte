@@ -60,7 +60,6 @@
 .md-header__topic:first-child .md-ellipsis::after { content: "."; color: var(--b-rust); margin-left: .02em; }
 .md-header__button.md-logo { display: none; }
 @media screen and (min-width: 76.25em) { .md-header__title { margin-left: .4rem; } }
-.b-hidden { display: none; }
 .md-tabs { background: var(--b-ground); color: var(--b-ink); border-bottom: 1px solid var(--b-line); }
 .md-tabs__link--active, .md-tabs__link:hover { color: var(--b-rust); }
 .md-search__form { background: var(--b-panel); }
@@ -97,16 +96,7 @@
 .md-typeset .admonition a, .md-typeset details a { color: var(--b-rust); }
 .md-typeset .tip > .admonition-title::before, .md-typeset .success > .admonition-title::before { background-color: var(--b-verd) !important; }
 
-/* Home page pieces. */
-.b-hero { padding: 1.2rem 0 .6rem; }
-.b-wordmark {
-  font-family: "Archivo", sans-serif; font-weight: 900; font-variation-settings: "wdth" 125;
-  font-size: clamp(3.6rem, 12vw, 7rem); line-height: .82; letter-spacing: -.03em; color: var(--b-ink); margin: 0;
-}
-.b-wordmark span { color: var(--b-rust); }
-.b-thesis { font-size: clamp(1.1rem, 2.4vw, 1.5rem); line-height: 1.3; max-width: 32ch; margin: .9rem 0 .4rem; }
-.b-thesis em { color: var(--b-rust); }
-.b-eyebrow { font-family: "IBM Plex Mono", monospace; font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; color: var(--b-muted); }
+/* Stat strip (evidence page) and link cards (home page). */
 .b-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 2px solid var(--b-ink); border-bottom: 1px solid var(--b-line); margin: 1.4rem 0; }
 .b-stat { padding: .9rem .9rem .9rem 0; }
 .b-stat + .b-stat { padding-left: .9rem; border-left: 1px solid var(--b-line); }
@@ -142,3 +132,4 @@
   --md-code-hl-variable-color: var(--b-ink);
 }
 .md-typeset h1 + h2 { border-top: 0; padding-top: 0; }
+.b-card code { white-space: nowrap; }
