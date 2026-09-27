@@ -46,9 +46,9 @@ Named after rust fungus (the blight Rust is named after), and bytes.
   variables; `--network=off` keeps code on the machine.
 - **Honest numbers.** `--report` writes one JSON record per run: outcome, turns, true cost,
   per-call usage, where the time went, and the run's security settings.
-- **Small on purpose.** About 7,200 lines of Rust. Features that did not win in measurement (a
-  daemon, an MCP server, a planner, a TDD mode, LLM summaries, …) were deleted.
-  [The manifesto](MANIFESTO.md) explains the rules.
+- **Small on purpose.** Features that did not win in measurement (a daemon, an MCP server, a
+  planner, a TDD mode, LLM summaries, …) were deleted. [The manifesto](MANIFESTO.md) explains the
+  rules.
 
 blyte is an **implementer**: one task, done and proven. Planning, splitting work and reviewing
 belong to whoever drives it, a person or an orchestrating agent.
