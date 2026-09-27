@@ -318,6 +318,8 @@ impl LocalShell {
 
 impl Shell for LocalShell {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let full_command = inherited_path_prefix() + command;
+        let command = full_command.as_str();
         let mut cmd = match &self.profile {
             Some(Profile::Seatbelt(profile)) => {
                 let mut c = Command::new("/usr/bin/sandbox-exec");
@@ -413,6 +415,14 @@ impl Shell for ContainerShell {
 /// Single-quote for a POSIX shell.
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// macOS `path_helper` in the login profile reorders PATH.
+pub fn inherited_path_prefix() -> String {
+    match std::env::var("PATH") {
+        Ok(path) if !path.is_empty() => format!("export PATH={}:\"$PATH\"; ", quote(&path)),
+        _ => String::new(),
+    }
 }
 
 /// How to start a session's shell: a login shell, as `bash -lc` gives today.
@@ -603,10 +613,14 @@ impl Session {
             next: 0,
             nonce: nonce(),
         };
-        s.send(
-            "__blyte_t=$(mktemp -d 2>/dev/null || { mkdir -p /tmp/blyte.$$ && echo /tmp/blyte.$$; }); \
+        let init = match launcher {
+            Launcher::Local { .. } => inherited_path_prefix(),
+            Launcher::Container { .. } => String::new(),
+        };
+        s.send(&format!(
+            "{init}__blyte_t=$(mktemp -d 2>/dev/null || {{ mkdir -p /tmp/blyte.$$ && echo /tmp/blyte.$$; }}); \
              echo \"__BLYTE_READY__ $__blyte_t\"\n",
-        )?;
+        ))?;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match s.read_line(deadline) {
