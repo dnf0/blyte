@@ -20,6 +20,38 @@ fn main() {
     restore_sigpipe();
     let cli = Cli::parse();
 
+    if let Some(cmd) = cli.command {
+        match cmd {
+            blyte_cli::cli::Command::Dispatch(args) => {
+                std::process::exit(blyte_cli::dispatch::run_dispatch(&args));
+            }
+            blyte_cli::cli::Command::Review(args) => {
+                std::process::exit(blyte_cli::dispatch::run_review(&args));
+            }
+            blyte_cli::cli::Command::Skill(args) => match args.action {
+                blyte_cli::cli::SkillAction::Install { project, force } => {
+                    match blyte_cli::skill::install(project, force) {
+                        Ok(path) => {
+                            println!("installed {}", path.display());
+                            println!(
+                                "ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
+                            );
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                blyte_cli::cli::SkillAction::Print => {
+                    print!("{}", blyte_cli::skill::SKILL_MD);
+                    std::process::exit(0);
+                }
+            },
+        }
+    }
+
     if let Some(ref prompt) = cli.prompt {
         if prompt.trim().is_empty() {
             eprintln!("Error: prompt cannot be empty");

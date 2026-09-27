@@ -42,6 +42,7 @@ pub struct RunRecord {
     pub harness_build: String,
     pub outcome: String,
     pub error: Option<String>,
+    pub final_message: Option<String>,
     pub model_requested: Option<String>,
     pub model_id: Option<String>,
     pub context: String,
@@ -104,6 +105,7 @@ impl RunRecord {
             harness_build: env!("BLYTE_BUILD").into(),
             outcome: "error".into(),
             error: None,
+            final_message: None,
             model_requested: config.model.clone(),
             model_id: None,
             context: config.context_strategy.clone(),
@@ -167,6 +169,7 @@ impl RunRecord {
         Self {
             outcome: outcome_name.into(),
             error,
+            final_message: report.final_message.clone(),
             model_id: Some(model_id.to_string()),
             turns: report.outcome_turns,
             empty_turns: report.empty_turns,

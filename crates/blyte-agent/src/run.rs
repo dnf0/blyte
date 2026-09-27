@@ -118,6 +118,8 @@ pub struct RunReport {
     pub tool_counts: BTreeMap<String, u32>,
     /// Whether the run stopped because spending reached `--max-cost`.
     pub cost_capped: bool,
+    /// The model's last non-empty text response (trimmed).
+    pub final_message: Option<String>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -466,14 +468,16 @@ impl<'a> Runner<'a> {
                 tools_ms: 0,
             });
 
-            if resp.text.trim().is_empty() && resp.tool_calls.is_empty() {
+            let trimmed = resp.text.trim();
+            if trimmed.is_empty() && resp.tool_calls.is_empty() {
                 report.empty_turns += 1;
             }
             self.emit(Event::Turn {
                 n: turn,
-                text: resp.text.trim(),
+                text: trimmed,
             });
-            if !resp.text.trim().is_empty() {
+            if !trimmed.is_empty() {
+                report.final_message = Some(trimmed.to_string());
                 history.push(Message::Assistant(resp.text.clone()));
             }
 
