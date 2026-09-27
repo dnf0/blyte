@@ -176,7 +176,7 @@ pub struct Cli {
     #[arg(long)]
     pub fold_budget: Option<usize>,
 
-    /// Sandbox local command execution on macOS: 'on' or 'off' (default 'on')
+    /// Sandbox the commands blyte runs on this machine (macOS Seatbelt, Linux Landlock): 'on' or 'off'
     #[arg(
         long,
         default_value = "on",

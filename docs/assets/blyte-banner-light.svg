@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="blyte: a lean coding-agent harness">
+  <rect width="1200" height="300" fill="#ECEFF0"/>
+  <g fill="#E8C8B7" opacity=".9">
+    <circle cx="930" cy="70" r="5"/><circle cx="968" cy="112" r="3"/><circle cx="1010" cy="58" r="7"/><circle cx="1052" cy="140" r="4"/>
+    <circle cx="1098" cy="92" r="6"/><circle cx="1130" cy="176" r="3"/><circle cx="1004" cy="196" r="4"/><circle cx="1070" cy="228" r="6"/>
+    <circle cx="946" cy="236" r="3"/><circle cx="1150" cy="64" r="4"/><circle cx="900" cy="150" r="3"/>
+  </g>
+  <g fill="#A6441A"><circle cx="1036" cy="100" r="3"/><circle cx="982" cy="160" r="5"/><circle cx="1114" cy="130" r="3"/></g>
+  <text x="64" y="176" font-family="Archivo, 'Helvetica Neue', Arial, sans-serif" font-weight="900" font-size="150" letter-spacing="-3" fill="#141A1E">blyte<tspan fill="#A6441A">.</tspan></text>
+  <line x1="64" y1="214" x2="820" y2="214" stroke="#C9D0D4" stroke-width="1"/>
+  <text x="64" y="252" font-family="'IBM Plex Mono', ui-monospace, Menlo, monospace" font-size="21" fill="#56616A">a lean coding-agent harness · one loop · a sealed gate · sandboxed tools</text>
+</svg>

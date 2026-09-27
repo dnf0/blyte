@@ -1,0 +1,1 @@
+--8<-- "MANIFESTO.md"
