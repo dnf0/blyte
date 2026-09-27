@@ -29,13 +29,49 @@ fn main() {
                 std::process::exit(blyte_cli::dispatch::run_review(&args));
             }
             blyte_cli::cli::Command::Skill(args) => match args.action {
-                blyte_cli::cli::SkillAction::Install { project, force } => {
-                    match blyte_cli::skill::install(project, force) {
-                        Ok(path) => {
-                            println!("installed {}", path.display());
+                blyte_cli::cli::SkillAction::Install {
+                    project,
+                    force,
+                    default: _,
+                    no_default,
+                } => match blyte_cli::skill::install(project, force, no_default) {
+                    Ok(path) => {
+                        println!("installed {}", path.display());
+                        if !no_default {
+                            match blyte_cli::skill::claude_md_path(project) {
+                                Ok(md_path) => println!("updated {}", md_path.display()),
+                                Err(e) => {
+                                    eprintln!("{e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        if no_default {
                             println!(
-                                "ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
+                                "to use it, ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
                             );
+                        } else {
+                            println!(
+                                "Claude Code now plans and reviews, and delegates implementation to blyte, in parallel, by default"
+                            );
+                        }
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                },
+                blyte_cli::cli::SkillAction::Uninstall { project } => {
+                    match blyte_cli::skill::uninstall(project) {
+                        Ok(paths) => {
+                            if paths.is_empty() {
+                                println!("nothing to remove");
+                            } else {
+                                for path in paths {
+                                    println!("removed {}", path.display());
+                                }
+                            }
                             std::process::exit(0);
                         }
                         Err(e) => {

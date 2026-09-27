@@ -92,6 +92,21 @@ pub enum SkillAction {
         /// Overwrite even if existing skill was modified
         #[arg(long)]
         force: bool,
+
+        /// Also tell Claude Code to delegate implementation to blyte by default, in CLAUDE.md
+        #[arg(long, hide = true)]
+        default: bool,
+
+        /// Install the skill without making blyte the default in CLAUDE.md
+        #[arg(long)]
+        no_default: bool,
+    },
+
+    /// Remove the skill and the CLAUDE.md block
+    Uninstall {
+        /// Remove from repository instead of personal ~/.claude
+        #[arg(long)]
+        project: bool,
     },
 
     /// Print the skill markdown to stdout

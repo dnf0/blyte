@@ -1,25 +1,39 @@
 ---
 name: blyte-implementer
-description: Use when a task can be handed to a cheaper model to implement while you plan and review: write a precise task, dispatch it with `blyte dispatch` into its own git worktree with the repository's check command as its gate, then verify the result yourself and merge it. Use for well-specified changes in a git repository with a runnable check (tests, lint).
+description: Use by default whenever you would otherwise write the code yourself for a change in a git repository that has a check command (tests, lint): plan the change, split it into independent tasks and dispatch them to blyte in parallel (`blyte dispatch`, one worktree each, on a cheaper model, with the check as the gate), then verify every result yourself and merge. Skip it for design discussions, ambiguous requirements, one-line edits, and anything with no check.
 ---
 
 # blyte as your implementer
 
 You plan and review; blyte implements, on a cheaper model, and its gate (the repository's check
-command) decides whether the work is done. Your job is to make each task unambiguous and to verify
-the result, not to trust it.
+command) decides whether the work is done. Your job is to make each task unambiguous, run
+independent tasks at the same time, and verify every result, not to trust it.
 
 ## When to delegate
 
 Delegate when a careful engineer could do the task from its description alone, without asking
 anything, and the repository has a check that would catch a wrong result. Keep for yourself:
-design decisions, ambiguous requirements, anything with no check, and anything touching
-credentials, deployment or other repositories.
+design decisions, ambiguous requirements, one-line edits, anything with no check, and anything
+touching credentials, deployment or other repositories.
 
-## 1. Write the task
+## 1. Plan for parallel work (the default)
 
-One task per dispatch, in a Markdown file. blyte sees only this file and the repository, nothing
-from your conversation. Include:
+Parallel is the default: it is how this workflow saves time. Break the change into tasks of
+one commit each, arranged so that as many as possible touch disjoint files, then sort them:
+
+- **Independent tasks** touch disjoint files and do not depend on each other: they run in parallel.
+- **Dependent tasks** need an earlier task's result: they run after it, based on its branch
+  (`--base wip/T1`).
+- **Coupled tasks** (task 2 cannot pass its checks without task 1) are one task.
+
+Dispatch every independent task at once. Run tasks one after another only when one needs
+another's result. A plan with a single task is fine for a single change; do not split work
+artificially just to run it in parallel.
+
+## 2. Write each task
+
+One task per Markdown file. blyte sees only this file and the repository, nothing from your
+conversation. Include:
 
 - **Goal**, in one or two sentences, and **why**.
 - **Files** to create or change.
@@ -27,17 +41,17 @@ from your conversation. Include:
   where it matters.
 - **Tests** that prove it, written out, and the command that runs them.
 - **Constraints**, e.g. "existing tests pass unmodified".
+- **Siblings**: for a task running in parallel, name the other tasks and say they are **not** in
+  this worktree ("T2 adds `slugify` separately; do not add it here"), so it does not "fix" their
+  absence.
 - **The exact commit message.**
 
 Before dispatching, check that the tests fail on the current code and can pass with the intended
 change.
 
-## 2. Dispatch
+## 3. Dispatch
 
-From the repository's main checkout. A dispatch takes minutes. In an interactive session, run it
-in the background and carry on (you are notified when it exits). In a one-shot or headless
-session (for example `claude -p`), run it in the foreground: a background command dies when the
-session ends, and the dispatch with it.
+From the repository's main checkout. Each dispatch takes minutes.
 
 ```bash
 blyte dispatch T1 /abs/path/task-T1.md --gate 'cargo fmt --all --check
@@ -46,16 +60,28 @@ cargo test'
 ```
 
 - Each line of the gate is a step; all must pass. Put the slow full test run last.
-- `--base <branch>` picks the starting commit; independent tasks (disjoint files) can run in
-  parallel under different ids.
 - The implementer model's API key must be in the environment; blyte never prints it.
 
-It prints one JSON object: `outcome` (`verified`, `no_changes`, `gate_failed`,
+**Parallel tasks in an interactive session:** send every independent `blyte dispatch` as its own
+background command in the same message. You are notified as each one exits; review each as it
+lands instead of waiting for all of them.
+
+**Parallel tasks in a one-shot or headless session** (for example `claude -p`): background commands
+die when the session ends, so start them together and wait in the foreground:
+
+```bash
+mkdir -p .wt
+blyte dispatch T1 /abs/task-T1.md --gate '...' > .wt/T1.json &
+blyte dispatch T2 /abs/task-T2.md --gate '...' > .wt/T2.json &
+wait
+```
+
+Each dispatch prints one JSON object: `outcome` (`verified`, `no_changes`, `gate_failed`,
 `budget_exhausted`, `error`), `exit` (0 only for `verified`), `commits`, `changed_files`,
 `final_message` (blyte's own report), `gate_failures`, `turns`, `cost_usd`, `seconds`, and the
 `log` and `report` paths. `no_changes` means the gate passed on an untouched tree: not done.
 
-## 3. Verify. Do not trust the summary
+## 4. Verify each result. Do not trust the summary
 
 ```bash
 blyte review T1 --diff
@@ -71,15 +97,19 @@ If it falls short: fix a trivial issue yourself, or write a follow-up task sayin
 change and dispatch it (`blyte dispatch T1b follow-up.md --base wip/T1 --gate ...`). If the task was
 wrong, fix the task, not the result.
 
-## 4. Merge
+## 5. Merge
+
+Merge verified tasks one at a time:
 
 ```bash
-git merge --ff-only wip/T1        # or cherry-pick if the branch moved
+git merge --ff-only wip/T1
 git worktree remove .wt/T1 && git branch -d wip/T1
 ```
 
-Re-run the checks after merging parallel tasks together. Push or open a pull request only if the
-user asks.
+When an earlier merge has moved the branch, a parallel task no longer fast-forwards: rebase it
+first (`git -C .wt/T2 rebase <branch>`), re-run its gate in the worktree, then merge it. After the
+last merge, run the full check once more on the merged branch. Push or open a pull request only if
+the user asks.
 
 ## Rules
 
