@@ -1,0 +1,136 @@
+/* Blyte docs theme: the manifesto's palette (ground/ink neutrals, rust accent, verdigris second)
+   and type (Archivo display, Newsreader text, IBM Plex Mono code) on top of Material for MkDocs. */
+
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+
+:root {
+  --b-ground: #ECEFF0; --b-panel: #E2E6E8; --b-ink: #141A1E; --b-muted: #56616A; --b-line: #C9D0D4;
+  --b-rust: #A6441A; --b-rust-soft: #E8C8B7; --b-verd: #3E6D64; --b-verd-soft: #C3D6D1;
+  --b-pass: #2E7A4D; --b-fail: #A93A36;
+  --md-text-font: "Newsreader";
+  --md-code-font: "IBM Plex Mono";
+}
+
+[data-md-color-scheme="slate"] {
+  --b-ground: #0F1315; --b-panel: #171D20; --b-ink: #E2E7E9; --b-muted: #93A0A7; --b-line: #283136;
+  --b-rust: #E27A44; --b-rust-soft: #4A2B1D; --b-verd: #7FB2A6; --b-verd-soft: #1F3431;
+  --b-pass: #6CC08E; --b-fail: #E27B76;
+}
+
+[data-md-color-scheme="default"],
+[data-md-color-scheme="slate"],
+[data-md-color-primary="custom"],
+[data-md-color-accent="custom"] {
+  --md-default-bg-color: var(--b-ground);
+  --md-default-fg-color: var(--b-ink);
+  --md-default-fg-color--light: var(--b-muted);
+  --md-default-fg-color--lighter: var(--b-line);
+  --md-default-fg-color--lightest: var(--b-panel);
+  --md-primary-fg-color: var(--b-ground);
+  --md-primary-bg-color: var(--b-ink);
+  --md-primary-bg-color--light: var(--b-muted);
+  --md-accent-fg-color: var(--b-rust);
+  --md-accent-fg-color--transparent: var(--b-rust-soft);
+  --md-typeset-color: var(--b-ink);
+  --md-typeset-a-color: var(--b-rust);
+  --md-code-bg-color: var(--b-panel);
+  --md-code-fg-color: var(--b-ink);
+  --md-footer-bg-color: var(--b-ink);
+  --md-footer-bg-color--dark: var(--b-ink);
+  --md-footer-fg-color: var(--b-ground);
+  --md-footer-fg-color--light: var(--b-line);
+  --md-footer-fg-color--lighter: var(--b-muted);
+  --md-admonition-bg-color: var(--b-panel);
+  --md-typeset-table-color: var(--b-line);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-footer-bg-color: #0A0D0F;
+  --md-footer-bg-color--dark: #0A0D0F;
+  --md-footer-fg-color: var(--b-ink);
+}
+
+/* Header: the page's ground, a hairline, and the wordmark. */
+.md-header { border-bottom: 1px solid var(--b-line); box-shadow: none; }
+.md-header[data-md-state="shadow"], .md-header--shadow { box-shadow: none; }
+.md-header__topic:first-child .md-ellipsis {
+  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  font-weight: 900; font-variation-settings: "wdth" 125; letter-spacing: -.02em; font-size: 1.05rem;
+}
+.md-header__topic:first-child .md-ellipsis::after { content: "."; color: var(--b-rust); margin-left: .02em; }
+.md-header__button.md-logo { display: none; }
+@media screen and (min-width: 76.25em) { .md-header__title { margin-left: .4rem; } }
+.md-tabs { background: var(--b-ground); color: var(--b-ink); border-bottom: 1px solid var(--b-line); }
+.md-tabs__link--active, .md-tabs__link:hover { color: var(--b-rust); }
+.md-search__form { background: var(--b-panel); }
+.md-search__input::placeholder { color: var(--b-muted); }
+
+/* Type. */
+.md-typeset { font-size: .86rem; line-height: 1.6; }
+.md-typeset h1, .md-typeset h2, .md-typeset h3, .md-typeset h4 {
+  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif; color: var(--b-ink); letter-spacing: -.01em;
+}
+.md-typeset h1 { font-weight: 900; font-variation-settings: "wdth" 118; font-size: 2.2em; line-height: 1.05; }
+.md-typeset h2 { font-weight: 800; font-variation-settings: "wdth" 112; border-top: 1px solid var(--b-line); padding-top: .9em; }
+.md-typeset h3 { font-weight: 700; }
+.md-typeset code { border-radius: 3px; font-size: .84em; }
+.md-typeset a:hover { color: var(--b-rust); text-decoration: underline; text-underline-offset: 3px; }
+.md-nav__link--active, .md-nav__link:hover { color: var(--b-rust) !important; }
+.md-typeset table:not([class]) { border: 1px solid var(--b-line); border-radius: 6px; font-size: .78rem; }
+.md-typeset table:not([class]) th { background: var(--b-panel); font-family: "Archivo", sans-serif; font-weight: 700; }
+.md-typeset table:not([class]) td { border-top: 1px solid var(--b-line); }
+
+/* Admonitions: rust for notes and warnings, verdigris for tips. */
+.md-typeset .admonition, .md-typeset details {
+  border: 0 !important; border-left: 3px solid var(--b-rust) !important; border-radius: 0 6px 6px 0; box-shadow: none;
+  background: var(--b-panel); font-size: .82rem;
+}
+.md-typeset .admonition-title, .md-typeset summary {
+  background: transparent !important; font-family: "Archivo", sans-serif; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; font-size: .72rem;
+}
+.md-typeset .admonition-title::before, .md-typeset summary::before { background-color: var(--b-rust) !important; }
+.md-typeset .tip, .md-typeset .success { border-left-color: var(--b-verd) !important; }
+.md-typeset .warning { border-left-color: var(--b-fail) !important; }
+.md-typeset .warning > .admonition-title::before { background-color: var(--b-fail) !important; }
+.md-typeset .admonition a, .md-typeset details a { color: var(--b-rust); }
+.md-typeset .tip > .admonition-title::before, .md-typeset .success > .admonition-title::before { background-color: var(--b-verd) !important; }
+
+/* Stat strip (evidence page) and link cards (home page). */
+.b-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 2px solid var(--b-ink); border-bottom: 1px solid var(--b-line); margin: 1.4rem 0; }
+.b-stat { padding: .9rem .9rem .9rem 0; }
+.b-stat + .b-stat { padding-left: .9rem; border-left: 1px solid var(--b-line); }
+.b-stat b { display: block; font-family: "Archivo", sans-serif; font-weight: 800; font-variation-settings: "wdth" 110; font-size: 2.2rem; line-height: 1; color: var(--b-rust); }
+.b-stat b small { font-size: .45em; color: var(--b-muted); }
+.b-stat span { display: block; margin-top: .35rem; font-size: .8rem; line-height: 1.35; }
+.b-stat i { display: block; margin-top: .3rem; font-style: normal; font-family: "IBM Plex Mono", monospace; font-size: .62rem; color: var(--b-muted); }
+@media (max-width: 720px) { .b-stats { grid-template-columns: 1fr; } .b-stat + .b-stat { padding-left: 0; border-left: 0; border-top: 1px solid var(--b-line); } }
+.b-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin: 1rem 0; }
+.b-card { display: block; background: var(--b-panel); border: 1px solid var(--b-line); border-radius: 6px; padding: .8rem 1rem; color: var(--b-ink) !important; }
+.b-card:hover { border-color: var(--b-rust); text-decoration: none !important; }
+.b-card strong { display: block; font-family: "Archivo", sans-serif; font-size: .95rem; margin-bottom: .2rem; }
+.b-card span { font-size: .78rem; color: var(--b-muted); }
+@media (max-width: 720px) { .b-cards { grid-template-columns: 1fr; } }
+
+/* Flags stay whole in narrow table cells; the header wordmark has no gap before its dot. */
+.md-typeset td code { white-space: nowrap; }
+.md-header__topic:first-child .md-ellipsis { display: inline-flex; }
+
+/* Code highlighting in the palette. */
+[data-md-color-scheme="default"], [data-md-color-scheme="slate"] {
+  --md-code-hl-keyword-color: var(--b-rust);
+  --md-code-hl-string-color: var(--b-verd);
+  --md-code-hl-name-color: var(--b-ink);
+  --md-code-hl-function-color: var(--b-ink);
+  --md-code-hl-constant-color: var(--b-rust);
+  --md-code-hl-number-color: var(--b-rust);
+  --md-code-hl-special-color: var(--b-rust);
+  --md-code-hl-operator-color: var(--b-muted);
+  --md-code-hl-punctuation-color: var(--b-muted);
+  --md-code-hl-comment-color: var(--b-muted);
+  --md-code-hl-generic-color: var(--b-muted);
+  --md-code-hl-variable-color: var(--b-ink);
+}
+.md-typeset h1 + h2 { border-top: 0; padding-top: 0; }
+.b-card code { white-space: nowrap; }
+.b-card-wide { grid-column: 1 / -1; border-left: 3px solid var(--b-rust); }

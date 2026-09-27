@@ -1,21 +1,86 @@
-site_name: Blyte
-site_description: A lean coding-agent harness in Rust.
+site_name: blyte
+site_description: A lean coding-agent harness in Rust. One loop, a sealed verification gate, sandboxed tools.
 site_author: Climate X Engineering
 repo_url: https://github.com/climate-x-org/superstate
+repo_name: blyte
+edit_uri: edit/main/docs/
+copyright: Apache-2.0 OR MIT
+
+# Historical plans and specs stay in the repository, not on the site.
+exclude_docs: |
+  superpowers/
+
 theme:
   name: material
+  font: false
   palette:
-    scheme: slate
-    primary: indigo
-    accent: teal
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+  icon:
+    repo: fontawesome/brands/github
   features:
     - navigation.instant
     - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
     - content.code.copy
+    - search.suggest
 
-nav:
-  - Overview: index.md
-  - Research: research/2026-09-24-harness-research.md
+extra_css:
+  - stylesheets/blyte.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: "#"
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
 
 plugins:
   - search
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Getting started: getting-started.md
+      - "The workflow: plan, delegate, review": orchestration.md
+      - Writing tasks for blyte: writing-tasks.md
+      - Running tasks: usage.md
+      - Providers: providers.md
+      - Security and the sandbox: security.md
+      - Run reports: reports.md
+  - How it works:
+      - Architecture: how-it-works.md
+      - Manifesto: manifesto.md
+  - Evidence:
+      - Overview: evidence.md
+      - FrontierHarness run: research/2026-09-27-frontierharness-gemini.md
+      - Harness research: research/2026-09-24-harness-research.md
+  - Reference:
+      - CLI flags: reference/cli.md
+      - Architecture decisions:
+          - Progressive staged verification: adr/0001-progressive-staged-verification.md
+          - Detached handoff and the native harness: adr/0002-detached-handoff-and-native-rust-harness.md
+  - Contributing: contributing.md

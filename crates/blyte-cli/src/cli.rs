@@ -4,8 +4,11 @@ use std::path::PathBuf;
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
+    /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
     Dispatch(DispatchArgs),
+    /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
     Review(ReviewArgs),
+    /// Install or print the Claude Code skill for the plan, delegate, review workflow
     Skill(SkillArgs),
 }
 
@@ -17,7 +20,7 @@ pub struct DispatchArgs {
     /// Path to the task description markdown file
     pub task_file: PathBuf,
 
-    /// Verification gate command
+    /// The check command; several lines are several steps, all of which must pass
     #[arg(short, long)]
     pub gate: String,
 
@@ -176,7 +179,7 @@ pub struct Cli {
     #[arg(long)]
     pub fold_budget: Option<usize>,
 
-    /// Sandbox local command execution on macOS: 'on' or 'off' (default 'on')
+    /// Sandbox the commands blyte runs on this machine (macOS Seatbelt, Linux Landlock): 'on' or 'off'
     #[arg(
         long,
         default_value = "on",

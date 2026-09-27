@@ -9,9 +9,10 @@ that division, and on what measuring it taught us.
 ## 1. The model does the work; the harness decides the bill
 
 Holding the model fixed and changing only the harness moves cost by up to 40× and pass rate by a
-few points (*The Scaffold Effect*, 2607.22585). Our own numbers say the same. On thirty-one real
-plan tasks in two repositories, blyte and agy running the same model produced work of comparable
-quality, and blyte did it in a median 0.47× the time and 0.63× the cost. It was cheaper in 29 of 31.
+few points ([*The Scaffold Effect in Coding Agents*](https://arxiv.org/abs/2607.22585)). Our own numbers say the same. On thirty-one real
+plan tasks in two repositories, blyte and agy (Google's Antigravity CLI) running the same model
+produced work of comparable quality, and blyte did it in a median 0.47× the time and 0.63× the
+cost. It was cheaper in 29 of 31.
 
 A harness that makes the model smarter is rare. A harness that wastes the model's time is
 everywhere. Blyte's job is to get out of the way.
@@ -35,27 +36,28 @@ checks itself.
 
 The model does not decide when it is finished. A command does: `--gate` exits 0 or the work is not
 done. The gate is not in the model's tool surface, so it cannot be skipped, run selectively, or
-reported on by the thing being graded. A failed attempt can be rolled back to the last verified
-commit, so failures do not pile up in the tree.
+reported on by the thing being graded. A failed attempt can be rolled back to the commit the run
+started from, so failures do not pile up in the tree.
 
 Confidence is not evidence. An exit code is.
 
 ## 4. Every feature earns its place, or it is deleted
 
-Blyte once had a daemon, an MCP server, a worktree engine, advisory review, a TDD mode, a cost cap,
+Blyte once had a daemon, an MCP server, a worktree engine, advisory review, a TDD mode, an early cost cap,
 journal and resume, a loop-breaker, a working set, an action ledger, a note tool, LLM-written fold
 notes and four context strategies. They were plausible. They did not win on turns, cost or
 completion in repeated runs, so they were removed.
 
-What is left is about 5,600 lines of Rust: one loop, a sealed gate, folded context, bounded
-output, provider retry, persistent shell sessions and in-process search. A new feature has to beat
+What is left is about 7,200 lines of Rust: one loop, a sealed gate, folded context, bounded
+output, provider retry, persistent shell sessions, in-process search, six providers and a command
+sandbox. A new feature has to beat
 that in measurement, or it does not stay.
 
 ## 5. Mechanical beats clever
 
 When the prompt grows past a budget, the oldest turns fold into a one-line digest per tool call.
 No model summarises them, because summaries did not pay for themselves, and a tool for recovering
-elided content goes unused (2609.20804). Tool output is cut by rule: 500 characters a line, 60K a
+elided content goes unused ([*An Empirical Study of Harness Design for Coding Agents*](https://arxiv.org/abs/2609.20804)). Tool output is cut by rule: 500 characters a line, 60K a
 result, head and tail kept. Rules are cheap, predictable and testable. Cleverness is none of those.
 
 ## 6. The harness's own time is overhead to eliminate
@@ -85,5 +87,5 @@ A number without a paired run behind it is a guess.
 
 ---
 
-The measurements behind these claims are in `docs/research/2026-09-24-harness-research.md` and the
-superstate-eval findings.
+The measurements behind these claims are in `docs/research/2026-09-24-harness-research.md`,
+`docs/research/2026-09-27-frontierharness-gemini.md` and the evaluation repository's findings.
