@@ -154,3 +154,23 @@
   --md-mermaid-sequence-note-border-color: var(--b-rust);
 }
 .md-typeset .mermaid { margin: 1.2em 0; }
+
+/* Charts (evidence page): plain HTML on the palette, so they follow light and dark mode. */
+.b-chart { background: var(--b-panel); border: 1px solid var(--b-line); border-radius: 8px; padding: 1rem 1.1rem .8rem; margin: 1rem 0 1.4rem; }
+.b-chart h4 { margin: 0 0 .15rem !important; font-size: .82rem; }
+.b-chart .b-sub { font-family: "IBM Plex Mono", monospace; font-size: .62rem; color: var(--b-muted); margin-bottom: .8rem; }
+.b-hbars { display: grid; grid-template-columns: max-content 1fr 3.2rem; gap: .3rem .7rem; align-items: center; font-size: .72rem; }
+.b-hbars .lbl { white-space: nowrap; }
+.b-hbars .trk { height: .8rem; background: var(--b-ground); border-radius: 3px; overflow: hidden; }
+.b-hbars .bar { height: 100%; background: var(--b-muted); opacity: .55; border-radius: 3px; }
+.b-hbars .me .bar, .b-hbars .bar.me { background: var(--b-rust); opacity: 1; }
+.b-hbars .val { font-family: "IBM Plex Mono", monospace; font-size: .66rem; color: var(--b-muted); text-align: right; }
+.b-hbars .me { font-weight: 700; color: var(--b-ink); }
+.b-cols { position: relative; display: flex; align-items: flex-end; gap: 2px; height: 9rem; border-bottom: 1px solid var(--b-line); }
+.b-cols .col { flex: 1 1 0; background: var(--b-rust); border-radius: 2px 2px 0 0; min-height: 2px; }
+.b-cols .col.over { background: var(--b-muted); }
+.b-cols .ref { position: absolute; left: 0; right: 0; border-top: 1.5px dashed var(--b-ink); opacity: .7; }
+.b-cols .ref span { position: absolute; left: 0; background: var(--b-panel); padding-right: .3rem; top: -1.1rem; font-family: "IBM Plex Mono", monospace; font-size: .6rem; color: var(--b-ink); }
+.b-axis { display: flex; justify-content: space-between; font-family: "IBM Plex Mono", monospace; font-size: .6rem; color: var(--b-muted); margin-top: .25rem; }
+.b-legend { font-family: "IBM Plex Mono", monospace; font-size: .62rem; color: var(--b-muted); margin-top: .5rem; }
+.b-charts-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; } @media (max-width: 720px) { .b-charts-2 { grid-template-columns: 1fr; } } .b-charts-2 .b-chart { margin: 0; }

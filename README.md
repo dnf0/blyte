@@ -48,7 +48,7 @@ plans and reviews, and hands the implementation to blyte, independent tasks in p
 
 | | |
 |---|---|
-| **0.47×** the time, **0.63×** the cost | as an implementer, against agy (Google's Antigravity CLI) on the same 31 tasks, same model, same commit, both driven by Claude |
+| **0.52×** the time, **0.63×** the cost | as an implementer, against agy (Google's Antigravity CLI) on the same 37 tasks, same model, same commit, both driven by Claude |
 | **19 / 27** FrontierHarness tasks | blyte on its own on Gemini 3.8 Flash, no plan; the best published Kimi K3 configuration passed 17 / 27 |
 
 Both come with caveats (one model, our own repositories, a single run on a different model from
