@@ -77,6 +77,16 @@ Written to `--report <path>` as a single JSON object, pretty-printed, on every e
 
 Zero values are written, never omitted. On an `error` outcome before the run starts, the counters are `0`, `usage` is all zeros, and `model_id` is `null`.
 
+#### Security settings (2026-09-27)
+
+| Field | Meaning |
+|---|---|
+| `sandbox` | sandbox mechanism: `"container"`, `"seatbelt"`, `"landlock"`, `"landlock-offline"`, or `"off"` |
+| `network` | outbound network mode: `"on"` or `"off"` |
+| `allow_read` | filesystem paths permitted for reading despite credential deny-lists, in given order |
+| `pass_env` | environment variable names permitted to pass to commands despite credential patterns |
+| `withheld_env` | names (never values) of environment variables withheld from commands by credential filtering (empty for container runs) |
+
 ## Part B — `superstate-eval` changes
 
 A new driver, `lab/engine/drivers/superstate_native.py`, class `SuperstateNativeDriver(AgentDriver)`:
