@@ -144,9 +144,10 @@ task.
 blyte skill install              # every project; --project for this repository only
 ```
 
-Then, in a session: *"Plan this change, then use blyte to implement each task and review the
-results."* Claude writes the task files, dispatches them (in the background in an interactive
-session, in the foreground under `claude -p`), reviews each diff and merges. Your Claude usage goes
+This installs the skill and makes blyte Claude Code's default implementer (`--no-default` to
+skip). Then ask for changes as usual: Claude splits the work, writes the task files, dispatches
+independent tasks in parallel (in the background in an interactive session; with `&` and `wait`
+under `claude -p`), reviews each diff as it lands and merges them in order. Your Claude usage goes
 on planning and review; the implementation runs on whichever model blyte is configured for.
 
 !!! example "One run, end to end (an example, not a measurement)"
@@ -158,6 +159,14 @@ on planning and review; the implementation runs on whichever model blyte is conf
     and log, removed a stray blank line, merged both, and pointed out an ambiguity in the request
     (`"foo-bar"` becomes `"foobar"`). 12 tests pass. Claude: 2 minutes, $0.42; blyte on Gemini
     3.8 Flash: 53 seconds, $0.16.
+
+!!! example "Default mode, parallel (an example, not a measurement)"
+    With the skill installed by `blyte skill install --project` and a request that did not mention
+    blyte ("fix `word_count` in `text.py` and `clamp` in `nums.py`, with tests"), headless Claude
+    Code loaded the skill on its own, wrote two task files, dispatched both **in parallel**, put
+    each task's tests in its own file so the two could not conflict, verified both and merged
+    them. 14 tests pass. Claude: 88 seconds, $0.36; blyte: two runs of about 30 seconds side by
+    side, $0.07.
 
 For another harness, `blyte skill print` writes the same instructions to stdout, to adapt into
 its own format.

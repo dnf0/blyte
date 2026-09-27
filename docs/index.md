@@ -31,13 +31,14 @@ flowchart LR
     R -- "merge one by one,<br/>rebase if main moved" --> M[("main")]
 ```
 
-## Set up in four steps
+## Set up
 
 1. **Install blyte:** `cargo install --git https://github.com/climate-x-org/superstate blyte --locked`
 2. **Give it a cheap model:** `export GEMINI_API_KEY=...` (or [another provider](providers.md)).
-3. **Install the Claude Code skill:** `blyte skill install`
-4. **Ask Claude Code:** *"Plan this change, then use blyte to implement each task and review the
-   results."*
+3. **Install the Claude Code skill:** `blyte skill install`. blyte becomes Claude Code's default
+   implementer.
+4. **Ask Claude Code for a change as usual.** It plans, dispatches independent tasks to blyte in
+   parallel, reviews each result and merges.
 
 [Getting started](getting-started.md) walks through each step, and how to run blyte on its own.
 

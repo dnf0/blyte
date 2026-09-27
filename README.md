@@ -42,8 +42,9 @@ Your frontier tokens go on the parts that need judgement: planning and review. T
 test-running and fixing runs on a model that costs a fraction as much, inside a harness built to
 waste as little of it as possible. This is how blyte itself is built.
 
-**Get started:** [install blyte](#install), run `blyte skill install`, and ask Claude Code to use
-it. [The workflow](docs/orchestration.md) explains what happens.
+**Get started:** [install blyte](#install) and run `blyte skill install`. From then on Claude Code
+plans and reviews, and hands the implementation to blyte, independent tasks in parallel.
+[The workflow](docs/orchestration.md) explains what happens.
 
 | | |
 |---|---|
@@ -85,16 +86,17 @@ export GEMINI_API_KEY=...          # the implementer's model; see Providers for 
 ## Quick start: with Claude Code
 
 ```bash
-blyte skill install          # the Claude Code skill; --project installs it into this repository
+blyte skill install          # the skill, and blyte as Claude Code's default implementer
 ```
 
-Then, in your repository, tell Claude Code:
+That's all. Ask Claude Code for a change as usual. It splits the work into independent tasks,
+runs `blyte dispatch` for each **in parallel** (one worktree each, your check command as the
+gate), reads each JSON summary, reviews each diff with `blyte review` and merges them in order.
 
-> Plan this change, then use blyte to implement each task and review the results.
-
-Claude writes each task with its tests, runs `blyte dispatch` to hand it to blyte in its own
-worktree with your check command as the gate, reads the JSON summary, reviews the diff with
-`blyte review` and merges. Any other orchestrator can do the same: `blyte dispatch` takes a task
+- `--project` installs into the current repository instead (committed, so everyone gets it).
+- `--no-default` installs the skill without making blyte the default; then ask for it: *"use
+  blyte to implement this"*.
+- `blyte skill uninstall` removes the skill and the `CLAUDE.md` block. Any other orchestrator can do the same: `blyte dispatch` takes a task
 file and a gate and prints JSON, and `blyte skill print` prints the instructions.
 
 ## Quick start: blyte on its own

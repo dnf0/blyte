@@ -40,22 +40,22 @@ or for one repository only (committed with it, so everyone on the repository get
 cd your-repo && blyte skill install --project
 ```
 
-The skill always matches the installed blyte; after upgrading blyte, run
+Installing also adds a short, marked block to `CLAUDE.md` (`~/.claude/CLAUDE.md`, or the
+repository's with `--project`) that makes blyte Claude Code's default implementer, with
+independent tasks dispatched in parallel. Pass `--no-default` to skip it; `blyte skill uninstall`
+removes both. The skill always matches the installed blyte; after upgrading blyte, run
 `blyte skill install --force` to refresh it. Make sure the repository has a check command that
 proves a change is right: your tests, plus formatting and lint.
 
 ## 4. Delegate your first task
 
-Start Claude Code in the repository and ask for the pattern explicitly:
+Start Claude Code in the repository and ask for a change as usual, for example *"make `parse()`
+return an error on empty input, and add `--strict` to the CLI"*. Claude will:
 
-> Plan this change, then use blyte to implement each task and review the results: *make
-> `parse()` return an error on empty input instead of panicking.*
-
-Claude will:
-
-1. write the task to a file, with the tests that prove it and the exact commit message;
-2. run `blyte dispatch`: blyte works in `.wt/T1` on branch `wip/T1`, with your check command as
-   its gate;
+1. split it into tasks, independent ones touching disjoint files, and write each to a file with
+   the tests that prove it and the exact commit message;
+2. run `blyte dispatch` for each, independent tasks at the same time: blyte works in `.wt/T1`,
+   `.wt/T2`, … with your check command as the gate;
 3. read the JSON summary (outcome, commits, blyte's own report, gate failures, cost) and review
    the diff with `blyte review`;
 4. merge it, or send a follow-up task.
