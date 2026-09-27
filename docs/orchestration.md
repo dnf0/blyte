@@ -171,6 +171,21 @@ on planning and review; the implementation runs on whichever model blyte is conf
 For another harness, `blyte skill print` writes the same instructions to stdout, to adapt into
 its own format.
 
+## With Codex (untested)
+
+```bash
+blyte skill install --harness codex        # or --harness all for Claude Code and Codex
+```
+
+This puts the same skill where Codex CLI finds it (`~/.agents/skills`, and `~/.codex/skills` for
+older versions; `.agents/skills` with `--project`), adds the default block to `~/.codex/AGENTS.md`
+(or the repository's `AGENTS.md`), and writes `~/.codex/rules/blyte.rules`, which pre-approves
+exactly `blyte dispatch` and `blyte review` to run outside Codex's sandbox: they need the network
+to reach blyte's model, and blyte applies its own sandbox to everything the implementer runs.
+Codex has no notification when a background command exits, so it starts parallel dispatches
+together and waits for them. The rules file has been checked with `codex execpolicy check`; the
+whole workflow has **not yet been run end to end under Codex**.
+
 ## Next
 
 - [Writing tasks for blyte](writing-tasks.md): the template, what to put in, how to check a task

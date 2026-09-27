@@ -96,7 +96,9 @@ gate), reads each JSON summary, reviews each diff with `blyte review` and merges
 - `--project` installs into the current repository instead (committed, so everyone gets it).
 - `--no-default` installs the skill without making blyte the default; then ask for it: *"use
   blyte to implement this"*.
-- `blyte skill uninstall` removes the skill and the `CLAUDE.md` block. Any other orchestrator can do the same: `blyte dispatch` takes a task
+- `blyte skill uninstall` removes the skill and the `CLAUDE.md` block.
+- `--harness codex` (or `all`) sets up Codex CLI the same way: skill, `AGENTS.md` block, and
+  rules that let `blyte dispatch` run outside Codex's sandbox. Untested end to end so far. Any other orchestrator can do the same: `blyte dispatch` takes a task
 file and a gate and prints JSON, and `blyte skill print` prints the instructions.
 
 ## Quick start: blyte on its own

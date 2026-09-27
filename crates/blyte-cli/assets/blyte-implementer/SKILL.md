@@ -62,12 +62,11 @@ cargo test'
 - Each line of the gate is a step; all must pass. Put the slow full test run last.
 - The implementer model's API key must be in the environment; blyte never prints it.
 
-**Parallel tasks in an interactive session:** send every independent `blyte dispatch` as its own
-background command in the same message. You are notified as each one exits; review each as it
-lands instead of waiting for all of them.
-
-**Parallel tasks in a one-shot or headless session** (for example `claude -p`): background commands
-die when the session ends, so start them together and wait in the foreground:
+**Starting parallel tasks.** If your harness tells you when a background command exits (an
+interactive Claude Code session does), send every independent `blyte dispatch` as its own
+background command in the same message and review each as it lands. Otherwise (Codex, or a
+one-shot session such as `claude -p`, where background commands die with the session), start
+them together and wait in the foreground:
 
 ```bash
 mkdir -p .wt
@@ -75,6 +74,11 @@ blyte dispatch T1 /abs/task-T1.md --gate '...' > .wt/T1.json &
 blyte dispatch T2 /abs/task-T2.md --gate '...' > .wt/T2.json &
 wait
 ```
+
+**Under Codex:** run `blyte dispatch` and `blyte review` outside Codex's sandbox (request
+escalated permissions for them; `blyte skill install --harness codex` pre-approves exactly these
+two commands). They need the network to reach blyte's model, and blyte applies its own sandbox
+to everything the implementer runs.
 
 Each dispatch prints one JSON object: `outcome` (`verified`, `no_changes`, `gate_failed`,
 `budget_exhausted`, `error`), `exit` (0 only for `verified`), `commits`, `changed_files`,
