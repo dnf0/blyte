@@ -12,7 +12,7 @@ Linux, headless or as a REPL, with any of six model providers.
 ## Install and first run
 
 ```bash
-cargo install --git https://github.com/climate-x-org/superstate blyte-cli --locked
+cargo install --git https://github.com/climate-x-org/superstate blyte --locked
 
 export GEMINI_API_KEY=...     # or another provider: see Providers
 cd your-repo                  # a git repository with a clean working tree

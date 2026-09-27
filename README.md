@@ -56,7 +56,7 @@ belong to whoever drives it, a person or an orchestrating agent.
 ## Install
 
 ```bash
-cargo install --git https://github.com/climate-x-org/superstate blyte-cli --locked
+cargo install --git https://github.com/climate-x-org/superstate blyte --locked
 blyte --version
 ```
 

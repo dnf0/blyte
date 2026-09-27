@@ -5,7 +5,7 @@
 blyte is a single Rust binary. With a recent stable Rust toolchain:
 
 ```bash
-cargo install --git https://github.com/climate-x-org/superstate blyte-cli --locked
+cargo install --git https://github.com/climate-x-org/superstate blyte --locked
 blyte --version        # blyte 0.1.0 (<commit>)
 ```
 
