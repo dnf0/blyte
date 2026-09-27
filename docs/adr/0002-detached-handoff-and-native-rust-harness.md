@@ -1,6 +1,10 @@
 # ADR 0002: Detached Handoff & Native Rust Harness as the Singular Execution Engine
 
-**Status:** Accepted  
+> **Superseded.** This records a design that was built, measured and removed: the MCP server, the
+> state engine, the worktree engine and the daemon described here no longer exist. Kept as a
+> record of the decision. The current architecture is [ADR 0003](0003-one-loop-implementer.md).
+
+**Status:** Superseded by [ADR 0003](0003-one-loop-implementer.md) (2026-09-27)  
 **Date:** 2026-09-14  
 **Deciders:** Core Engineering Team  
 **Consulted:** Blyte Architecture, Antigravity Engineering, Agent Rules  
@@ -39,54 +43,15 @@ Empirical evaluation conducted on 2026-09-13 across the DataCurve / TerminalBenc
 
 We will deprecate and remove all in-loop state mutation tools from the public MCP server manifest, establishing the **Detached Handoff** and the **Native Rust Daemon Harness** as the singular, authoritative execution architecture for Blyte.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│ 1. INTERACTIVE CHAT (Google Antigravity / Claude Code / Cursor)        │
-│    Role: Conversational Alignment & Milestone Specification ONLY       │
-│                                                                        │
-│    MCP Gateway Tool Surface:                                           │
-│    • `blyte_handoff` (Initiates detached execution; always true) │
-│    • `blyte_status`  (Interrogate active background jobs)        │
-│    • `blyte_cancel`  (Gracefully abort a running job)            │
-│    • `blyte_doctor`  (Environment & driver preflight check)       │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    │ Single Tool Call:
-                                    │ `blyte_handoff(goal, milestones, verify_cmd, ...)`
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ 2. BLYTE DETACHED GATEWAY (`crates/blyte-mcp/src/server.rs`)  │
-│                                                                        │
-│  1. Runs `execute_preflight` on verification commands.                 │
-│  2. Captures target branch and provisions isolated worktree `.wt/<job>`.│
-│  3. Writes atomic `.agent-state/state.json`.                           │
-│  4. Spawns detached daemon: `blyte state daemon --state ...`      │
-│  5. Releases chat session immediately:                                 │
-│     "Execution detached to job-9a1b in .wt/job-9a1b. Chat is free."    │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                      Chat Closes   │ Detached Process Runs
-                      Human is Free │ Headlessly in Background
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ 3. NATIVE RUST HARNESS (`crates/blyte-core/src/daemon.rs`)        │
-│                                                                        │
-│  Loop per milestone:                                                   │
-│   a. Render turnkey bounded prompt (0 conversational history).         │
-│   b. Launch headless driver worker (`agy -p` / `claude -p`).           │
-│   c. Execute OS verification gate (`--verify-cmd` + git clean check).  │
-│   d. Gate Pass: Create atomic checkpoint commit, advance milestone.    │
-│   e. Gate Fail: Feed stderr diff back to worker (up to max retries).   │
-│   f. Complete: Merge `.wt/<job>` to base branch, write completion JSON.│
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ 4. AUDIT & NOTIFICATION                                                │
-│    • Real-time interrogation: `blyte state status`                │
-│    • Completion artifact: `.agent-state/completion.json`               │
-│    • OS terminal bell / system notification ping                       │
-└────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    C["<b>1. Interactive chat</b> (Google Antigravity / Claude Code / Cursor)<br/>Role: conversational alignment and milestone specification only<br/>MCP gateway tools: blyte_handoff (starts detached execution; always detaches),<br/>blyte_status (active background jobs), blyte_cancel (gracefully abort a job),<br/>blyte_doctor (environment and driver preflight check)"]
+    G["<b>2. Blyte detached gateway</b> (crates/blyte-mcp/src/server.rs)<br/>1. Runs execute_preflight on the verification commands<br/>2. Captures the target branch and provisions the isolated worktree .wt/&lt;job&gt;<br/>3. Writes an atomic .agent-state/state.json<br/>4. Spawns the detached daemon: blyte state daemon --state ...<br/>5. Releases the chat session at once: 'Execution detached to job-9a1b in .wt/job-9a1b. Chat is free.'"]
+    H["<b>3. Native Rust harness</b> (crates/blyte-core/src/daemon.rs)<br/>Loop per milestone:<br/>a. Render a turnkey bounded prompt (no conversational history)<br/>b. Launch a headless driver worker (agy -p / claude -p)<br/>c. Run the OS verification gate (--verify-cmd + git clean check)<br/>d. Gate pass: atomic checkpoint commit, advance the milestone<br/>e. Gate fail: feed the stderr diff back to the worker (up to max retries)<br/>f. Complete: merge .wt/&lt;job&gt; into the base branch, write completion JSON"]
+    A["<b>4. Audit and notification</b><br/>Real-time interrogation: blyte state status<br/>Completion artifact: .agent-state/completion.json<br/>OS terminal bell / system notification"]
+    C -- "single tool call: blyte_handoff(goal, milestones, verify_cmd, ...)" --> G
+    G -- "chat closes, the human is free; the detached process runs headlessly" --> H
+    H --> A
 ```
 
 ---

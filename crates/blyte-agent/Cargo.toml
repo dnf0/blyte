@@ -1,6 +1,7 @@
 [package]
 name = "blyte-agent"
 version.workspace = true
+description = "The blyte agent loop: tools, context, persistent shell sessions, search and the command sandbox."
 edition.workspace = true
 
 [dependencies]
