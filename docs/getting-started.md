@@ -28,19 +28,21 @@ commands the model runs.
 
 ## 3. Connect Claude Code
 
-The blyte repository ships a Claude Code skill and two small scripts that implement the
-workflow. Install them as a personal skill:
+blyte carries a Claude Code skill that teaches Claude the workflow. Install it for every project:
 
 ```bash
-git clone https://github.com/climate-x-org/superstate.git blyte-src
-mkdir -p ~/.claude/skills/blyte-implementer
-cp blyte-src/examples/orchestrate/claude-skill/blyte-implementer/SKILL.md \
-   blyte-src/examples/orchestrate/blyte-*.sh ~/.claude/skills/blyte-implementer/
+blyte skill install
 ```
 
-In the repository you want to work on, add `.wt/` to `.gitignore` (blyte's worktrees live there),
-and make sure you have a check command that proves a change is right: your tests, plus
-formatting and lint.
+or for one repository only (committed with it, so everyone on the repository gets it):
+
+```bash
+cd your-repo && blyte skill install --project
+```
+
+The skill always matches the installed blyte; after upgrading blyte, run
+`blyte skill install --force` to refresh it. Make sure the repository has a check command that
+proves a change is right: your tests, plus formatting and lint.
 
 ## 4. Delegate your first task
 
@@ -52,8 +54,10 @@ Start Claude Code in the repository and ask for the pattern explicitly:
 Claude will:
 
 1. write the task to a file, with the tests that prove it and the exact commit message;
-2. dispatch it: blyte works in `.wt/T1` on branch `wip/T1`, with your check command as its gate;
-3. read blyte's summary (outcome, gate failures, turns, cost) and review the diff itself;
+2. run `blyte dispatch`: blyte works in `.wt/T1` on branch `wip/T1`, with your check command as
+   its gate;
+3. read the JSON summary (outcome, commits, blyte's own report, gate failures, cost) and review
+   the diff with `blyte review`;
 4. merge it, or send a follow-up task.
 
 Your Claude usage goes on steps 1, 3 and 4. [blyte as your implementer](orchestration.md)
@@ -77,8 +81,8 @@ It works until the gate exits 0 or a budget runs out:
 
 !!! warning "Start from a clean tree"
     By default a failed gate resets the tree to the commit the run started from, discarding
-    uncommitted changes (`--rollback=false` keeps them). The orchestration scripts turn rollback
-    off and run in a separate worktree, so your checkout is never touched.
+    uncommitted changes (`--rollback=false` keeps them). `blyte dispatch` turns rollback off and
+    works in a separate worktree, so your checkout is never touched.
 
 A gate of several lines is several steps; every step runs and every failure comes back at once:
 

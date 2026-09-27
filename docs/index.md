@@ -19,8 +19,7 @@ frontier model:  review diff + report ◀── outcome, gate failures, turns, c
 
 1. **Install blyte:** `cargo install --git https://github.com/climate-x-org/superstate blyte --locked`
 2. **Give it a cheap model:** `export GEMINI_API_KEY=...` (or [another provider](providers.md)).
-3. **Install the Claude Code skill** from
-   [`examples/orchestrate/`](https://github.com/climate-x-org/superstate/tree/main/examples/orchestrate).
+3. **Install the Claude Code skill:** `blyte skill install`
 4. **Ask Claude Code:** *"Plan this change, then use blyte to implement each task and review the
    results."*
 

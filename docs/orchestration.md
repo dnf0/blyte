@@ -49,56 +49,69 @@ more of the thinking is in the task, the less the implementer has to guess.
 
 ## The workflow
 
-The blyte repository ships two scripts and a Claude Code skill in
-[`examples/orchestrate/`](https://github.com/climate-x-org/superstate/tree/main/examples/orchestrate).
+Two commands do the mechanical part: `blyte dispatch` and `blyte review`. The Claude Code skill
+(`blyte skill install`) teaches Claude to use them; any other orchestrator can call them directly.
 
-**1. Write the task** to a file, one task per file:
+**1. Write the task** to a file, one task per file ([how](writing-tasks.md)):
 
 ```markdown
-## Task: reject empty input in parse()
+## Task: fix add()
 
-`parse("")` currently panics. It should return `Err(ParseError::Empty)`.
+`add` in `calc.py` subtracts. Make it add.
 
-Files: `src/parse.rs`, `tests/parse_empty.rs` (new).
-
-Test (add verbatim):
-    #[test]
-    fn empty_input_is_an_error() {
-        assert_eq!(parse(""), Err(ParseError::Empty));
-    }
-
-Constraints: existing tests pass unmodified.
-Commit message: fix(parse): empty input is an error, not a panic
+Files: `calc.py` only.
+The existing test `test_calc.py` must pass unmodified.
+Commit message: fix: add() adds
 ```
 
 **2. Dispatch it** from the repository's main checkout:
 
 ```bash
-examples/orchestrate/blyte-dispatch.sh T1 task-T1.md 'cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test'
+blyte dispatch T1 task-T1.md --gate 'python3 -m pytest -q'
 ```
 
-The script creates the worktree `.wt/T1` on branch `wip/T1`, runs blyte with the gate (rollback
-off, so a failed attempt is kept for review), and prints a summary, for example:
+blyte creates the worktree `.wt/T1` on branch `wip/T1` (from `--base`, default `HEAD`), works
+there with rollback off, and prints one JSON object. From a real run of the task above
+(trimmed). A gate of several lines is several steps, as in `blyte --gate`:
 
 ```json
-{ "id": "T1", "exit": 0, "commits": 1, "outcome": "verified", "gate_failures": [],
-  "turns": 21, "gate_attempts": 1, "cost_usd": 0.18, "seconds": 142, "sandbox": "seatbelt" }
+{
+  "id": "T1",
+  "branch": "wip/T1",
+  "outcome": "verified",
+  "exit": 0,
+  "commits": [{ "sha": "e9d1632", "subject": "fix: add() adds" }],
+  "changed_files": ["calc.py"],
+  "final_message": "### Summary of Changes\n\n- **`calc.py`**: Changed `return a - b` to `return a + b` in `add()`. ...",
+  "turns": 10,
+  "gate_failures": [],
+  "cost_usd": 0.0172,
+  "seconds": 19,
+  "sandbox": "seatbelt"
+}
 ```
 
-`exit` is 0 when the gate passed and something was committed, and 4 when the gate passed on an
-untouched tree, which is not done.
+| `outcome` | meaning | `exit` |
+|---|---|---|
+| `verified` | the gate passed and something was committed | 0 |
+| `no_changes` | the gate passed on an untouched tree: not done | 4 |
+| `gate_failed`, `budget_exhausted`, `error` | see `gate_failures`, `error` and the log | 1 |
+
+The summary also names the `log` (`.wt/T1.log`) and the full [run report](reports.md).
+Budgets and sandbox flags (`--max-seconds`, `--max-turns`, `--max-cost`, `--model`, `--network`,
+`--allow-read`, `--pass-env`) pass through to the run; `.wt/` is added to `.git/info/exclude`, so
+no tracked file changes.
 
 **3. Verify it yourself:**
 
 ```bash
-examples/orchestrate/blyte-review.sh T1 --diff
+blyte review T1 --diff
 ```
 
-Check scope (only the files the task names), fidelity (code you gave verbatim landed verbatim),
-the checks (run the gate yourself in `.wt/T1`), and any deviations blyte reported. A passing gate
-is necessary, not sufficient.
+This shows the commits, changed files, the worktree's state, blyte's report and the diff. Check
+scope (only the files the task names), fidelity (code you gave verbatim landed verbatim), the
+checks (run the gate yourself in `.wt/T1`), and every deviation blyte's report mentions. A passing
+gate is necessary, not sufficient.
 
 **4. Merge or follow up:**
 
@@ -106,23 +119,23 @@ is necessary, not sufficient.
 git merge --ff-only wip/T1 && git worktree remove .wt/T1 && git branch -d wip/T1
 ```
 
-If the result falls short, fix a trivial issue yourself, or write a follow-up task saying exactly
-what to change. If the task was wrong, fix the task.
+If the result falls short, fix a trivial issue yourself, or write a follow-up task and dispatch it
+on top: `blyte dispatch T1b follow-up.md --base wip/T1 --gate ...`. If the task was wrong, fix the
+task.
 
 ## With Claude Code
 
-Install the skill, and Claude Code will follow this workflow when you ask it to use blyte:
-
 ```bash
-mkdir -p ~/.claude/skills/blyte-implementer
-cp examples/orchestrate/claude-skill/blyte-implementer/SKILL.md \
-   examples/orchestrate/blyte-*.sh ~/.claude/skills/blyte-implementer/
+blyte skill install              # every project; --project for this repository only
 ```
 
 Then, in a session: *"Plan this change, then use blyte to implement each task and review the
 results."* Claude writes the task files, dispatches them in the background (independent tasks in
 parallel), reviews each diff and merges. Your Claude usage goes on planning and review; the
 implementation runs on whichever model blyte is configured for.
+
+For another harness, `blyte skill print` writes the same instructions to stdout, to adapt into
+its own format.
 
 ## Next
 

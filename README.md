@@ -29,9 +29,8 @@ Your frontier tokens go on the parts that need judgement: planning and review. T
 test-running and fixing runs on a model that costs a fraction as much, inside a harness built to
 waste as little of it as possible. This is how blyte itself is built.
 
-**Get started:** [install blyte](#install), then the
-[Claude Code skill and scripts](examples/orchestrate/), or read
-[blyte as your implementer](docs/orchestration.md) for the workflow.
+**Get started:** [install blyte](#install), run `blyte skill install`, and ask Claude Code to use
+it. [The workflow](docs/orchestration.md) explains what happens.
 
 | | |
 |---|---|
@@ -72,22 +71,18 @@ export GEMINI_API_KEY=...          # the implementer's model; see Providers for 
 
 ## Quick start: with Claude Code
 
-Install the skill and its two scripts, then ask Claude to use blyte:
-
 ```bash
-git clone https://github.com/climate-x-org/superstate.git blyte-src
-mkdir -p ~/.claude/skills/blyte-implementer
-cp blyte-src/examples/orchestrate/claude-skill/blyte-implementer/SKILL.md \
-   blyte-src/examples/orchestrate/blyte-*.sh ~/.claude/skills/blyte-implementer/
+blyte skill install          # the Claude Code skill; --project installs it into this repository
 ```
 
-In your repository (add `.wt/` to its `.gitignore`), tell Claude Code:
+Then, in your repository, tell Claude Code:
 
 > Plan this change, then use blyte to implement each task and review the results.
 
-Claude writes each task with its tests, dispatches it to blyte in its own worktree with your check
-command as the gate, reviews the diff and merges. Any other orchestrator can drive the same
-scripts: they take a task file and a gate, and print JSON.
+Claude writes each task with its tests, runs `blyte dispatch` to hand it to blyte in its own
+worktree with your check command as the gate, reads the JSON summary, reviews the diff with
+`blyte review` and merges. Any other orchestrator can do the same: `blyte dispatch` takes a task
+file and a gate and prints JSON, and `blyte skill print` prints the instructions.
 
 ## Quick start: blyte on its own
 

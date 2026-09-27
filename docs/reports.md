@@ -42,7 +42,8 @@ removed; new fields are added without a bump.
   "tool_counts": { "bash": 22, "read": 17, "edit": 9, "grep": 3 },
   "model_seconds": 121.7,
   "tools_seconds": 20.1,
-  "gate_seconds": 41.2
+  "gate_seconds": 41.2,
+  "final_message": "Changed parse() to return Err(ParseError::Empty) ... Deviations: none."
 }
 ```
 
@@ -59,6 +60,7 @@ removed; new fields are added without a bump.
 | `context` | `folded` or `conversational` |
 | `gated`, `gate_source` | whether a gate was given; `user` or `none` |
 | `duration_seconds` | wall-clock time of the run |
+| `final_message` | the model's last text: its own report of what it did (what `blyte dispatch` shows the orchestrator) |
 
 **Work**
 
