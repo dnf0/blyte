@@ -78,8 +78,28 @@ pub struct ReviewArgs {
     pub diff: bool,
 }
 
+#[derive(clap::Subcommand, Debug, PartialEq, Clone)]
+pub enum SkillAction {
+    /// Install the Claude Code skill
+    Install {
+        /// Install to repository instead of personal ~/.claude
+        #[arg(long)]
+        project: bool,
+
+        /// Overwrite even if existing skill was modified
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Print the skill markdown to stdout
+    Print,
+}
+
 #[derive(clap::Args, Debug, PartialEq, Clone)]
-pub struct SkillArgs {}
+pub struct SkillArgs {
+    #[command(subcommand)]
+    pub action: SkillAction,
+}
 
 #[derive(Parser, Debug, PartialEq)]
 #[command(
