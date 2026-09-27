@@ -66,6 +66,7 @@ nav:
   - Guide:
       - Getting started: getting-started.md
       - Running tasks: usage.md
+      - blyte as your implementer: orchestration.md
       - Providers: providers.md
       - Security and the sandbox: security.md
       - Run reports: reports.md

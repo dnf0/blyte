@@ -133,3 +133,4 @@
 }
 .md-typeset h1 + h2 { border-top: 0; padding-top: 0; }
 .b-card code { white-space: nowrap; }
+.b-card-wide { grid-column: 1 / -1; border-left: 3px solid var(--b-rust); }

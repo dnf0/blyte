@@ -68,19 +68,6 @@ cost, per-call token usage, where the time went, gate failures and the security 
 
 ## Driving blyte from another agent
 
-blyte is built to be dispatched: one task per run, in its own worktree, with a gate and a report.
-A typical orchestrator loop:
-
-```bash
-git worktree add .wt/task-42 -b wip/task-42
-cd .wt/task-42
-blyte "$(cat plan-task-42.md)" \
-  --gate 'cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test' \
-  --max-seconds 1800 --report ../task-42.report.json
-```
-
-The orchestrator then reads the report, reviews the diff and merges or re-dispatches. blyte has no
-push, PR or merge tools, and on macOS its sandbox also withholds the credentials a `git push` would
-need (SSH keys and agent, the keychain, `gh`'s token), so publishing stays with the orchestrator.
+blyte is built to be dispatched: one task per run, in its own worktree, with a gate and a report,
+reviewed and merged by whoever dispatched it. [blyte as your implementer](orchestration.md)
+describes the pattern, with scripts and a Claude Code skill.

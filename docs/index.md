@@ -25,8 +25,9 @@ more detail.
 ## Find what you need
 
 <div class="b-cards">
+<a class="b-card b-card-wide" href="orchestration/"><strong>Offload work from a frontier model</strong><span>Let Claude Code, or any agent, plan and review while blyte implements each task on a cheaper model, checked by your tests.</span></a>
 <a class="b-card" href="getting-started/"><strong>Get set up</strong><span>Install, choose a model, run a first gated task, use the REPL.</span></a>
-<a class="b-card" href="usage/"><strong>Run tasks well</strong><span>Gates with several steps, budgets, rollback, containers, driving blyte from an orchestrator.</span></a>
+<a class="b-card" href="usage/"><strong>Run tasks well</strong><span>Gates with several steps, budgets, rollback, containers.</span></a>
 <a class="b-card" href="providers/"><strong>Choose a model</strong><span>Gemini, Anthropic, OpenAI-compatible, OpenRouter, Ollama, ChatGPT; credentials, retries, cost.</span></a>
 <a class="b-card" href="security/"><strong>Know what commands can touch</strong><span>The sandbox on macOS and Linux, credential reads, the environment filter, <code>--network=off</code>.</span></a>
 <a class="b-card" href="reports/"><strong>Read a run's results</strong><span>Every field of <code>--report</code>: outcome, turns, cost, timing, security settings.</span></a>
@@ -51,7 +52,7 @@ optionally by wall-clock time (`--max-seconds`) and spend (`--max-cost`).
 read credential stores. See [Security](security.md).
 
 **One job.** blyte implements one task per run. Planning, splitting work and review belong to
-whoever drives it, a person or another agent.
+whoever drives it, a person or another agent: see [blyte as your implementer](orchestration.md).
 
 ## Background
 

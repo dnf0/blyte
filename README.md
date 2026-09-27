@@ -31,6 +31,23 @@ the leaderboard's); [the evidence page](docs/evidence.md) has the method and all
 
 Named after rust fungus (the blight Rust is named after), and bytes.
 
+## Offload implementation from a frontier model
+
+blyte is an **implementer**: one task, done and proven. That makes it a good partner for a
+frontier model. Let Claude Code (or any agent) plan the work and review the diffs, and hand each
+well-specified task to blyte on a cheaper model, where the repository's tests, run as blyte's
+gate, decide whether it is done:
+
+```
+Claude Code: plan → task file ──▶ blyte (e.g. Gemini Flash): implement, gate passes, commit
+Claude Code: review diff + report ◀── outcome, gate failures, turns, cost
+```
+
+This is how blyte itself is built. [examples/orchestrate/](examples/orchestrate/) has the dispatch
+and review scripts and a Claude Code skill; [docs/orchestration.md](docs/orchestration.md) has the
+workflow. (What is not measured yet: the saving against the frontier model doing the whole task
+alone. The orchestrator's planning and review use frontier tokens too.)
+
 ## Why blyte
 
 - **"Done" means something.** `--gate` is a command, not a tool: the model cannot call it, skip it
@@ -49,9 +66,6 @@ Named after rust fungus (the blight Rust is named after), and bytes.
 - **Small on purpose.** Features that did not win in measurement (a daemon, an MCP server, a
   planner, a TDD mode, LLM summaries, …) were deleted. [The manifesto](MANIFESTO.md) explains the
   rules.
-
-blyte is an **implementer**: one task, done and proven. Planning, splitting work and reviewing
-belong to whoever drives it, a person or an orchestrating agent.
 
 ## Install
 
@@ -112,7 +126,8 @@ Credentials are read by blyte and never reach the commands the model runs. Detai
 | | |
 |---|---|
 | [Getting started](docs/getting-started.md) | install, pick a model, the first gated run |
-| [Running tasks](docs/usage.md) | the gate, budgets, rollback, containers, driving blyte from an orchestrator |
+| [Running tasks](docs/usage.md) | the gate, budgets, rollback, containers |
+| [blyte as your implementer](docs/orchestration.md) | offload tasks from Claude Code or another orchestrator |
 | [Security and the sandbox](docs/security.md) | what commands can and cannot reach, per platform |
 | [Run reports](docs/reports.md) | every field of `--report` |
 | [How it works](docs/how-it-works.md) | the loop, folded context, the tools |
