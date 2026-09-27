@@ -150,7 +150,7 @@ measured on. Credentials are read by blyte and never reach the commands the mode
 |---|---|
 | [Getting started](docs/getting-started.md) | install, set up Claude Code, the first delegated task |
 | [blyte as your implementer](docs/orchestration.md) | the plan → delegate → review workflow, and when to use it |
-| [Writing tasks for blyte](docs/writing-tasks.md) | what a task needs so a cheap model gets it right first time |
+| [How tasks are written](docs/writing-tasks.md) | what the orchestrating agent writes for blyte, and why |
 | [Running tasks](docs/usage.md) | the gate, budgets, rollback, containers, standalone runs |
 | [Security and the sandbox](docs/security.md) | what commands can and cannot reach, per platform |
 | [Run reports](docs/reports.md) | every field of `--report` |
