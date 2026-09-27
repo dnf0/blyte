@@ -57,7 +57,10 @@ pub fn bound_output_with(text: &str, line_budget: usize, line_chars: usize) -> S
             let n = l.chars().count();
             if n > line_chars {
                 let head: String = l.chars().take(line_chars).collect();
-                format!("{head} …[{} more chars clipped by blyte]", n - line_chars)
+                format!(
+                    "{head} …[{} more chars clipped by blyte; the grep tool shows the text around a match]",
+                    n - line_chars
+                )
             } else {
                 l.to_string()
             }
@@ -91,6 +94,98 @@ pub fn bound_output_lines(text: &str, line_budget: usize) -> String {
 /// then cap the total, keeping head and tail. Ordinary output passes through unchanged.
 pub fn bound_output(text: &str) -> String {
     bound_output_lines(text, OUTPUT_LINE_BUDGET)
+}
+
+/// Match-centred excerpt for long lines.
+///
+/// When `text` has at most `max` characters, return it unchanged. Otherwise keep the whole match
+/// (cut the match itself to `max` characters if it alone is longer) and split the rest of the
+/// `max` budget evenly before and after it, shifting any unused side to the other; prefix
+/// `…[<n> chars] ` when characters were dropped before, and suffix ` …[<n> chars]` when dropped
+/// after, `<n>` being the count dropped. Never split a UTF-8 character.
+pub fn excerpt_around(text: &str, start: usize, end: usize, max: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max {
+        return text.to_string();
+    }
+    if start > text.len()
+        || end > text.len()
+        || start > end
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return text.to_string();
+    }
+
+    let before = &text[..start];
+    let matched = &text[start..end];
+    let after = &text[end..];
+
+    let before_chars = before.chars().count();
+    let match_chars = matched.chars().count();
+    let after_chars = after.chars().count();
+
+    if match_chars >= max {
+        let kept_match: String = matched.chars().take(max).collect();
+        let dropped_before = before_chars;
+        let dropped_after = after_chars + (match_chars - max);
+        let mut out = String::new();
+        if dropped_before > 0 {
+            out.push_str(&format!("…[{dropped_before} chars] "));
+        }
+        out.push_str(&kept_match);
+        if dropped_after > 0 {
+            out.push_str(&format!(" …[{dropped_after} chars]"));
+        }
+        return out;
+    }
+
+    let rem = max - match_chars;
+    let half_before = rem / 2;
+    let half_after = rem - half_before;
+
+    let (take_before, take_after) = if before_chars < half_before {
+        let tb = before_chars;
+        let ta = (rem - tb).min(after_chars);
+        (tb, ta)
+    } else if after_chars < half_after {
+        let ta = after_chars;
+        let tb = (rem - ta).min(before_chars);
+        (tb, ta)
+    } else {
+        (half_before, half_after)
+    };
+
+    let dropped_before = before_chars - take_before;
+    let dropped_after = after_chars - take_after;
+
+    let mut out = String::new();
+    if dropped_before > 0 {
+        out.push_str(&format!("…[{dropped_before} chars] "));
+    }
+    let kept_before: String = before
+        .chars()
+        .skip(dropped_before)
+        .take(take_before)
+        .collect();
+    out.push_str(&kept_before);
+    out.push_str(matched);
+    let kept_after: String = after.chars().take(take_after).collect();
+    out.push_str(&kept_after);
+    if dropped_after > 0 {
+        out.push_str(&format!(" …[{dropped_after} chars]"));
+    }
+    out
+}
+
+fn split_grep_prefix(line: &str) -> (&str, &str) {
+    static PREFIX_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"^(\d+:\d+:|\d+:|.*?:\d+:)").unwrap());
+    if let Some(m) = PREFIX_RE.find(line) {
+        (&line[..m.end()], &line[m.end()..])
+    } else {
+        ("", line)
+    }
 }
 
 /// Ceiling on a single MODEL-ISSUED command.
@@ -362,6 +457,8 @@ pub fn execute(
     let mut outcome = execute_unbounded(root, shell, fs, name, args);
     outcome.content = if name == "read" {
         bound_output_with(&outcome.content, READ_LINE_BUDGET, READ_LINE_CHARS)
+    } else if name == "grep" {
+        bound_output_with(&outcome.content, OUTPUT_LINE_BUDGET, READ_LINE_CHARS)
     } else {
         bound_output_lines(&outcome.content, OUTPUT_LINE_BUDGET)
     };
@@ -570,6 +667,25 @@ fn execute_unbounded(
             if lines.is_empty() {
                 return ToolOutcome::ok(format!("no matches for {pattern}"));
             }
+            let pattern_re = regex::Regex::new(&pattern).ok();
+            let lines: Vec<String> = lines
+                .into_iter()
+                .map(|line| {
+                    if line.chars().count() <= MAX_LINE_CHARS {
+                        return line;
+                    }
+                    let Some(ref re) = pattern_re else {
+                        return line;
+                    };
+                    let (prefix, rest) = split_grep_prefix(&line);
+                    if let Some(m) = re.find(rest) {
+                        let excerpt = excerpt_around(rest, m.start(), m.end(), MAX_LINE_CHARS);
+                        format!("{prefix}{excerpt}")
+                    } else {
+                        line
+                    }
+                })
+                .collect();
             if lines.len() > MAX_MATCHES {
                 ToolOutcome::ok(format!(
                     "{}\n\n[capped at {MAX_MATCHES} matches; narrow the pattern or pass `glob` \
