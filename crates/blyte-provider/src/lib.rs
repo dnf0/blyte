@@ -45,6 +45,8 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderError {
     #[error("no API key: set {0}")]
     MissingKey(&'static str),
+    #[error("authentication: {0}")]
+    Auth(String),
     #[error("transport: {0}")]
     Transport(String),
     #[error("provider returned {status}: {body}")]
