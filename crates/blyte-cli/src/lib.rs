@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod config;
 pub mod dispatch;
 pub mod repl;
 pub mod report;

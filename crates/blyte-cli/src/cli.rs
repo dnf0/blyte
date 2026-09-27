@@ -4,6 +4,13 @@ use std::path::PathBuf;
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
+    /// Detect this repository's checks and write blyte.toml
+    Init {
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        print: bool,
+    },
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
     Dispatch(DispatchArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
@@ -22,7 +29,7 @@ pub struct DispatchArgs {
 
     /// The check command; several lines are several steps, all of which must pass
     #[arg(short, long)]
-    pub gate: String,
+    pub gate: Option<String>,
 
     /// The commit a new worktree starts from
     #[arg(long, default_value = "HEAD")]
@@ -32,13 +39,13 @@ pub struct DispatchArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Wall-clock budget in seconds
-    #[arg(long, default_value = "3600")]
-    pub max_seconds: u64,
+    /// Wall-clock budget in seconds (default 3600)
+    #[arg(long)]
+    pub max_seconds: Option<u64>,
 
-    /// Maximum turn budget
-    #[arg(long, default_value = "300")]
-    pub max_turns: usize,
+    /// Maximum turn budget (default 300)
+    #[arg(long)]
+    pub max_turns: Option<u32>,
 
     /// Maximum spend in USD
     #[arg(long = "max-cost")]
@@ -59,10 +66,9 @@ pub struct DispatchArgs {
     /// Outbound network mode: 'on' or 'off' (default 'on')
     #[arg(
         long,
-        default_value = "on",
         value_parser = ["on", "off"]
     )]
-    pub network: String,
+    pub network: Option<String>,
 
     /// Let sandboxed commands read this path despite credential deny-list (repeatable)
     #[arg(long = "allow-read")]

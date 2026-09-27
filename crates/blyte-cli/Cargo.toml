@@ -23,6 +23,7 @@ blyte-provider = { path = "../blyte-provider", version = "0.1.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true
