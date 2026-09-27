@@ -9,10 +9,10 @@ that division, and on what measuring it taught us.
 ## 1. The model does the work; the harness decides the bill
 
 Holding the model fixed and changing only the harness moves cost by up to 40× and pass rate by a
-few points ([*The Scaffold Effect in Coding Agents*](https://arxiv.org/abs/2607.22585)). Our own numbers say the same. On thirty-one real
+few points ([*The Scaffold Effect in Coding Agents*](https://arxiv.org/abs/2607.22585)). Our own numbers say the same. On thirty-seven real
 plan tasks in two repositories, blyte and agy (Google's Antigravity CLI) running the same model
-produced work of comparable quality, and blyte did it in a median 0.47× the time and 0.63× the
-cost. It was cheaper in 29 of 31.
+produced work of comparable quality, and blyte did it in a median 0.52× the time and 0.63× the
+cost. It was cheaper in 35 of 37.
 
 A harness that makes the model smarter is rare. A harness that wastes the model's time is
 everywhere. Blyte's job is to get out of the way.
