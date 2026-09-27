@@ -12,6 +12,21 @@ credentials itself; they are removed from the environment of every command the m
 | `<name>:<tag>` or `ollama/…` | Ollama, local or cloud; thinking off unless the name ends in `+think` | `OLLAMA_HOST` (e.g. `http://localhost:11434`) or `OLLAMA_API_KEY` |
 | `chatgpt/<model>` (e.g. `chatgpt/gpt-5.5`) | a ChatGPT subscription, through the Codex CLI's login | `~/.codex/auth.json` from `codex login` |
 
+## Choosing an implementer model
+
+In the plan → delegate → review pattern, blyte's model does the implementation, so it should be
+**cheap, fast and good at following precise instructions**. It does not need to be good at
+planning: the frontier model above it does that.
+
+| model | status |
+|---|---|
+| **Gemini 3.8 Flash** (default) | measured: every paired run and the FrontierHarness run used it. Start here. |
+| Claude Haiku, GPT mini-class models | supported (via `claude-…`, `openai/…`, `openrouter/…`), not yet measured as implementers |
+| local models via Ollama | supported; `qwen3:14b` handled small tasks but failed a real repository task in our tests. Worth trying on simple, well-tested tasks; slow on a laptop. |
+
+Only Gemini 3.8 Flash has a list price in blyte today, so it is the only model for which the
+report's `cost_usd` and `--max-cost` work. For another model, compare token counts in the report.
+
 ## Notes per provider
 
 **Gemini.** The default. The thinking suffix is part of the name: `gemini-3.8-flash-low` thinks

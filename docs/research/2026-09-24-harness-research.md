@@ -1,6 +1,6 @@
-# Harness research and measurements, 2026-09-24
+# Harness research and measurements
 
-What we measured on our own harness, what current external research says, and the objective that follows. Evidence lives in superstate-eval FINDINGS 13.39–13.44. This note is the synthesis.
+Written 24 September 2026. What we measured on our own harness, what current external research says, and the objective that follows. Evidence lives in superstate-eval FINDINGS 13.39–13.44. This note is the synthesis.
 
 ## Objective
 
@@ -27,14 +27,14 @@ A feature earns its place only if it improves one of these, or completion, in re
 ## What external research says (September 2026)
 
 1. **The harness changes cost far more than pass rate.**
-   - Three harnesses on one model spanned up to 40× in tokens per solved task, with pass-rate differences of 0–8 points (Vats & Golev, *The Scaffold Effect*, 2607.22585).
+   - Three harnesses on one model spanned up to 40× in tokens per solved task, with pass-rate differences of 0–8 points (Vats & Golev, [*The Scaffold Effect in Coding Agents*](https://arxiv.org/abs/2607.22585)).
    - Holding the model fixed and changing only the harness moves leaderboard scores 9–48 points.
    - This matches our data.
-2. **Context management matters for tight windows, little for wide ones.** Managed context beat none by 35.7 points at 32K but only 2.7 at 128K (*An Empirical Study of Harness Design for Coding Agents*, 2609.20804). Gemini's 1M window puts us in the wide regime: context management buys cost, not correctness.
-3. **Cheap mechanical trimming beats clever machinery.** Rule-based elision gave the best efficiency, with LLM summarisation as a later backstop. A tool for recovering elided content went unused in 56% of settings and added no accuracy (2609.20804). This backs `folded`, explains why fold notes did not pay, and says not to build recall.
-4. **Coarser action spaces can be cheaper for strong models.** Bash-only was 53% cheaper and 3.6 points more accurate for a strong model on SWE-bench, with 20–30% fewer tool calls from composite commands. Weak models and file-heavy tasks still benefit from predefined read/edit tools (2609.20804).
-5. **A light plan cuts cost for strong models:** about −30% cost and −24% turns, by skipping redundant verification. It helps weak models' accuracy instead (2609.20804).
-6. **The field is moving to adaptive or learned harnesses** (CHILL-Harness 2607.25825, openJiuwen 2608.27969, Natural-Language Agent Harnesses 2603.25723), and to always disclosing the harness in comparisons (2605.23950).
+2. **Context management matters for tight windows, little for wide ones.** Managed context beat none by 35.7 points at 32K but only 2.7 at 128K ([*An Empirical Study of Harness Design for Coding Agents*](https://arxiv.org/abs/2609.20804)). Gemini's 1M window puts us in the wide regime: context management buys cost, not correctness.
+3. **Cheap mechanical trimming beats clever machinery.** Rule-based elision gave the best efficiency, with LLM summarisation as a later backstop. A tool for recovering elided content went unused in 56% of settings and added no accuracy ([*An Empirical Study of Harness Design for Coding Agents*](https://arxiv.org/abs/2609.20804)). This backs `folded`, explains why fold notes did not pay, and says not to build recall.
+4. **Coarser action spaces can be cheaper for strong models.** Bash-only was 53% cheaper and 3.6 points more accurate for a strong model on SWE-bench, with 20–30% fewer tool calls from composite commands. Weak models and file-heavy tasks still benefit from predefined read/edit tools ([*An Empirical Study of Harness Design for Coding Agents*](https://arxiv.org/abs/2609.20804)).
+5. **A light plan cuts cost for strong models:** about −30% cost and −24% turns, by skipping redundant verification. It helps weak models' accuracy instead ([*An Empirical Study of Harness Design for Coding Agents*](https://arxiv.org/abs/2609.20804)).
+6. **The field is moving to adaptive or learned harnesses** ([CHILL-Harness](https://arxiv.org/abs/2607.25825), [openJiuwen](https://arxiv.org/abs/2608.27969), [Natural-Language Agent Harnesses](https://arxiv.org/abs/2603.25723)), and to always disclosing the harness in comparisons ([*Stop Comparing LLM Agents Without Disclosing the Harness*](https://arxiv.org/abs/2605.23950)).
 
 ## Where the remaining efficiency is
 
@@ -46,14 +46,14 @@ A feature earns its place only if it improves one of these, or completion, in re
 
 ## Sources
 
-- [An Empirical Study of Harness Design for Coding Agents](https://arxiv.org/html/2609.20804v1)
-- [The Scaffold Effect in Coding Agents](https://arxiv.org/pdf/2607.22585)
-- [Same Model, Different Harness: Different Coding-Agent Results](https://arxiv.org/pdf/2608.26218)
-- [Harness or Model? Isolating the Harness Effect in Agentic Coding](https://arxiv.org/pdf/2609.11987)
+- [An Empirical Study of Harness Design for Coding Agents](https://arxiv.org/abs/2609.20804)
+- [The Scaffold Effect in Coding Agents](https://arxiv.org/abs/2607.22585)
+- [Same Model, Different Harness: Different Coding-Agent Results](https://arxiv.org/abs/2608.26218)
+- [Harness or Model? Isolating the Harness Effect in Agentic Coding](https://arxiv.org/abs/2609.11987)
 - [SWE-bench in 2026: Benchmarks vs Scaffolding Reality](https://www.digitalapplied.com/blog/swe-bench-verified-june-2026-benchmark-vs-scaffolding-analysis)
-- [Stop Comparing LLM Agents Without Disclosing the Harness](https://arxiv.org/pdf/2605.23950)
-- [CHILL-Harness](https://arxiv.org/pdf/2607.25825)
-- [openJiuwen: Beyond Static Harnesses](https://arxiv.org/pdf/2608.27969)
-- [Natural-Language Agent Harnesses](https://arxiv.org/pdf/2603.25723)
-- [Context as an Environment](https://arxiv.org/pdf/2608.21690)
+- [Stop Comparing LLM Agents Without Disclosing the Harness](https://arxiv.org/abs/2605.23950)
+- [CHILL-Harness](https://arxiv.org/abs/2607.25825)
+- [openJiuwen: Beyond Static Harnesses](https://arxiv.org/abs/2608.27969)
+- [Natural-Language Agent Harnesses](https://arxiv.org/abs/2603.25723)
+- [Context as an Environment](https://arxiv.org/abs/2608.21690)
 - [Gemini Developer API pricing](https://ai.google.dev/gemini-api/docs/pricing)

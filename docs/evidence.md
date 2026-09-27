@@ -2,6 +2,15 @@
 
 Two kinds of evidence, with different strengths. Neither is a benchmark leaderboard entry.
 
+- The **paired runs** measure blyte **as it is meant to be used**: Claude planned every task and
+  reviewed every result, and blyte implemented on a cheap model. They compare blyte with another
+  implementer, agy, in that same position.
+- The **FrontierHarness run** measures blyte **on its own**: no plan, a cheap model and the raw
+  task, against harnesses that plan and implement for themselves. It is a hard test of the
+  implementer, not a picture of the intended use.
+- **Not yet measured:** the pattern against the frontier model doing the whole task alone. The
+  orchestrator's planning and review cost frontier tokens too; an experiment is planned.
+
 ## Paired shadow runs against agy
 
 **Method.** Every change to blyte, and to the repository that evaluates it, was implemented twice

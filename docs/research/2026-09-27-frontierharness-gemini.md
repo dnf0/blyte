@@ -1,8 +1,15 @@
-# blyte on the FrontierHarness tasks, with Gemini 3.8 Flash (2026-09-26/27)
+# blyte on FrontierHarness with Gemini 3.8 Flash
 
-A single run of blyte over the 30 tasks of [FrontierHarness Eval v1.0](https://frontierharness.org/)
+A single run of blyte, on 26–27 September 2026, over the 30 tasks of [FrontierHarness Eval v1.0](https://frontierharness.org/)
 (21 Terminal-Bench 2, 9 DeepSWE), graded by each task's own held-out tests through superstate-eval,
 compared task by task with the published results of the 12 FrontierHarness configurations.
+
+**Where blyte fits.** blyte is an implementer, not a planner. It is meant to sit under a frontier
+harness: Claude Code, or another harness on a frontier model, writes the plan, then hands each task
+to blyte running on a cheap model, and checks the result. This run tests blyte **on its own**: no
+plan, a cheap model and the raw task instructions, against harnesses that plan and implement for
+themselves. That makes it a hard test of the implementer, not a picture of how blyte is meant to
+be used.
 
 **Read the caveats before quoting the numbers.** The model differs (blyte ran on Gemini 3.8 Flash; the
 leaderboard runs on Kimi K3), the infrastructure differs (local Docker, not Runta), each task was run
@@ -84,7 +91,13 @@ comparable with the leaderboard's: the model and its pricing differ.
 
 ## Where the data is
 
-`superstate-eval/results/fh-gemini-blyte-20260926-1947/` (main run),
-`superstate-eval/results/fh-gemini-blyte-offline-rerun-20260927-0122/` (offline re-runs),
-`superstate-eval/results/fh-gemini-blyte-ungated-fix-20260927-0209/` (near misses on build `69fbc6c`).
-Each task has its result JSON, a runner log and blyte's own report and event log.
+All three runs are in superstate-eval:
+
+| Run | What it answers |
+|---|---|
+| [Main run](https://github.com/dnfcx/superstate-eval/tree/main/results/fh-gemini-blyte-20260926-1947) | The 30 tasks on build `9f7cdd0`: the numbers in the result table |
+| [Offline re-runs](https://github.com/dnfcx/superstate-eval/tree/main/results/fh-gemini-blyte-offline-rerun-20260927-0122) | The 8 Terminal-Bench tasks that passed with network access, re-run offline |
+| [Near-miss re-runs](https://github.com/dnfcx/superstate-eval/tree/main/results/fh-gemini-blyte-ungated-fix-20260927-0209) | The four DeepSWE near misses, on the prompt-fixed build `69fbc6c` |
+
+Each task has `<task>.json` (the verdict, test counts, cost and tokens), `<task>.log` (the runner log) and
+`<task>.native_reports/` (blyte's own report and event log).

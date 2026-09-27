@@ -12,41 +12,37 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-56616A" alt="macOS and Linux">
 </p>
 
-**blyte** is a coding-agent harness in Rust. The model does the work; blyte runs the loop, the
-tools and a **sealed verification gate**, and spends as little as possible of its own time and the
-model's tokens doing it. Give it a task and a check command: it does the work and proves it, and
-the check, not the model, decides when it is done.
+**blyte is the implementer you put under a frontier model.** Plan with Claude Code (or any
+frontier harness), then hand each well-specified task to blyte running on a cheap model. blyte
+does the work in its own git worktree, and the repository's own check, run as a **sealed gate**,
+decides whether it is done. The frontier model reviews the diff and merges.
 
-```bash
-blyte "handle empty input in parse() and add a test" --gate "cargo test"
 ```
+Claude Code (frontier model)                blyte (cheap model, e.g. Gemini Flash)
+  plan → write the task + its tests  ─────▶   implement in .wt/<id>, commit
+                                              gate: your check command → pass / fail
+  review the diff and the report  ◀─────────  outcome, gate failures, turns, cost
+  merge, or send a follow-up
+```
+
+Your frontier tokens go on the parts that need judgement: planning and review. The typing,
+test-running and fixing runs on a model that costs a fraction as much, inside a harness built to
+waste as little of it as possible. This is how blyte itself is built.
+
+**Get started:** [install blyte](#install), then the
+[Claude Code skill and scripts](examples/orchestrate/), or read
+[blyte as your implementer](docs/orchestration.md) for the workflow.
 
 | | |
 |---|---|
-| **0.47×** the time, **0.63×** the cost | median, against agy (Google's Antigravity CLI) on the same 31 tasks, same model, same commit |
-| **19 / 27** FrontierHarness tasks | on Gemini 3.8 Flash; the best published Kimi K3 configuration passed 17 / 27 |
+| **0.47×** the time, **0.63×** the cost | as an implementer, against agy (Google's Antigravity CLI) on the same 31 tasks, same model, same commit, both driven by Claude |
+| **19 / 27** FrontierHarness tasks | blyte on its own on Gemini 3.8 Flash, no plan; the best published Kimi K3 configuration passed 17 / 27 |
 
 Both come with caveats (one model, our own repositories, a single run on a different model from
-the leaderboard's); [the evidence page](docs/evidence.md) has the method and all of them.
+the leaderboard's), and **the saving against a frontier model doing the whole task alone has not
+been measured yet**. [The evidence page](docs/evidence.md) has the method and all the caveats.
 
 Named after rust fungus (the blight Rust is named after), and bytes.
-
-## Offload implementation from a frontier model
-
-blyte is an **implementer**: one task, done and proven. That makes it a good partner for a
-frontier model. Let Claude Code (or any agent) plan the work and review the diffs, and hand each
-well-specified task to blyte on a cheaper model, where the repository's tests, run as blyte's
-gate, decide whether it is done:
-
-```
-Claude Code: plan → task file ──▶ blyte (e.g. Gemini Flash): implement, gate passes, commit
-Claude Code: review diff + report ◀── outcome, gate failures, turns, cost
-```
-
-This is how blyte itself is built. [examples/orchestrate/](examples/orchestrate/) has the dispatch
-and review scripts and a Claude Code skill; [docs/orchestration.md](docs/orchestration.md) has the
-workflow. (What is not measured yet: the saving against the frontier model doing the whole task
-alone. The orchestrator's planning and review use frontier tokens too.)
 
 ## Why blyte
 
@@ -71,14 +67,31 @@ alone. The orchestrator's planning and review use frontier tokens too.)
 
 ```bash
 cargo install --git https://github.com/climate-x-org/superstate blyte --locked
-blyte --version
+export GEMINI_API_KEY=...          # the implementer's model; see Providers for others
 ```
 
-## Quick start
+## Quick start: with Claude Code
+
+Install the skill and its two scripts, then ask Claude to use blyte:
 
 ```bash
-export GEMINI_API_KEY=...          # or pick another provider with --model
+git clone https://github.com/climate-x-org/superstate.git blyte-src
+mkdir -p ~/.claude/skills/blyte-implementer
+cp blyte-src/examples/orchestrate/claude-skill/blyte-implementer/SKILL.md \
+   blyte-src/examples/orchestrate/blyte-*.sh ~/.claude/skills/blyte-implementer/
+```
 
+In your repository (add `.wt/` to its `.gitignore`), tell Claude Code:
+
+> Plan this change, then use blyte to implement each task and review the results.
+
+Claude writes each task with its tests, dispatches it to blyte in its own worktree with your check
+command as the gate, reviews the diff and merges. Any other orchestrator can drive the same
+scripts: they take a task file and a gate, and print JSON.
+
+## Quick start: blyte on its own
+
+```bash
 # A gated run: exits 0 only when the check passes
 blyte "fix the off-by-one in the lexer" --gate "cargo test -p lexer"
 
@@ -87,8 +100,8 @@ blyte "handle empty input in parse()" --gate 'cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test'
 
-# Budgets and a report
-blyte "..." --gate "pytest" --max-seconds 1800 --max-cost 2 --report run.json
+# Budgets and a machine-readable report
+blyte "$(cat task.md)" --gate "pytest" --max-seconds 1800 --max-cost 2 --report run.json
 
 # Inside a running container
 blyte "make the migration idempotent" --gate "pytest tests/test_migrations.py" \
@@ -96,9 +109,6 @@ blyte "make the migration idempotent" --gate "pytest tests/test_migrations.py" \
 
 # Keep the code on the machine
 blyte "..." --gate "cargo test --offline" --network=off
-
-# Interactive
-blyte
 ```
 
 > [!WARNING]
@@ -118,16 +128,18 @@ The model name picks the provider:
 | `<name>:<tag>`, `ollama/…` | Ollama, local or cloud | `OLLAMA_HOST` or `OLLAMA_API_KEY` |
 | `chatgpt/<model>` | a ChatGPT subscription, via the Codex CLI's login | `~/.codex/auth.json` (read only) |
 
-Credentials are read by blyte and never reach the commands the model runs. Details:
+For the implementer, start with the default, Gemini 3.8 Flash: it is the model blyte has been
+measured on. Credentials are read by blyte and never reach the commands the model runs. Details:
 [docs/providers.md](docs/providers.md).
 
 ## Documentation
 
 | | |
 |---|---|
-| [Getting started](docs/getting-started.md) | install, pick a model, the first gated run |
-| [Running tasks](docs/usage.md) | the gate, budgets, rollback, containers |
-| [blyte as your implementer](docs/orchestration.md) | offload tasks from Claude Code or another orchestrator |
+| [Getting started](docs/getting-started.md) | install, set up Claude Code, the first delegated task |
+| [blyte as your implementer](docs/orchestration.md) | the plan → delegate → review workflow, and when to use it |
+| [Writing tasks for blyte](docs/writing-tasks.md) | what a task needs so a cheap model gets it right first time |
+| [Running tasks](docs/usage.md) | the gate, budgets, rollback, containers, standalone runs |
 | [Security and the sandbox](docs/security.md) | what commands can and cannot reach, per platform |
 | [Run reports](docs/reports.md) | every field of `--report` |
 | [How it works](docs/how-it-works.md) | the loop, folded context, the tools |

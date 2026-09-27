@@ -65,8 +65,9 @@ nav:
   - Home: index.md
   - Guide:
       - Getting started: getting-started.md
+      - "The workflow: plan, delegate, review": orchestration.md
+      - Writing tasks for blyte: writing-tasks.md
       - Running tasks: usage.md
-      - blyte as your implementer: orchestration.md
       - Providers: providers.md
       - Security and the sandbox: security.md
       - Run reports: reports.md

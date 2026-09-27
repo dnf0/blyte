@@ -5,35 +5,39 @@ hide:
 
 # blyte documentation
 
-blyte is a coding-agent harness: you give it a task and a check command, a model does the work
-through blyte's tools, and the check, not the model, decides when it is done. It runs on macOS and
-Linux, headless or as a REPL, with any of six model providers.
+blyte is the implementer you put under a frontier model. Plan with Claude Code or another
+frontier harness, then hand each well-specified task to blyte running on a cheap model. blyte
+works in its own git worktree, your check command decides when the task is done, and the frontier
+model reviews the result and merges it.
 
-## Install and first run
-
-```bash
-cargo install --git https://github.com/climate-x-org/superstate blyte --locked
-
-export GEMINI_API_KEY=...     # or another provider: see Providers
-cd your-repo                  # a git repository with a clean working tree
-blyte "handle empty input in parse() and add a test" --gate "cargo test"
+```
+frontier model:  plan → task + tests ──▶ blyte (cheap model): implement, gate, commit
+frontier model:  review diff + report ◀── outcome, gate failures, turns, cost
 ```
 
-blyte exits `0` when the gate passes. [Getting started](getting-started.md) walks through this in
-more detail.
+## Set up in four steps
+
+1. **Install blyte:** `cargo install --git https://github.com/climate-x-org/superstate blyte --locked`
+2. **Give it a cheap model:** `export GEMINI_API_KEY=...` (or [another provider](providers.md)).
+3. **Install the Claude Code skill** from
+   [`examples/orchestrate/`](https://github.com/climate-x-org/superstate/tree/main/examples/orchestrate).
+4. **Ask Claude Code:** *"Plan this change, then use blyte to implement each task and review the
+   results."*
+
+[Getting started](getting-started.md) walks through each step, and how to run blyte on its own.
 
 ## Find what you need
 
 <div class="b-cards">
-<a class="b-card b-card-wide" href="orchestration/"><strong>Offload work from a frontier model</strong><span>Let Claude Code, or any agent, plan and review while blyte implements each task on a cheaper model, checked by your tests.</span></a>
-<a class="b-card" href="getting-started/"><strong>Get set up</strong><span>Install, choose a model, run a first gated task, use the REPL.</span></a>
-<a class="b-card" href="usage/"><strong>Run tasks well</strong><span>Gates with several steps, budgets, rollback, containers.</span></a>
-<a class="b-card" href="providers/"><strong>Choose a model</strong><span>Gemini, Anthropic, OpenAI-compatible, OpenRouter, Ollama, ChatGPT; credentials, retries, cost.</span></a>
+<a class="b-card b-card-wide" href="orchestration/"><strong>The workflow: plan, delegate, review</strong><span>How Claude Code (or any orchestrator) hands tasks to blyte, verifies them and merges; when to delegate and when not to.</span></a>
+<a class="b-card" href="getting-started/"><strong>Get set up</strong><span>Install, choose a model, connect Claude Code, delegate a first task.</span></a>
+<a class="b-card" href="writing-tasks/"><strong>Write tasks blyte gets right</strong><span>The template, the tests, checking a task before sending it, sizing.</span></a>
+<a class="b-card" href="usage/"><strong>Tune a run</strong><span>Gates with several steps, budgets, rollback, containers, standalone use.</span></a>
+<a class="b-card" href="providers/"><strong>Choose the implementer model</strong><span>What has been measured, the six providers, credentials, retries, cost.</span></a>
 <a class="b-card" href="security/"><strong>Know what commands can touch</strong><span>The sandbox on macOS and Linux, credential reads, the environment filter, <code>--network=off</code>.</span></a>
 <a class="b-card" href="reports/"><strong>Read a run's results</strong><span>Every field of <code>--report</code>: outcome, turns, cost, timing, security settings.</span></a>
 <a class="b-card" href="reference/cli/"><strong>Look up a flag</strong><span>The full <code>blyte --help</code> and the environment variables blyte reads.</span></a>
 <a class="b-card" href="how-it-works/"><strong>Understand the design</strong><span>The loop, the sealed gate, folded context, the tools and their limits.</span></a>
-<a class="b-card" href="contributing/"><strong>Contribute</strong><span>Set-up, the checks CI runs, how changes are measured and reviewed.</span></a>
 </div>
 
 ## Key ideas
@@ -52,7 +56,7 @@ optionally by wall-clock time (`--max-seconds`) and spend (`--max-cost`).
 read credential stores. See [Security](security.md).
 
 **One job.** blyte implements one task per run. Planning, splitting work and review belong to
-whoever drives it, a person or another agent: see [blyte as your implementer](orchestration.md).
+the frontier model or person driving it: see [the workflow](orchestration.md).
 
 ## Background
 

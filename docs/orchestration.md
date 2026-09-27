@@ -45,6 +45,7 @@ there is no check, or it touches credentials, deployment or other repositories.
 In practice the pattern pays off most when tasks are **specified precisely**: the files involved,
 the names and signatures that matter, the tests (written out), and the exact commit message. The
 more of the thinking is in the task, the less the implementer has to guess.
+[Writing tasks for blyte](writing-tasks.md) covers this in detail.
 
 ## The workflow
 
@@ -123,15 +124,9 @@ results."* Claude writes the task files, dispatches them in the background (inde
 parallel), reviews each diff and merges. Your Claude usage goes on planning and review; the
 implementation runs on whichever model blyte is configured for.
 
-## Tips from running it
+## Next
 
-- **Give the tests, not just the goal.** With the tests written out, the implementer knows exactly
-  what must pass, and the gate checks the thing you meant rather than what it guessed.
-- **Check that the tests can pass.** A test that fails for a reason the change cannot fix (an
-  over-long line the tool output clips, a missing fixture) burns every attempt.
-- **Name the commit message.** "Use the message in the plan" produced the wrong message in two of
-  our first six dispatches; stating it verbatim in the task fixed that.
-- **Coupled tasks go together.** If task 2 cannot pass without task 1, dispatch them as one task
-  or into one worktree.
-- **Read the log for out-of-scope commands**, not just the diff. The sandbox limits the damage;
-  review catches the intent.
+- [Writing tasks for blyte](writing-tasks.md): the template, what to put in, how to check a task
+  before sending it, sizing, and what to keep for yourself.
+- [Providers](providers.md#choosing-an-implementer-model): choosing the implementer's model.
+- [Run reports](reports.md): everything in the report the orchestrator reads.

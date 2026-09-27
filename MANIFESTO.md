@@ -9,7 +9,7 @@ that division, and on what measuring it taught us.
 ## 1. The model does the work; the harness decides the bill
 
 Holding the model fixed and changing only the harness moves cost by up to 40× and pass rate by a
-few points (*The Scaffold Effect*, 2607.22585). Our own numbers say the same. On thirty-one real
+few points ([*The Scaffold Effect in Coding Agents*](https://arxiv.org/abs/2607.22585)). Our own numbers say the same. On thirty-one real
 plan tasks in two repositories, blyte and agy (Google's Antigravity CLI) running the same model
 produced work of comparable quality, and blyte did it in a median 0.47× the time and 0.63× the
 cost. It was cheaper in 29 of 31.
@@ -57,7 +57,7 @@ that in measurement, or it does not stay.
 
 When the prompt grows past a budget, the oldest turns fold into a one-line digest per tool call.
 No model summarises them, because summaries did not pay for themselves, and a tool for recovering
-elided content goes unused (2609.20804). Tool output is cut by rule: 500 characters a line, 60K a
+elided content goes unused ([*An Empirical Study of Harness Design for Coding Agents*](https://arxiv.org/abs/2609.20804)). Tool output is cut by rule: 500 characters a line, 60K a
 result, head and tail kept. Rules are cheap, predictable and testable. Cleverness is none of those.
 
 ## 6. The harness's own time is overhead to eliminate
