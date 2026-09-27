@@ -329,7 +329,27 @@ impl Shell for LocalShell {
                 {
                     let mut c = Command::new("bash");
                     c.arg("-lc").arg(command);
-                    crate::sandbox::landlock_pre_exec(&mut c, paths).map_err(|e| e.to_string())?;
+                    crate::sandbox::landlock_pre_exec(&mut c, paths, false)
+                        .map_err(|e| e.to_string())?;
+                    c
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = paths;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "Landlock is only supported on Linux",
+                    )
+                    .to_string());
+                }
+            }
+            Some(Profile::LandlockOffline(paths)) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let mut c = Command::new("bash");
+                    c.arg("-lc").arg(command);
+                    crate::sandbox::landlock_pre_exec(&mut c, paths, true)
+                        .map_err(|e| e.to_string())?;
                     c
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -425,7 +445,24 @@ impl Launcher {
                         {
                             let mut cmd = Command::new("bash");
                             cmd.arg("-l");
-                            crate::sandbox::landlock_pre_exec(&mut cmd, paths)?;
+                            crate::sandbox::landlock_pre_exec(&mut cmd, paths, false)?;
+                            cmd
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = paths;
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Unsupported,
+                                "Landlock is only supported on Linux",
+                            ));
+                        }
+                    }
+                    Some(Profile::LandlockOffline(paths)) => {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let mut cmd = Command::new("bash");
+                            cmd.arg("-l");
+                            crate::sandbox::landlock_pre_exec(&mut cmd, paths, true)?;
                             cmd
                         }
                         #[cfg(not(target_os = "linux"))]

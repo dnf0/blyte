@@ -80,6 +80,14 @@ pub struct Cli {
     )]
     pub sandbox: String,
 
+    /// Let commands blyte runs connect out: 'on' or 'off' (default 'on'). 'off' needs the sandbox
+    #[arg(
+        long,
+        default_value = "on",
+        value_parser = ["on", "off"]
+    )]
+    pub network: String,
+
     /// Let sandboxed commands read this path despite the credential deny-list (repeatable)
     #[arg(long = "allow-read")]
     pub allow_read: Vec<PathBuf>,
