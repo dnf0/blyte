@@ -4,6 +4,7 @@ A lean coding-agent harness in Rust: one owned loop, a sealed verification gate,
 and fast tools (persistent shell sessions, in-process ripgrep). See the repository `README.md`.
 
 - `../MANIFESTO.md`: why blyte is built the way it is.
+- `research/2026-09-27-frontierharness-gemini.md`: blyte on the FrontierHarness tasks (Gemini 3.8 Flash), compared task by task with the leaderboard.
 - `research/2026-09-24-harness-research.md`: what was measured, what external research says, and
   the objective (fast and good, no bloat).
 - `adr/`: architecture decisions.
