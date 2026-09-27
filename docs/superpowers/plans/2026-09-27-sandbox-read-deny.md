@@ -11,7 +11,7 @@ still `cat ~/.aws/sso/cache/*` or `~/.ssh/id_ed25519` and send it anywhere: the 
 output, and bash has the network. Reading credentials is never part of an implementer's job.
 
 **Tech Stack:** Rust, macOS Seatbelt (SBPL). In SBPL the **last matching rule wins**; this was
-checked by hand: a `(deny file-read* (subpath X))` followed by `(allow file-read* (subpath X))`
+checked by hand: a `(deny file-read-data (subpath X))` followed by `(allow file-read-data (subpath X))`
 allows X. Denying `~/Library/Keychains` does not break HTTPS (`curl`, `git ls-remote` over https).
 
 ## Global Constraints
@@ -38,9 +38,9 @@ allows X. Denying `~/Library/Keychains` does not break HTTPS (`curl`, `git ls-re
   in that order.
 - `pub fn profile_with(write: &[PathBuf], deny_read: &[PathBuf], allow_read: &[PathBuf]) -> String`:
   1. exactly `profile(write)`, then
-  2. `(deny file-read* (subpath "P"))` for each `deny_read` path, then
-  3. `(deny file-read* (regex #"/\.env$"))`, then
-  4. `(allow file-read* (subpath "P"))` for each `allow_read` path.
+  2. `(deny file-read-data (subpath "P"))` for each `deny_read` path, then
+  3. `(deny file-read-data (regex #"/\.env$"))`, then
+  4. `(allow file-read-data (subpath "P"))` for each `allow_read` path.
   Paths are canonicalised when possible and escaped exactly as `profile` does (share a helper).
   Because the last match wins, an `allow_read` grant overrides both the list and the `.env` rule.
 - Update the module doc comment to mention reads.
@@ -83,9 +83,9 @@ fn the_read_rules_follow_the_write_profile_and_grants_come_last() {
         &[PathBuf::from("/nonexistent/secret/ok")],
     );
     assert!(p.starts_with(&profile(&write)), "{p}");
-    let deny = p.find(r#"(deny file-read* (subpath "/nonexistent/secret"))"#).expect(&p);
-    let env = p.find(r##"(deny file-read* (regex #"/\.env$"))"##).expect(&p);
-    let grant = p.find(r#"(allow file-read* (subpath "/nonexistent/secret/ok"))"#).expect(&p);
+    let deny = p.find(r#"(deny file-read-data (subpath "/nonexistent/secret"))"#).expect(&p);
+    let env = p.find(r##"(deny file-read-data (regex #"/\.env$"))"##).expect(&p);
+    let grant = p.find(r#"(allow file-read-data (subpath "/nonexistent/secret/ok"))"#).expect(&p);
     assert!(deny < env && env < grant, "{p}");
 }
 

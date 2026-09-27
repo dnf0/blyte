@@ -34,13 +34,13 @@ fn the_read_rules_follow_the_write_profile_and_grants_come_last() {
     );
     assert!(p.starts_with(&profile(&write)), "{p}");
     let deny = p
-        .find(r#"(deny file-read* (subpath "/nonexistent/secret"))"#)
+        .find(r#"(deny file-read-data (subpath "/nonexistent/secret"))"#)
         .expect(&p);
     let env = p
-        .find(r##"(deny file-read* (regex #"/\.env$"))"##)
+        .find(r##"(deny file-read-data (regex #"/\.env$"))"##)
         .expect(&p);
     let grant = p
-        .find(r#"(allow file-read* (subpath "/nonexistent/secret/ok"))"#)
+        .find(r#"(allow file-read-data (subpath "/nonexistent/secret/ok"))"#)
         .expect(&p);
     assert!(deny < env && env < grant, "{p}");
 }
@@ -89,6 +89,11 @@ mod macos {
         assert!(code != 0 && !out.contains("TOKEN=x"), "{out}");
         let (code, out) = cat(&sh, &ws.path().join(".env.example"), ws.path()).unwrap();
         assert_eq!(code, 0, "{out}");
+        // Only contents are refused: pytest stats every path while collecting, `.env` included.
+        let stat = sh
+            .exec("test -e .env", ws.path(), Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(stat.exit_code, 0, "{}", stat.merged());
     }
 
     #[test]

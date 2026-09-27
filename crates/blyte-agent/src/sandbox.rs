@@ -84,16 +84,18 @@ pub fn read_denied(home: &Path) -> Vec<PathBuf> {
 
 /// Generates an SBPL profile denying file writes outside `write`, denying file reads under
 /// `deny_read` and any `.env` file, and granting file reads back under `allow_read`.
+/// Reads are denied as `file-read-data`: contents and directory listings are refused, but `stat`
+/// still works (pytest stats every path while collecting, including `.env`).
 pub fn profile_with(write: &[PathBuf], deny_read: &[PathBuf], allow_read: &[PathBuf]) -> String {
     let mut out = profile(write);
     for path in deny_read {
         let escaped = escape_subpath(path);
-        out.push_str(&format!(r#"(deny file-read* (subpath "{escaped}"))"#));
+        out.push_str(&format!(r#"(deny file-read-data (subpath "{escaped}"))"#));
     }
-    out.push_str(r##"(deny file-read* (regex #"/\.env$"))"##);
+    out.push_str(r##"(deny file-read-data (regex #"/\.env$"))"##);
     for path in allow_read {
         let escaped = escape_subpath(path);
-        out.push_str(&format!(r#"(allow file-read* (subpath "{escaped}"))"#));
+        out.push_str(&format!(r#"(allow file-read-data (subpath "{escaped}"))"#));
     }
     out
 }
@@ -156,6 +158,7 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
                 ".gradle",
                 ".m2",
                 "go",
+                ".docker/buildx",
             ] {
                 allowed.push(home_path.join(sub));
             }
