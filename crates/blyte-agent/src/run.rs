@@ -269,7 +269,9 @@ impl<'a> Runner<'a> {
         let completion = if steps.is_empty() {
             "No command checks your work. When you stop, the result is judged by tests you \
              cannot see, so verify it yourself first: run the project's existing test suite and \
-             the tests that cover your change, and check the edge cases the task describes. Stop \
+             the tests that cover your change, and check the edge cases the task describes. \
+             If you searched for problems (with grep or other commands), run those same searches \
+             again before you stop and confirm they find nothing left to fix. Stop \
              only when you are confident the task is complete."
                 .to_string()
         } else {
