@@ -484,7 +484,7 @@ pub fn grep_command(use_rg: bool, pattern: &str, sub: &str, glob: &str) -> Strin
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "grep -rnI {excludes} {globarg} -e {} {} | head -n {}",
+            "grep -rnIE {excludes} {globarg} -e {} {} | head -n {}",
             shell_quote(pattern),
             shell_quote(sub),
             MAX_MATCHES + 1

@@ -32,6 +32,9 @@ impl Provider for Stopper {
 // One test: it sets process environment variables.
 #[test]
 fn the_library_takes_no_slot_and_gate_commands_are_marked() {
+    let prev_in_gate = std::env::var_os(IN_GATE_ENV);
+    std::env::remove_var(IN_GATE_ENV);
+
     assert!(
         !enabled(),
         "slots are off unless the blyte command turns them on"
@@ -102,4 +105,7 @@ fn the_library_takes_no_slot_and_gate_commands_are_marked() {
     std::env::remove_var(IN_GATE_ENV);
     std::env::remove_var("BLYTE_GATE_SLOT_DIR");
     std::env::remove_var("BLYTE_GATE_SLOTS");
+    if let Some(v) = prev_in_gate {
+        std::env::set_var(IN_GATE_ENV, v);
+    }
 }
