@@ -24,6 +24,7 @@ fn config() -> TaskConfig {
         report: None,
         fold_budget: None,
         sandbox: "on".into(),
+        allow_read: Vec::new(),
     }
 }
 

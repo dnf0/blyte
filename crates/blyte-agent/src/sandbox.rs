@@ -1,7 +1,8 @@
 //! macOS Seatbelt (SBPL) sandbox profile generation and host sandbox detection.
 //!
 //! Restricts local shell command execution to prevent writes outside of the workspace,
-//! git common directory, temporary folders, and standard developer tool caches.
+//! git common directory, temporary folders, and standard developer tool caches, and
+//! denies reads of credential stores and environment secret files unless permitted.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,13 @@ pub fn available() -> bool {
     {
         false
     }
+}
+
+/// Canonicalises when possible and escapes a path for inclusion in an SBPL subpath rule.
+fn escape_subpath(path: &Path) -> String {
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let s = canon.to_string_lossy();
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Generates an SBPL (Seatbelt Profile Language) profile denying file writes outside allowed paths.
@@ -35,9 +43,7 @@ pub fn profile(allowed: &[PathBuf]) -> String {
 
     // Allow recursive writes under each specified path, resolving symlinks when possible.
     for path in allowed {
-        let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let s = canon.to_string_lossy();
-        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = escape_subpath(path);
         out.push_str(&format!(r#"(allow file-write* (subpath "{escaped}"))"#));
     }
 
@@ -45,6 +51,50 @@ pub fn profile(allowed: &[PathBuf]) -> String {
     out.push_str(
         r#"(allow file-write* (literal "/dev/null") (literal "/dev/tty") (subpath "/dev/fd"))"#,
     );
+    out
+}
+
+/// Returns the list of standard credential and secret store paths under `home` that should be denied reading.
+pub fn read_denied(home: &Path) -> Vec<PathBuf> {
+    const DENIED_PATHS: &[&str] = &[
+        ".ssh",
+        ".aws",
+        ".azure",
+        ".config/gcloud",
+        ".config/gh",
+        ".kube",
+        ".gnupg",
+        ".docker/config.json",
+        ".git-credentials",
+        ".netrc",
+        ".pypirc",
+        ".cargo/credentials.toml",
+        ".cargo/credentials",
+        ".codex",
+        "Library/Keychains",
+        "Library/Cookies",
+        "Library/Safari",
+        "Library/Application Support/Google/Chrome",
+        "Library/Application Support/Firefox",
+        "Library/Application Support/Arc",
+        "Library/Application Support/BraveSoftware",
+    ];
+    DENIED_PATHS.iter().map(|sub| home.join(sub)).collect()
+}
+
+/// Generates an SBPL profile denying file writes outside `write`, denying file reads under
+/// `deny_read` and any `.env` file, and granting file reads back under `allow_read`.
+pub fn profile_with(write: &[PathBuf], deny_read: &[PathBuf], allow_read: &[PathBuf]) -> String {
+    let mut out = profile(write);
+    for path in deny_read {
+        let escaped = escape_subpath(path);
+        out.push_str(&format!(r#"(deny file-read* (subpath "{escaped}"))"#));
+    }
+    out.push_str(r##"(deny file-read* (regex #"/\.env$"))"##);
+    for path in allow_read {
+        let escaped = escape_subpath(path);
+        out.push_str(&format!(r#"(allow file-read* (subpath "{escaped}"))"#));
+    }
     out
 }
 

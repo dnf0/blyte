@@ -37,6 +37,8 @@ pub struct TaskConfig {
     pub fold_budget: Option<usize>,
     /// Sandbox local command execution mode (`--sandbox`).
     pub sandbox: String,
+    /// Paths permitted for reading despite credential deny-list (`--allow-read`).
+    pub allow_read: Vec<PathBuf>,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -60,6 +62,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             report: cli.report.clone(),
             fold_budget: cli.fold_budget,
             sandbox: cli.sandbox.clone(),
+            allow_read: cli.allow_read.clone(),
         }
     }
 }
@@ -159,8 +162,17 @@ pub fn run_task_with_state_and_writer<W: Write>(
         None => {
             let shell = if config.sandbox == "on" {
                 if blyte_agent::sandbox::available() {
-                    let allowed = blyte_agent::sandbox::default_allowed(&config.root);
-                    let profile = blyte_agent::sandbox::profile(&allowed);
+                    let deny_read = match std::env::var_os("HOME") {
+                        Some(home) if !home.is_empty() => {
+                            blyte_agent::sandbox::read_denied(std::path::Path::new(&home))
+                        }
+                        _ => Vec::new(),
+                    };
+                    let profile = blyte_agent::sandbox::profile_with(
+                        &blyte_agent::sandbox::default_allowed(&config.root),
+                        &deny_read,
+                        &config.allow_read,
+                    );
                     blyte_agent::shell::PersistentShell::local_sandboxed(
                         config.root.clone(),
                         profile,
