@@ -14,6 +14,7 @@
 pub mod bench;
 pub mod context;
 pub mod fs;
+pub mod gate_slots;
 pub mod run;
 pub mod sandbox;
 pub mod search;
