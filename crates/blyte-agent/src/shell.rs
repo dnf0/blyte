@@ -524,7 +524,7 @@ impl Session {
             format!("{}/{id}.o", self.tmp),
             format!("{}/{id}.e", self.tmp),
         );
-        let (qo, qe) = (quote(&out), quote(&err));
+        let (qo, qe, qt) = (quote(&out), quote(&err), quote(&self.tmp));
         let delim = format!("__BLYTE_CMD_{id}_{}__", self.nonce);
         let body = match cwd {
             Some(d) => format!(
@@ -536,9 +536,10 @@ impl Session {
         // `|| true` on the protocol's own reads: a model's `set -e` must not end the session
         // because `read` reports end of input. LC_ALL=C makes `${#var}` count bytes; the
         // model's LC_ALL is put back afterwards.
+        // Recreate tmp before each command so output redirects succeed even if a command deleted it.
         let script = format!(
             "IFS= read -r -d '' __blyte_c <<'{delim}' || true\n{command}\n{delim}\n\
-             {body} </dev/null >{qo} 2>{qe}; __blyte_r=$?; \
+             mkdir -p {qt} 2>/dev/null; {body} </dev/null >{qo} 2>{qe}; __blyte_r=$?; \
              IFS= read -r -d '' __blyte_o <{qo} || true; \
              IFS= read -r -d '' __blyte_e <{qe} || true; \
              __blyte_l=${{LC_ALL-__blyte_unset__}}; LC_ALL=C; \

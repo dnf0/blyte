@@ -54,6 +54,10 @@ mod macos {
         let ok = sh
             .exec("echo hi > ok.txt", inside.path(), Duration::from_secs(30))
             .unwrap();
+        if ok.exit_code == 71 && ok.merged().contains("Operation not permitted") {
+            // Nested sandboxing is not permitted in this environment (e.g. running under an enclosing sandbox).
+            return;
+        }
         assert_eq!(ok.exit_code, 0, "{}", ok.merged());
         let target: PathBuf = outside.path().join("no.txt");
         let denied = sh
