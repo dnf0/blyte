@@ -1,20 +1,61 @@
-//! macOS Seatbelt (SBPL) sandbox profile generation and host sandbox detection.
+//! Sandbox profile generation and host sandbox detection for macOS (Seatbelt) and Linux (Landlock).
 //!
 //! Restricts local shell command execution to prevent writes outside of the workspace,
-//! git common directory, temporary folders, and standard developer tool caches, and
-//! denies reads of credential stores and environment secret files unless permitted.
+//! git common directory, temporary folders, and standard developer tool caches.
+//!
+//! # Platform differences and scope limits
+//!
+//! - On macOS, Seatbelt (SBPL) restricts writes and denies reading credential stores and
+//!   environment secret files unless explicitly permitted via allow-lists.
+//! - On Linux, Landlock restricts writes only. Because Landlock can only allow beneath paths
+//!   and cannot carve out forbidden subdirectories (e.g. `~/.ssh`) from a readable home,
+//!   the credential read-deny is macOS-only. The harness environment filter applies on both platforms.
 
 use std::path::{Path, PathBuf};
 
-/// Returns whether seatbelt sandbox execution is available on this system.
+/// Sandbox profile restricting command execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Profile {
+    /// An SBPL profile string for `sandbox-exec` on macOS.
+    Seatbelt(String),
+    /// A list of write-allowed directory paths for Landlock on Linux.
+    Landlock(Vec<PathBuf>),
+}
+
+impl From<String> for Profile {
+    fn from(s: String) -> Self {
+        Profile::Seatbelt(s)
+    }
+}
+
+impl From<&str> for Profile {
+    fn from(s: &str) -> Self {
+        Profile::Seatbelt(s.to_string())
+    }
+}
+
+/// Returns whether sandbox execution is available on this system.
 ///
-/// Returns true only on macOS when `/usr/bin/sandbox-exec` is present on disk.
+/// On macOS, returns true when `/usr/bin/sandbox-exec` is present on disk.
+/// On Linux, returns true when the kernel supports Landlock.
+/// On other platforms, returns false.
 pub fn available() -> bool {
     #[cfg(target_os = "macos")]
     {
         Path::new("/usr/bin/sandbox-exec").exists()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                std::ptr::null::<libc::c_void>(),
+                0usize,
+                1u32,
+            ) >= 1
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         false
     }
@@ -136,6 +177,9 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
     // Allow system temporary directories used by compilers and scripts.
     allowed.push(PathBuf::from("/private/tmp"));
     allowed.push(PathBuf::from("/private/var/folders"));
+    allowed.push(PathBuf::from("/tmp"));
+    allowed.push(PathBuf::from("/var/tmp"));
+    allowed.push(PathBuf::from("/dev"));
 
     // Allow user-specified temporary directory if configured in the environment.
     if let Some(tmp) = std::env::var_os("TMPDIR") {
@@ -166,4 +210,66 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
     }
 
     allowed
+}
+
+/// Returns the default sandbox profile for the current platform.
+///
+/// On macOS, returns an SBPL profile denying writes outside `default_allowed` and reads under credential stores.
+/// On other platforms, returns a Landlock profile with `default_allowed`.
+pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
+    #[cfg(target_os = "macos")]
+    {
+        let deny_read = match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
+            _ => Vec::new(),
+        };
+        Profile::Seatbelt(profile_with(&default_allowed(root), &deny_read, allow_read))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = allow_read;
+        Profile::Landlock(default_allowed(root))
+    }
+}
+
+/// Sets up Landlock sandbox rules in the child process before exec.
+#[cfg(target_os = "linux")]
+pub(crate) fn landlock_pre_exec(
+    cmd: &mut std::process::Command,
+    allowed: &[PathBuf],
+) -> std::io::Result<()> {
+    use landlock::{
+        path_beneath_rules, AccessFs, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, ABI,
+    };
+    use std::os::unix::process::CommandExt;
+    use std::sync::Mutex;
+
+    let ruleset: RulesetCreated = Ruleset::default()
+        .handle_access(AccessFs::from_write(ABI::V5))
+        .map_err(std::io::Error::other)?
+        .create()
+        .map_err(std::io::Error::other)?
+        .add_rules(path_beneath_rules(allowed, AccessFs::from_write(ABI::V5)))
+        .map_err(std::io::Error::other)?;
+
+    let ruleset = Mutex::new(Some(ruleset));
+    unsafe {
+        cmd.pre_exec(move || {
+            // SAFETY: In the child process after fork in a multi-threaded parent,
+            // we must not allocate memory or use non-async-signal-safe functions.
+            // On error return Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            // never a formatted error.
+            let mut guard = ruleset
+                .lock()
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EPERM))?;
+            let r = guard
+                .take()
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EPERM))?;
+            if r.restrict_self().is_err() {
+                return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            }
+            Ok(())
+        });
+    }
+    Ok(())
 }
