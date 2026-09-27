@@ -220,5 +220,12 @@ pub fn sandbox_kind(config: &TaskConfig) -> String {
         Profile::Seatbelt(_) => "seatbelt".into(),
         Profile::Landlock(_) => "landlock".into(),
         Profile::LandlockOffline(_) => "landlock-offline".into(),
+        Profile::LandlockConfined { block_tcp, .. } => {
+            if block_tcp {
+                "landlock-offline".into()
+            } else {
+                "landlock".into()
+            }
+        }
     }
 }

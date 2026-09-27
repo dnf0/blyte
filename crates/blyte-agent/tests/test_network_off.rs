@@ -59,9 +59,13 @@ fn the_offline_default_profile_matches_the_platform() {
             assert!(cfg!(target_os = "macos"));
             assert!(s.contains("(deny network-outbound)"), "{s}");
         }
-        Profile::LandlockOffline(paths) => {
+        Profile::LandlockConfined {
+            write,
+            block_tcp: true,
+            ..
+        } => {
             assert!(!cfg!(target_os = "macos"));
-            assert!(paths.contains(&d.path().to_path_buf()), "{paths:?}");
+            assert!(write.contains(&d.path().to_path_buf()), "{write:?}");
         }
         other => panic!("unexpected {other:?}"),
     }

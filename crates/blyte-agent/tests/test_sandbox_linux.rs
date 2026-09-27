@@ -22,11 +22,16 @@ fn the_default_profile_matches_the_platform() {
         );
     } else {
         match p {
-            Profile::Landlock(paths) => {
-                assert!(paths.contains(&d.path().to_path_buf()), "{paths:?}");
-                assert!(paths.contains(&PathBuf::from("/dev")), "{paths:?}");
+            Profile::LandlockConfined {
+                write,
+                read,
+                block_tcp: false,
+            } => {
+                assert!(write.contains(&d.path().to_path_buf()), "{write:?}");
+                assert!(write.contains(&PathBuf::from("/dev")), "{write:?}");
+                assert!(read.contains(&PathBuf::from("/usr")), "{read:?}");
             }
-            other => panic!("expected Landlock, got {other:?}"),
+            other => panic!("expected LandlockConfined, got {other:?}"),
         }
     }
 }
