@@ -83,4 +83,8 @@ pub struct Cli {
     /// Let sandboxed commands read this path despite the credential deny-list (repeatable)
     #[arg(long = "allow-read")]
     pub allow_read: Vec<PathBuf>,
+
+    /// Pass this environment variable to commands even though it looks like a credential (repeatable)
+    #[arg(long = "pass-env")]
+    pub pass_env: Vec<String>,
 }

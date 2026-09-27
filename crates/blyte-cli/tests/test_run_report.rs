@@ -30,6 +30,7 @@ fn config() -> TaskConfig {
         fold_budget: None,
         sandbox: "on".into(),
         allow_read: Vec::new(),
+        pass_env: Vec::new(),
     }
 }
 

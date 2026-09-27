@@ -41,6 +41,8 @@ pub struct TaskConfig {
     pub sandbox: String,
     /// Paths permitted for reading despite credential deny-list (`--allow-read`).
     pub allow_read: Vec<PathBuf>,
+    /// Environment variables permitted to pass to commands despite looking like credentials (`--pass-env`).
+    pub pass_env: Vec<String>,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -66,6 +68,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             fold_budget: cli.fold_budget,
             sandbox: cli.sandbox.clone(),
             allow_read: cli.allow_read.clone(),
+            pass_env: cli.pass_env.clone(),
         }
     }
 }
@@ -172,6 +175,14 @@ pub fn run_task_with_state_and_writer<W: Write>(
             PathBuf::from(&config.container_workdir),
         ),
         None => {
+            blyte_agent::shell::set_pass_env(config.pass_env.clone());
+            let withheld = blyte_agent::shell::withheld_env();
+            if !withheld.is_empty() {
+                eprintln!(
+                    "blyte: withholding from commands: {} (keep one with --pass-env NAME)",
+                    withheld.join(", ")
+                );
+            }
             let shell = if config.sandbox == "on" {
                 if blyte_agent::sandbox::available() {
                     let deny_read = match std::env::var_os("HOME") {

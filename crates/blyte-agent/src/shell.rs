@@ -41,7 +41,91 @@ pub const HARNESS_ENV: &[&str] = &[
     "OPENROUTER_API_KEY",
 ];
 
-/// Remove the harness's own variables from a command about to run on this machine.
+const CREDENTIAL_SEGMENTS: &[&str] = &[
+    "TOKEN",
+    "SECRET",
+    "SECRETS",
+    "PASSWORD",
+    "PASSWD",
+    "PASS",
+    "KEY",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "AUTH",
+    "COOKIE",
+    "SESSION",
+];
+
+static PASS_ENV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// True when either the upper-cased name, split on `_`, has a credential segment,
+/// or the value contains a URL with inline credentials.
+pub fn credential_like(name: &str, value: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if upper
+        .split('_')
+        .any(|seg| CREDENTIAL_SEGMENTS.contains(&seg))
+    {
+        return true;
+    }
+    has_inline_credentials(value)
+}
+
+fn has_inline_credentials(value: &str) -> bool {
+    let mut rest = value;
+    while let Some(idx) = rest.find("://") {
+        let after_scheme = &rest[idx + 3..];
+        let len = after_scheme
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(after_scheme.len());
+        let authority_prefix = &after_scheme[..len];
+        if let Some((userinfo, _)) = authority_prefix.split_once('@') {
+            if let Some((_user, pass)) = userinfo.split_once(':') {
+                if !pass.is_empty() {
+                    return true;
+                }
+            }
+        }
+        rest = after_scheme;
+    }
+    false
+}
+
+/// Process-wide allow-list of environment variable names to keep even if they look like credentials.
+///
+/// Calling this a second time is a no-op.
+pub fn set_pass_env(names: Vec<String>) {
+    let _ = PASS_ENV.set(names);
+}
+
+/// The sorted names of current process environment variables withheld by the credential filter.
+pub fn withheld_env() -> Vec<String> {
+    let pass_env = PASS_ENV.get();
+    let mut withheld = Vec::new();
+    for (key, val) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if HARNESS_ENV.iter().any(|&h| h == name.as_ref()) {
+            continue;
+        }
+        if name.starts_with("BLYTE_") {
+            continue;
+        }
+        if let Some(passed) = pass_env {
+            if passed.iter().any(|p| p == name.as_ref()) {
+                continue;
+            }
+        }
+        let value = val.to_string_lossy();
+        if credential_like(&name, &value) {
+            withheld.push(name.into_owned());
+        }
+    }
+    withheld.sort();
+    withheld.dedup();
+    withheld
+}
+
+/// Remove the harness's own variables and credential-looking variables from a command about to run on this machine.
 fn scrub(cmd: &mut Command) {
     for name in HARNESS_ENV {
         cmd.env_remove(name);
@@ -50,6 +134,9 @@ fn scrub(cmd: &mut Command) {
         if name.to_string_lossy().starts_with("BLYTE_") {
             cmd.env_remove(&name);
         }
+    }
+    for name in withheld_env() {
+        cmd.env_remove(name);
     }
 }
 
