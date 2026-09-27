@@ -185,17 +185,13 @@ pub fn run_task_with_state_and_writer<W: Write>(
             }
             let shell = if config.sandbox == "on" {
                 if blyte_agent::sandbox::available() {
-                    let deny_read = match std::env::var_os("HOME") {
-                        Some(home) if !home.is_empty() => {
-                            blyte_agent::sandbox::read_denied(std::path::Path::new(&home))
-                        }
-                        _ => Vec::new(),
-                    };
-                    let profile = blyte_agent::sandbox::profile_with(
-                        &blyte_agent::sandbox::default_allowed(&config.root),
-                        &deny_read,
-                        &config.allow_read,
-                    );
+                    let profile =
+                        blyte_agent::sandbox::default_profile(&config.root, &config.allow_read);
+                    if matches!(profile, blyte_agent::sandbox::Profile::Landlock(_)) {
+                        eprintln!(
+                            "blyte: on Linux the sandbox restricts writes only; credential reads are not blocked"
+                        );
+                    }
                     blyte_agent::shell::PersistentShell::local_sandboxed(
                         config.root.clone(),
                         profile,

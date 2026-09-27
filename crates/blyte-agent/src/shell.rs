@@ -26,6 +26,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::sandbox::Profile;
+
 /// Variables the harness itself uses, never passed to the commands it runs: provider credentials
 /// (the model could otherwise read them with `env`) and blyte's own configuration (a
 /// `BLYTE_MODEL` in the environment broke the repository's provider tests). Every variable named
@@ -294,7 +296,7 @@ fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
 /// Commands run on this machine, in the workspace directory.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LocalShell {
-    pub profile: Option<String>,
+    pub profile: Option<Profile>,
 }
 
 #[allow(non_upper_case_globals)]
@@ -306,8 +308,8 @@ impl LocalShell {
         Self { profile: None }
     }
 
-    /// Creates a local shell sandboxed with the given SBPL profile string.
-    pub fn sandboxed(profile: impl Into<String>) -> Self {
+    /// Creates a local shell sandboxed with the given profile.
+    pub fn sandboxed(profile: impl Into<Profile>) -> Self {
         Self {
             profile: Some(profile.into()),
         }
@@ -317,10 +319,28 @@ impl LocalShell {
 impl Shell for LocalShell {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
         let mut cmd = match &self.profile {
-            Some(profile) => {
+            Some(Profile::Seatbelt(profile)) => {
                 let mut c = Command::new("/usr/bin/sandbox-exec");
                 c.args(["-p", profile, "bash", "-lc", command]);
                 c
+            }
+            Some(Profile::Landlock(paths)) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let mut c = Command::new("bash");
+                    c.arg("-lc").arg(command);
+                    crate::sandbox::landlock_pre_exec(&mut c, paths).map_err(|e| e.to_string())?;
+                    c
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = paths;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "Landlock is only supported on Linux",
+                    )
+                    .to_string());
+                }
             }
             None => {
                 let mut c = Command::new("bash");
@@ -378,10 +398,10 @@ fn quote(s: &str) -> String {
 /// How to start a session's shell: a login shell, as `bash -lc` gives today.
 #[derive(Debug, Clone)]
 pub enum Launcher {
-    /// `bash -l` on this machine, starting in `root`, optionally sandboxed under an SBPL profile.
+    /// `bash -l` on this machine, starting in `root`, optionally sandboxed under a profile.
     Local {
         root: PathBuf,
-        profile: Option<String>,
+        profile: Option<Profile>,
     },
     /// `bash -l` inside a running container, starting in `workdir`.
     Container {
@@ -391,14 +411,31 @@ pub enum Launcher {
 }
 
 impl Launcher {
-    fn command(&self) -> Command {
+    fn command(&self) -> std::io::Result<Command> {
         match self {
             Launcher::Local { root, profile } => {
                 let mut c = match profile {
-                    Some(p) => {
+                    Some(Profile::Seatbelt(p)) => {
                         let mut cmd = Command::new("/usr/bin/sandbox-exec");
                         cmd.args(["-p", p, "bash", "-l"]);
                         cmd
+                    }
+                    Some(Profile::Landlock(paths)) => {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let mut cmd = Command::new("bash");
+                            cmd.arg("-l");
+                            crate::sandbox::landlock_pre_exec(&mut cmd, paths)?;
+                            cmd
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = paths;
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Unsupported,
+                                "Landlock is only supported on Linux",
+                            ));
+                        }
                     }
                     None => {
                         let mut cmd = Command::new("bash");
@@ -408,7 +445,7 @@ impl Launcher {
                 };
                 c.current_dir(root);
                 scrub(&mut c);
-                c
+                Ok(c)
             }
             Launcher::Container {
                 container_id,
@@ -419,7 +456,7 @@ impl Launcher {
                     .arg(workdir)
                     .arg(container_id)
                     .args(["bash", "-l"]);
-                c
+                Ok(c)
             }
         }
     }
@@ -490,7 +527,9 @@ enum ReadErr {
 
 impl Session {
     pub fn start(launcher: &Launcher) -> Result<Session, String> {
-        let mut cmd = launcher.command();
+        let mut cmd = launcher
+            .command()
+            .map_err(|e| format!("cannot start a shell session: {e}"))?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -715,14 +754,14 @@ impl PersistentShell {
         })
     }
 
-    pub fn local_sandboxed(root: PathBuf, profile: String) -> Self {
+    pub fn local_sandboxed(root: PathBuf, profile: impl Into<Profile>) -> Self {
         Self::new(Launcher::Local {
             root,
-            profile: Some(profile),
+            profile: Some(profile.into()),
         })
     }
 
-    pub fn sandboxed(root: PathBuf, profile: String) -> Self {
+    pub fn sandboxed(root: PathBuf, profile: impl Into<Profile>) -> Self {
         Self::local_sandboxed(root, profile)
     }
 
