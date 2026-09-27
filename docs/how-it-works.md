@@ -83,3 +83,5 @@ cargo run --release -p blyte-agent --example harness_bench
 measures blyte's own per-command and per-turn overhead with no model involved. Across a
 200-turn run the harness spends about 2 seconds of its own time; the rest is the model and the
 commands it chose.
+
+For the full walk through the code, see the [architecture deep dive](architecture.md).

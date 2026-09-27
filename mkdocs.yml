@@ -81,6 +81,7 @@ nav:
       - Run reports: reports.md
   - How it works:
       - Architecture: how-it-works.md
+      - Architecture deep dive: architecture.md
       - Manifesto: manifesto.md
   - Evidence:
       - Overview: evidence.md
