@@ -314,9 +314,9 @@ impl<'a> Runner<'a> {
     /// failures come back in one message. On retries, previously failing steps run first, and if
     /// any of them still fails, the attempt stops without re-running the passing steps.
     fn run_gate(&self, state: &State, last_failed: &[String]) -> (bool, String, u64, Vec<String>) {
-        let max_slots = gate_slots::slots();
-        let slot_dir = gate_slots::slot_dir();
-        let (_guard, wait_ms) =
+        let (_guard, wait_ms) = if gate_slots::enabled() && !gate_slots::nested() {
+            let max_slots = gate_slots::slots();
+            let slot_dir = gate_slots::slot_dir();
             match gate_slots::acquire(max_slots, &slot_dir, Duration::from_millis(500)) {
                 Ok((guard, waited)) => {
                     if !waited.is_zero() {
@@ -331,7 +331,10 @@ impl<'a> Runner<'a> {
                     eprintln!("gate: slot acquisition failed: {e}");
                     (None, 0)
                 }
-            };
+            }
+        } else {
+            (None, 0)
+        };
 
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         if steps.len() <= 1 {
@@ -409,7 +412,11 @@ impl<'a> Runner<'a> {
 
     /// Run one gate command: exit status and its bounded output.
     fn run_step(&self, cmd: &str) -> (bool, String) {
-        match self.shell.exec(cmd, &self.root, Duration::from_secs(1800)) {
+        let wrapped = format!("(export {}=1\n{cmd}\n)", gate_slots::IN_GATE_ENV);
+        match self
+            .shell
+            .exec(&wrapped, &self.root, Duration::from_secs(1800))
+        {
             Ok(o) => {
                 let body = tools::bound_output(o.merged().trim_end());
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))

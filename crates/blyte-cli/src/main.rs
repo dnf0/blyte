@@ -173,6 +173,8 @@ fn main() {
         }
     }
 
+    blyte_agent::gate_slots::enable();
+
     if let Some(ref prompt) = cli.prompt {
         if prompt.trim().is_empty() {
             eprintln!("Error: prompt cannot be empty");
