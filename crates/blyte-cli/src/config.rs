@@ -32,6 +32,21 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
 }
 
 pub fn detect(root: &Path) -> Vec<String> {
+    // A Makefile's own targets are how a repository says it is checked: superstate-eval's
+    // `make lint` runs ruff and pyright, which per-language guessing would miss.
+    let make = make_targets(root);
+    if make.iter().any(|t| t == "check") {
+        return vec!["make check".to_string()];
+    }
+    let from_make: Vec<String> = ["lint", "test"]
+        .iter()
+        .filter(|t| make.iter().any(|m| m == *t))
+        .map(|t| format!("make {t}"))
+        .collect();
+    if !from_make.is_empty() {
+        return from_make;
+    }
+
     let mut steps = Vec::new();
 
     // Rust (Cargo.toml)
@@ -114,4 +129,26 @@ max_turns = 300
 # network = "on"
 "#
     )
+}
+
+/// The targets a `Makefile` (or `makefile`, `GNUmakefile`) at `root` defines: lines of the form
+/// `name:` at the start of a line, excluding variable assignments (`name := …`) and special
+/// targets (`.PHONY`).
+fn make_targets(root: &Path) -> Vec<String> {
+    let text = ["GNUmakefile", "makefile", "Makefile"]
+        .iter()
+        .find_map(|f| std::fs::read_to_string(root.join(f)).ok())
+        .unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let (name, rest) = l.split_once(':')?;
+            if rest.starts_with('=')
+                || name.starts_with(['.', '\t', ' ', '#'])
+                || name.contains(['=', '$', ' '])
+            {
+                return None;
+            }
+            Some(name.trim().to_string())
+        })
+        .collect()
 }

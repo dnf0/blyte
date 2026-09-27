@@ -157,3 +157,25 @@ fn dispatch_takes_its_gate_from_blyte_toml_and_says_so() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
     assert_eq!(v["gate_source"], "blyte.toml");
 }
+
+#[test]
+fn makefile_targets_win_over_guessing() {
+    let r = repo();
+    std::fs::write(
+        r.path().join("pyproject.toml"),
+        "[project]\nname = \"x\"\n[tool.ruff]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        r.path().join("Makefile"),
+        ".PHONY: lint test\nVENV := .venv\nlint:\n\truff check .\n\tpyright\ntest:\n\tpytest -q\n",
+    )
+    .unwrap();
+    assert_eq!(detect(r.path()), vec!["make lint", "make test"]);
+    std::fs::write(
+        r.path().join("Makefile"),
+        "check: lint test\nlint:\n\ttrue\n",
+    )
+    .unwrap();
+    assert_eq!(detect(r.path()), vec!["make check"]);
+}
