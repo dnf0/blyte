@@ -27,6 +27,7 @@ fn config() -> TaskConfig {
         max_seconds: Some(600),
         report: None,
         fold_budget: None,
+        sandbox: "on".into(),
     }
 }
 
@@ -47,6 +48,7 @@ fn an_error_record_has_zeroed_counters_and_no_model_id() {
     assert_eq!(v["gated"], false);
     assert_eq!(v["container"], "abc123");
     assert_eq!(v["container_workdir"], "/app");
+    assert_eq!(v["sandboxed"], false);
     assert_eq!(v["duration_seconds"], 1.5);
     assert_eq!(v["turns"], 0);
     assert_eq!(v["empty_turns"], 0);
@@ -163,5 +165,27 @@ fn the_binary_writes_a_report_when_the_provider_cannot_start() {
     assert_eq!(v["gated"], false);
     assert!(v["container"].is_null());
     assert_eq!(v["container_workdir"], "/app");
+    assert_eq!(v["sandboxed"], blyte_agent::sandbox::available());
     assert_eq!(v["turns"], 0);
+}
+
+#[test]
+fn sandboxed_reflects_configuration_and_availability() {
+    let mut local_on = config();
+    local_on.container = None;
+    local_on.sandbox = "on".into();
+    assert_eq!(
+        RunRecord::from_error(&local_on, "err", Duration::ZERO).sandboxed,
+        blyte_agent::sandbox::available()
+    );
+
+    let mut local_off = config();
+    local_off.container = None;
+    local_off.sandbox = "off".into();
+    assert!(!RunRecord::from_error(&local_off, "err", Duration::ZERO).sandboxed);
+
+    let mut container_on = config();
+    container_on.container = Some("cid".into());
+    container_on.sandbox = "on".into();
+    assert!(!RunRecord::from_error(&container_on, "err", Duration::ZERO).sandboxed);
 }

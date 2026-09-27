@@ -32,6 +32,7 @@ fn config() -> TaskConfig {
         max_seconds: None,
         report: None,
         fold_budget: None,
+        sandbox: "on".into(),
     }
 }
 

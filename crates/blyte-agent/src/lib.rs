@@ -15,6 +15,7 @@ pub mod bench;
 pub mod context;
 pub mod fs;
 pub mod run;
+pub mod sandbox;
 pub mod search;
 pub mod shell;
 pub mod state;

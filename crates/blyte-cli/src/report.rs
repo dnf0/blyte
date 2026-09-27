@@ -49,6 +49,8 @@ pub struct RunRecord {
     pub gate_source: String,
     pub container: Option<String>,
     pub container_workdir: String,
+    /// Whether local shell commands ran under macOS seatbelt sandbox isolation.
+    pub sandboxed: bool,
     pub duration_seconds: f64,
     pub turns: u32,
     pub empty_turns: u32,
@@ -74,6 +76,9 @@ pub struct RunRecord {
 impl RunRecord {
     fn base(config: &TaskConfig, elapsed: Duration) -> Self {
         let gated = config.gate.as_deref().is_some_and(|g| !g.trim().is_empty());
+        let sandboxed = config.container.is_none()
+            && config.sandbox == "on"
+            && blyte_agent::sandbox::available();
         Self {
             schema_version: SCHEMA_VERSION,
             harness_build: env!("BLYTE_BUILD").into(),
@@ -86,6 +91,7 @@ impl RunRecord {
             gate_source: if gated { "user" } else { "none" }.into(),
             container: config.container.clone(),
             container_workdir: config.container_workdir.clone(),
+            sandboxed,
             duration_seconds: elapsed.as_secs_f64(),
             turns: 0,
             empty_turns: 0,

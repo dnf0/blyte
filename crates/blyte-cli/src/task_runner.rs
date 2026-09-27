@@ -35,6 +35,8 @@ pub struct TaskConfig {
     pub report: Option<PathBuf>,
     /// Fold budget in approximate tokens (`--fold-budget`).
     pub fold_budget: Option<usize>,
+    /// Sandbox local command execution mode (`--sandbox`).
+    pub sandbox: String,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -57,6 +59,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             max_seconds: cli.max_seconds,
             report: cli.report.clone(),
             fold_budget: cli.fold_budget,
+            sandbox: cli.sandbox.clone(),
         }
     }
 }
@@ -153,11 +156,24 @@ pub fn run_task_with_state_and_writer<W: Write>(
             )),
             PathBuf::from(&config.container_workdir),
         ),
-        None => (
-            blyte_agent::shell::PersistentShell::local(config.root.clone()),
-            None,
-            config.root.clone(),
-        ),
+        None => {
+            let shell = if config.sandbox == "on" {
+                if blyte_agent::sandbox::available() {
+                    let allowed = blyte_agent::sandbox::default_allowed(&config.root);
+                    let profile = blyte_agent::sandbox::profile(&allowed);
+                    blyte_agent::shell::PersistentShell::local_sandboxed(
+                        config.root.clone(),
+                        profile,
+                    )
+                } else {
+                    eprintln!("warning: sandbox unavailable; running unsandboxed");
+                    blyte_agent::shell::PersistentShell::local(config.root.clone())
+                }
+            } else {
+                blyte_agent::shell::PersistentShell::local(config.root.clone())
+            };
+            (shell, None, config.root.clone())
+        }
     };
     let shell: &dyn blyte_agent::shell::Shell = &persistent;
     let fs: &dyn blyte_agent::fs::Fs = match &session_fs {

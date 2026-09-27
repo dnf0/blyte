@@ -489,6 +489,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     max_seconds: None,
                     report: None,
                     fold_budget: None,
+                    sandbox: "on".into(),
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer
