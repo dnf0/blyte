@@ -85,3 +85,21 @@ fn test_context_validation() {
         "invalid context strategy must be rejected"
     );
 }
+
+#[test]
+fn test_sandbox_flag() {
+    let default = Cli::try_parse_from(["blyte", "task"]).expect("should parse");
+    assert_eq!(default.sandbox, "on");
+
+    let on = Cli::try_parse_from(["blyte", "task", "--sandbox", "on"]).expect("should parse");
+    assert_eq!(on.sandbox, "on");
+
+    let off = Cli::try_parse_from(["blyte", "task", "--sandbox", "off"]).expect("should parse");
+    assert_eq!(off.sandbox, "off");
+
+    let off_eq = Cli::try_parse_from(["blyte", "task", "--sandbox=off"]).expect("should parse");
+    assert_eq!(off_eq.sandbox, "off");
+
+    let invalid = Cli::try_parse_from(["blyte", "task", "--sandbox", "maybe"]);
+    assert!(invalid.is_err(), "invalid sandbox option must be rejected");
+}

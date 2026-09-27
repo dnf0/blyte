@@ -24,6 +24,8 @@ fn test_task_config_from_cli() {
         "--max-gates",
         "7",
         "--rollback=false",
+        "--sandbox",
+        "off",
     ]);
 
     let config = TaskConfig::from(&cli);
@@ -35,6 +37,7 @@ fn test_task_config_from_cli() {
     assert_eq!(config.max_turns, 42);
     assert_eq!(config.max_gates, 7);
     assert!(!config.rollback);
+    assert_eq!(config.sandbox, "off");
     assert_eq!(
         config.root,
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -53,6 +56,7 @@ fn test_task_config_defaults() {
     assert_eq!(config.max_turns, 25);
     assert_eq!(config.max_gates, 5);
     assert!(config.rollback);
+    assert_eq!(config.sandbox, "on");
     assert_eq!(
         config.root,
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -84,6 +88,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         max_seconds: None,
         report: None,
         fold_budget: None,
+        sandbox: "on".into(),
     };
 
     let result = run_task(config);
@@ -117,6 +122,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         max_seconds: None,
         report: None,
         fold_budget: None,
+        sandbox: "on".into(),
     };
 
     let err = run_task(anthropic_config).unwrap_err();
@@ -139,6 +145,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         max_seconds: None,
         report: None,
         fold_budget: None,
+        sandbox: "on".into(),
     };
 
     let err = run_task(ollama_config).unwrap_err();
@@ -172,6 +179,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         max_seconds: None,
         report: None,
         fold_budget: None,
+        sandbox: "on".into(),
     };
 
     let mut state = blyte_agent::state::State::new("custom goal", "echo 1");

@@ -67,4 +67,12 @@ pub struct Cli {
     /// Approximate token budget for the verbatim tail before folding (folded context; default 48000)
     #[arg(long)]
     pub fold_budget: Option<usize>,
+
+    /// Sandbox local command execution on macOS: 'on' or 'off' (default 'on')
+    #[arg(
+        long,
+        default_value = "on",
+        value_parser = ["on", "off"]
+    )]
+    pub sandbox: String,
 }

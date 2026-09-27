@@ -205,13 +205,43 @@ fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
 }
 
 /// Commands run on this machine, in the workspace directory.
-#[derive(Debug, Default, Clone)]
-pub struct LocalShell;
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LocalShell {
+    pub profile: Option<String>,
+}
+
+#[allow(non_upper_case_globals)]
+pub const LocalShell: LocalShell = LocalShell { profile: None };
+
+impl LocalShell {
+    /// Creates an unsandboxed local shell.
+    pub fn new() -> Self {
+        Self { profile: None }
+    }
+
+    /// Creates a local shell sandboxed with the given SBPL profile string.
+    pub fn sandboxed(profile: impl Into<String>) -> Self {
+        Self {
+            profile: Some(profile.into()),
+        }
+    }
+}
 
 impl Shell for LocalShell {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-lc").arg(command).current_dir(cwd);
+        let mut cmd = match &self.profile {
+            Some(profile) => {
+                let mut c = Command::new("/usr/bin/sandbox-exec");
+                c.args(["-p", profile, "bash", "-lc", command]);
+                c
+            }
+            None => {
+                let mut c = Command::new("bash");
+                c.arg("-lc").arg(command);
+                c
+            }
+        };
+        cmd.current_dir(cwd);
         scrub(&mut cmd);
         exec_command(cmd, timeout)
     }
@@ -261,8 +291,11 @@ fn quote(s: &str) -> String {
 /// How to start a session's shell: a login shell, as `bash -lc` gives today.
 #[derive(Debug, Clone)]
 pub enum Launcher {
-    /// `bash -l` on this machine, starting in `root`.
-    Local { root: PathBuf },
+    /// `bash -l` on this machine, starting in `root`, optionally sandboxed under an SBPL profile.
+    Local {
+        root: PathBuf,
+        profile: Option<String>,
+    },
     /// `bash -l` inside a running container, starting in `workdir`.
     Container {
         container_id: String,
@@ -273,9 +306,20 @@ pub enum Launcher {
 impl Launcher {
     fn command(&self) -> Command {
         match self {
-            Launcher::Local { root } => {
-                let mut c = Command::new("bash");
-                c.arg("-l").current_dir(root);
+            Launcher::Local { root, profile } => {
+                let mut c = match profile {
+                    Some(p) => {
+                        let mut cmd = Command::new("/usr/bin/sandbox-exec");
+                        cmd.args(["-p", p, "bash", "-l"]);
+                        cmd
+                    }
+                    None => {
+                        let mut cmd = Command::new("bash");
+                        cmd.arg("-l");
+                        cmd
+                    }
+                };
+                c.current_dir(root);
                 scrub(&mut c);
                 c
             }
@@ -297,7 +341,10 @@ impl Launcher {
     /// cannot start.
     fn fallback(&self) -> Box<dyn Shell> {
         match self {
-            Launcher::Local { .. } => Box::new(LocalShell),
+            Launcher::Local { profile, .. } => match profile {
+                Some(p) => Box::new(LocalShell::sandboxed(p.clone())),
+                None => Box::new(LocalShell),
+            },
             Launcher::Container {
                 container_id,
                 workdir,
@@ -574,7 +621,21 @@ impl PersistentShell {
     }
 
     pub fn local(root: PathBuf) -> Self {
-        Self::new(Launcher::Local { root })
+        Self::new(Launcher::Local {
+            root,
+            profile: None,
+        })
+    }
+
+    pub fn local_sandboxed(root: PathBuf, profile: String) -> Self {
+        Self::new(Launcher::Local {
+            root,
+            profile: Some(profile),
+        })
+    }
+
+    pub fn sandboxed(root: PathBuf, profile: String) -> Self {
+        Self::local_sandboxed(root, profile)
     }
 
     pub fn container(container_id: String, workdir: PathBuf) -> Self {
