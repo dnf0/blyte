@@ -8,21 +8,25 @@ frontier model then verifies the result and merges it.
 ```mermaid
 sequenceDiagram
     participant F as Frontier model (Claude Code)
-    participant B as blyte (cheap model)
-    participant G as Gate (your check)
-    F->>F: plan, write the task and its tests
-    F->>B: blyte dispatch T1 task.md --gate ...
-    B->>B: implement in .wt/T1, run quick checks, commit
-    B->>G: run every step
-    alt a step fails
-        G-->>B: all the failures
-        B->>B: fix, commit again
-    else every step passes
-        G-->>B: pass
+    participant B1 as blyte T1 (.wt/T1)
+    participant B2 as blyte T2 (.wt/T2)
+    participant M as main
+    F->>F: plan, split into tasks with disjoint files, write each task and its tests
+    par independent tasks run at once
+        F->>B1: blyte dispatch T1 task-T1.md --gate ...
+        B1->>B1: implement, quick checks, commit
+        B1->>B1: gate: run every step (on failure, fix and retry)
+        B1-->>F: JSON: outcome, commits, final_message, cost
+    and
+        F->>B2: blyte dispatch T2 task-T2.md --gate ...
+        B2->>B2: implement, quick checks, commit
+        B2->>B2: gate: run every step (on failure, fix and retry)
+        B2-->>F: JSON: outcome, commits, final_message, cost
     end
-    B-->>F: JSON: outcome, commits, final_message, cost
     F->>F: blyte review T1 --diff, then verify
-    F->>F: merge, or send a follow-up task
+    F->>M: merge wip/T1
+    F->>F: blyte review T2 --diff, rebase on main, re-run its gate
+    F->>M: merge wip/T2, then run the full check once more
 ```
 
 ## Why it works
@@ -140,9 +144,10 @@ task.
 blyte skill install              # every project; --project for this repository only
 ```
 
-Then, in a session: *"Plan this change, then use blyte to implement each task and review the
-results."* Claude writes the task files, dispatches them (in the background in an interactive
-session, in the foreground under `claude -p`), reviews each diff and merges. Your Claude usage goes
+This installs the skill and makes blyte Claude Code's default implementer (`--no-default` to
+skip). Then ask for changes as usual: Claude splits the work, writes the task files, dispatches
+independent tasks in parallel (in the background in an interactive session; with `&` and `wait`
+under `claude -p`), reviews each diff as it lands and merges them in order. Your Claude usage goes
 on planning and review; the implementation runs on whichever model blyte is configured for.
 
 !!! example "One run, end to end (an example, not a measurement)"
@@ -154,6 +159,14 @@ on planning and review; the implementation runs on whichever model blyte is conf
     and log, removed a stray blank line, merged both, and pointed out an ambiguity in the request
     (`"foo-bar"` becomes `"foobar"`). 12 tests pass. Claude: 2 minutes, $0.42; blyte on Gemini
     3.8 Flash: 53 seconds, $0.16.
+
+!!! example "Default mode, parallel (an example, not a measurement)"
+    With the skill installed by `blyte skill install --project` and a request that did not mention
+    blyte ("fix `word_count` in `text.py` and `clamp` in `nums.py`, with tests"), headless Claude
+    Code loaded the skill on its own, wrote two task files, dispatched both **in parallel**, put
+    each task's tests in its own file so the two could not conflict, verified both and merged
+    them. 14 tests pass. Claude: 88 seconds, $0.36; blyte: two runs of about 30 seconds side by
+    side, $0.07.
 
 For another harness, `blyte skill print` writes the same instructions to stdout, to adapt into
 its own format.
