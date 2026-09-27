@@ -19,12 +19,23 @@ decides whether it is done. The frontier model reviews the diff and merges.
 
 ```mermaid
 flowchart LR
-    F["Frontier model<br/>(Claude Code)"] -- "task + its tests" --> B["blyte<br/>(cheap model)"]
-    B -- "implement, commit" --> G{{"gate: your check"}}
-    G -- "fail: every failure, retry" --> B
-    G -- pass --> R["JSON summary<br/>outcome · commits · cost"]
-    R --> F
-    F -- "review the diff, merge" --> M[("main")]
+    P["<b>Frontier model</b><br/>(Claude Code)<br/>plan: split into tasks<br/>with disjoint files"]
+    subgraph par ["blyte dispatch, in parallel: one worktree and one gate each"]
+        direction TB
+        T1["<b>T1</b> · .wt/T1<br/>blyte (cheap model)<br/>implement, commit"] --> G1{{"gate"}}
+        T2["<b>T2</b> · .wt/T2<br/>blyte (cheap model)<br/>implement, commit"] --> G2{{"gate"}}
+        T3["<b>T3</b> · .wt/T3<br/>blyte (cheap model)<br/>implement, commit"] --> G3{{"gate"}}
+        G1 -. "fail: retry" .-> T1
+        G2 -. "fail: retry" .-> T2
+        G3 -. "fail: retry" .-> T3
+    end
+    P -- "task + tests" --> T1
+    P -- "task + tests" --> T2
+    P -- "task + tests" --> T3
+    G1 -- "JSON summary" --> R["<b>Frontier model</b><br/>review each diff<br/>as it lands"]
+    G2 -- "JSON summary" --> R
+    G3 -- "JSON summary" --> R
+    R -- "merge one by one,<br/>rebase if main moved" --> M[("main")]
 ```
 
 Your frontier tokens go on the parts that need judgement: planning and review. The typing,
