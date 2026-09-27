@@ -212,16 +212,30 @@ impl<'a> Runner<'a> {
     /// Held constant for the whole run so it caches.
     fn system_prompt(&self, state: &State) -> String {
         let bins = tools::available_binaries(self.shell, &self.root).join(", ");
+        let steps = gate_steps(&state.orchestrator.verification_cmd);
+        // Ungated runs have no check command, so the model must verify the work itself before stopping.
+        let completion = if steps.is_empty() {
+            "No command checks your work. When you stop, the result is judged by tests you \
+             cannot see, so verify it yourself first: run the project's existing test suite and \
+             the tests that cover your change, and check the edge cases the task describes. Stop \
+             only when you are confident the task is complete."
+                .to_string()
+        } else {
+            let verify = steps.join(" && ");
+            format!(
+                "Your work is accepted when `{verify}` exits 0. That command is run for you when \
+                 you stop calling tools, and you do not decide the verdict. A failure costs a full \
+                 rerun after your fix, so before you stop, run its quick parts yourself \
+                 (formatting, lint) together with the tests that cover your change; leave the slow \
+                 full run to it. Do not claim to be finished; simply stop when you believe the \
+                 command will pass, and you will be told."
+            )
+        };
         format!(
             "You are a software engineer working in a repository.\n\n\
              ## Goal\n{goal}\n\n\
              ## How completion is decided\n\
-             Your work is accepted when `{verify}` exits 0. That command is run for you when \
-             you stop calling tools, and you do not decide the verdict. A failure costs a full \
-             rerun after your fix, so before you stop, run its quick parts yourself \
-             (formatting, lint) together with the tests that cover your change; leave the slow \
-             full run to it. Do not claim to be finished; simply stop when you believe the \
-             command will pass, and you will be told.\n\n\
+             {completion}\n\n\
              ## Environment\n{where_}\nAvailable: {bins}\n\n\
              Change nothing outside the repository: no caches, other repositories, \
              home-directory files or system settings. If something outside it blocks you \
@@ -231,7 +245,7 @@ impl<'a> Runner<'a> {
              turn: they run in order and you see every result together. Batch them whenever one \
              does not depend on another's result; every turn you save is a full model call.\n",
             goal = state.orchestrator.goal,
-            verify = gate_steps(&state.orchestrator.verification_cmd).join(" && "),
+            completion = completion,
             where_ = self.shell.describe(),
             bins = bins,
         )
