@@ -1,12 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="blyte: a lean coding-agent harness">
   <rect width="1200" height="300" fill="#0F1315"/>
-  <g fill="#4A2B1D" opacity=".9">
-    <circle cx="930" cy="70" r="5"/><circle cx="968" cy="112" r="3"/><circle cx="1010" cy="58" r="7"/><circle cx="1052" cy="140" r="4"/>
-    <circle cx="1098" cy="92" r="6"/><circle cx="1130" cy="176" r="3"/><circle cx="1004" cy="196" r="4"/><circle cx="1070" cy="228" r="6"/>
-    <circle cx="946" cy="236" r="3"/><circle cx="1150" cy="64" r="4"/><circle cx="900" cy="150" r="3"/>
+  <g transform="translate(64 58) scale(1.4)">
+    <rect x="10" y="10" width="24" height="24" rx="3" fill="#E2E7E9"/>
+    <rect x="38" y="10" width="24" height="24" rx="3" fill="#E2E7E9"/>
+    <rect x="66" y="10" width="24" height="24" rx="3" fill="#E2E7E9"/>
+    <rect x="10" y="38" width="24" height="24" rx="3" fill="#E2E7E9"/>
+    <rect x="38" y="38" width="24" height="24" rx="3" fill="#8A3A17"/>
+    <rect x="66" y="38" width="24" height="24" rx="3" fill="#E27A44"/>
+    <rect x="10" y="66" width="24" height="24" rx="3" fill="#E2E7E9"/>
+    <rect x="38" y="66" width="24" height="24" rx="3" fill="#E27A44"/>
+    <rect x="66" y="66" width="24" height="24" rx="3" fill="#E27A44"/>
   </g>
-  <g fill="#E27A44"><circle cx="1036" cy="100" r="3"/><circle cx="982" cy="160" r="5"/><circle cx="1114" cy="130" r="3"/></g>
-  <text x="64" y="176" font-family="Archivo, 'Helvetica Neue', Arial, sans-serif" font-weight="900" font-size="150" letter-spacing="-3" fill="#E2E7E9">blyte<tspan fill="#E27A44">.</tspan></text>
-  <line x1="64" y1="214" x2="820" y2="214" stroke="#283136" stroke-width="1"/>
-  <text x="64" y="252" font-family="'IBM Plex Mono', ui-monospace, Menlo, monospace" font-size="21" fill="#93A0A7">a lean coding-agent harness · one loop · a sealed gate · sandboxed tools</text>
+  <text x="240" y="178" font-family="Archivo, 'Helvetica Neue', Arial, sans-serif" font-weight="900" font-size="150" letter-spacing="-3" fill="#E2E7E9">blyte</text>
+  <line x1="64" y1="222" x2="1136" y2="222" stroke="#283136" stroke-width="1"/>
+  <text x="64" y="262" font-family="'IBM Plex Mono', ui-monospace, Menlo, monospace" font-size="21" fill="#93A0A7">the implementer under your frontier model · a sealed gate · parallel by default</text>
 </svg>

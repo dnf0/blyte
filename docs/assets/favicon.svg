@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <style>.i{fill:#141A1E}.r{fill:#A6441A}.s{fill:#E8C8B7}@media (prefers-color-scheme: dark){.i{fill:#E2E7E9}.r{fill:#E27A44}.s{fill:#8A3A17}}</style>
+  <rect class="i" x="10" y="10" width="24" height="24" rx="3"/>
+  <rect class="i" x="38" y="10" width="24" height="24" rx="3"/>
+  <rect class="i" x="66" y="10" width="24" height="24" rx="3"/>
+  <rect class="i" x="10" y="38" width="24" height="24" rx="3"/>
+  <rect class="s" x="38" y="38" width="24" height="24" rx="3"/>
+  <rect class="r" x="66" y="38" width="24" height="24" rx="3"/>
+  <rect class="i" x="10" y="66" width="24" height="24" rx="3"/>
+  <rect class="r" x="38" y="66" width="24" height="24" rx="3"/>
+  <rect class="r" x="66" y="66" width="24" height="24" rx="3"/>
+</svg>

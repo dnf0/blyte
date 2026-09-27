@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="blyte">
+  <rect x="10" y="10" width="24" height="24" rx="3" fill="#141A1E"/>
+  <rect x="38" y="10" width="24" height="24" rx="3" fill="#141A1E"/>
+  <rect x="66" y="10" width="24" height="24" rx="3" fill="#141A1E"/>
+  <rect x="10" y="38" width="24" height="24" rx="3" fill="#141A1E"/>
+  <rect x="38" y="38" width="24" height="24" rx="3" fill="#E8C8B7"/>
+  <rect x="66" y="38" width="24" height="24" rx="3" fill="#A6441A"/>
+  <rect x="10" y="66" width="24" height="24" rx="3" fill="#141A1E"/>
+  <rect x="38" y="66" width="24" height="24" rx="3" fill="#A6441A"/>
+  <rect x="66" y="66" width="24" height="24" rx="3" fill="#A6441A"/>
+</svg>
