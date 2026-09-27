@@ -19,12 +19,14 @@ use serde::{Deserialize, Serialize};
 /// "the orchestrator states the verification command" as doctrine while the code happily let
 /// the worker's own test become the gate; making it structurally impossible is the difference
 /// between a rule and a property.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Orchestrator {
     /// What success means, in prose, for the worker.
     pub goal: String,
     /// The shell command whose exit code decides completion. Exit 0 and only exit 0.
     pub verification_cmd: String,
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
 }
 
 /// Facts the harness observed. Not opinions, and not reported by the worker.
@@ -34,7 +36,7 @@ pub struct Runtime {
 }
 
 /// Execution state across two regions: [`Orchestrator`] and [`Runtime`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct State {
     pub orchestrator: Orchestrator,
     pub runtime: Runtime,
@@ -46,6 +48,7 @@ impl State {
             orchestrator: Orchestrator {
                 goal: goal.into(),
                 verification_cmd: verification_cmd.into(),
+                max_cost_usd: None,
             },
             runtime: Runtime::default(),
         }

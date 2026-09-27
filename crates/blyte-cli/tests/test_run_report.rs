@@ -25,6 +25,7 @@ fn config() -> TaskConfig {
         root: PathBuf::from("."),
         container_workdir: "/app".into(),
         max_seconds: Some(600),
+        max_cost_usd: None,
         report: None,
         fold_budget: None,
         sandbox: "on".into(),

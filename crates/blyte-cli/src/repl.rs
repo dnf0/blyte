@@ -487,6 +487,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     root: session.repo_root.clone(),
                     container_workdir: "/workspace".into(),
                     max_seconds: None,
+                    max_cost_usd: None,
                     report: None,
                     fold_budget: None,
                     sandbox: "on".into(),

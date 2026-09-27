@@ -116,6 +116,8 @@ pub struct RunReport {
     pub gate_failures: Vec<String>,
     /// Calls per tool name.
     pub tool_counts: BTreeMap<String, u32>,
+    /// Whether the run stopped because spending reached `--max-cost`.
+    pub cost_capped: bool,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -337,6 +339,14 @@ impl<'a> Runner<'a> {
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return (Outcome::BudgetExhausted, report);
+            }
+            if let Some(cap) = state.orchestrator.max_cost_usd {
+                if let Some(price) = blyte_provider::pricing(&self.provider.model_id()) {
+                    if price.cost(&report.usage) >= cap {
+                        report.cost_capped = true;
+                        return (Outcome::BudgetExhausted, report);
+                    }
+                }
             }
             report.outcome_turns = turn;
 

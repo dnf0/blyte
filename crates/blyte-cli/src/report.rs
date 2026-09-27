@@ -60,6 +60,10 @@ pub struct RunRecord {
     pub provider_retries: u32,
     /// List-price cost in USD, when the model's price is known.
     pub cost_usd: Option<f64>,
+    /// Spending cap in USD given with `--max-cost`, if any.
+    pub max_cost_usd: Option<f64>,
+    /// Whether the run stopped because spending reached `--max-cost`.
+    pub cost_capped: bool,
     /// Fold budget given with `--fold-budget`, if any.
     pub fold_budget: Option<usize>,
     /// Per-call usage (see `blyte_agent::run::TurnUsage`).
@@ -100,6 +104,8 @@ impl RunRecord {
             rollbacks: 0,
             provider_retries: 0,
             cost_usd: None,
+            max_cost_usd: config.max_cost_usd,
+            cost_capped: false,
             fold_budget: config.fold_budget,
             turn_usage: Vec::new(),
             usage: UsageRecord::default(),
@@ -144,6 +150,7 @@ impl RunRecord {
             rollbacks: state.runtime.rollbacks,
             provider_retries: report.provider_retries,
             cost_usd: blyte_provider::pricing(model_id).map(|p| p.cost(&report.usage)),
+            cost_capped: report.cost_capped,
             turn_usage: report.turn_usage.clone(),
             usage: UsageRecord {
                 input: report.usage.input,
