@@ -130,9 +130,19 @@ blyte skill install              # every project; --project for this repository 
 ```
 
 Then, in a session: *"Plan this change, then use blyte to implement each task and review the
-results."* Claude writes the task files, dispatches them in the background (independent tasks in
-parallel), reviews each diff and merges. Your Claude usage goes on planning and review; the
-implementation runs on whichever model blyte is configured for.
+results."* Claude writes the task files, dispatches them (in the background in an interactive
+session, in the foreground under `claude -p`), reviews each diff and merges. Your Claude usage goes
+on planning and review; the implementation runs on whichever model blyte is configured for.
+
+!!! example "One run, end to end (an example, not a measurement)"
+    Headless Claude Code with the skill, on a small Python project, asked to make `word_count`
+    split on any whitespace and to add `slugify`, both with tests. Claude read the code, wrote two
+    task files with the tests verbatim, checked that the tests failed before and passed after,
+    and dispatched each task with the gate `ruff check .` / `ruff format --check .` /
+    `python -m pytest -q`. blyte finished them in 16 and 23 turns. Claude then reviewed each diff
+    and log, removed a stray blank line, merged both, and pointed out an ambiguity in the request
+    (`"foo-bar"` becomes `"foobar"`). 12 tests pass. Claude: 2 minutes, $0.42; blyte on Gemini
+    3.8 Flash: 53 seconds, $0.16.
 
 For another harness, `blyte skill print` writes the same instructions to stdout, to adapt into
 its own format.
