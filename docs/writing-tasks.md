@@ -1,4 +1,4 @@
-# Writing tasks for blyte
+# How tasks are written for blyte
 
 !!! tip "You don't write these tasks yourself"
     In normal use the **orchestrating agent writes them**: Claude Code (or Codex) plans your change
