@@ -1,13 +1,97 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+#[derive(clap::Subcommand, Debug, PartialEq, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum Command {
+    Dispatch(DispatchArgs),
+    Review(ReviewArgs),
+    Skill(SkillArgs),
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct DispatchArgs {
+    /// Identifier for this dispatch (used for worktree and branch wip/<id>)
+    pub id: String,
+
+    /// Path to the task description markdown file
+    pub task_file: PathBuf,
+
+    /// Verification gate command
+    #[arg(short, long)]
+    pub gate: String,
+
+    /// The commit a new worktree starts from
+    #[arg(long, default_value = "HEAD")]
+    pub base: String,
+
+    /// Model identifier or provider selection
+    #[arg(short, long)]
+    pub model: Option<String>,
+
+    /// Wall-clock budget in seconds
+    #[arg(long, default_value = "3600")]
+    pub max_seconds: u64,
+
+    /// Maximum turn budget
+    #[arg(long, default_value = "300")]
+    pub max_turns: usize,
+
+    /// Maximum spend in USD
+    #[arg(long = "max-cost")]
+    pub max_cost_usd: Option<f64>,
+
+    /// Approximate token budget for the verbatim tail before folding
+    #[arg(long)]
+    pub fold_budget: Option<usize>,
+
+    /// Sandbox local command execution: 'on' or 'off' (default 'on')
+    #[arg(
+        long,
+        default_value = "on",
+        value_parser = ["on", "off"]
+    )]
+    pub sandbox: String,
+
+    /// Outbound network mode: 'on' or 'off' (default 'on')
+    #[arg(
+        long,
+        default_value = "on",
+        value_parser = ["on", "off"]
+    )]
+    pub network: String,
+
+    /// Let sandboxed commands read this path despite credential deny-list (repeatable)
+    #[arg(long = "allow-read")]
+    pub allow_read: Vec<PathBuf>,
+
+    /// Pass this environment variable to commands (repeatable)
+    #[arg(long = "pass-env")]
+    pub pass_env: Vec<String>,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct ReviewArgs {
+    pub id: String,
+
+    #[arg(long)]
+    pub diff: bool,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct SkillArgs {}
+
 #[derive(Parser, Debug, PartialEq)]
 #[command(
     name = "blyte",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BLYTE_BUILD"), ")"),
-    about = "A lean coding-agent harness with a sealed verification gate"
+    about = "A lean coding-agent harness with a sealed verification gate",
+    subcommand_precedence_over_arg = true
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Direct task prompt to run in single-shot / headless mode
     #[arg(index = 1)]
     pub prompt: Option<String>,

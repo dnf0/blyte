@@ -20,6 +20,21 @@ fn main() {
     restore_sigpipe();
     let cli = Cli::parse();
 
+    if let Some(cmd) = cli.command {
+        match cmd {
+            blyte_cli::cli::Command::Dispatch(args) => {
+                std::process::exit(blyte_cli::dispatch::run_dispatch(&args));
+            }
+            blyte_cli::cli::Command::Review(args) => {
+                std::process::exit(blyte_cli::dispatch::run_review(&args));
+            }
+            blyte_cli::cli::Command::Skill(_) => {
+                eprintln!("blyte skill: not implemented yet");
+                std::process::exit(2);
+            }
+        }
+    }
+
     if let Some(ref prompt) = cli.prompt {
         if prompt.trim().is_empty() {
             eprintln!("Error: prompt cannot be empty");
