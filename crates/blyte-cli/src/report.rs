@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use blyte_agent::run::{Outcome, RunReport};
+use blyte_agent::sandbox::Profile;
 use blyte_agent::state::State;
 use serde::Serialize;
 
@@ -51,6 +52,16 @@ pub struct RunRecord {
     pub container_workdir: String,
     /// Whether local shell commands ran under macOS seatbelt sandbox isolation.
     pub sandboxed: bool,
+    /// The sandbox mechanism active for the run (`container`, `seatbelt`, `landlock`, `landlock-offline`, `off`).
+    pub sandbox: String,
+    /// Outbound network mode for commands (`on` or `off`).
+    pub network: String,
+    /// Filesystem paths permitted for reading despite credential deny-lists.
+    pub allow_read: Vec<String>,
+    /// Environment variables permitted to pass to commands despite looking like credentials.
+    pub pass_env: Vec<String>,
+    /// Names of environment variables withheld from commands by the credential filter.
+    pub withheld_env: Vec<String>,
     pub duration_seconds: f64,
     pub turns: u32,
     pub empty_turns: u32,
@@ -83,6 +94,11 @@ impl RunRecord {
         let sandboxed = config.container.is_none()
             && config.sandbox == "on"
             && blyte_agent::sandbox::available();
+        let withheld_env = if config.container.is_some() {
+            Vec::new()
+        } else {
+            blyte_agent::shell::withheld_env()
+        };
         Self {
             schema_version: SCHEMA_VERSION,
             harness_build: env!("BLYTE_BUILD").into(),
@@ -96,6 +112,15 @@ impl RunRecord {
             container: config.container.clone(),
             container_workdir: config.container_workdir.clone(),
             sandboxed,
+            sandbox: sandbox_kind(config),
+            network: config.network.clone(),
+            allow_read: config
+                .allow_read
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            pass_env: config.pass_env.clone(),
+            withheld_env,
             duration_seconds: elapsed.as_secs_f64(),
             turns: 0,
             empty_turns: 0,
@@ -174,4 +199,23 @@ pub fn write(path: &Path, record: &RunRecord) -> Result<(), String> {
         .map_err(|e| format!("report serialisation failed: {e}"))?;
     std::fs::write(path, json + "\n")
         .map_err(|e| format!("cannot write report {}: {e}", path.display()))
+}
+
+/// Returns the name of the sandbox mechanism active for the task configuration.
+pub fn sandbox_kind(config: &TaskConfig) -> String {
+    if config.container.is_some() {
+        return "container".into();
+    }
+    if config.sandbox != "on" || !blyte_agent::sandbox::available() {
+        return "off".into();
+    }
+    match blyte_agent::sandbox::default_profile_net(
+        &config.root,
+        &config.allow_read,
+        config.network == "on",
+    ) {
+        Profile::Seatbelt(_) => "seatbelt".into(),
+        Profile::Landlock(_) => "landlock".into(),
+        Profile::LandlockOffline(_) => "landlock-offline".into(),
+    }
 }
