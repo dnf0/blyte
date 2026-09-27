@@ -100,6 +100,14 @@ pub enum SkillAction {
         /// Install the skill without making blyte the default in CLAUDE.md
         #[arg(long)]
         no_default: bool,
+
+        /// Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all
+        #[arg(
+            long,
+            default_value = "claude",
+            value_parser = ["claude", "codex", "all"]
+        )]
+        harness: String,
     },
 
     /// Remove the skill and the CLAUDE.md block
@@ -107,6 +115,14 @@ pub enum SkillAction {
         /// Remove from repository instead of personal ~/.claude
         #[arg(long)]
         project: bool,
+
+        /// Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all
+        #[arg(
+            long,
+            default_value = "claude",
+            value_parser = ["claude", "codex", "all"]
+        )]
+        harness: String,
     },
 
     /// Print the skill markdown to stdout

@@ -34,51 +34,89 @@ fn main() {
                     force,
                     default: _,
                     no_default,
-                } => match blyte_cli::skill::install(project, force, no_default) {
-                    Ok(path) => {
-                        println!("installed {}", path.display());
-                        if !no_default {
-                            match blyte_cli::skill::claude_md_path(project) {
-                                Ok(md_path) => println!("updated {}", md_path.display()),
-                                Err(e) => {
-                                    eprintln!("{e}");
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                        if no_default {
-                            println!(
-                                "to use it, ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
-                            );
-                        } else {
-                            println!(
-                                "Claude Code now plans and reviews, and delegates implementation to blyte, in parallel, by default"
-                            );
-                        }
-                        std::process::exit(0);
-                    }
-                    Err(e) => {
-                        eprintln!("{e}");
-                        std::process::exit(1);
-                    }
-                },
-                blyte_cli::cli::SkillAction::Uninstall { project } => {
-                    match blyte_cli::skill::uninstall(project) {
-                        Ok(paths) => {
-                            if paths.is_empty() {
-                                println!("nothing to remove");
-                            } else {
-                                for path in paths {
-                                    println!("removed {}", path.display());
-                                }
-                            }
-                            std::process::exit(0);
-                        }
+                    harness,
+                } => {
+                    let targets = match blyte_cli::skill::Harness::parse_all(&harness) {
+                        Ok(t) => t,
                         Err(e) => {
                             eprintln!("{e}");
                             std::process::exit(1);
                         }
+                    };
+                    for &target in &targets {
+                        let written =
+                            match blyte_cli::skill::install_for(target, project, force, no_default)
+                            {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    eprintln!("{e}");
+                                    std::process::exit(1);
+                                }
+                            };
+                        for path in written {
+                            if path.extension().is_some_and(|ext| ext == "rules") {
+                                println!("wrote {}", path.display());
+                            } else if path.file_name().is_some_and(|name| name == "SKILL.md") {
+                                println!("installed {}", path.display());
+                            } else {
+                                println!("updated {}", path.display());
+                            }
+                        }
                     }
+                    for target in targets {
+                        match target {
+                            blyte_cli::skill::Harness::Claude => {
+                                if no_default {
+                                    println!(
+                                        "to use it, ask Claude Code: \"Plan this change, then use blyte to implement each task and review the results.\""
+                                    );
+                                } else {
+                                    println!(
+                                        "Claude Code now plans and reviews, and delegates implementation to blyte, in parallel, by default"
+                                    );
+                                }
+                            }
+                            blyte_cli::skill::Harness::Codex => {
+                                if no_default {
+                                    println!(
+                                        "to use it, ask Codex: \"use blyte to implement this\""
+                                    );
+                                } else {
+                                    println!(
+                                        "Codex now plans and reviews, and delegates implementation to blyte, in parallel, by default (untested)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    std::process::exit(0);
+                }
+                blyte_cli::cli::SkillAction::Uninstall { project, harness } => {
+                    let targets = match blyte_cli::skill::Harness::parse_all(&harness) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let mut all_paths = Vec::new();
+                    for target in targets {
+                        match blyte_cli::skill::uninstall_for(target, project) {
+                            Ok(paths) => all_paths.extend(paths),
+                            Err(e) => {
+                                eprintln!("{e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    if all_paths.is_empty() {
+                        println!("nothing to remove");
+                    } else {
+                        for path in all_paths {
+                            println!("removed {}", path.display());
+                        }
+                    }
+                    std::process::exit(0);
                 }
                 blyte_cli::cli::SkillAction::Print => {
                     print!("{}", blyte_cli::skill::SKILL_MD);
