@@ -7,9 +7,10 @@
 //!
 //! - On macOS, Seatbelt (SBPL) restricts writes and denies reading credential stores and
 //!   environment secret files unless explicitly permitted via allow-lists.
-//! - On Linux, Landlock restricts writes only. Because Landlock can only allow beneath paths
-//!   and cannot carve out forbidden subdirectories (e.g. `~/.ssh`) from a readable home,
-//!   the credential read-deny is macOS-only. The harness environment filter applies on both platforms.
+//! - On Linux, Landlock restricts writes and restricts reads via an allowlist: commands can read
+//!   only system directories, the workspace, tool caches under `$HOME`, and `--allow-read` grants;
+//!   credential stores and other files under `$HOME` are not granted and therefore unreadable.
+//!   The harness environment filter applies on both platforms.
 //!
 //! # Network isolation (`--network=off`)
 //!
@@ -29,6 +30,12 @@ pub enum Profile {
     Landlock(Vec<PathBuf>),
     /// A list of write-allowed directory paths for Landlock on Linux, blocking outbound TCP connections.
     LandlockOffline(Vec<PathBuf>),
+    /// Write-allowed and read-allowed directory paths for Landlock on Linux, optionally blocking outbound TCP connections.
+    LandlockConfined {
+        write: Vec<PathBuf>,
+        read: Vec<PathBuf>,
+        block_tcp: bool,
+    },
 }
 
 impl From<String> for Profile {
@@ -147,6 +154,61 @@ pub fn read_denied(home: &Path) -> Vec<PathBuf> {
         "Library/Application Support/BraveSoftware",
     ];
     DENIED_PATHS.iter().map(|sub| home.join(sub)).collect()
+}
+
+/// Returns the list of standard read-allowed paths for a confined Landlock sandbox on Linux.
+///
+/// In order: system roots, tool directories under `home` (if given), and `allow_read` grants.
+pub fn read_allowed(home: Option<&Path>, allow_read: &[PathBuf]) -> Vec<PathBuf> {
+    let mut allowed = Vec::new();
+
+    const SYSTEM_ROOTS: &[&str] = &[
+        "/usr", "/lib", "/lib32", "/lib64", "/libx32", "/bin", "/sbin", "/etc", "/opt", "/proc",
+        "/sys", "/dev", "/run", "/var", "/tmp", "/snap", "/nix",
+    ];
+    for root in SYSTEM_ROOTS {
+        allowed.push(PathBuf::from(root));
+    }
+
+    if let Some(home) = home {
+        const TOOL_DIRS: &[&str] = &[
+            ".cargo",
+            ".rustup",
+            ".cache",
+            ".local/bin",
+            ".local/lib",
+            ".local/share/uv",
+            ".local/share/pnpm",
+            ".local/share/mise",
+            ".npm",
+            ".nvm",
+            ".pyenv",
+            ".rbenv",
+            ".asdf",
+            ".bun",
+            ".deno",
+            ".gradle",
+            ".m2",
+            "go",
+            ".config/git",
+            ".gitconfig",
+            ".gitignore_global",
+            ".gitattributes",
+            ".profile",
+            ".bashrc",
+            ".bash_profile",
+            ".bash_login",
+            ".inputrc",
+            ".editorconfig",
+            ".docker/buildx",
+        ];
+        for sub in TOOL_DIRS {
+            allowed.push(home.join(sub));
+        }
+    }
+
+    allowed.extend(allow_read.iter().cloned());
+    allowed
 }
 
 /// Generates an SBPL profile denying file writes outside `write`, denying file reads under
@@ -281,7 +343,7 @@ pub fn offline(mut profile: String, docker_sockets: &[PathBuf]) -> String {
 /// Returns the default sandbox profile for the current platform.
 ///
 /// On macOS, returns an SBPL profile denying writes outside `default_allowed` and reads under credential stores.
-/// On other platforms, returns a Landlock profile with `default_allowed`.
+/// On other platforms, returns a confined Landlock profile with `default_allowed` and `read_allowed`.
 pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
     #[cfg(target_os = "macos")]
     {
@@ -293,8 +355,13 @@ pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = allow_read;
-        Profile::Landlock(default_allowed(root))
+        let home = std::env::var_os("HOME");
+        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
+        Profile::LandlockConfined {
+            write: default_allowed(root),
+            read: read_allowed(home_path, allow_read),
+            block_tcp: false,
+        }
     }
 }
 
@@ -320,8 +387,13 @@ pub fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = allow_read;
-        Profile::LandlockOffline(default_allowed(root))
+        let home = std::env::var_os("HOME");
+        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
+        Profile::LandlockConfined {
+            write: default_allowed(root),
+            read: read_allowed(home_path, allow_read),
+            block_tcp: true,
+        }
     }
 }
 
@@ -329,11 +401,12 @@ pub fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -
 #[cfg(target_os = "linux")]
 pub(crate) fn landlock_pre_exec(
     cmd: &mut std::process::Command,
-    allowed: &[PathBuf],
+    write: &[PathBuf],
+    read: Option<&[PathBuf]>,
     block_tcp: bool,
 ) -> std::io::Result<()> {
     use landlock::{
-        path_beneath_rules, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetCreated,
+        path_beneath_rules, Access, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetCreated,
         RulesetCreatedAttr, ABI,
     };
     use std::os::unix::process::CommandExt;
@@ -350,17 +423,30 @@ pub(crate) fn landlock_pre_exec(
         .handle_access(AccessFs::from_write(ABI::V5))
         .map_err(std::io::Error::other)?;
 
+    if read.is_some() {
+        ruleset = ruleset
+            .handle_access(AccessFs::from_read(ABI::V5))
+            .map_err(std::io::Error::other)?;
+    }
+
     if block_tcp {
         ruleset = ruleset
             .handle_access(AccessNet::ConnectTcp)
             .map_err(std::io::Error::other)?;
     }
 
-    let ruleset: RulesetCreated = ruleset
-        .create()
-        .map_err(std::io::Error::other)?
-        .add_rules(path_beneath_rules(allowed, AccessFs::from_write(ABI::V5)))
-        .map_err(std::io::Error::other)?;
+    let ruleset: RulesetCreated = ruleset.create().map_err(std::io::Error::other)?;
+
+    let ruleset: RulesetCreated = match read {
+        Some(read_paths) => ruleset
+            .add_rules(path_beneath_rules(write, AccessFs::from_all(ABI::V5)))
+            .map_err(std::io::Error::other)?
+            .add_rules(path_beneath_rules(read_paths, AccessFs::from_read(ABI::V5)))
+            .map_err(std::io::Error::other)?,
+        None => ruleset
+            .add_rules(path_beneath_rules(write, AccessFs::from_write(ABI::V5)))
+            .map_err(std::io::Error::other)?,
+    };
 
     let ruleset = Mutex::new(Some(ruleset));
     unsafe {

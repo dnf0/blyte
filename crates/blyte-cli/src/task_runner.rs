@@ -230,6 +230,18 @@ pub fn run_task_with_state_and_writer<W: Write>(
                             "blyte: on Linux --network=off blocks TCP connections only (localhost included); UDP and the Docker socket are not blocked"
                         );
                     }
+                    if let blyte_agent::sandbox::Profile::LandlockConfined { block_tcp, .. } =
+                        &profile
+                    {
+                        eprintln!(
+                            "blyte: on Linux, commands can read only system directories, the workspace, tool caches and --allow-read paths"
+                        );
+                        if *block_tcp {
+                            eprintln!(
+                                "blyte: on Linux --network=off blocks TCP connections only (localhost included); UDP and the Docker socket are not blocked"
+                            );
+                        }
+                    }
                     blyte_agent::shell::PersistentShell::local_sandboxed(
                         config.root.clone(),
                         profile,
