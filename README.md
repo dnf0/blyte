@@ -67,6 +67,12 @@ of 18 (agy: 13 of 18). Since the two prompts were put on identical rules (from "
 on), quality has been level; the one serious miss was blyte's (the host-cache detour), which led to
 the workspace-boundary rule now built into blyte.
 
+**FrontierHarness tasks** (one run, 2026-09-27): on the 27 of FrontierHarness v1.0's 30 tasks that
+could be matched, blyte with Gemini 3.8 Flash passed **19/27 (70%)**; the best published Kimi K3
+configuration, Codex, passed 17/27 (63%), and the others 12–16. It was a single run on a different
+model, so read it as "competitive with the best", not "better". Details and caveats:
+[docs/research/2026-09-27-frontierharness-gemini.md](docs/research/2026-09-27-frontierharness-gemini.md).
+
 **Benchmark tasks**, measured with `superstate-eval` (same model, tasks and sealed grader), 3 runs
 per cell:
 
