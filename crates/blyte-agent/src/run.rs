@@ -308,10 +308,10 @@ impl<'a> Runner<'a> {
 
     /// Run the verification command. Runtime-only: nothing in the tool surface reaches this.
     ///
-    /// A gate of several lines is several steps. Every step runs even after one fails, and all
-    /// failures come back in one message: with `fmt && clippy && test` a shadow run found the
-    /// clippy failure only after fixing the fmt one, a whole extra gate round of 7 turns.
-    fn run_gate(&self, state: &State) -> (bool, String, u64) {
+    /// A gate of several lines is several steps. On the first attempt, every step runs and all
+    /// failures come back in one message. On retries, previously failing steps run first, and if
+    /// any of them still fails, the attempt stops without re-running the passing steps.
+    fn run_gate(&self, state: &State, last_failed: &[String]) -> (bool, String, u64, Vec<String>) {
         let max_slots = gate_slots::slots();
         let slot_dir = gate_slots::slot_dir();
         let (_guard, wait_ms) =
@@ -334,19 +334,62 @@ impl<'a> Runner<'a> {
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         if steps.len() <= 1 {
             let (passed, output) = self.run_step(&state.orchestrator.verification_cmd);
-            return (passed, output, wait_ms);
+            let failed = if passed {
+                Vec::new()
+            } else {
+                vec![state.orchestrator.verification_cmd.clone()]
+            };
+            return (passed, output, wait_ms, failed);
         }
+        let (first_group, second_group) = {
+            let (f, s) = retry_order(&steps, last_failed);
+            if f.is_empty() {
+                (steps.clone(), Vec::new())
+            } else {
+                (f, s)
+            }
+        };
         let mut failures = Vec::new();
         let mut failed_steps = Vec::new();
-        for &step in &steps {
+        for &step in &first_group {
             let (passed, output) = self.run_step(step);
             if !passed {
-                failed_steps.push(step);
+                failed_steps.push(step.to_string());
+                failures.push(format!("$ {step}\n{output}"));
+            }
+        }
+        if !failures.is_empty() {
+            let body = tools::bound_output(&failures.join("\n\n"));
+            let not_rerun = if !second_group.is_empty() {
+                format!(
+                    "\nNot re-run this attempt: {} step(s) that passed last time ({}).",
+                    second_group.len(),
+                    second_group.join(", ")
+                )
+            } else {
+                String::new()
+            };
+            return (
+                false,
+                format!(
+                    "{} of {} steps failed: {}{not_rerun}\n\n{body}",
+                    failures.len(),
+                    steps.len(),
+                    failed_steps.join(", ")
+                ),
+                wait_ms,
+                failed_steps,
+            );
+        }
+        for &step in &second_group {
+            let (passed, output) = self.run_step(step);
+            if !passed {
+                failed_steps.push(step.to_string());
                 failures.push(format!("$ {step}\n{output}"));
             }
         }
         if failures.is_empty() {
-            return (true, "exit 0".into(), wait_ms);
+            return (true, "exit 0".into(), wait_ms, Vec::new());
         }
         let body = tools::bound_output(&failures.join("\n\n"));
         (
@@ -358,6 +401,7 @@ impl<'a> Runner<'a> {
                 failed_steps.join(", ")
             ),
             wait_ms,
+            failed_steps,
         )
     }
 
@@ -409,6 +453,7 @@ impl<'a> Runner<'a> {
         let specs = tools::specs();
         let baseline = self.checkpoint();
         let mut last_sent: Option<Vec<Message>> = None;
+        let mut last_failed: Vec<String> = Vec::new();
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -580,7 +625,8 @@ impl<'a> Runner<'a> {
             // --- the model stopped calling tools: the runtime decides -----------------------
             report.gate_attempts += 1;
             let gate_start = std::time::Instant::now();
-            let (passed, output, wait_ms) = self.run_gate(state);
+            let (passed, output, wait_ms, failing) = self.run_gate(state, &last_failed);
+            last_failed = failing;
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);
             self.emit(Event::Gate {
@@ -631,6 +677,24 @@ fn gate_steps(gate: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Splits `steps` into (the steps whose text is in `last_failed`, in gate order; the
+/// others, in gate order). With an empty `last_failed`, returns (all steps, nothing).
+pub fn retry_order<'a>(steps: &[&'a str], last_failed: &[String]) -> (Vec<&'a str>, Vec<&'a str>) {
+    if last_failed.is_empty() {
+        return (steps.to_vec(), Vec::new());
+    }
+    let mut failed = Vec::new();
+    let mut others = Vec::new();
+    for &step in steps {
+        if last_failed.iter().any(|f| f == step) {
+            failed.push(step);
+        } else {
+            others.push(step);
+        }
+    }
+    (failed, others)
 }
 
 /// Cuts gate output to its first 4,000 characters, appending `…` when cut.
