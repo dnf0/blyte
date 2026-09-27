@@ -31,6 +31,8 @@ pub struct TaskConfig {
     pub container_workdir: String,
     /// Wall-clock budget in seconds (`--max-seconds`).
     pub max_seconds: Option<u64>,
+    /// Maximum spend in USD (`--max-cost`).
+    pub max_cost_usd: Option<f64>,
     /// Where to write the JSON run report, if anywhere (`--report`).
     pub report: Option<PathBuf>,
     /// Fold budget in approximate tokens (`--fold-budget`).
@@ -57,6 +59,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             root,
             container_workdir: cli.container_workdir.clone(),
             max_seconds: cli.max_seconds,
+            max_cost_usd: cli.max_cost_usd,
             report: cli.report.clone(),
             fold_budget: cli.fold_budget,
             sandbox: cli.sandbox.clone(),
@@ -83,6 +86,7 @@ pub fn run_task(
     let started = std::time::Instant::now();
     let verification_cmd = config.gate.as_deref().unwrap_or("");
     let mut state = blyte_agent::state::State::new(&config.prompt, verification_cmd);
+    state.orchestrator.max_cost_usd = config.max_cost_usd;
     let mut stdout = std::io::stdout();
     let result = run_task_with_state_and_writer(&config, &mut state, &mut stdout);
     // The loop writes its own report; this covers a run that never reached it (e.g. no API
@@ -126,6 +130,14 @@ pub fn run_task_with_state_and_writer<W: Write>(
         }
         Err(e) => return Err(format!("Provider error: {e}")),
     };
+
+    let model_id = provider.model_id();
+    if config.max_cost_usd.is_some() && blyte_provider::pricing(&model_id).is_none() {
+        return Err(format!(
+            "--max-cost needs a known price for {model_id}; none is known"
+        ));
+    }
+    state.orchestrator.max_cost_usd = config.max_cost_usd;
 
     // 2. Select context assembly strategy.
     let folded = blyte_agent::context::Folded {

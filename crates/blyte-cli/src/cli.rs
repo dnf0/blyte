@@ -60,6 +60,10 @@ pub struct Cli {
     #[arg(long)]
     pub max_seconds: Option<u64>,
 
+    /// Maximum spend in USD; the run stops before a model call once reached
+    #[arg(long = "max-cost")]
+    pub max_cost_usd: Option<f64>,
+
     /// Write a JSON run report to this path when the headless run exits
     #[arg(long)]
     pub report: Option<PathBuf>,
