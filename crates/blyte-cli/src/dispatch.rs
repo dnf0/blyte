@@ -71,6 +71,7 @@ pub struct DispatchSummary {
     pub sandbox: String,
     pub log: String,
     pub report: String,
+    pub gate_source: &'static str,
 }
 
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
@@ -87,6 +88,38 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         return 2;
     }
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+
+    let repo_config = match crate::config::load(&root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let dispatch_cfg = repo_config.map(|c| c.dispatch).unwrap_or_default();
+
+    let (gate, gate_source) = if let Some(ref g) = args.gate {
+        (g.clone(), "flag")
+    } else if let Some(ref g) = dispatch_cfg.gate {
+        (g.clone(), "blyte.toml")
+    } else {
+        eprintln!("no gate: pass --gate, or run blyte init to write blyte.toml");
+        return 2;
+    };
+
+    let model = args.model.as_ref().or(dispatch_cfg.model.as_ref());
+    let max_seconds = args
+        .max_seconds
+        .or(dispatch_cfg.max_seconds)
+        .unwrap_or(3600);
+    let max_turns = args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300);
+    let max_cost = args.max_cost_usd.or(dispatch_cfg.max_cost);
+    let network = args
+        .network
+        .as_deref()
+        .or(dispatch_cfg.network.as_deref())
+        .unwrap_or("on");
+
     let wt_parent = root.join(".wt");
     let worktree_dir = wt_parent.join(&args.id);
     let branch = format!("wip/{}", args.id);
@@ -202,23 +235,23 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     cmd.stdout(log_file);
     cmd.stderr(log_file_err);
 
-    cmd.arg("--gate").arg(&args.gate);
+    cmd.arg("--gate").arg(&gate);
     cmd.arg("--rollback=false");
-    cmd.arg("--max-seconds").arg(args.max_seconds.to_string());
-    cmd.arg("--max-turns").arg(args.max_turns.to_string());
+    cmd.arg("--max-seconds").arg(max_seconds.to_string());
+    cmd.arg("--max-turns").arg(max_turns.to_string());
     cmd.arg("--report").arg(&report_path);
 
-    if let Some(ref m) = args.model {
+    if let Some(m) = model {
         cmd.arg("--model").arg(m);
     }
-    if let Some(c) = args.max_cost_usd {
+    if let Some(c) = max_cost {
         cmd.arg("--max-cost").arg(c.to_string());
     }
     if let Some(fb) = args.fold_budget {
         cmd.arg("--fold-budget").arg(fb.to_string());
     }
     cmd.arg("--sandbox").arg(&args.sandbox);
-    cmd.arg("--network").arg(&args.network);
+    cmd.arg("--network").arg(network);
     for r in &args.allow_read {
         cmd.arg("--allow-read").arg(r);
     }
@@ -376,6 +409,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         sandbox,
         log: log_path.display().to_string(),
         report: report_path.display().to_string(),
+        gate_source,
     };
 
     let json_str = serde_json::to_string_pretty(&summary).unwrap();

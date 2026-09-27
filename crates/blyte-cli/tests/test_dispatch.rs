@@ -58,15 +58,15 @@ fn subcommands_parse_and_a_plain_prompt_is_unchanged() {
     match cli.command {
         Some(Sub::Dispatch(a)) => {
             assert_eq!(a.id, "T1");
-            assert_eq!(a.gate, "cargo test");
-            assert_eq!(a.max_turns, 300);
-            assert_eq!(a.max_seconds, 3600);
+            assert_eq!(a.gate.as_deref(), Some("cargo test"));
+            assert_eq!(a.max_turns, None);
+            assert_eq!(a.max_seconds, None);
         }
         other => panic!("expected dispatch, got {other:?}"),
     }
     assert!(
-        Cli::try_parse_from(["blyte", "dispatch", "T1", "task.md"]).is_err(),
-        "--gate is required"
+        Cli::try_parse_from(["blyte", "dispatch", "T1", "task.md"]).is_ok(),
+        "--gate is optional with blyte.toml"
     );
     let plain = Cli::try_parse_from(["blyte", "fix the lexer"]).unwrap();
     assert!(plain.command.is_none());

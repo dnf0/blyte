@@ -22,6 +22,50 @@ fn main() {
 
     if let Some(cmd) = cli.command {
         match cmd {
+            blyte_cli::cli::Command::Init { force, print } => {
+                let out = std::process::Command::new("git")
+                    .args(["rev-parse", "--show-toplevel"])
+                    .output();
+                let Ok(out) = out else {
+                    eprintln!("error: git not found");
+                    std::process::exit(2);
+                };
+                if !out.status.success() {
+                    eprintln!("error: not a git repository");
+                    std::process::exit(2);
+                }
+                let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+                let detected = blyte_cli::config::detect(&root);
+
+                if print {
+                    print!("{}", blyte_cli::config::render(&detected));
+                    std::process::exit(0);
+                }
+
+                if detected.is_empty() {
+                    eprintln!(
+                        "no toolchain detected: write blyte.toml by hand (see blyte init --print for the format)"
+                    );
+                    std::process::exit(1);
+                }
+
+                let toml_path = root.join("blyte.toml");
+                if toml_path.exists() && !force {
+                    eprintln!("blyte.toml already exists; pass --force to overwrite");
+                    std::process::exit(1);
+                }
+
+                if let Err(e) = std::fs::write(&toml_path, blyte_cli::config::render(&detected)) {
+                    eprintln!("error writing {}: {e}", toml_path.display());
+                    std::process::exit(1);
+                }
+
+                println!("wrote {}", toml_path.display());
+                for step in &detected {
+                    println!("{step}");
+                }
+                std::process::exit(0);
+            }
             blyte_cli::cli::Command::Dispatch(args) => {
                 std::process::exit(blyte_cli::dispatch::run_dispatch(&args));
             }

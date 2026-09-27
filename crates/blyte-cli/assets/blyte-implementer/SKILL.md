@@ -59,7 +59,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test'
 ```
 
-- Each line of the gate is a step; all must pass. Put the slow full test run last.
+- **The gate:** if the repository has a `blyte.toml`, leave `--gate` out: blyte uses the
+  repository's own checks. If it has none, run `blyte init` once, read the gate it detected,
+  and fix it if it is wrong, or pass `--gate`. Each line is a step; all must pass; the slow full
+  test run goes last.
 - The implementer model's API key must be in the environment; blyte never prints it.
 
 **Starting parallel tasks.** If your harness tells you when a background command exits (an
