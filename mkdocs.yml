@@ -1,7 +1,7 @@
 site_name: blyte
 site_description: A lean coding-agent harness in Rust. One loop, a sealed verification gate, sandboxed tools.
 site_author: Climate X Engineering
-repo_url: https://github.com/climate-x-org/superstate
+repo_url: https://github.com/climate-x-org/blyte
 repo_name: blyte
 edit_uri: edit/main/docs/
 copyright: Apache-2.0 OR MIT

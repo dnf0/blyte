@@ -6,7 +6,7 @@ to blyte on a cheap model, and let the repository's own check, run as a sealed g
 it is done.
 
 ```bash
-cargo install --git https://github.com/climate-x-org/superstate blyte --locked
+cargo install --git https://github.com/climate-x-org/blyte blyte --locked
 blyte skill install          # the Claude Code skill for the plan, delegate, review workflow
 ```
 
@@ -18,7 +18,7 @@ blyte skill install          # the Claude Code skill for the plan, delegate, rev
 | `blyte skill install [--project]` / `blyte skill print` | install or print the Claude Code skill |
 | `blyte` | the REPL |
 
-Full documentation: the [repository README](https://github.com/climate-x-org/superstate#readme)
+Full documentation: the [repository README](https://github.com/climate-x-org/blyte#readme)
 and the docs (`docs/` in the repository).
 
 This crate is the binary; the loop, tools and sandbox are in `blyte-agent`, the model providers

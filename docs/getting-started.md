@@ -9,7 +9,7 @@ on its own is covered at the end.
 blyte is a single Rust binary, for macOS and Linux. With a recent stable Rust toolchain:
 
 ```bash
-cargo install --git https://github.com/climate-x-org/superstate blyte --locked
+cargo install --git https://github.com/climate-x-org/blyte blyte --locked
 blyte --version        # blyte 0.1.0 (<commit>)
 ```
 

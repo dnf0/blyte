@@ -1,12 +1,12 @@
 # Contributing to blyte
 
 Thanks for helping. blyte has one rule that shapes everything else: **every feature earns its place
-in measurement, or it goes.** Read the [manifesto](https://github.com/climate-x-org/superstate/blob/main/MANIFESTO.md) before proposing something large.
+in measurement, or it goes.** Read the [manifesto](https://github.com/climate-x-org/blyte/blob/main/MANIFESTO.md) before proposing something large.
 
 ## Set up
 
 ```bash
-git clone https://github.com/climate-x-org/superstate.git blyte
+git clone https://github.com/climate-x-org/blyte.git blyte
 cd blyte
 cargo build
 cargo install --path crates/blyte-cli --locked   # optional: put `blyte` on your PATH
@@ -77,7 +77,7 @@ docs/superpowers/       historical plans and specs, as written at the time (some
 
 ## Security issues
 
-Please do not open a public issue for a vulnerability; see [SECURITY.md](https://github.com/climate-x-org/superstate/blob/main/SECURITY.md).
+Please do not open a public issue for a vulnerability; see [SECURITY.md](https://github.com/climate-x-org/blyte/blob/main/SECURITY.md).
 
 ## Licence
 

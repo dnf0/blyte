@@ -84,4 +84,4 @@ See [Run reports](reports.md).
 
 ## Reporting a vulnerability
 
-See [`SECURITY.md`](https://github.com/climate-x-org/superstate/blob/main/SECURITY.md).
+See [`SECURITY.md`](https://github.com/climate-x-org/blyte/blob/main/SECURITY.md).
