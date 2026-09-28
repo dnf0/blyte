@@ -52,11 +52,7 @@ pub fn detect_provider_kind(model: Option<&str>) -> ProviderKind {
         if m.starts_with("ollama/") || m == "ollama" || m.contains(':') {
             return ProviderKind::Ollama;
         }
-        if m.starts_with("gemini")
-            || m.starts_with("gemini/")
-            || m.starts_with("vertex/")
-            || m == "vertex"
-        {
+        if m.starts_with("gemini") || m.starts_with("gemini/") {
             return ProviderKind::Gemini;
         }
     }
@@ -93,12 +89,10 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
     // Determine provider kind first so routing logic is unified
     let kind = detect_provider_kind(model);
 
-    let is_vertex = matches!(model, Some(m) if m.starts_with("vertex/") || m == "vertex");
-
     // Strip provider prefix from model string if present, treating bare provider names as default
     let clean_model = match model {
         Some("anthropic") | Some("ollama") | Some("gemini") | Some("openai")
-        | Some("openrouter") | Some("chatgpt") | Some("vertex") => None,
+        | Some("openrouter") | Some("chatgpt") => None,
         Some(m) => {
             let stripped = if let Some(s) = m.strip_prefix("chatgpt/") {
                 s
@@ -109,8 +103,6 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
             } else if let Some(s) = m.strip_prefix("anthropic/") {
                 s
             } else if let Some(s) = m.strip_prefix("gemini/") {
-                s
-            } else if let Some(s) = m.strip_prefix("vertex/") {
                 s
             } else if let Some(s) = m.strip_prefix("ollama/") {
                 s
@@ -129,11 +121,7 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
     // Instantiate provider adapter and apply stripped model identifier override if provided
     match kind {
         ProviderKind::Gemini => {
-            let mut p = if is_vertex {
-                crate::gemini::Gemini::vertex_from_env()?
-            } else {
-                crate::gemini::Gemini::from_env()?
-            };
+            let mut p = crate::gemini::Gemini::from_env()?;
             if let Some(m) = clean_model {
                 p = p.with_model(m);
             }
