@@ -2,8 +2,8 @@
 
 **Status:** Accepted
 **Date:** 2026-09-27
-**Supersedes:** [ADR 0001](https://github.com/climate-x-org/superstate/blob/main/docs/adr/0001-progressive-staged-verification.md) (progressive staged
-verification) and [ADR 0002](https://github.com/climate-x-org/superstate/blob/main/docs/adr/0002-detached-handoff-and-native-rust-harness.md) (detached handoff
+**Supersedes:** [ADR 0001](https://github.com/climate-x-org/blyte/blob/main/docs/adr/0001-progressive-staged-verification.md) (progressive staged
+verification) and [ADR 0002](https://github.com/climate-x-org/blyte/blob/main/docs/adr/0002-detached-handoff-and-native-rust-harness.md) (detached handoff
 and the native daemon harness)
 
 ## Context

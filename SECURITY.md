@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report vulnerabilities privately, through GitHub's
-[private vulnerability reporting](https://github.com/climate-x-org/superstate/security/advisories/new)
+[private vulnerability reporting](https://github.com/climate-x-org/blyte/security/advisories/new)
 for this repository, not in a public issue. Include what you found, how to reproduce it, and the
 blyte version (`blyte --version` prints the build commit).
 

@@ -33,7 +33,7 @@ flowchart LR
 
 ## Set up
 
-1. **Install blyte:** `cargo install --git https://github.com/climate-x-org/superstate blyte --locked`
+1. **Install blyte:** `cargo install --git https://github.com/climate-x-org/blyte blyte --locked`
 2. **Give it a cheap model:** `export GEMINI_API_KEY=...` (or [another provider](providers.md)).
 3. **Install the Claude Code skill:** `blyte skill install`. blyte becomes Claude Code's default
    implementer.
