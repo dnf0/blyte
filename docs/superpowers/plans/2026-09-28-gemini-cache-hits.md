@@ -1,7 +1,7 @@
 # Gemini Cache Hits — Plan
 
-**Status:** planned 2026-09-28; build after the offload v2 runs finish (changing blyte mid-experiment
-would break the comparison).
+**Status:** closed 2026-09-28, nothing built. Step 1 showed the misses are Gemini's; a probe
+(below) showed that explicit caching would cost more than it saves for blyte's growing context.
 
 ## The finding
 
@@ -68,7 +68,21 @@ prompt asks for independent calls to be batched in one turn. Each avoided turn s
 whole context (about 58K tokens in B1), so getting Gemini to batch may be worth more than the cache
 fix. That is its own plan.
 
-## Step 2: explicit context caching (only if Step 1 says so)
+## Step 2: explicit context caching — rejected after a probe
+
+**Probe (2026-09-28, about $0.10):** a 28,097-token explicit cache (system, tools, contents), then five
+turns each appending about 6K tokens. `cachedContentTokenCount` stayed at exactly 28,097 on every
+turn while `promptTokenCount` grew 34,276 → 59,076: the suffix after an explicit cache is billed
+fresh every turn, and implicit caching does not cover it. Creation is metered on the full cache
+(`usageMetadata.totalTokenCount` 28,097) plus storage ($0.50/M tokens/hour). Caches are immutable.
+
+So for a context that grows each turn, a cache must be recreated to cover new turns. At B1's rates
+(about 1K new tokens a turn, 60K context), recreating every R turns costs about R/2 K fresh tokens
+a turn for the tail plus 60K/R at creation: best near R = 11, about 11K fresh-equivalent a turn,
+against about 4K today (1K new plus half of the turns missing about 6.4K). Implicit caching, even
+missing half the time, is cheaper, because its misses are partial. Not built.
+
+The original design, kept for the record:
 
 Gemini's `cachedContents` API stores a prefix (system instruction, tools, contents) and returns a
 name; `generateContent` then sends `cachedContent: <name>` plus only the contents after it, and the
