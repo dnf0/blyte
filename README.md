@@ -39,8 +39,10 @@ flowchart LR
 ```
 
 Your frontier tokens go on the parts that need judgement: planning and review. The typing,
-test-running and fixing runs on a model that costs a fraction as much, inside a harness built to
-waste as little of it as possible. This is how blyte itself is built.
+test-running and fixing runs on a cheaper model, inside a harness built to waste as little of it as
+possible. In a first check against Claude doing the same work itself, Claude spent about a third as
+much when blyte implemented, for the same result. blyte took longer; independent tasks run in
+parallel, and adding blyte agents adds little frontier usage. This is how blyte itself is built.
 
 **Get started:** [install blyte](#install) and run `blyte skill install`. From then on Claude Code
 plans and reviews, and hands the implementation to blyte, independent tasks in parallel.
@@ -52,8 +54,8 @@ plans and reviews, and hands the implementation to blyte, independent tasks in p
 | **19 / 27** FrontierHarness tasks | blyte on its own on Gemini 3.8 Flash, no plan; the best published Kimi K3 configuration passed 17 / 27 |
 
 Both come with caveats (one model, our own repositories, a single run on a different model from
-the leaderboard's), and **the saving against a frontier model doing the whole task alone has not
-been measured yet**. [The evidence page](docs/evidence.md) has the method and all the caveats.
+the leaderboard's), and the comparison against a frontier model doing the whole task itself so far
+covers one task. [The evidence page](docs/evidence.md) has the method and all the caveats.
 
 Named after rust fungus (the blight Rust is named after), and bytes.
 

@@ -45,9 +45,14 @@ sequenceDiagram
     blyte was developed this way: every change in its own repositories was planned by Claude and
     implemented by blyte on Gemini 3.8 Flash, with results reviewed and merged by Claude. Against
     another harness doing the same tasks on the same model, blyte took about half the time and two
-    thirds of the cost ([Evidence](evidence.md)). **The saving against a frontier model doing the
-    whole task itself has not been measured yet**: the orchestrator's own planning and review cost
-    frontier tokens too. Measure it on your own work before relying on a number.
+    thirds of the cost ([Evidence](evidence.md)).
+
+    Against Claude doing the work itself, so far one task has been measured: with the same written
+    plan, Claude spent about a third as much when blyte implemented, the result passed every time
+    either way, and blyte took about two and a half times as long. Without a plan, Claude alone
+    failed. So the pattern pays when your frontier usage is what runs out, and when several
+    independent tasks can run at once; it does not pay for one small task you want done quickly.
+    Measure it on your own work before relying on a number.
 
 ## When to delegate, and when not to
 
