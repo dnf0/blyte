@@ -9,6 +9,9 @@
 > expected at blyte's rate, p ≈ 0.01). Streaming (`streamGenerateContent`) made no difference
 > (a 56-turn probe, 43% vs 46% by the old rule, identical by block). The likely fix is the Vertex AI
 > endpoint, which needs Google Cloud credentials; fewer turns remains the larger saving.
+>
+> **Update:** a real-task A/B (see `2026-09-28-gemini-vertex.md`) found Vertex no better on cache
+> and slower; it was reverted. The implicit-cache misses remain open, at about 10% of Gemini cost.
 
 **Status:** closed 2026-09-28, nothing built. Step 1 showed the misses are Gemini's; a probe
 (below) showed that explicit caching would cost more than it saves for blyte's growing context.
