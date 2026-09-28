@@ -1,13 +1,16 @@
 ---
 name: blyte-implementer
-description: Use by default whenever you would otherwise write the code yourself for a change in a git repository that has a check command (tests, lint): plan the change, split it into independent tasks and dispatch them to blyte in parallel (`blyte dispatch`, one worktree each, on a cheaper model, with the check as the gate), then verify every result yourself and merge. Skip it for design discussions, ambiguous requirements, one-line edits, and anything with no check.
+description: Use by default whenever you would otherwise write the code yourself for a change in a git repository that has a check command (tests, lint): plan the change, split it into independent tasks and dispatch them to blyte in parallel (`blyte dispatch`, one worktree each, on a cheaper model, with the check as the gate), then check each result and merge. Skip it for design discussions, ambiguous requirements, one-line edits, and anything with no check.
 ---
 
 # blyte as your implementer
 
-You plan and review; blyte implements, on a cheaper model, and its gate (the repository's check
-command) decides whether the work is done. Your job is to make each task unambiguous, run
-independent tasks at the same time, and verify every result, not to trust it.
+You plan; blyte implements, on a cheaper model, and its gate (the repository's check command)
+decides whether the work is done. **The plan is where your effort pays most.** Measured on a real
+task (2026-09-28): given a frontier model's plan, blyte passed every time at a fraction of the cost,
+with or without a detailed review; from its own plan it failed. So make each task unambiguous and
+its tests decisive, run independent tasks at the same time, and let a passing gate do most of the
+checking.
 
 ## When to delegate
 
@@ -33,13 +36,18 @@ artificially just to run it in parallel.
 ## 2. Write each task
 
 One task per Markdown file. blyte sees only this file and the repository, nothing from your
-conversation. Include:
+conversation. This is the step to spend your effort on: the gate can only check what the task's
+tests pin down. Include:
 
 - **Goal**, in one or two sentences, and **why**.
 - **Files** to create or change.
-- **What to build**: names, signatures and behaviour that are part of the contract; exact code
-  where it matters.
-- **Tests** that prove it, written out, and the command that runs them.
+- **What to build**: names, signatures and behaviour that are part of the contract, including
+  every edge case the change has to handle; exact code where it matters.
+- **Tests** that prove it, written out, one for each behaviour and edge case, and the command that
+  runs them. If a wrong implementation could pass them, the task is not finished.
+- **How**, when it matters: for a bulk mechanical change (a rename across many files), say to do it
+  with one script (`git mv`, `sed`) and then fix the exceptions by hand; otherwise the implementer
+  may edit file by file and run out of turns.
 - **Constraints**, e.g. "existing tests pass unmodified".
 - **Siblings**: for a task running in parallel, name the other tasks and say they are **not** in
   this worktree ("T2 adds `slugify` separately; do not add it here"), so it does not "fix" their
@@ -92,17 +100,23 @@ Each dispatch prints one JSON object: `outcome` (`verified`, `no_changes`, `gate
 `final_message` (blyte's own report), `gate_failures`, `turns`, `cost_usd`, `seconds`, and the
 `log` and `report` paths. `no_changes` means the gate passed on an untouched tree: not done.
 
-## 4. Verify each result. Do not trust the summary
+## 4. Check each result: trust the gate, not the summary
 
 ```bash
 blyte review T1 --diff
 ```
 
+**When the gate passed (`verified`)**, a light check is enough:
+
 1. **Scope**: only the files the task names changed, in the commit(s) you asked for, with the exact message.
-2. **Fidelity**: code you gave verbatim landed verbatim; read everything else in full.
-3. **Checks yourself**: run the gate in the worktree (`.wt/T1`). A passing gate is necessary, not sufficient.
-4. **Deviations**: every deviation in `final_message` is justified, and there are none it did not mention.
-5. **Out-of-scope effects**: skim the log (`.wt/T1.log`) for commands that touched anything outside the worktree.
+2. **Deviations**: every deviation in `final_message` is justified, and the diff shows none it did not mention.
+3. **Out-of-scope effects**: skim the log (`.wt/T1.log`) for commands that touched anything outside the worktree.
+
+You do not need to re-run the gate: it ran the repository's checks and they passed.
+
+**Review in depth** (read the whole diff, re-run the gate in `.wt/T1`, check verbatim code landed
+verbatim) when the gate failed or the budget ran out, when the change is risky (security, data
+handling, migrations, a public interface), or when the diff surprises you.
 
 If it falls short: fix a trivial issue yourself, or write a follow-up task saying exactly what to
 change and dispatch it (`blyte dispatch T1b follow-up.md --base wip/T1 --gate ...`). If the task was

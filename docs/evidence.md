@@ -150,9 +150,24 @@ setups used, so its cost falls on neither. Claude's own setup and plugins were k
   they would have one after another (nearly three times with three or four at once), and each one
   adds Gemini usage; Claude's part stays its plan and its review.
 
-**So:** the pattern pays when frontier usage is the constraint (a subscription's limits, or an API
-bill) and when there is planned work that splits into independent tasks. For one small task that
-you want done quickly, Claude alone is faster.
+**Who writes the plan, and is the review needed?** Three more setups on the same task, on Gemini
+only, two runs each: blyte alone on the raw task; blyte writing its own plan and then implementing
+it; and blyte implementing Claude's plan with no Claude review.
+
+- **A frontier plan with blyte implementing, unreviewed, was the best combination**: it passed both
+  times and was the cheapest and fastest pass of any setup, about two dollars of Gemini and a
+  quarter of an hour, on top of the one-off plan.
+- **Claude's review added no quality here**: with and without it, blyte's work passed; with it, the
+  task cost about twice as much and took three times as long. The gate did the checking.
+- **A weak plan is worse than none**: from its own plan blyte failed both runs, a few target tests
+  short, while from the raw task it passed both.
+- **blyte alone beat Claude alone on this task**, passing both runs at about two thirds of the cost.
+  On the FrontierHarness tasks blyte alone passed 5 of 9 of the same kind, so this varies by task.
+
+**So:** spend the frontier model on the plan, let a passing gate do most of the checking, and keep
+deep review for failed gates and risky changes. The pattern pays when frontier usage is the
+constraint (a subscription's limits, or an API bill) and when planned work splits into independent
+tasks. For one small task that you want done quickly, Claude alone is faster.
 
 **Known costs on Gemini.** Gemini makes one tool call per turn, whatever the prompt asks, so blyte
 on Gemini takes more turns than Claude does for the same work, and every turn re-sends the context.
@@ -161,7 +176,6 @@ investigated; neither a prompt change, a multi-file read, streaming, explicit ca
 AI endpoint improved them, so none of those were kept.
 
 **Limits.** One task and two runs per setup: a direction, not a rate. The plan was unusually
-detailed, which favours delegation. Only the blyte setup had a review step (Claude checking blyte's
-work). Claude's cost is the notional list price that Claude Code reports under a subscription.
-Results: superstate-eval `results/offload-v2-sonnet-20260928-1028/`.
+detailed, which favours delegation. Claude's cost is the notional list price that Claude Code reports under a subscription.
+Results: blyte-eval `results/offload-v2-sonnet-20260928-1028/` and `results/offload-v3-blyte-20260928-1754/`.
 

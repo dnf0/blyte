@@ -1,9 +1,10 @@
 # blyte as the implementer for a frontier model
 
-A pattern that works well: a frontier model (Claude Code, for example) **plans and reviews**, and
-hands each well-specified task to blyte, which **implements** it on a cheaper model. The
-repository's check command, run by blyte as its sealed gate, decides whether the work is done. The
-frontier model then verifies the result and merges it.
+A pattern that works well: a frontier model (Claude Code, for example) **plans**, and hands each
+well-specified task to blyte, which **implements** it on a cheaper model. The repository's check
+command, run by blyte as its sealed gate, decides whether the work is done. The frontier model
+then checks the result and merges it. The plan is where the frontier model earns its keep: the
+better the task and its tests, the less there is to review.
 
 ```mermaid
 sequenceDiagram
@@ -47,11 +48,11 @@ sequenceDiagram
     another harness doing the same tasks on the same model, blyte took about half the time and two
     thirds of the cost ([Evidence](evidence.md)).
 
-    Against Claude doing the work itself, so far one task has been measured: with the same written
-    plan, Claude spent about a third as much when blyte implemented, the result passed every time
-    either way, and blyte took about two and a half times as long. Without a plan, Claude alone
-    failed. So the pattern pays when your frontier usage is what runs out, and when several
-    independent tasks can run at once; it does not pay for one small task you want done quickly.
+    Against Claude doing the work itself, one task has been measured so far, with two runs per
+    setup: with a plan written by Claude, blyte passed every time, whether or not Claude reviewed
+    its work, and without the review it was the cheapest and fastest setup of all. From a plan blyte
+    wrote itself, it failed. Without a plan, Claude alone failed. So spend the frontier model on the
+    plan, let a passing gate do most of the checking, and run independent tasks at once.
     Measure it on your own work before relying on a number.
 
 ## When to delegate, and when not to
@@ -122,16 +123,18 @@ Budgets and sandbox flags (`--max-seconds`, `--max-turns`, `--max-cost`, `--mode
 `--allow-read`, `--pass-env`) pass through to the run; `.wt/` is added to `.git/info/exclude`, so
 no tracked file changes.
 
-**3. Verify it yourself:**
+**3. Check it:**
 
 ```bash
 blyte review T1 --diff
 ```
 
-This shows the commits, changed files, the worktree's state, blyte's report and the diff. Check
-scope (only the files the task names), fidelity (code you gave verbatim landed verbatim), the
-checks (run the gate yourself in `.wt/T1`), and every deviation blyte's report mentions. A passing
-gate is necessary, not sufficient.
+This shows the commits, changed files, the worktree's state, blyte's report and the diff. When the
+gate passed, a light check is enough: scope (only the files the task names), every deviation
+blyte's report mentions, and a skim of the log for anything outside the worktree. Review in depth
+(the whole diff, the gate re-run in `.wt/T1`) when the gate failed, when the change is risky
+(security, data handling, migrations, a public interface), or when the diff surprises you. The gate
+is only as good as the task's tests, which is why the plan matters most.
 
 **4. Merge or follow up:**
 
