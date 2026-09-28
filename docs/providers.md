@@ -6,6 +6,7 @@ credentials itself; they are removed from the environment of every command the m
 | model name | provider | credentials |
 |---|---|---|
 | `gemini-3.8-flash-high` (default) | Google Gemini; `-low` / `-medium` / `-high` sets the thinking level | `GEMINI_API_KEY` |
+| `vertex/<model>` (e.g. `vertex/gemini-3.8-flash-high`) | Google Gemini on Vertex AI; `-low` / `-medium` / `-high` sets the thinking level | Application Default Credentials (`gcloud auth application-default login`) or `GOOGLE_OAUTH_ACCESS_TOKEN`, `GOOGLE_CLOUD_PROJECT` |
 | `claude-…` or `anthropic/…` | Anthropic | `ANTHROPIC_API_KEY` |
 | `openai/<model>` | any OpenAI-compatible API: OpenAI, or a local vLLM or LM Studio server | `OPENAI_API_KEY`, `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) |
 | `openrouter/<vendor>/<model>` | OpenRouter | `OPENROUTER_API_KEY` |
@@ -31,6 +32,16 @@ report's `cost_usd` and `--max-cost` work. For another model, compare token coun
 
 **Gemini.** The default. The thinking suffix is part of the name: `gemini-3.8-flash-low` thinks
 least and costs least.
+
+**Gemini on Vertex AI.** Select by prefixing the model with `vertex/`, e.g. `--model vertex/gemini-3.8-flash-high`.
+Runs Gemini through Vertex AI instead of the Gemini API (AI Studio key), authenticated with your own
+Application Default Credentials (`gcloud auth application-default login`) or `GOOGLE_OAUTH_ACCESS_TOKEN`.
+blyte ships no account and assumes no project: it uses the user's own credentials and project.
+
+Configuration:
+- `GOOGLE_CLOUD_PROJECT`: Google Cloud project id (falls back to the ADC file's `quota_project_id`).
+- `GOOGLE_CLOUD_LOCATION`: Vertex AI region (defaults to `global`).
+- Service-account key files are not supported yet: set `GOOGLE_OAUTH_ACCESS_TOKEN`, for example from `gcloud auth print-access-token`.
 
 **Anthropic.** Prompt caching is on: blyte marks cache breakpoints on the tool definitions and the
 latest message, so each turn pays full price only for what is new.

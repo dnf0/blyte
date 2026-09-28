@@ -80,3 +80,12 @@ fn withheld_variables_are_removed_from_commands_and_passed_ones_are_kept() {
     assert!(env.contains("ZZ_BLYTE_TEST_PASS_TOKEN=kept-value"));
     assert!(env.contains("ZZ_BLYTE_TEST_PLAIN=plain-value"));
 }
+
+#[test]
+fn a_vertex_access_token_is_withheld_from_commands() {
+    // `--model vertex/...` may authenticate with GOOGLE_OAUTH_ACCESS_TOKEN (2026-09-28).
+    assert!(blyte_agent::shell::credential_like(
+        "GOOGLE_OAUTH_ACCESS_TOKEN",
+        "x"
+    ));
+}
