@@ -12,5 +12,4 @@ ureq = { version = "2.12", features = ["json"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-blyte-agent = { path = "../blyte-agent" }
 

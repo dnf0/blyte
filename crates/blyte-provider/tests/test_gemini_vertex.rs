@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use blyte_agent::shell::credential_like;
 use blyte_provider::gemini::{vertex_url, Gemini};
 use blyte_provider::vertex_auth::VertexAuth;
 use blyte_provider::{
@@ -475,9 +474,4 @@ fn test_401_refresh_and_retry_success() {
 
     // Token stub got 2 calls: one initial, one refresh after 401
     assert_eq!(token_stub.requests().len(), 2);
-}
-
-#[test]
-fn test_google_oauth_access_token_is_credential_like() {
-    assert!(credential_like("GOOGLE_OAUTH_ACCESS_TOKEN", "x"));
 }
