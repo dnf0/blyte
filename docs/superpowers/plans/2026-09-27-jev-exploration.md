@@ -69,3 +69,21 @@ Sources: [MindStudio: Jev launch](https://www.mindstudio.ai/blog/jev-system-one-
 [OpenRouter: What is Jev](https://openrouter.ai/blog/insights/what-is-jev/),
 [Pydantic AI: TypeSafe (Jev)](https://pydantic.dev/docs/ai/models/typesafe/),
 [LiteLLM: TypeSafe pass-through](https://docs.litellm.ai/docs/pass_through/typesafe).
+
+## Local open models (added 2026-09-28)
+
+Jev itself is closed (no official weights). Open "Jev-like" models implement the same typed
+questions (choice, score, yes/no with probabilities) and could run on the developer's Mac, which
+would make the offline studies free and keep company code on the machine.
+
+- **Leaderboard:** [JevBench v1.4.2](https://benchmarkheaven.com/jev-models/v1.4.2) (Benchmark Heaven,
+  independent, beta) ranks 93 Jev-class systems on intelligence, calibration, speed and cost.
+  Hosted Jev 1.13.0 scores 63.3; open entries close to it include decider-4b v2 (64.1), JevK5
+  v0.2.0 (62.0) and Cygnet (Gemma-4-12B with an adapter, 61.8). Several entries disclose
+  benchmark-directed development, so read each entry's notes before trusting its score.
+- **Licence matters for company use:** openjev (27B, with an Apple-silicon MLX 4-bit build of about
+  15 GB) is CC BY-NC 4.0, non-commercial; autotrust JEV-9B (Qwen3.5-9B base) is Apache-2.0 but ships
+  only bf16 weights (about 18 GB) for vLLM.
+- **Before any study uses one:** pick a small, permissively licensed entry from the leaderboard,
+  check it runs on the Mac at a usable speed, and score it on the same labelled set as hosted Jev
+  (candidate 1: environment or code?), so the local model's accuracy is measured, not assumed.
