@@ -396,13 +396,12 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "read".into(),
-            description: "Read one file (path) or several at once (paths, up to 10). Up to 2,000 lines (60,000 characters) come back in one call, so read whole files; pass start_line/end_line only for one larger file. To read several files, pass them together as paths, or call read once per file in the same response.".into(),
+            description: "Read a file. Up to 2,000 lines (60,000 characters) come back in one call, so read whole files; pass start_line/end_line only for larger ones. To read several files, call read once per file in the same response.".into(),
             parameters: json!({"type":"object","properties":{
                 "path":{"type":"string"},
-                "paths":{"type":"array","items":{"type":"string"},"maxItems":10},
                 "start_line":{"type":"integer","description":"1-indexed, inclusive"},
                 "end_line":{"type":"integer","description":"1-indexed, inclusive"}},
-                "required":[]}),
+                "required":["path"]}),
         },
         ToolSpec {
             name: "write".into(),
@@ -537,181 +536,48 @@ fn execute_unbounded(
     };
     match name {
         "read" => {
-            let has_path = args.get("path").is_some_and(|v| !v.is_null());
-            let has_paths = args.get("paths").is_some_and(|v| !v.is_null());
-
-            if has_path && has_paths {
-                return ToolOutcome::err("pass one of `path` or `paths`, not both");
-            }
-            if !has_path && !has_paths {
-                return ToolOutcome::err("pass one of `path` or `paths`");
-            }
-
-            if has_path {
-                let path_str = s("path");
-                let path = match resolve_in_workspace(fs, root, &path_str) {
-                    Ok(p) => p,
-                    Err(e) => return ToolOutcome::err(e),
-                };
-                let body = match fs.read(&path) {
-                    Ok(b) => b,
-                    Err(e) => return ToolOutcome::err(e),
-                };
-                let lines: Vec<&str> = body.lines().collect();
-                let start = args
-                    .get("start_line")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1)
-                    .max(1) as usize;
-                // A read from the top of a file that fits comes back whole, whatever end_line says:
-                // models page from line 1 out of habit (a shadow run read 700 lines as six 200-line
-                // calls). A range starting later is a deliberate re-read and is honoured.
-                let fits =
-                    lines.len() <= READ_LINE_BUDGET && body.chars().count() <= MAX_OUTPUT_CHARS;
-                let end = if start == 1 && fits {
-                    lines.len()
-                } else {
-                    args.get("end_line")
-                        .and_then(|v| v.as_u64())
-                        .map(|e| e as usize)
-                        .unwrap_or(lines.len())
-                        .min(lines.len())
-                };
-                if start > lines.len() {
-                    return ToolOutcome::err(format!(
-                        "{} has {} lines; start_line {start} is past the end",
-                        path_str,
-                        lines.len()
-                    ));
-                }
-                // Numbered, because an agent that cannot cite a line cannot edit precisely.
-                let body = lines[start - 1..end]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, l)| format!("{:>6}\t{l}", start + i))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ToolOutcome::ok(distil(&body, READ_LINE_BUDGET))
+            let path = match resolve_in_workspace(fs, root, &s("path")) {
+                Ok(p) => p,
+                Err(e) => return ToolOutcome::err(e),
+            };
+            let body = match fs.read(&path) {
+                Ok(b) => b,
+                Err(e) => return ToolOutcome::err(e),
+            };
+            let lines: Vec<&str> = body.lines().collect();
+            let start = args
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as usize;
+            // A read from the top of a file that fits comes back whole, whatever end_line says:
+            // models page from line 1 out of habit (a shadow run read 700 lines as six 200-line
+            // calls). A range starting later is a deliberate re-read and is honoured.
+            let fits = lines.len() <= READ_LINE_BUDGET && body.chars().count() <= MAX_OUTPUT_CHARS;
+            let end = if start == 1 && fits {
+                lines.len()
             } else {
-                if args.get("start_line").is_some_and(|v| !v.is_null())
-                    || args.get("end_line").is_some_and(|v| !v.is_null())
-                {
-                    return ToolOutcome::err(
-                        "start_line and end_line only apply to a single file (`path`)",
-                    );
-                }
-
-                let Some(raw_paths) = args.get("paths").and_then(|v| v.as_array()) else {
-                    return ToolOutcome::err("`paths` must be an array of strings");
-                };
-                if raw_paths.is_empty() {
-                    return ToolOutcome::err("pass one of `path` or `paths`");
-                }
-                if raw_paths.len() > 10 {
-                    return ToolOutcome::err(format!("too many paths ({} > 10)", raw_paths.len()));
-                }
-                let mut paths = Vec::with_capacity(raw_paths.len());
-                for item in raw_paths {
-                    match item.as_str() {
-                        Some(s) => paths.push(s),
-                        None => return ToolOutcome::err("`paths` must contain only strings"),
-                    }
-                }
-
-                let mut blocks: Vec<String> = Vec::new();
-                let mut unread: Vec<&str> = Vec::new();
-                let mut success_count = 0;
-
-                for (i, &p) in paths.iter().enumerate() {
-                    let (content, is_file_error) = match resolve_in_workspace(fs, root, p) {
-                        Ok(path) => match fs.read(&path) {
-                            Ok(body) => {
-                                let numbered = body
-                                    .lines()
-                                    .enumerate()
-                                    .map(|(line_idx, l)| format!("{:>6}\t{l}", line_idx + 1))
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                (numbered, false)
-                            }
-                            Err(e) => (e, true),
-                        },
-                        Err(e) => (e, true),
-                    };
-
-                    let whole_block = if content.is_empty() {
-                        format!("==> {p} <==")
-                    } else {
-                        format!("==> {p} <==\n{content}")
-                    };
-
-                    if i == 0 {
-                        if is_file_error {
-                            blocks.push(whole_block);
-                        } else {
-                            success_count += 1;
-                            let fits = whole_block.lines().count() <= READ_LINE_BUDGET
-                                && whole_block.chars().count() <= MAX_OUTPUT_CHARS;
-                            if fits {
-                                blocks.push(whole_block);
-                            } else {
-                                // A single file larger than the whole budget behaves as a single-file
-                                // read of it would (its first READ_LINE_BUDGET lines, with the existing note),
-                                // and only when it is the first file.
-                                let body = distil(&content, READ_LINE_BUDGET);
-                                blocks.push(format!("==> {p} <==\n{body}"));
-                                if paths.len() > 1 {
-                                    unread.extend_from_slice(&paths[1..]);
-                                }
-                                break;
-                            }
-                        }
-                    } else {
-                        let mut candidate_blocks = blocks.clone();
-                        candidate_blocks.push(whole_block.clone());
-                        let candidate_text = candidate_blocks.join("\n\n");
-
-                        let unread_reserve = if i + 1 < paths.len() {
-                            let sample = format!(
-                                "\n\nnot read (over this call's budget; read separately): {}",
-                                paths[i + 1..].join(", ")
-                            );
-                            (sample.chars().count(), 2)
-                        } else {
-                            (0, 0)
-                        };
-
-                        let fits = candidate_text.lines().count() + unread_reserve.1
-                            <= READ_LINE_BUDGET
-                            && candidate_text.chars().count() + unread_reserve.0
-                                <= MAX_OUTPUT_CHARS;
-
-                        if fits {
-                            if !is_file_error {
-                                success_count += 1;
-                            }
-                            blocks.push(whole_block);
-                        } else {
-                            unread.extend_from_slice(&paths[i..]);
-                            break;
-                        }
-                    }
-                }
-
-                if !unread.is_empty() {
-                    blocks.push(format!(
-                        "not read (over this call's budget; read separately): {}",
-                        unread.join(", ")
-                    ));
-                }
-
-                let result = blocks.join("\n\n");
-                if success_count == 0 {
-                    ToolOutcome::err(result)
-                } else {
-                    ToolOutcome::ok(result)
-                }
+                args.get("end_line")
+                    .and_then(|v| v.as_u64())
+                    .map(|e| e as usize)
+                    .unwrap_or(lines.len())
+                    .min(lines.len())
+            };
+            if start > lines.len() {
+                return ToolOutcome::err(format!(
+                    "{} has {} lines; start_line {start} is past the end",
+                    s("path"),
+                    lines.len()
+                ));
             }
+            // Numbered, because an agent that cannot cite a line cannot edit precisely.
+            let body = lines[start - 1..end]
+                .iter()
+                .enumerate()
+                .map(|(i, l)| format!("{:>6}\t{l}", start + i))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ToolOutcome::ok(distil(&body, READ_LINE_BUDGET))
         }
         "write" => {
             let path = match resolve_in_workspace(fs, root, &s("path")) {
