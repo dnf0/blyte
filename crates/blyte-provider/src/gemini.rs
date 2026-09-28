@@ -6,6 +6,7 @@
 
 use serde_json::{json, Value};
 
+use crate::vertex_auth::VertexAuth;
 use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
 
 const DEFAULT_MODEL: &str = "gemini-3.8-flash";
@@ -40,8 +41,33 @@ fn push_part(contents: &mut [Value], part: Value) {
     }
 }
 
+/// Vertex AI endpoint for generateContent requests.
+pub fn vertex_url(project: &str, location: &str, model: &str) -> String {
+    if location == "global" {
+        format!(
+            "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{model}:generateContent"
+        )
+    } else {
+        format!(
+            "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent"
+        )
+    }
+}
+
+enum Backend {
+    GenerativeLanguage {
+        api_key: String,
+    },
+    Vertex {
+        project: String,
+        location: String,
+        auth: VertexAuth,
+        vertex_root: Option<String>,
+    },
+}
+
 pub struct Gemini {
-    api_key: String,
+    backend: Backend,
     model: String,
     thinking_level: Option<String>,
 }
@@ -55,10 +81,73 @@ impl Gemini {
         let (model, thinking_level) =
             split_effort(&std::env::var("BLYTE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()));
         Ok(Self {
-            api_key,
+            backend: Backend::GenerativeLanguage { api_key },
             model,
             thinking_level,
         })
+    }
+
+    /// Creates a [`Gemini`] instance configured for Vertex AI with explicit parameters.
+    pub fn vertex(
+        project: impl Into<String>,
+        location: impl Into<String>,
+        auth: VertexAuth,
+    ) -> Self {
+        let (model, thinking_level) =
+            split_effort(&std::env::var("BLYTE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()));
+        Self {
+            backend: Backend::Vertex {
+                project: project.into(),
+                location: location.into(),
+                auth,
+                vertex_root: None,
+            },
+            model,
+            thinking_level,
+        }
+    }
+
+    /// Reads Vertex AI configuration and ADC credentials from ambient environment.
+    pub fn vertex_from_env() -> Result<Self, ProviderError> {
+        let auth = VertexAuth::from_env()?;
+        let project = std::env::var("GOOGLE_CLOUD_PROJECT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| auth.quota_project_id().map(String::from))
+            .or_else(crate::vertex_auth::quota_project_id_from_env)
+            .ok_or(ProviderError::MissingKey("GOOGLE_CLOUD_PROJECT"))?;
+        let location = std::env::var("GOOGLE_CLOUD_LOCATION")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "global".to_string());
+        let (model, thinking_level) =
+            split_effort(&std::env::var("BLYTE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()));
+        Ok(Self {
+            backend: Backend::Vertex {
+                project,
+                location,
+                auth,
+                vertex_root: None,
+            },
+            model,
+            thinking_level,
+        })
+    }
+
+    /// Overrides the root URL prefix for Vertex AI requests (for local stub tests).
+    pub fn with_vertex_root(mut self, root: impl Into<String>) -> Self {
+        if let Backend::Vertex {
+            ref mut vertex_root,
+            ..
+        } = self.backend
+        {
+            let mut r = root.into();
+            if r.ends_with('/') {
+                r.pop();
+            }
+            *vertex_root = Some(r);
+        }
+        self
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -281,13 +370,56 @@ impl Gemini {
 
 impl Provider for Gemini {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        let url = format!("{API_ROOT}/{}:generateContent", self.model);
         let agent = crate::http_client();
-        let resp = agent
-            .post(&url)
-            .set("x-goog-api-key", &self.api_key)
-            .set("content-type", "application/json")
-            .send_json(self.body(req));
+        let body = self.body(req);
+
+        let resp = match &self.backend {
+            Backend::GenerativeLanguage { api_key } => {
+                let url = format!("{API_ROOT}/{}:generateContent", self.model);
+                agent
+                    .post(&url)
+                    .set("x-goog-api-key", api_key)
+                    .set("content-type", "application/json")
+                    .send_json(body)
+            }
+            Backend::Vertex {
+                project,
+                location,
+                auth,
+                vertex_root,
+            } => {
+                let url = if let Some(root) = vertex_root {
+                    format!(
+                        "{root}/v1/projects/{project}/locations/{location}/publishers/google/models/{}:generateContent",
+                        self.model
+                    )
+                } else {
+                    vertex_url(project, location, &self.model)
+                };
+
+                let token = auth.token()?;
+                let first_resp = agent
+                    .post(&url)
+                    .set("Authorization", &format!("Bearer {token}"))
+                    .set("x-goog-user-project", project)
+                    .set("content-type", "application/json")
+                    .send_json(body.clone());
+
+                if let Err(ureq::Error::Status(401, r)) = first_resp {
+                    let _ = r.into_string();
+                    auth.clear_cached_token();
+                    let token = auth.token()?;
+                    agent
+                        .post(&url)
+                        .set("Authorization", &format!("Bearer {token}"))
+                        .set("x-goog-user-project", project)
+                        .set("content-type", "application/json")
+                        .send_json(body)
+                } else {
+                    first_resp
+                }
+            }
+        };
 
         match resp {
             Ok(r) => {
@@ -305,29 +437,43 @@ impl Provider for Gemini {
     }
 
     fn model_id(&self) -> String {
-        format!("gemini/{}", self.model)
+        match &self.backend {
+            Backend::GenerativeLanguage { .. } => format!("gemini/{}", self.model),
+            Backend::Vertex { .. } => format!("vertex/{}", self.model),
+        }
+    }
+
+    fn thinking_level(&self) -> Option<&str> {
+        self.thinking_level()
     }
 
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let url = API_ROOT;
-        // Build an agent with bounded connection and read timeouts.
-        let agent = crate::http_client();
-        // Query Google GenAI models list endpoint using AI Studio API key header.
-        let resp = agent.get(url).set("x-goog-api-key", &self.api_key).call();
+        match &self.backend {
+            Backend::GenerativeLanguage { api_key } => {
+                let url = API_ROOT;
+                let agent = crate::http_client();
+                let resp = agent.get(url).set("x-goog-api-key", api_key).call();
 
-        match resp {
-            Ok(r) => {
-                // Parse JSON payload and delegate model filtering/extraction.
-                let v: Value = r
-                    .into_json()
-                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
-                Self::parse_models_list(&v)
+                match resp {
+                    Ok(r) => {
+                        let v: Value = r
+                            .into_json()
+                            .map_err(|e| ProviderError::Parse(e.to_string()))?;
+                        Self::parse_models_list(&v)
+                    }
+                    Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
+                        status,
+                        body: r.into_string().unwrap_or_default(),
+                    }),
+                    Err(e) => Err(ProviderError::Transport(e.to_string())),
+                }
             }
-            Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
-                status,
-                body: r.into_string().unwrap_or_default(),
-            }),
-            Err(e) => Err(ProviderError::Transport(e.to_string())),
+            Backend::Vertex { .. } => Ok(vec![ModelInfo {
+                id: self.model.clone(),
+                display_name: self.model.clone(),
+                description: None,
+                provider: "gemini".to_string(),
+            }]),
         }
     }
 }

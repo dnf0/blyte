@@ -25,6 +25,7 @@ pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub mod registry;
+pub mod vertex_auth;
 
 pub use registry::{detect_provider_kind, discover_all_models, resolve_provider, ProviderKind};
 
@@ -187,6 +188,10 @@ pub trait Provider {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError>;
     /// Identifier recorded in telemetry, e.g. `gemini/gemini-3.8-flash`.
     fn model_id(&self) -> String;
+    /// The thinking effort level (e.g. `low`, `medium`, `high`) if configured.
+    fn thinking_level(&self) -> Option<&str> {
+        None
+    }
     /// Lists available models supported by this provider for the configured credentials.
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(Vec::new())
