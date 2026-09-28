@@ -1,5 +1,15 @@
 # Gemini Cache Hits — Plan
 
+> **Correction (2026-09-28, later the same day):** the miss counts below overstate the problem. Gemini
+> caches in 4,096-token blocks and serves at best the previous prompt rounded down to a block, so up
+> to 4K of fresh input a turn is structural, and the first rule counted it as a miss. Scored
+> block-aware (a true miss serves at least one block less than that), blyte's true misses are
+> **22% of turns in B1 (0.38M tokens, about $0.26, 10% of its Gemini cost)** and **24% over 5,573
+> earlier turns (10.2M tokens, about $7)**. A 16-turn agy probe on Vertex AI had none (about 4
+> expected at blyte's rate, p ≈ 0.01). Streaming (`streamGenerateContent`) made no difference
+> (a 56-turn probe, 43% vs 46% by the old rule, identical by block). The likely fix is the Vertex AI
+> endpoint, which needs Google Cloud credentials; fewer turns remains the larger saving.
+
 **Status:** closed 2026-09-28, nothing built. Step 1 showed the misses are Gemini's; a probe
 (below) showed that explicit caching would cost more than it saves for blyte's growing context.
 
