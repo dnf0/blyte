@@ -16,8 +16,10 @@ on an appended turn only the new messages should be billed as fresh input. They 
 | 3 | 84 | 427K | ~85K | 46 |
 | total | 237 | 1.33M | ~241K | 115 of 229 |
 
-(A miss here: fresh input above both 4K tokens and three times the new content.) About 1.1M tokens
-were billed at $0.75/M instead of $0.075/M: roughly $0.75, 30% of the run's $2.56 of Gemini.
+(A miss here: fresh input above both 4K tokens and three times the new content.) Counting only the
+missed turns, 0.74M tokens beyond their new content were billed at $0.75/M instead of $0.075/M:
+about $0.50, 20% of the run's $2.56 of Gemini ($0.74, 29%, if every appended turn had billed only
+its new content).
 
 The cost arithmetic itself is right: the adapter subtracts `cachedContentTokenCount` from
 `promptTokenCount` before pricing (`gemini.rs`). The request body is built deterministically and
@@ -41,6 +43,30 @@ Establish whether the misses are ours or Gemini's before building anything.
    to see whether B1 is typical (use the same miss rule).
 
 Decision: our bug → fix it (a unit test pins prefix stability). Gemini's → Step 2.
+
+### Step 1 findings (offline, 2026-09-28)
+
+Items 2 and 3, on B1 and on 88 earlier blyte-on-Gemini reports in superstate-eval `results/`
+(5,571 appended turns):
+
+| | B1 | earlier runs |
+|---|---|---|
+| miss rate | 50% | 53% |
+| excess fresh input on missed turns | 0.74M | 20.0M (about $13.50) |
+
+- **Not expiry:** turns less than 5 s after the previous request miss 51% of the time.
+- **Not size:** about 50% at every prompt size (under 32K, 32–64K, over 64K).
+- **Not folds:** the first turn after a fold misses less (36%).
+- **Clustered:** a miss follows a miss 69% of the time, a hit 35%. That fits requests being served
+  by backends that do not hold the cache, i.e. implicit caching being best-effort.
+
+So the misses look like Gemini's, and Step 2 is the fix; item 1 (byte identity) remains as a quick
+confirmation with the first Step 2 task.
+
+**Also found:** on 5,565 of those 5,571 turns, Gemini made a single tool call, though blyte's system
+prompt asks for independent calls to be batched in one turn. Each avoided turn saves re-sending the
+whole context (about 58K tokens in B1), so getting Gemini to batch may be worth more than the cache
+fix. That is its own plan.
 
 ## Step 2: explicit context caching (only if Step 1 says so)
 
