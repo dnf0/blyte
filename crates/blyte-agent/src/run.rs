@@ -298,12 +298,9 @@ impl<'a> Runner<'a> {
              home-directory files or system settings. If something outside it blocks you \
              (disk space, network, a missing tool), say so and stop.\n\n\
              ## Working efficiently\n\
-             Every turn re-sends this whole conversation, so turns are what a run costs. When you \
-             need several things that do not depend on each other, ask for all of them at once, \
-             as several tool calls in one turn: for example, to look at three files, pass all \
-             three to one read call as paths (or call `read` three times in the same response), \
-             not one per response. The calls run in order and you see every result together. Only \
-             wait for a result when the next call depends on it.\n",
+             Independent reads, searches and commands can be issued as several tool calls in one \
+             turn: they run in order and you see every result together. Batch them whenever one \
+             does not depend on another's result; every turn you save is a full model call.\n",
             goal = state.orchestrator.goal,
             completion = completion,
             where_ = self.shell.describe(),
@@ -757,16 +754,6 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
                     (None, None) => return path.to_string(),
                 }
             }
-            if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
-                let names: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-                if names.len() <= 3 {
-                    return names.join(", ");
-                } else {
-                    let first_three = names[..3].join(", ");
-                    let rem = names.len() - 3;
-                    return format!("{first_three} (+{rem})");
-                }
-            }
         }
         "write" => {
             // Extract the destination path and include byte size for visibility into write volume.
@@ -842,14 +829,8 @@ pub fn extract_action_summary(tool: &str, content: &str, is_error: bool) -> Stri
             if is_error {
                 let first = content
                     .lines()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty() && !(l.starts_with("==>") && l.ends_with("<==")))
-                    .unwrap_or_else(|| {
-                        content
-                            .lines()
-                            .find(|l| !l.trim().is_empty())
-                            .unwrap_or("read failed")
-                    });
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("read failed");
                 let clamped: String = first.chars().take(80).collect();
                 format!("failed: {clamped}")
             } else {

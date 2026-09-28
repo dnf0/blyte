@@ -129,3 +129,13 @@ and the event input for `read`), `crates/blyte-agent/src/run.rs` system prompt e
 git add -A crates
 git commit --no-gpg-sign -m "feat(agent): read takes several paths, so one call can bring several files into one turn"
 ```
+
+## Result (2026-09-28): both tasks reverted
+
+In the Vertex A/B above (four real blyte dispatches on Gemini 3.8 Flash with tasks 1 and 2 merged),
+Gemini made exactly one tool call on every turn that made any (0 multi-call turns) and never used
+`read` with `paths` (0 of 68 reads). Neither change affected Gemini, so by this plan's rule both
+were reverted (#134, #136). The planned offload B runs were cancelled after this. Multi-path `read`
+might help models that do batch; it is in #136 if a measurement on another model is wanted. The
+eval's offload prompt change (one dispatch per coupled change, superstate-eval #75) stays: it
+matches blyte's own skill.

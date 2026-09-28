@@ -107,3 +107,19 @@ Measure on a real task: the same small plan task dispatched twice on each backen
 (`gemini-3.8-flash-high` against `vertex/gemini-3.8-flash-high`), scoring true cache misses
 block-aware, fresh input against new content, cost and time. Make Vertex the recommended Gemini path
 only if its true-miss rate is clearly lower on real turns, not only at warm-up.
+
+## Result (2026-09-28): reverted
+
+Real-task A/B: the fewer-turns task 2 (a real blyte workload), dispatched twice on each endpoint,
+alternating, blyte `582977e` (tasks 1 and 2 of the fewer-turns plan included):
+
+| run | turns | true cache misses (block-aware) | s per model call | cost | time |
+|---|---|---|---|---|---|
+| Gemini API 1 | 51 | 12/49 (24%) | 6.4 | $0.80 | 8 min |
+| Gemini API 2 | 52 | 9/50 (18%) | 7.2 | $0.83 | 9 min |
+| Vertex 1 | 84 | 13/81 (16%) | 12.2 | $1.41 | 22 min |
+| Vertex 2 | 71 | 24/69 (35%) | 15.6 | $1.78 | 21 min |
+
+Vertex did not reduce cache misses on real tool-calling turns (the toy probe's advantage was at
+warm-up only), was about twice as slow per call, took 40–60% more turns and cost about twice as
+much. Reverted (the code is in #135 if a data-governance need for Vertex arises).
