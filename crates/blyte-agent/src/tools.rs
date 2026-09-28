@@ -396,7 +396,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "read".into(),
-            description: "Read a file. Up to 2,000 lines (60,000 characters) come back in one call, so read whole files; pass start_line/end_line only for larger ones. To read several files, call read once per file in the same response.".into(),
+            description: "Read a file. Up to 2,000 lines (60,000 characters) come back in one call, so read whole files; pass start_line/end_line only for larger ones.".into(),
             parameters: json!({"type":"object","properties":{
                 "path":{"type":"string"},
                 "start_line":{"type":"integer","description":"1-indexed, inclusive"},

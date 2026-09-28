@@ -298,12 +298,9 @@ impl<'a> Runner<'a> {
              home-directory files or system settings. If something outside it blocks you \
              (disk space, network, a missing tool), say so and stop.\n\n\
              ## Working efficiently\n\
-             Every turn re-sends this whole conversation, so turns are what a run costs. When you \
-             need several things that do not depend on each other, ask for all of them at once, \
-             as several tool calls in one turn: for example, to look at three files, call `read` \
-             three times in the same response, not once per response. The calls run in order and \
-             you see every result together. Only wait for a result when the next call depends on \
-             it.\n",
+             Independent reads, searches and commands can be issued as several tool calls in one \
+             turn: they run in order and you see every result together. Batch them whenever one \
+             does not depend on another's result; every turn you save is a full model call.\n",
             goal = state.orchestrator.goal,
             completion = completion,
             where_ = self.shell.describe(),
