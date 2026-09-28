@@ -10,8 +10,7 @@ Two kinds of evidence, with different strengths. Neither is a benchmark leaderbo
       leaderboard runs on Kimi K3. Local infrastructure, one attempt per task, 27 of 30 tasks
       matched: about ±9 points of noise.
     - **"Mergeable" is a reviewer's judgement.**
-    - **Not measured yet:** the pattern (frontier model plans, blyte implements) against the
-      frontier model doing the whole task alone.
+    - **Against a frontier model working alone, one task so far:** [see below](#against-claude-doing-the-work-itself).
 
 - The **paired runs** measure blyte **as it is meant to be used**: Claude planned every task and
   reviewed every result, and blyte implemented on a cheap model. They compare blyte with another
@@ -126,3 +125,43 @@ The full write-up, with per-task results and every caveat:
 literature says, and what was removed because it did not pay for itself: a daemon, an MCP server,
 a worktree engine, advisory review, a TDD mode, LLM-written fold notes, four losing context
 strategies, and more.
+
+## Against Claude doing the work itself
+
+**The question.** If Claude plans and reviews and blyte implements, how much Claude does that save,
+and what does it cost in quality and time, compared with Claude doing the whole task?
+
+**Method.** One real-repository task from FrontierHarness (`python-statemachine-state-data-scoping`,
+graded by held-out tests), Claude Sonnet in Claude Code, three setups, two runs each, interleaved:
+Claude implementing a written plan; Claude dispatching the same plan to blyte (Gemini 3.8 Flash)
+and reviewing; and Claude on the raw task with no plan. One planning run wrote the plan both planned
+setups used, so its cost falls on neither. Claude's own setup and plugins were kept out of every run.
+
+**What it showed.**
+
+- **Planning decided the outcome.** Both setups with the plan passed every run; Claude alone on the
+  raw task failed both, a few target tests short (one also broke three existing tests). Who implemented did not change the result.
+- **blyte cut Claude's share by about two thirds.** With blyte implementing, Claude spent about a
+  third as much as when it implemented the plan itself; counting blyte's Gemini cost, the whole task
+  was about a quarter cheaper. The difference was larger than the spread between runs.
+- **blyte was slower,** about two and a half times on the task. Gemini works in many small steps,
+  and the evaluation ran each dispatch one after another, even where Claude sent independent ones
+  together. In our own work, dispatches running at once finished about twice as fast overall as
+  they would have one after another (nearly three times with three or four at once), and each one
+  adds Gemini usage; Claude's part stays its plan and its review.
+
+**So:** the pattern pays when frontier usage is the constraint (a subscription's limits, or an API
+bill) and when there is planned work that splits into independent tasks. For one small task that
+you want done quickly, Claude alone is faster.
+
+**Known costs on Gemini.** Gemini makes one tool call per turn, whatever the prompt asks, so blyte
+on Gemini takes more turns than Claude does for the same work, and every turn re-sends the context.
+Gemini's automatic prompt caching misses on roughly a quarter of blyte's turns. Both were
+investigated; neither a prompt change, a multi-file read, streaming, explicit caching nor the Vertex
+AI endpoint improved them, so none of those were kept.
+
+**Limits.** One task and two runs per setup: a direction, not a rate. The plan was unusually
+detailed, which favours delegation. Only the blyte setup had a review step (Claude checking blyte's
+work). Claude's cost is the notional list price that Claude Code reports under a subscription.
+Results: superstate-eval `results/offload-v2-sonnet-20260928-1028/`.
+
