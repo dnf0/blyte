@@ -71,7 +71,7 @@ cargo test'
   repository's own checks. If it has none, run `blyte init` once, read the gate it detected,
   and fix it if it is wrong, or pass `--gate`. Each line is a step; all must pass; the slow full
   test run goes last.
-- The implementer model's API key must be in the environment; blyte never prints it.
+- The implementer model's API key must be in the environment or in `~/.config/blyte/env` (`NAME=value`, `chmod 600`); blyte never prints it. If a dispatch fails with "no API key", tell the user; do not do the work some other way.
 
 **Starting parallel tasks.** If your harness tells you when a background command exits (an
 interactive Claude Code session does), send every independent `blyte dispatch` as its own
