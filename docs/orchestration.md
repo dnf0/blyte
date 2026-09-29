@@ -68,6 +68,13 @@ the names and signatures that matter, the tests (written out), and the exact com
 more of the thinking is in the task, the less the implementer has to guess.
 [How tasks are written](writing-tasks.md) covers what the agent writes, in detail.
 
+**One feature, one dispatch; separate tasks in parallel.** Each dispatch re-reads the code it
+touches, and the model makes one tool call per turn, so splitting one feature into several
+dispatches costs more and is usually slower, even when the parts run at once (on two measured
+tasks, 30–160% more Gemini). Parallelism pays across tasks that are truly independent: different
+files, no shared groundwork, similar size. Several such tasks at once finished about twice as fast
+overall in our own work. See [Evidence](evidence.md#against-claude-doing-the-work-itself).
+
 ## The workflow
 
 Two commands do the mechanical part: `blyte dispatch` and `blyte review`. The Claude Code skill
