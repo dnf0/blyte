@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod dispatch;
+pub mod env_file;
 pub mod repl;
 pub mod report;
 pub mod skill;

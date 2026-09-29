@@ -22,6 +22,18 @@ default, and the one blyte has been measured on, is Gemini 3.8 Flash:
 export GEMINI_API_KEY=...
 ```
 
+A session that did not start with the key exported (a Claude Code session opened from another
+shell, say) will not see it. So you can keep it in a file instead, which blyte reads for any
+variable not already set:
+
+```bash
+mkdir -p ~/.config/blyte && printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > ~/.config/blyte/env
+chmod 600 ~/.config/blyte/env
+```
+
+blyte refuses the file if other users can read it. `BLYTE_ENV_FILE` names another file; an empty
+`BLYTE_ENV_FILE` turns it off.
+
 Other providers (Anthropic, any OpenAI-compatible API, OpenRouter, Ollama, a ChatGPT
 subscription) are on [Providers](providers.md). blyte reads the key itself; it never reaches the
 commands the model runs.

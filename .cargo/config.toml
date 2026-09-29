@@ -1,0 +1,4 @@
+# Tests run blyte without a provider key to exercise the "no key" paths. An empty BLYTE_ENV_FILE
+# turns off blyte's key file (~/.config/blyte/env), so a developer's own key is never loaded by a test.
+[env]
+BLYTE_ENV_FILE = ""

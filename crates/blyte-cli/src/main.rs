@@ -18,6 +18,14 @@ fn restore_sigpipe() {
 
 fn main() {
     restore_sigpipe();
+
+    // Before anything else reads the environment, and before any threads start.
+    if let Some(path) = blyte_cli::env_file::default_path() {
+        if let Err(e) = blyte_cli::env_file::load(&path) {
+            eprintln!("warning: {e}");
+        }
+    }
+
     let cli = Cli::parse();
 
     if let Some(cmd) = cli.command {
