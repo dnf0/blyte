@@ -5,15 +5,10 @@ decisions; the evidence behind them is in `docs/evidence.md` and the plans in `d
 
 ## In progress
 
-- **The AWS profile variables are withheld** with the other credentials. The sandbox denies
-  `~/.aws`, so a passed `AWS_PROFILE` made boto fail, and blyte edited `conftest.py` to work around it
-  (premise-lookup, 2026-09-29). Plan: `2026-09-29-withhold-aws-profile.md`.
-- **Parallel dispatches in the eval** (blyte-eval): each hand-off gets its own copy of the task
-  repository, runs at the same time as the others, and is merged back when it ends. This makes a
-  parallel blyte-vs-Claude-alone comparison possible (chosen 2026-09-29, option B).
-- **Research mode for blyte.** Read-only research (surveys, lookups) still goes to agy
-  (`dispatch.sh --research`), so it is outside the sampled A/B and the ledger. blyte needs the same
-  entry point, read-only rules, a "report exists" gate and ledger records.
+- **More evidence, on `katex-multicolumn-array-spans` (TypeScript), 2026-09-29:** v2 repeated on a
+  second task (does the Sonnet saving hold?), and a fair parallel test (the same split for both arms;
+  only whether the parts run at once differs). Plan: blyte-eval
+  `docs/superpowers/plans/2026-09-29-parallel-offload-comparison.md`.
 
 ## Next
 
@@ -22,9 +17,23 @@ decisions; the evidence behind them is in `docs/evidence.md` and the plans in `d
   install, delegate one small real task, confirm the skill, the sandbox rule and the run. Then drop
   "(untested)". Step 2: a Codex driver in the eval's offload arm, to compare Codex + blyte with
   Claude Code + blyte.
-- **Fewer, larger dispatches.** Gemini makes one tool call per turn whatever the prompt says, and
-  each dispatch pays its setup again, so fewer, larger dispatches may cut cost. A small test on a
-  real task.
+- **Fewer, larger dispatches as the default guidance.** Gemini makes one tool call per turn, and each
+  dispatch re-reads the code it touches. On scc (2026-09-29), one dispatch was the fastest and
+  cheapest; splitting one feature cost 30–160% more Gemini, even with the parts running at once.
+  Split only independent tasks of similar size; the skill says so, and the eval's tools now do too.
+
+## Done
+
+- **2026-09-29**
+  - Provider keys from `~/.config/blyte/env` when they are not exported (#151): a session started
+    without the key failed every dispatch at turn 0.
+  - `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` withheld with the credentials (#150): blyte had edited a
+    repository's `conftest.py` to work around a profile the sandbox cannot read.
+  - Research mode (local dispatch scripts): `dispatch-auto.sh --research`, read-only, with a "report
+    exists" gate, the sampled A/B and ledger records.
+  - The eval's dispatch tool runs dispatches in parallel, each in its own copy of the repository
+    (blyte-eval #83), with start-then-wait tools (#85), because Claude Code runs an MCP server's
+    calls one after another. Results on scc: blyte-eval #86.
 
 ## Information gathering (2026-09-29 to about 2026-10-27)
 
