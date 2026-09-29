@@ -83,6 +83,7 @@ nav:
       - Architecture: how-it-works.md
       - Architecture deep dive: architecture.md
       - Manifesto: manifesto.md
+      - Roadmap: roadmap.md
   - Evidence:
       - Overview: evidence.md
       - FrontierHarness run: research/2026-09-27-frontierharness-gemini.md
