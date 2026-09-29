@@ -119,7 +119,7 @@ fn main() {
                                     );
                                 } else {
                                     println!(
-                                        "Claude Code now plans and reviews, and delegates implementation to blyte, in parallel, by default"
+                                        "Claude Code now writes the plan and delegates implementation to blyte, in parallel, by default"
                                     );
                                 }
                             }
@@ -130,7 +130,7 @@ fn main() {
                                     );
                                 } else {
                                     println!(
-                                        "Codex now plans and reviews, and delegates implementation to blyte, in parallel, by default (untested)"
+                                        "Codex now writes the plan and delegates implementation to blyte, in parallel, by default (untested)"
                                     );
                                 }
                             }
