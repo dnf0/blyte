@@ -113,6 +113,8 @@ pub struct RunReport {
     pub turn_usage: Vec<TurnUsage>,
     /// Wall time of each gate attempt, in order.
     pub gate_ms: Vec<u64>,
+    /// The turn on which each gate attempt ran, in order (one entry per gate attempt).
+    pub gate_turns: Vec<u32>,
     /// Time spent waiting for a gate slot on each attempt, in order (0 when acquired at once).
     pub gate_wait_ms: Vec<u64>,
     /// Gate output for each failed attempt, bounded to 4,000 characters (keeps the head and the tail).
@@ -633,6 +635,7 @@ impl<'a> Runner<'a> {
 
             // --- the model stopped calling tools: the runtime decides -----------------------
             report.gate_attempts += 1;
+            report.gate_turns.push(turn);
             let gate_start = std::time::Instant::now();
             let (passed, output, wait_ms, failing) = self.run_gate(state, &last_failed);
             last_failed = failing;
