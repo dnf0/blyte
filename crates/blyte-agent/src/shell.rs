@@ -58,12 +58,19 @@ const CREDENTIAL_SEGMENTS: &[&str] = &[
     "SESSION",
 ];
 
+/// Whole names that select credentials without looking like one: the AWS profile variables pick a
+/// profile in ~/.aws, which the sandbox denies (a passed profile makes boto fail on it).
+const CREDENTIAL_NAMES: &[&str] = &["AWS_PROFILE", "AWS_DEFAULT_PROFILE"];
+
 static PASS_ENV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
-/// True when either the upper-cased name, split on `_`, has a credential segment,
-/// or the value contains a URL with inline credentials.
+/// True when the upper-cased name is one of `CREDENTIAL_NAMES`, or, split on `_`,
+/// has a credential segment, or the value contains a URL with inline credentials.
 pub fn credential_like(name: &str, value: &str) -> bool {
     let upper = name.to_ascii_uppercase();
+    if CREDENTIAL_NAMES.contains(&upper.as_str()) {
+        return true;
+    }
     if upper
         .split('_')
         .any(|seg| CREDENTIAL_SEGMENTS.contains(&seg))

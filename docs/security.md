@@ -14,7 +14,7 @@ apply to every command the model runs on the host: `bash`, and the gate.
 |---|---|---|---|
 | **Writes** only inside the workspace, its git directory, temp directories and tool caches | Seatbelt | Landlock (kernel 5.13+) | `--sandbox=off` |
 | **Credential reads** refused: `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.kube`, `~/.gnupg`, `~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`, `~/.pypirc`, cargo credentials, `~/.codex`, keychains, cookies and browser profiles, and any file named `.env` | Seatbelt | not enforced | `--allow-read PATH` grants one back |
-| **Environment**: variables that look like credentials are withheld from commands | yes | yes | `--pass-env NAME` keeps one |
+| **Environment**: variables that look like credentials, and the AWS profile variables, are withheld from commands | yes | yes | `--pass-env NAME` keeps one |
 | **Network**: commands cannot connect out | Seatbelt | Landlock (kernel 6.7+) | opt in with `--network=off` |
 
 blyte's own provider keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, …) and `BLYTE_*` variables are
