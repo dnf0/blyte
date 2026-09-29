@@ -597,7 +597,7 @@ impl<'a> Runner<'a> {
                         .take(90)
                         .collect::<String>();
                     // A read's line range is part of what it did: paging through a file and
-                    // re-reading it look identical without it (superstate-eval 13.43).
+                    // re-reading it look identical without it (blyte-eval 13.43).
                     let input = if call.name == "read" {
                         extract_action_target(&call.name, &call.arguments)
                             .chars()

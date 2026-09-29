@@ -1,7 +1,7 @@
 # blyte on FrontierHarness with Gemini 3.8 Flash
 
 A single run of blyte, on 26–27 September 2026, over the 30 tasks of [FrontierHarness Eval v1.0](https://frontierharness.org/)
-(21 Terminal-Bench 2, 9 DeepSWE), graded by each task's own held-out tests through superstate-eval,
+(21 Terminal-Bench 2, 9 DeepSWE), graded by each task's own held-out tests through blyte-eval,
 compared task by task with the published results of the 12 FrontierHarness configurations.
 
 **Where blyte fits.** blyte is an implementer, not a planner. It is meant to sit under a frontier
@@ -51,11 +51,11 @@ needs blyte on Kimi K3 (Amazon Bedrock offers it; the account role used here lac
   [terminal-bench-2](https://github.com/laude-institute/terminal-bench-2) repository.
 - **Harness.** blyte build `9f7cdd0`, `blyte[folded]`, model `gemini-3.8-flash-high`, no gate (like
   FrontierHarness, the agent decides when it is done and only the hidden tests judge).
-- **Runner.** superstate-eval harness mode (`scripts/paired_run.py --harnesses "blyte[folded]"`), one
+- **Runner.** blyte-eval harness mode (`scripts/paired_run.py --harnesses "blyte[folded]"`), one
   task at a time, each task image pulled before its run and removed after it.
 - **Network.** FrontierHarness runs every task offline. DeepSWE tasks ran offline throughout.
   Terminal-Bench tasks are graded inside the agent's container by a script that downloads `curl` and
-  `uv`, so switching the network off also broke grading; superstate-eval was changed to run the agent
+  `uv`, so switching the network off also broke grading; blyte-eval was changed to run the agent
   on an internal Docker network and connect it to the bridge only for grading (eval #56). The
   Terminal-Bench tasks first ran with the network on; every pass was then checked for network use, and
   the 8 affected tasks (7 network-assisted passes, 1 ungraded) were re-run offline:
@@ -91,13 +91,13 @@ comparable with the leaderboard's: the model and its pricing differ.
 
 ## Where the data is
 
-All three runs are in superstate-eval:
+All three runs are in blyte-eval:
 
 | Run | What it answers |
 |---|---|
-| [Main run](https://github.com/dnfcx/superstate-eval/tree/main/results/fh-gemini-blyte-20260926-1947) | The 30 tasks on build `9f7cdd0`: the numbers in the result table |
-| [Offline re-runs](https://github.com/dnfcx/superstate-eval/tree/main/results/fh-gemini-blyte-offline-rerun-20260927-0122) | The 8 Terminal-Bench tasks that passed with network access, re-run offline |
-| [Near-miss re-runs](https://github.com/dnfcx/superstate-eval/tree/main/results/fh-gemini-blyte-ungated-fix-20260927-0209) | The four DeepSWE near misses, on the prompt-fixed build `69fbc6c` |
+| [Main run](https://github.com/dnfcx/blyte-eval/tree/main/results/fh-gemini-blyte-20260926-1947) | The 30 tasks on build `9f7cdd0`: the numbers in the result table |
+| [Offline re-runs](https://github.com/dnfcx/blyte-eval/tree/main/results/fh-gemini-blyte-offline-rerun-20260927-0122) | The 8 Terminal-Bench tasks that passed with network access, re-run offline |
+| [Near-miss re-runs](https://github.com/dnfcx/blyte-eval/tree/main/results/fh-gemini-blyte-ungated-fix-20260927-0209) | The four DeepSWE near misses, on the prompt-fixed build `69fbc6c` |
 
 Each task has `<task>.json` (the verdict, test counts, cost and tokens), `<task>.log` (the runner log) and
 `<task>.native_reports/` (blyte's own report and event log).

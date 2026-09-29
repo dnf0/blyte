@@ -1,6 +1,6 @@
 # Harness research and measurements
 
-Written 24 September 2026. What we measured on our own harness, what current external research says, and the objective that follows. Evidence lives in superstate-eval FINDINGS 13.39–13.44. This note is the synthesis.
+Written 24 September 2026. What we measured on our own harness, what current external research says, and the objective that follows. Evidence lives in blyte-eval FINDINGS 13.39–13.44. This note is the synthesis.
 
 ## Objective
 
