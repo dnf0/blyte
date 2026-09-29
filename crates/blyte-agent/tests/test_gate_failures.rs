@@ -98,3 +98,15 @@ fn multi_byte_output_is_cut_on_character_boundaries() {
 fn a_passing_gate_adds_nothing() {
     assert!(run("true", 1).gate_failures.is_empty());
 }
+
+#[test]
+fn each_gate_attempt_records_its_turn() {
+    let rep = run("echo boom-marker && exit 1", 2);
+    assert_eq!(rep.gate_turns.len(), rep.gate_attempts as usize);
+    assert!(
+        rep.gate_turns.windows(2).all(|w| w[0] < w[1]),
+        "{:?}",
+        rep.gate_turns
+    );
+    assert!(*rep.gate_turns.last().unwrap() <= rep.outcome_turns);
+}

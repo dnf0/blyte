@@ -38,6 +38,7 @@ removed; new fields are added without a bump.
   "turn_usage": [ { "turn": 1, "input": 14210, "cached": 0, "output": 312, "thinking": 540, "...": "..." } ],
   "usage": { "input": 3120455, "cached": 2811020, "output": 18011, "thinking": 40210 },
   "gate_ms": [41230],
+  "gate_turns": [38],
   "gate_failures": [],
   "tool_counts": { "bash": 22, "read": 17, "edit": 9, "grep": 3 },
   "model_seconds": 121.7,
@@ -69,6 +70,7 @@ removed; new fields are added without a bump.
 | `turns`, `empty_turns` | model calls, and calls that returned neither text nor a tool call |
 | `tool_calls`, `tool_counts` | tool calls in total and by tool |
 | `gate_attempts`, `gate_ms`, `gate_failures` | gate runs, the time of each, and the (trimmed) output of each failure |
+| `gate_turns` | the turn on which each gate attempt ran, in order (one entry per gate attempt) |
 | `rollbacks` | times the tree was reset after a failed gate |
 | `provider_retries` | transient provider errors waited out |
 
