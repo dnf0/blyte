@@ -45,7 +45,7 @@ much when blyte implemented, for the same result. blyte took longer; independent
 parallel, and adding blyte agents adds little frontier usage. This is how blyte itself is built.
 
 **Get started:** [install blyte](#install) and run `blyte skill install`. From then on Claude Code
-plans and reviews, and hands the implementation to blyte, independent tasks in parallel.
+writes the plan and hands the implementation to blyte, independent tasks in parallel, checking each result.
 [The workflow](docs/orchestration.md) explains what happens.
 
 | | |
