@@ -115,7 +115,7 @@ pub struct RunReport {
     pub gate_ms: Vec<u64>,
     /// Time spent waiting for a gate slot on each attempt, in order (0 when acquired at once).
     pub gate_wait_ms: Vec<u64>,
-    /// Gate output for each failed attempt, bounded to 4,000 characters.
+    /// Gate output for each failed attempt, bounded to 4,000 characters (keeps the head and the tail).
     pub gate_failures: Vec<String>,
     /// Calls per tool name.
     pub tool_counts: BTreeMap<String, u32>,
@@ -706,17 +706,41 @@ pub fn retry_order<'a>(steps: &[&'a str], last_failed: &[String]) -> (Vec<&'a st
     (failed, others)
 }
 
-/// Cuts gate output to its first 4,000 characters, appending `…` when cut.
+/// Cuts gate output longer than 4,000 characters, keeping the head and the tail.
 fn cut_gate_output(output: &str) -> String {
     const MAX_CHARS: usize = 4_000;
-    match output.char_indices().nth(MAX_CHARS) {
-        Some((idx, _)) => {
-            let mut cut = output[..idx].to_string();
-            cut.push('…');
-            cut
-        }
-        None => output.to_string(),
+    const HEAD_CHARS: usize = 1_000;
+    const TAIL_CHARS: usize = 3_000;
+
+    let total_chars = output.chars().count();
+    if total_chars <= MAX_CHARS {
+        return output.to_string();
     }
+
+    let head_cand_end = output
+        .char_indices()
+        .nth(HEAD_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(output.len());
+    let head_cand = &output[..head_cand_end];
+    let head = match head_cand.rfind('\n') {
+        Some(idx) => &head_cand[..idx],
+        None => head_cand,
+    };
+
+    let tail_cand_start = output
+        .char_indices()
+        .nth(total_chars - TAIL_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let tail_cand = &output[tail_cand_start..];
+    let tail = match tail_cand.find('\n') {
+        Some(idx) => &tail_cand[idx + 1..],
+        None => tail_cand,
+    };
+
+    let dropped = total_chars - head.chars().count() - tail.chars().count();
+    format!("{head}\n… [{dropped} characters cut] …\n{tail}")
 }
 
 /// Extracts a concise, human-readable target descriptor from a tool call's arguments.
