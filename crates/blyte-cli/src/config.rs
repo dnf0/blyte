@@ -32,7 +32,7 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
 }
 
 pub fn detect(root: &Path) -> Vec<String> {
-    // A Makefile's own targets are how a repository says it is checked: superstate-eval's
+    // A Makefile's own targets are how a repository says it is checked: blyte-eval's
     // `make lint` runs ruff and pyright, which per-language guessing would miss.
     let make = make_targets(root);
     if make.iter().any(|t| t == "check") {

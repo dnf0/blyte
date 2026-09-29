@@ -1,4 +1,4 @@
-//! The `--report` JSON contract that superstate-eval reads. Schema:
+//! The `--report` JSON contract that blyte-eval reads. Schema:
 //! docs/superpowers/specs/2026-09-23-native-harness-eval-surface-design.md
 
 use std::path::PathBuf;

@@ -278,7 +278,7 @@ which is what `--max-cost` and the report's `cost_usd` use.
 - **Headless runs** (`task_runner`) wire the pieces together: the provider from `--model`, the
   shell (container, sandboxed local or plain local), the matching `Fs`, the context strategy,
   the budget, and the gate from `--gate`. The run writes a report (`--report`), the machine-readable
-  contract that superstate-eval reads (see [Run reports](reports.md)).
+  contract that blyte-eval reads (see [Run reports](reports.md)).
 - **The REPL** sends each prompt through the same task runner, keeping the goal and gate between prompts.
 - **`blyte.toml`** (`blyte init`) stores a repository's gate and dispatch defaults, so an
   orchestrator doesn't have to repeat them.

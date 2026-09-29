@@ -1,6 +1,6 @@
 //! The headless solver's machine-readable run report (`--report <path>`).
 //!
-//! This is the contract between the harness and anything that measures it: superstate-eval
+//! This is the contract between the harness and anything that measures it: blyte-eval
 //! reads exactly this shape. Every field is always written, because a zero is a measurement and
 //! an absent key is a bug. Schema: docs/superpowers/specs/2026-09-23-native-harness-eval-surface-design.md
 
