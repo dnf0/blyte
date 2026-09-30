@@ -184,3 +184,7 @@ cost, per-call token usage, where the time went, gate failures and the security 
 blyte is built to be dispatched: one task per run, in its own worktree, with a gate and a report,
 reviewed and merged by whoever dispatched it. [blyte as your implementer](orchestration.md)
 describes the pattern, `blyte dispatch` and `blyte review`, and the Claude Code skill.
+
+### Recording a verdict
+
+Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. It works even after the worktree has been removed.
