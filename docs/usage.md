@@ -40,6 +40,41 @@ orchestrator. Each is looked for in the working tree, then in the main checkout 
 be untracked). Rules are capped at 12,000 characters. The run prints which file it used
 (`blyte: repository rules from …`). Container runs read none.
 
+## Repository configuration (`blyte.toml`)
+
+`blyte init` detects a repository's checks and writes `blyte.toml`. `blyte dispatch` reads it
+when a flag is not passed:
+
+```toml
+# blyte.toml: how this repository's work is checked, for `blyte dispatch`.
+[dispatch]
+gate = """
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace --all-targets
+"""
+# model = "gemini-3.8-flash-high"
+max_seconds = 3600
+max_turns = 300
+# max_cost = 2.0
+# network = "on"
+# fold_budget = 60000
+
+# [dispatch.env]
+# UV_FROZEN = "1"   # settings for every command and the gate; never credentials
+```
+
+| key | type | meaning |
+|---|---|---|
+| `gate` | string | the check command; several lines are several steps |
+| `model` | string | model identifier or provider selection |
+| `max_seconds` | integer | wall-clock budget in seconds (default 3600) |
+| `max_turns` | integer | maximum turn budget (default 300) |
+| `max_cost` | float | maximum spend in USD |
+| `fold_budget` | integer | approximate token budget for verbatim tail before folding |
+| `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
+| `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
+
 ## Dashboard
 
 `blyte dashboard` serves a local web page that monitors running and recent blyte jobs across repositories:

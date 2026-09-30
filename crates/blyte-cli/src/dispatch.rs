@@ -22,6 +22,25 @@ pub fn wrap_task(task: &str) -> String {
     )
 }
 
+pub fn quick_steps(gate: &str) -> Option<String> {
+    let lines: Vec<&str> = gate
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() < 2 {
+        return None;
+    }
+    let steps = lines[..lines.len() - 1]
+        .iter()
+        .map(|s| format!("`{s}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "The check's quick steps, to run yourself before you stop: {steps}. The last step, the full run, happens at the gate."
+    ))
+}
+
 pub fn dispatch_outcome(report_outcome: &str, commits: usize) -> &'static str {
     match report_outcome {
         "verified" => {
@@ -114,6 +133,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         .unwrap_or(3600);
     let max_turns = args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300);
     let max_cost = args.max_cost_usd.or(dispatch_cfg.max_cost);
+    let fold_budget = args.fold_budget.or(dispatch_cfg.fold_budget);
     let network = args
         .network
         .as_deref()
@@ -238,6 +258,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     cmd.stdout(log_file);
     cmd.stderr(log_file_err);
 
+    for (k, v) in &dispatch_cfg.env {
+        cmd.env(k, v);
+    }
+
     cmd.arg("--gate").arg(&gate);
     cmd.arg("--rollback=false");
     cmd.arg("--max-seconds").arg(max_seconds.to_string());
@@ -250,7 +274,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if let Some(c) = max_cost {
         cmd.arg("--max-cost").arg(c.to_string());
     }
-    if let Some(fb) = args.fold_budget {
+    if let Some(fb) = fold_budget {
         cmd.arg("--fold-budget").arg(fb.to_string());
     }
     cmd.arg("--sandbox").arg(&args.sandbox);
@@ -263,7 +287,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     cmd.arg("--");
-    cmd.arg(wrap_task(&task_content));
+    let mut task_prompt = wrap_task(&task_content);
+    if let Some(qs) = quick_steps(&gate) {
+        task_prompt.push_str("\n\n");
+        task_prompt.push_str(&qs);
+    }
+    cmd.arg(task_prompt);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -278,6 +307,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
     let start_json = serde_json::json!({
         "id": args.id,
         "pid": child.id(),
@@ -285,6 +315,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "task_file": args.task_file.display().to_string(),
         "gate": gate,
         "tags": args.tags,
+        "env": env_names,
     });
     let start_path = wt_parent.join(format!("{}.start.json", args.id));
     if let Ok(json_str) = serde_json::to_string_pretty(&start_json) {
@@ -442,6 +473,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     let json_str = serde_json::to_string_pretty(&summary).unwrap();
+    let summary_path = wt_parent.join(format!("{}.json", args.id));
+    let _ = std::fs::write(&summary_path, format!("{json_str}\n"));
     println!("{json_str}");
     exit
 }
