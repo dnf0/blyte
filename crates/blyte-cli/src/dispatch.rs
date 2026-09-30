@@ -107,6 +107,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         return 2;
     }
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    crate::registry::register(&root);
 
     let repo_config = match crate::config::load(&root) {
         Ok(cfg) => cfg,

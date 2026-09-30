@@ -128,14 +128,14 @@ A plain `blyte "..."` run in a terminal writes none of these, so it does not app
 
 ### Sources and configuration
 
-By default, when neither `--root` nor `--runs-dir` is passed on the command line, `blyte dashboard` reads sources from `~/.config/blyte/dashboard.toml`:
+By default, when neither `--root` nor `--runs-dir` is passed on the command line, `blyte dashboard` watches every repository where `blyte dispatch` has been run on this machine, plus any extra sources configured in `~/.config/blyte/dashboard.toml`:
 
 ```toml
 roots = ["~/repos", "~/work"]
 runs_dirs = ["~/.cache/blyte-runs"]
 ```
 
-Leading `~/` paths expand to your home directory. If the config file is absent or lists no sources, `blyte dashboard` falls back to the current git repository's top-level checkout.
+Leading `~/` paths expand to your home directory. Every dispatch records its repository in `$BLYTE_STATE_DIR/repos` (default `$XDG_STATE_HOME/blyte/repos` or `~/.local/state/blyte/repos`), so the dashboard finds all of them from any folder without needing to be started in the repository.
 
 You can also pass sources explicitly:
 - `--root <DIR>` (repeatable): directories containing repositories or `.wt` worktree folders.
