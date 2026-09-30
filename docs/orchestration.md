@@ -214,6 +214,15 @@ minutes, $0.19). Before the skill named `sandbox_permissions`, Codex ran the dis
 sandbox, where it failed, and then wrote the code itself; `codex exec` also needs
 `--sandbox workspace-write` and `-c approval_policy=on-request` for escalation to be possible.
 
+## Watching parallel dispatches
+
+With several dispatches running, and several sessions dispatching in different repositories,
+`blyte dashboard` shows them all on one local page: each job's current step (including "gate
+running"), time, cost and turns, the task's section of its plan, and tags that group a plan's
+tasks or the two halves of an A/B. It reads what `blyte dispatch` writes to `.wt/`, so the
+orchestrator needs to do nothing extra; `blyte dispatch --tag "<text>"` adds a tag of its own.
+See [Dashboard](usage.md#dashboard).
+
 ## Next
 
 - [How tasks are written](writing-tasks.md): what the agent writes for blyte: the template, what to put in, how to check a task

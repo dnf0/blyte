@@ -49,6 +49,7 @@ flowchart LR
 <a class="b-card" href="getting-started/"><strong>Get set up</strong><span>Install, choose a model, connect Claude Code, delegate a first task.</span></a>
 <a class="b-card" href="writing-tasks/"><strong>What makes a good task</strong><span>What the agent writes for blyte, and why: the template, the tests, checks, sizing.</span></a>
 <a class="b-card" href="usage/"><strong>Tune a run</strong><span>Gates with several steps, budgets, rollback, containers, standalone use.</span></a>
+<a class="b-card" href="usage/#dashboard"><strong>Watch running jobs</strong><span><code>blyte dashboard</code>: a local page of every running and recent job, with time, cost and tags.</span></a>
 <a class="b-card" href="providers/"><strong>Choose the implementer model</strong><span>What has been measured, the six providers, credentials, retries, cost.</span></a>
 <a class="b-card" href="security/"><strong>Know what commands can touch</strong><span>The sandbox on macOS and Linux, credential reads, the environment filter, <code>--network=off</code>.</span></a>
 <a class="b-card" href="reports/"><strong>Read a run's results</strong><span>Every field of <code>--report</code>: outcome, turns, cost, timing, security settings.</span></a>
