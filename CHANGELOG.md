@@ -1,3 +1,9 @@
+## v0.2.0 (2026-09-30)
+
+### Feat
+
+- **agent**: load the repository's rules for agents on every run (#160)
+
 ## v0.1.1 (2026-09-30)
 
 ### Fix
