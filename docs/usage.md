@@ -42,8 +42,15 @@ be untracked). Rules are capped at 12,000 characters. The run prints which file 
 
 ## Repository configuration (`blyte.toml`)
 
-`blyte init` detects a repository's checks and writes `blyte.toml`. `blyte dispatch` reads it
-when a flag is not passed:
+`blyte init` works out a repository's gate and environment settings, and proves each step in a
+fresh worktree before writing `blyte.toml`. It first extracts check commands from CI workflows
+(`.github/workflows/*.yml` and `*.yaml`), stripping reporting arguments (like `--cov` and `| tee`),
+or falls back to toolchain detection (Makefiles, Cargo, pyproject, package.json, go.mod). It detects
+environment needs such as `UV_FROZEN = "1"` (when `uv.lock` exists) and `UV_OFFLINE = "1"` (when a
+private index is configured). Unless `--no-verify` is passed, it proves each step in a detached
+worktree of `HEAD` (`.wt/init-<pid>`) using the sandboxed local shell, leaving out steps broken by
+the environment and flagging steps that fail on HEAD. `blyte dispatch` reads `blyte.toml` when flags
+are not passed:
 
 ```toml
 # blyte.toml: how this repository's work is checked, for `blyte dispatch`.
