@@ -255,6 +255,62 @@ fn file_mtime(path: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+pub fn parse_etime(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let (days, time_str) = match s.split_once('-') {
+        Some((d, rest)) => {
+            let days = d.parse::<u64>().ok()?;
+            (days, rest)
+        }
+        None => (0, s),
+    };
+
+    let parts: Vec<&str> = time_str.split(':').collect();
+    match parts.len() {
+        2 => {
+            let m = parts[0].parse::<u64>().ok()?;
+            let sec = parts[1].parse::<u64>().ok()?;
+            Some(days * 86400 + m * 60 + sec)
+        }
+        3 => {
+            let h = parts[0].parse::<u64>().ok()?;
+            let m = parts[1].parse::<u64>().ok()?;
+            let sec = parts[2].parse::<u64>().ok()?;
+            Some(days * 86400 + h * 3600 + m * 60 + sec)
+        }
+        _ => None,
+    }
+}
+
+fn get_process_etime(pid: i64) -> Option<u64> {
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+    {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if let Some(sec) = parse_etime(&s) {
+                return Some(sec);
+            }
+        }
+    }
+
+    None
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct AgySummary {
+    status: Option<String>,
+    error: Option<String>,
+    duration_seconds: Option<f64>,
+    num_turns: Option<u64>,
+    response: Option<String>,
+}
+
 struct RawJob {
     id: String,
     repo: String,
@@ -270,6 +326,8 @@ struct RawJob {
     commits: Vec<CommitRecord>,
     changed_files: Vec<String>,
     summary_final_msg: Option<String>,
+    is_runs_dir: bool,
+    agy_summary_path: Option<PathBuf>,
 }
 
 pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
@@ -382,6 +440,8 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                         commits,
                         changed_files,
                         summary_final_msg,
+                        is_runs_dir: false,
+                        agy_summary_path: None,
                     });
                 }
             }
@@ -438,6 +498,15 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                                     None
                                 };
 
+                                let agy_summary_path = {
+                                    let p = repo_path.join(format!("{id}.json"));
+                                    if p.is_file() {
+                                        Some(p)
+                                    } else {
+                                        None
+                                    }
+                                };
+
                                 raw_jobs.push(RawJob {
                                     id: id.clone(),
                                     repo: repo.clone(),
@@ -453,6 +522,8 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                                     commits: Vec::new(),
                                     changed_files: Vec::new(),
                                     summary_final_msg: None,
+                                    is_runs_dir: true,
+                                    agy_summary_path,
                                 });
                             }
                         }
@@ -513,6 +584,16 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
 
         let report_mtime = if raw.report_path.is_file() {
             file_mtime(&raw.report_path)
+        } else {
+            None
+        };
+
+        let agy_summary = if report_json.is_none() {
+            raw.agy_summary_path.as_ref().and_then(|p| {
+                std::fs::read_to_string(p)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<AgySummary>(&s).ok())
+            })
         } else {
             None
         };
@@ -591,10 +672,54 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                 elapsed_s,
                 now_str,
             )
+        } else if let Some(ref agy) = agy_summary {
+            let status = if agy.status.as_deref() == Some("ERROR") {
+                "error".to_string()
+            } else {
+                "finished".to_string()
+            };
+            let cost = None;
+            let turns = agy.num_turns.unwrap_or(log_info.turns);
+            let gate_attempts = log_info.gate_attempts;
+            let gate_failures = Vec::new();
+            let model = None;
+            let finished_at = raw.agy_summary_path.as_ref().and_then(|p| file_mtime(p));
+            let elapsed_s = agy.duration_seconds.map(|d| d.round() as u64);
+            let now_str = if status == "error" {
+                let err = agy.error.as_deref().unwrap_or("");
+                let first_line = err.lines().next().unwrap_or("");
+                first_line.chars().take(200).collect()
+            } else {
+                let resp = agy.response.as_deref().unwrap_or("");
+                let first_line = resp.lines().next().unwrap_or("");
+                first_line.chars().take(200).collect()
+            };
+
+            (
+                status,
+                false,
+                cost,
+                turns,
+                gate_attempts,
+                gate_failures,
+                model,
+                finished_at,
+                elapsed_s,
+                now_str,
+            )
         } else {
-            let is_alive = raw
-                .pid
-                .is_some_and(|p| p > 0 && unsafe { libc::kill(p as libc::pid_t, 0) == 0 });
+            // A live PID is this job's only if that process started with the job, not after it.
+            // Only runs-dir jobs are checked: their PID files outlive the job for days, and the
+            // dispatch layout's test fixture fakes a start time before its own process.
+            let started_with_job = |p: i64| match (get_process_etime(p), raw.started_at) {
+                (Some(elapsed), Some(started_at)) => now.saturating_sub(elapsed) <= started_at + 60,
+                _ => true,
+            };
+            let is_alive = raw.pid.is_some_and(|p| {
+                p > 0
+                    && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
+                    && (!raw.is_runs_dir || started_with_job(p))
+            });
             let status = if is_alive {
                 "running".to_string()
             } else {

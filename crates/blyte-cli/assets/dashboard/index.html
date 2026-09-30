@@ -602,7 +602,8 @@
       "budget_exhausted": { label: "Out of budget", dot: "dot-amber", text: "label-muted" },
       "no_changes": { label: "No changes", dot: "dot-stopped", text: "label-muted" },
       "error": { label: "Error", dot: "dot-failed", text: "label-failed" },
-      "stopped": { label: "Stopped", dot: "dot-stopped", text: "label-stopped" }
+      "stopped": { label: "Stopped", dot: "dot-stopped", text: "label-stopped" },
+      "finished": { label: "Finished", dot: "dot-stopped", text: "label-muted" }
     };
 
     let currentData = null;
@@ -664,7 +665,7 @@
     }
 
     function isDone(job) {
-      return job.status === "verified" || job.status === "no_changes";
+      return job.status === "verified" || job.status === "no_changes" || job.status === "finished";
     }
 
     function getJobStatusInfo(job) {
