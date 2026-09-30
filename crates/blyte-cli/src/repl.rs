@@ -100,6 +100,9 @@ pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
                 format!("● {} {} -> {}", name, input, summary)
             }
         }
+        blyte_agent::run::Event::GateStart { attempt } => {
+            format!("⏳ Gate running (attempt {})", attempt)
+        }
         blyte_agent::run::Event::Gate {
             attempt,
             passed,

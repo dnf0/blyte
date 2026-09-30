@@ -146,6 +146,11 @@ pub enum Event<'e> {
         summary: String,
         is_error: bool,
     },
+    /// A gate attempt is starting (the check runs next). Emitted so a watcher can tell a run
+    /// that is waiting on its gate from one that is thinking (`blyte dashboard`, 2026-09-30).
+    GateStart {
+        attempt: u32,
+    },
     Gate {
         attempt: u32,
         passed: bool,
@@ -638,6 +643,9 @@ impl<'a> Runner<'a> {
             // --- the model stopped calling tools: the runtime decides -----------------------
             report.gate_attempts += 1;
             report.gate_turns.push(turn);
+            self.emit(Event::GateStart {
+                attempt: report.gate_attempts,
+            });
             let gate_start = std::time::Instant::now();
             let (passed, output, wait_ms, failing) = self.run_gate(state, &last_failed);
             last_failed = failing;

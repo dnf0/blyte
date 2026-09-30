@@ -69,6 +69,7 @@ fn main() {
                 "    {} {name:<5} {input}\n           -> {summary}",
                 if is_error { "!" } else { "-" }
             ),
+            GateStart { attempt } => println!("    GATE #{attempt} START"),
             Gate {
                 attempt,
                 passed,
