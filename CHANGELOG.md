@@ -1,3 +1,9 @@
+## v0.2.3 (2026-09-30)
+
+### Fix
+
+- **license**: standardise on Apache-2.0 (#166)
+
 ## v0.2.2 (2026-09-30)
 
 ### Fix
