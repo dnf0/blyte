@@ -1,0 +1,87 @@
+name: Release on merge
+
+# Every merge to main (the user's rule, 2026-09-30): commitizen bumps the version from the
+# Conventional Commits since the last tag and writes CHANGELOG.md (.cz.toml has the rules). main
+# takes changes only through pull requests (the organisation's ruleset), so the bump lands as a
+# release PR that this job opens and merges at once; then it tags vX.Y.Z, publishes the GitHub
+# release with that version's changelog, and builds the static binaries. A merge with nothing to
+# release (docs, ci, chore, test) is skipped. A merge made by this workflow's token starts no new
+# run, and the subject guard below covers any other push of a release commit.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "commitizen==4.19.0"
+
+      - name: Bump the version and changelog
+        id: bump
+        run: |
+          set +e
+          cz bump --files-only --yes 2>&1 | tee bump.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -eq 21 ]; then echo "Nothing to release since the last tag."; exit 0; fi
+          [ "$code" -eq 0 ] || exit "$code"
+          echo "tag=v$(cz version --project)" >> "$GITHUB_OUTPUT"
+
+      - name: Land the release through a pull request
+        if: steps.bump.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "release/$TAG"
+          git add Cargo.toml CHANGELOG.md
+          git commit -m "chore(release): $TAG"
+          git push origin "release/$TAG"
+          gh pr create --base main --head "release/$TAG" --title "chore(release): $TAG" \
+            --body "Automated release for $TAG: the version in Cargo.toml and CHANGELOG.md."
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            gh pr merge "release/$TAG" --squash --delete-branch && break
+            echo "not mergeable yet; retrying"; sleep 6
+          done
+          [ "$(gh pr view "release/$TAG" --json state -q .state)" = MERGED ]
+
+      - name: Tag and publish the GitHub release
+        if: steps.bump.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          git fetch -q origin main
+          sha=$(git rev-parse origin/main)
+          git show -s --format=%s "$sha" | grep -q "^chore(release): $TAG" || { echo "main is not at the release commit"; exit 1; }
+          git tag "$TAG" "$sha"
+          git push origin "$TAG"
+          git show "$sha:CHANGELOG.md" | awk -v t="## $TAG " 'index($0, t) == 1 {f = 1; next} /^## v/ {f = 0} f' > notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md --target "$sha"
+
+  binaries:
+    needs: release
+    if: needs.release.outputs.tag != ''
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}

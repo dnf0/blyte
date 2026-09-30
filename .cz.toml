@@ -1,0 +1,13 @@
+# Releases (2026-09-30): every merge to main is released by .github/workflows/release-on-merge.yml.
+# commitizen reads the Conventional Commits since the last tag: feat -> minor, fix/refactor/perf ->
+# patch, a breaking change -> minor while the version is 0.x; docs/ci/chore/test/style -> no release.
+[tool.commitizen]
+name = "cz_conventional_commits"
+version_provider = "scm"
+tag_format = "v$version"
+version_scheme = "semver"
+major_version_zero = true
+update_changelog_on_bump = true
+changelog_incremental = true
+changelog_file = "CHANGELOG.md"
+version_files = ["Cargo.toml:^version = "]
