@@ -1,0 +1,17 @@
+# Dependency licences (2026-09-30). blyte is Apache-2.0; every dependency must be under one of these
+# permissive licences, so nothing copyleft (GPL, LGPL, AGPL, MPL) can enter unnoticed. CI runs
+# `cargo deny check licenses`. Adding a licence here is a decision, not a routine fix.
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9

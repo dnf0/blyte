@@ -34,6 +34,16 @@ jobs:
             revert
           requireScope: false
 
+  licences:
+    name: Dependency licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # deny.toml lists the permissive licences allowed; anything else (GPL, LGPL, AGPL, MPL) fails.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
   matrix-test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
