@@ -30,44 +30,79 @@ fn expand_home(path_str: &str, home: &Path) -> PathBuf {
 
 impl Sources {
     pub fn from_args(args: &crate::cli::DashboardArgs) -> Self {
-        let mut roots = args.roots.clone();
-        let mut runs_dirs = args.runs_dirs.clone();
+        Self::from_args_with_where(args).0
+    }
 
-        if roots.is_empty() && runs_dirs.is_empty() {
-            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-                let config_path = home.join(".config/blyte/dashboard.toml");
-                if let Ok(content) = std::fs::read_to_string(&config_path) {
-                    if let Ok(cfg) = toml::from_str::<DashboardConfig>(&content) {
-                        if let Some(r) = cfg.roots {
-                            roots = r.into_iter().map(|p| expand_home(&p, &home)).collect();
+    pub fn from_args_with_where(args: &crate::cli::DashboardArgs) -> (Self, String) {
+        if !args.roots.is_empty() || !args.runs_dirs.is_empty() {
+            return (
+                Self {
+                    roots: args.roots.clone(),
+                    runs_dirs: args.runs_dirs.clone(),
+                    hours: args.hours,
+                },
+                "--root/--runs-dir".to_string(),
+            );
+        }
+
+        let mut roots = Vec::new();
+        let mut runs_dirs = Vec::new();
+        let mut dashboard_contributed = false;
+
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let config_path = home.join(".config/blyte/dashboard.toml");
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(cfg) = toml::from_str::<DashboardConfig>(&content) {
+                    if let Some(r) = cfg.roots {
+                        for p in r {
+                            let expanded = expand_home(&p, &home);
+                            if !roots.contains(&expanded) {
+                                roots.push(expanded);
+                                dashboard_contributed = true;
+                            }
                         }
-                        if let Some(d) = cfg.runs_dirs {
-                            runs_dirs = d.into_iter().map(|p| expand_home(&p, &home)).collect();
+                    }
+                    if let Some(d) = cfg.runs_dirs {
+                        for p in d {
+                            let expanded = expand_home(&p, &home);
+                            if !runs_dirs.contains(&expanded) {
+                                runs_dirs.push(expanded);
+                                dashboard_contributed = true;
+                            }
                         }
                     }
                 }
             }
         }
 
-        if roots.is_empty() && runs_dirs.is_empty() {
-            let git_root = std::process::Command::new("git")
-                .args(["rev-parse", "--show-toplevel"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
-            if let Some(root) = git_root {
-                roots.push(root);
-            } else {
-                roots.push(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let mut dispatch_contributed = false;
+        for reg in crate::registry::registered() {
+            let already_listed = roots
+                .iter()
+                .any(|r| r == &reg || std::fs::canonicalize(r).map(|c| c == reg).unwrap_or(false));
+            if !already_listed {
+                roots.push(reg);
+                dispatch_contributed = true;
             }
         }
 
-        Self {
-            roots,
-            runs_dirs,
-            hours: args.hours,
+        let mut parts = Vec::new();
+        if dashboard_contributed {
+            parts.push("dashboard.toml");
         }
+        if dispatch_contributed {
+            parts.push("dispatch history");
+        }
+        let where_from = parts.join(" and ");
+
+        (
+            Self {
+                roots,
+                runs_dirs,
+                hours: args.hours,
+            },
+            where_from,
+        )
     }
 }
 
@@ -1079,7 +1114,7 @@ fn handle_connection(mut stream: std::net::TcpStream, src: &Sources) {
 }
 
 pub fn run(args: &crate::cli::DashboardArgs) -> i32 {
-    let sources = Sources::from_args(args);
+    let (sources, where_from) = Sources::from_args_with_where(args);
     let listener = match std::net::TcpListener::bind(format!("127.0.0.1:{}", args.port)) {
         Ok(l) => l,
         Err(e) => {
@@ -1097,6 +1132,17 @@ pub fn run(args: &crate::cli::DashboardArgs) -> i32 {
     };
     let port = local_addr.port();
     let url = format!("http://127.0.0.1:{port}");
+    if sources.roots.is_empty() && sources.runs_dirs.is_empty() {
+        eprintln!(
+            "blyte dashboard: nothing to watch yet: run blyte dispatch in a repository, or list roots in ~/.config/blyte/dashboard.toml"
+        );
+    } else {
+        eprintln!(
+            "blyte dashboard: watching {} repositories and {} run directories ({where_from})",
+            sources.roots.len(),
+            sources.runs_dirs.len()
+        );
+    }
     println!("blyte dashboard: {url}");
     let _ = std::io::stdout().flush();
 
