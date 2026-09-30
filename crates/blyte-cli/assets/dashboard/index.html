@@ -868,7 +868,7 @@
 
         return `
           <div class="job-item" data-key="${escapeAttr(job.key)}">
-            <button type="button" class="job-row-btn" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="detail-${escapeAttr(job.key)}" onclick="toggleExpand('${escapeAttr(job.key)}')">
+            <button type="button" class="job-row-btn" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="detail-${escapeAttr(job.key)}" data-toggle-key="${escapeAttr(job.key)}">
               <div class="col-status">
                 <span class="status-dot ${statusInfo.dot}"></span>
                 <span class="status-label ${statusInfo.text}">${escapeHtml(statusInfo.label)}</span>
@@ -885,7 +885,7 @@
             ${tags.length > 0 ? `
               <div class="row-tags-wrapper">
                 ${tags.map(tag => `
-                  <button type="button" class="tag-pill ${activeTag === tag ? 'active' : ''}" onclick="onTagClick(event, '${escapeAttr(tag)}')">
+                  <button type="button" class="tag-pill ${activeTag === tag ? 'active' : ''}" data-tag="${escapeAttr(tag)}">
                     ${escapeHtml(tag)}
                   </button>
                 `).join('')}
@@ -984,6 +984,14 @@
         render();
       }
     }
+
+    // Keys and tags come from job data, so they travel in data attributes, not inline handlers.
+    document.addEventListener("click", (e) => {
+      const tagBtn = e.target.closest("[data-tag]");
+      if (tagBtn) return onTagClick(e, tagBtn.dataset.tag);
+      const rowBtn = e.target.closest("[data-toggle-key]");
+      if (rowBtn) toggleExpand(rowBtn.dataset.toggleKey);
+    });
 
     // Initial fetch and poll every 5 seconds
     fetchJobs();
