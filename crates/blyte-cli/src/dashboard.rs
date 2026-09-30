@@ -370,33 +370,27 @@ pub fn parse_etime(s: &str) -> Option<u64> {
 }
 
 fn get_process_etime(pid: i64) -> Option<u64> {
+    // macOS: ask the kernel for the start time. `ps` is setuid there, so blyte's own sandbox
+    // cannot run it, and this also saves a process per PID.
     #[cfg(target_os = "macos")]
     {
-        extern "C" {
-            fn proc_pidinfo(
-                pid: libc::c_int,
-                flavor: libc::c_int,
-                arg: u64,
-                buffer: *mut libc::c_void,
-                buffersize: libc::c_int,
-            ) -> libc::c_int;
-        }
-        const PROC_PIDTBSDINFO: libc::c_int = 3;
-        let mut buf = [0u8; 136];
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
         let ret = unsafe {
-            proc_pidinfo(
+            libc::proc_pidinfo(
                 pid as libc::c_int,
-                PROC_PIDTBSDINFO,
+                libc::PROC_PIDTBSDINFO,
                 0,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len() as libc::c_int,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
             )
         };
-        if ret == 136 {
-            let start_sec = u64::from_ne_bytes(buf[120..128].try_into().unwrap());
-            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                return Some(now.as_secs().saturating_sub(start_sec));
-            }
+        if ret == size && info.pbi_start_tvsec > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            return Some(now.saturating_sub(info.pbi_start_tvsec));
         }
     }
 
