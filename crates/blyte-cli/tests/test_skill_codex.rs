@@ -1,6 +1,6 @@
 //! `blyte skill install --harness codex` sets up Codex CLI as the orchestrator with blyte
 //! underneath: the skill where Codex finds it, the default block in AGENTS.md, and rules that let
-//! `blyte dispatch` run outside Codex's sandbox (2026-09-27). Untested against a live Codex.
+//! `blyte dispatch` run outside Codex's sandbox (2026-09-27). Run end to end against a live Codex on 2026-09-30.
 
 use std::path::Path;
 use std::process::Command;
@@ -46,7 +46,7 @@ fn a_personal_codex_install_writes_skills_agents_md_and_rules() {
         CODEX_RULES
     );
     assert!(!h.join(".claude").exists(), "codex only");
-    assert!(String::from_utf8_lossy(&out.stdout).contains("(untested)"));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("(untested)"));
 
     let out = blyte(
         cwd.path(),

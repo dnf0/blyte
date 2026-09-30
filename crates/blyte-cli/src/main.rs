@@ -138,7 +138,7 @@ fn main() {
                                     );
                                 } else {
                                     println!(
-                                        "Codex now writes the plan and delegates implementation to blyte, in parallel, by default (untested)"
+                                        "Codex now writes the plan and delegates implementation to blyte, in parallel, by default"
                                     );
                                 }
                             }

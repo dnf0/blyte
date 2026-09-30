@@ -100,7 +100,7 @@ gate), reads each JSON summary, reviews each diff with `blyte review` and merges
   blyte to implement this"*.
 - `blyte skill uninstall` removes the skill and the `CLAUDE.md` block.
 - `--harness codex` (or `all`) sets up Codex CLI the same way: skill, `AGENTS.md` block, and
-  rules that let `blyte dispatch` run outside Codex's sandbox. Untested end to end so far. Any other orchestrator can do the same: `blyte dispatch` takes a task
+  rules that let `blyte dispatch` run outside Codex's sandbox. Run end to end with Codex CLI on 2026-09-30. Any other orchestrator can do the same: `blyte dispatch` takes a task
 file and a gate and prints JSON, and `blyte skill print` prints the instructions.
 
 ## Quick start: blyte on its own
