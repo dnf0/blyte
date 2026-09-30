@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 
 use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
 
-const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+/// High effort: every measured run (the A/B pairs and the evals, 2026-09) used `-high`.
+const DEFAULT_MODEL: &str = "gemini-3.8-flash-high";
 
 const API_ROOT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
