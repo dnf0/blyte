@@ -370,6 +370,36 @@ pub fn parse_etime(s: &str) -> Option<u64> {
 }
 
 fn get_process_etime(pid: i64) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn proc_pidinfo(
+                pid: libc::c_int,
+                flavor: libc::c_int,
+                arg: u64,
+                buffer: *mut libc::c_void,
+                buffersize: libc::c_int,
+            ) -> libc::c_int;
+        }
+        const PROC_PIDTBSDINFO: libc::c_int = 3;
+        let mut buf = [0u8; 136];
+        let ret = unsafe {
+            proc_pidinfo(
+                pid as libc::c_int,
+                PROC_PIDTBSDINFO,
+                0,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len() as libc::c_int,
+            )
+        };
+        if ret == 136 {
+            let start_sec = u64::from_ne_bytes(buf[120..128].try_into().unwrap());
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                return Some(now.as_secs().saturating_sub(start_sec));
+            }
+        }
+    }
+
     if let Ok(output) = std::process::Command::new("ps")
         .args(["-o", "etime=", "-p", &pid.to_string()])
         .output()
@@ -997,6 +1027,22 @@ pub fn route(path: &str, src: &Sources) -> (u16, &'static str, Vec<u8>) {
         "/" | "/index.html" => {
             let html = include_str!("../assets/dashboard/index.html");
             (200, "text/html; charset=utf-8", html.as_bytes().to_vec())
+        }
+        "/favicon.svg" => {
+            let svg = include_bytes!("../assets/dashboard/favicon.svg");
+            (200, "image/svg+xml", svg.to_vec())
+        }
+        "/fonts/archivo.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/archivo.woff2");
+            (200, "font/woff2", font.to_vec())
+        }
+        "/fonts/plex-mono-400.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-400.woff2");
+            (200, "font/woff2", font.to_vec())
+        }
+        "/fonts/plex-mono-500.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-500.woff2");
+            (200, "font/woff2", font.to_vec())
         }
         "/api/jobs" => {
             let now = std::time::SystemTime::now()

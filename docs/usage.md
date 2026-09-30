@@ -48,7 +48,7 @@ be untracked). Rules are capped at 12,000 characters. The run prints which file 
 blyte dashboard
 ```
 
-On start, it prints `blyte dashboard: http://127.0.0.1:<port>` and serves until killed. The server binds to `127.0.0.1` only, and the page makes requests only to its own server—it runs strictly on this machine and makes no network calls. Pass `--open` to open the URL in your default browser automatically.
+On start, it prints `blyte dashboard: http://127.0.0.1:<port>` and serves until killed. The server binds to `127.0.0.1` only, and the page makes requests only to its own server—it runs strictly on this machine and makes no network calls. The page uses blyte's bundled Archivo and IBM Plex Mono fonts, under the SIL Open Font License, served locally. Pass `--open` to open the URL in your default browser automatically.
 
 The page refreshes every 5 seconds. Running jobs come first, then jobs that finished in the last
 24 hours. Each row shows the job's status, title, what it is doing now (the last tool call, "Gate
