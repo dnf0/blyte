@@ -9,21 +9,27 @@ Nothing at the moment; see Next.
 
 ## Next
 
-- **Codex as the planner (2026-09-29).** `blyte skill install --harness codex` exists but is untested
-  end to end. Step 1: a smoke test with a Codex login (a paid ChatGPT plan or an OpenAI API key):
-  install, delegate one small real task, confirm the skill, the sandbox rule and the run. Then drop
-  "(untested)". Step 2: a Codex driver in the eval's offload arm, to compare Codex + blyte with
-  Claude Code + blyte.
-- **Fewer, larger dispatches as the default guidance.** Gemini makes one tool call per turn, and each
-  dispatch re-reads the code it touches. On scc (2026-09-29), one dispatch was the fastest and
-  cheapest; splitting one feature cost 30–160% more Gemini, even with the parts running at once.
-  Split only independent tasks of similar size; the skill says so, and the eval's tools now do too.
+- **Codex as the planner, step 2 (2026-09-30).** Step 1, the end-to-end smoke test, passed (#164).
+  Next: a Codex driver in the eval's offload arm, to compare Codex + blyte with Claude Code + blyte
+  on the same task. Uses the ChatGPT plan's Codex allowance; ask before running.
+- **Commit `blyte.toml` in team repositories** once a second person uses blyte in one, so nobody has
+  to run `blyte init` (it is in the global git ignore on the user's machine for now).
 
 ## Done
 
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-09-30**
+  - A release on every merge (commitizen, semantic versioning, #157/#159/#162): a release PR, a
+    `vX.Y.Z` tag, the GitHub release with its changelog, and static binaries for macOS and Linux.
+  - `blyte update` installs the latest release in place, with `--check` and `--rollback` (#169).
+  - blyte loads the repository's rules for agents itself on every run (#160): `.blyte/rules.md`,
+    else `.claude/agy-rules.md`, else `AGENTS.md`, however it is started.
+  - Codex CLI run end to end (#164): the skill names the escalation Codex must request; the
+    "(untested)" labels are gone.
+  - Apache-2.0 only (#166), and a dependency licence check in CI (`cargo deny`, #168): every
+    dependency is permissive.
+  - Fewer, larger dispatches as the default guidance (docs, skill and the eval's tools).
   - `blyte skill install --no-default` removes an earlier default block, so switching from on to
     "only when asked" needs no uninstall first.
   - Every blyte run is recorded for reporting, including ones started with `blyte dispatch`
@@ -51,4 +57,12 @@ Kept for about the last four weeks; older items are in the git history and the e
 ## Parked
 
 - **Open-sourcing blyte** and the brief for Jack: on hold until the information gathering ends.
-- **Docs hosting and the licence line:** parked until the decision to go public.
+- **Docs hosting:** parked until the decision to go public.
+- **When open source is approved** (these need a public repository and a crates.io release):
+  - `blyte update` updates the way blyte was installed: `cargo install blyte --locked` (or
+    `cargo binstall blyte`) for a cargo install, detected from `~/.cargo/.crates2.json`, and the
+    release binary over plain HTTPS otherwise, with no GitHub CLI needed. Today it always downloads
+    the release binary through `gh`.
+  - Publish the crates to crates.io (`cd.yml`, manual, dry run first).
+  - Contributions: a DCO sign-off or a CLA, decided with Jack and legal, before accepting outside
+    pull requests.
