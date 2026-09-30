@@ -39,3 +39,9 @@ fn every_status_in_the_contract_has_a_label() {
         );
     }
 }
+
+#[test]
+fn each_row_shows_the_job_id() {
+    // Which run a row is (R3T1-agy, say) matters as much as its title (2026-09-30).
+    assert!(PAGE.contains("class=\"job-id\">${escapeHtml(job.id)}"));
+}
