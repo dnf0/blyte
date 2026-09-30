@@ -1,3 +1,9 @@
+## v0.5.0 (2026-09-30)
+
+### Feat
+
+- **cli**: dashboard rows show the job id (#175)
+
 ## v0.4.0 (2026-09-30)
 
 ### Feat
