@@ -29,9 +29,17 @@ one commit each, arranged so that as many as possible touch disjoint files, then
   (`--base wip/T1`).
 - **Coupled tasks** (task 2 cannot pass its checks without task 1) are one task.
 
-Dispatch every independent task at once. Run tasks one after another only when one needs
-another's result. A plan with a single task is fine for a single change; do not split work
-artificially just to run it in parallel.
+Give every task a **Depends on:** line: `none`, or the tasks whose result it needs. Tasks that
+change the same file depend on each other. Then:
+
+- Dispatch every independent task at once. That means every task whose dependencies are merged.
+- When a merge unblocks a task, dispatch it straight away, before you review the next result, so
+  blyte is never idle while you read.
+- Run tasks one after another only when one needs another's result. If a plan has two or more
+  tasks with `Depends on: none` and you are about to run them in turn, stop: that is a mistake.
+
+A plan with a single task is fine for a single change; do not split work artificially just to run
+it in parallel.
 
 ## 2. Write each task
 
@@ -49,6 +57,7 @@ tests pin down. Include:
   with one script (`git mv`, `sed`) and then fix the exceptions by hand; otherwise the implementer
   may edit file by file and run out of turns.
 - **Constraints**, e.g. "existing tests pass unmodified".
+- **Depends on**: `none`, or the tasks it needs, as in the plan.
 - **Siblings**: for a task running in parallel, name the other tasks and say they are **not** in
   this worktree ("T2 adds `slugify` separately; do not add it here"), so it does not "fix" their
   absence.
@@ -68,9 +77,13 @@ cargo test'
 ```
 
 - **The gate:** if the repository has a `blyte.toml`, leave `--gate` out: blyte uses the
-  repository's own checks. If it has none, run `blyte init` once, read the gate it detected,
-  and fix it if it is wrong, or pass `--gate`. Each line is a step; all must pass; the slow full
-  test run goes last.
+  repository's own checks. If it has none, run `blyte init` first. It takes the checks from the
+  repository's CI, sets what the environment needs (`[dispatch.env]`, such as `UV_FROZEN`), runs
+  each step once in a fresh worktree, and writes `blyte.toml` with a comment on every step. Read
+  that summary: a step **left out** failed for environment reasons (credentials, network) and
+  says why; a step that **failed on HEAD** is a real failure to fix, or to tell the user about,
+  before dispatching. Each line of the gate is a step; all must pass; the slow full test run goes
+  last. Never put credentials in `blyte.toml`; blyte refuses them.
 - The implementer model's API key must be in the environment or in `~/.config/blyte/env` (`NAME=value`, `chmod 600`); blyte never prints it. If a dispatch fails with "no API key", tell the user; do not do the work some other way.
 
 **Starting parallel tasks.** If your harness tells you when a background command exits (an
@@ -80,11 +93,13 @@ one-shot session such as `claude -p`, where background commands die with the ses
 them together and wait in the foreground:
 
 ```bash
-mkdir -p .wt
-blyte dispatch T1 /abs/task-T1.md --gate '...' > .wt/T1.json &
-blyte dispatch T2 /abs/task-T2.md --gate '...' > .wt/T2.json &
+blyte dispatch T1 /abs/task-T1.md > /dev/null &
+blyte dispatch T2 /abs/task-T2.md > /dev/null &
 wait
 ```
+
+Each dispatch also saves its summary to `.wt/<id>.json`, so nothing is lost when output is
+discarded. `blyte dashboard` shows every dispatch on the machine while they run.
 
 **A long dispatch:** `blyte status T1` shows whether it is still running, the current turn, the
 last command and gate attempts. A run that is `dead`, or many turns in with no gate attempt,
@@ -114,13 +129,24 @@ blyte review T1 --diff
 
 1. **Scope**: only the files the task names changed, in the commit(s) you asked for, with the exact message.
 2. **Deviations**: every deviation in `final_message` is justified, and the diff shows none it did not mention.
-3. **Out-of-scope effects**: skim the log (`.wt/T1.log`) for commands that touched anything outside the worktree.
+3. **Out-of-scope effects**: `blyte review` lists, under `== host commands`, logged commands that
+   may have changed things outside the worktree (deleted a cache, wrote to `~/`, pushed). If any
+   appear, check what they did and tell the user.
 
 You do not need to re-run the gate: it ran the repository's checks and they passed.
 
 **Review in depth** (read the whole diff, re-run the gate in `.wt/T1`, check verbatim code landed
 verbatim) when the gate failed or the budget ran out, when the change is risky (security, data
 handling, migrations, a public interface), or when the diff surprises you.
+
+**Record your verdict** once you have checked it, so the repository keeps an honest record of
+how blyte does:
+
+```bash
+blyte review T1 --verdict accepted --notes "to the task"      # merged as it was
+blyte review T1 --verdict fixed --notes "what you changed"    # merged after a small fix
+blyte review T1 --verdict redone --notes "why"                # not used; redone or rewritten
+```
 
 If it falls short: fix a trivial issue yourself, or write a follow-up task saying exactly what to
 change and dispatch it (`blyte dispatch T1b follow-up.md --base wip/T1 --gate ...`). If the task was
