@@ -10,4 +10,8 @@ major_version_zero = true
 update_changelog_on_bump = true
 changelog_incremental = true
 changelog_file = "CHANGELOG.md"
-version_files = ["Cargo.toml:^version = "]
+version_files = [
+    "Cargo.toml:^version = ",
+    # blyte-cli pins its sibling crates; a 0.x caret requirement only matches the same minor.
+    "crates/blyte-cli/Cargo.toml:^blyte-(agent|provider) = ",
+]

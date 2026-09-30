@@ -62,7 +62,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "release/$TAG"
-          git add Cargo.toml CHANGELOG.md
+          git add Cargo.toml crates/blyte-cli/Cargo.toml CHANGELOG.md
           git commit -m "chore(release): $TAG"
           git push origin "release/$TAG"
           gh pr create --base main --head "release/$TAG" --title "chore(release): $TAG" \
