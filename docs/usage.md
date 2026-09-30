@@ -50,7 +50,8 @@ environment needs such as `UV_FROZEN = "1"` (when `uv.lock` exists) and `UV_OFFL
 private index is configured). Unless `--no-verify` is passed, it proves each step in a detached
 worktree of `HEAD` (`.wt/init-<pid>`) using the sandboxed local shell, leaving out steps broken by
 the environment and flagging steps that fail on HEAD. `blyte dispatch` reads `blyte.toml` when flags
-are not passed:
+are not passed. In a linked worktree with no `blyte.toml` of its own, it falls back to the main
+checkout's:
 
 ```toml
 # blyte.toml: how this repository's work is checked, for `blyte dispatch`.
