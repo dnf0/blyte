@@ -156,7 +156,7 @@ You can also pass sources explicitly:
 |---|---|---|
 | `--max-turns N` | 25 | the model has taken N turns |
 | `--max-gates N` | 5 | the gate has failed N times |
-| `--max-seconds N` | none | N seconds of wall-clock time have passed; blyte stops itself and reports |
+| `--max-seconds N` | none | N seconds of wall-clock time have passed; blyte stops itself and reports. The run stops, with a report, at most 30 s after the budget even if a model call or command never returns |
 | `--max-cost USD` | none | list-price spend reaches USD (Gemini 3.8 Flash only for now; refused for a model with no known price) |
 
 A run that hits a budget ends with outcome `budget_exhausted`.

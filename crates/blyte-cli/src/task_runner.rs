@@ -119,6 +119,34 @@ pub fn run_task(
     config: TaskConfig,
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     let started = std::time::Instant::now();
+    if let Some(s) = config.max_seconds {
+        let watchdog_config = config.clone();
+        std::thread::spawn(move || {
+            let deadline = started + std::time::Duration::from_secs(s.saturating_add(30));
+            while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+                if remaining.is_zero() {
+                    break;
+                }
+                std::thread::sleep(remaining);
+            }
+            let msg = format!(
+                "stopped {} s past --max-seconds {s}: a model call or command never returned",
+                30
+            );
+            if let Some(path) = &watchdog_config.report {
+                let _ = crate::report::write(
+                    path,
+                    &crate::report::RunRecord::from_error(
+                        &watchdog_config,
+                        &msg,
+                        started.elapsed(),
+                    ),
+                );
+            }
+            eprintln!("blyte: {msg}");
+            std::process::exit(1);
+        });
+    }
     let verification_cmd = config.gate.as_deref().unwrap_or("");
     let mut state = blyte_agent::state::State::new(&config.prompt, verification_cmd);
     state.orchestrator.max_cost_usd = config.max_cost_usd;

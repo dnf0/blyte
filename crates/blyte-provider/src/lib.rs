@@ -36,6 +36,7 @@ pub fn http_client() -> &'static ureq::Agent {
         ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(20))
             .timeout_read(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(600))
             .build()
     })
 }
