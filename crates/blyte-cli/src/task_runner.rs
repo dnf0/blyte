@@ -206,6 +206,9 @@ pub fn run_task_with_state_and_writer<W: Write>(
         ),
         None => {
             blyte_agent::shell::set_pass_env(config.pass_env.clone());
+            if let Some(r) = blyte_agent::rules::load(&config.root) {
+                eprintln!("blyte: repository rules from {}", r.source.display());
+            }
             let withheld = blyte_agent::shell::withheld_env();
             if !withheld.is_empty() {
                 eprintln!(

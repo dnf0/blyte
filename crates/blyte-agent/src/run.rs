@@ -299,6 +299,7 @@ impl<'a> Runner<'a> {
              Change nothing outside the repository: no caches, other repositories, \
              home-directory files or system settings. If something outside it blocks you \
              (disk space, network, a missing tool), say so and stop.\n\n\
+             {rules}\
              ## Working efficiently\n\
              Independent reads, searches and commands can be issued as several tool calls in one \
              turn: they run in order and you see every result together. Batch them whenever one \
@@ -307,6 +308,7 @@ impl<'a> Runner<'a> {
             completion = completion,
             where_ = self.shell.describe(),
             bins = bins,
+            rules = crate::rules::prompt_section(&self.root),
         )
     }
 
