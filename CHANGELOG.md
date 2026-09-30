@@ -1,3 +1,9 @@
+## v0.3.0 (2026-09-30)
+
+### Feat
+
+- **cli**: blyte update installs the latest release, with --check and --rollback (#169)
+
 ## v0.2.3 (2026-09-30)
 
 ### Fix
