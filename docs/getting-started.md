@@ -10,8 +10,19 @@ blyte is a single Rust binary, for macOS and Linux. With a recent stable Rust to
 
 ```bash
 cargo install --git https://github.com/climate-x-org/blyte blyte --locked
-blyte --version        # blyte 0.1.0 (<commit>)
+blyte --version        # blyte <version> (<commit>)
 ```
+
+Or, without Rust, download the ready-built binary from the latest release with the GitHub CLI
+(`blyte-x86_64-apple-darwin` on an Intel Mac, `blyte-x86_64-unknown-linux-musl` on Linux):
+
+```bash
+gh release download --repo climate-x-org/blyte --pattern blyte-aarch64-apple-darwin -O ~/.local/bin/blyte
+chmod +x ~/.local/bin/blyte
+```
+
+To update later, `blyte update` installs the latest release in place (`--check` only shows the
+versions; `--rollback` restores the previous build, kept as `blyte.prev`).
 
 ## 2. Give it a model
 

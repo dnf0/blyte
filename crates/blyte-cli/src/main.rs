@@ -83,6 +83,9 @@ fn main() {
             blyte_cli::cli::Command::Status { id, json } => {
                 std::process::exit(blyte_cli::dispatch::run_status(&id, json));
             }
+            blyte_cli::cli::Command::Update { check, rollback } => {
+                std::process::exit(blyte_cli::update::run(check, rollback));
+            }
             blyte_cli::cli::Command::Skill(args) => match args.action {
                 blyte_cli::cli::SkillAction::Install {
                     project,

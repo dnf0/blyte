@@ -23,6 +23,15 @@ pub enum Command {
     },
     /// Install or print the Claude Code skill for the plan, delegate, review workflow
     Skill(SkillArgs),
+    /// Replace this binary with the latest release (the old one is kept as blyte.prev)
+    Update {
+        /// Only show the installed and latest versions
+        #[arg(long, conflicts_with = "rollback")]
+        check: bool,
+        /// Swap back to the previous build (blyte.prev)
+        #[arg(long)]
+        rollback: bool,
+    },
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
