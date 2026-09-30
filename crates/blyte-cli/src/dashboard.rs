@@ -179,6 +179,89 @@ fn extract_plan(task: &str) -> Option<String> {
     None
 }
 
+fn extract_prompt_task_title(prompt: &str) -> Option<String> {
+    for line in prompt.lines() {
+        let trimmed = line.trim();
+        if let Some(pos) = trimmed.find("Task: \"") {
+            let rest = &trimmed[pos + "Task: \"".len()..];
+            if let Some(end) = rest.find('"') {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    if hashes > 0 {
+        let after = &trimmed[hashes..];
+        if after.is_empty() || after.starts_with(' ') || after.starts_with('\t') {
+            return Some((hashes, after.trim()));
+        }
+    }
+    None
+}
+
+fn extract_task_from_plan(plan_content: &str, title: &str) -> Option<String> {
+    let mut target_heading = None;
+    let mut offset = 0;
+
+    for line in plan_content.split_inclusive('\n') {
+        let line_len = line.len();
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if let Some((level, text)) = parse_heading(trimmed) {
+            if text == title {
+                target_heading = Some((offset, level));
+                break;
+            }
+        }
+        offset += line_len;
+    }
+
+    let (start_offset, target_level) = target_heading?;
+
+    // A `#` line inside a fenced code block (a shell comment, say) is not a heading.
+    let mut end_offset = plan_content.len();
+    let mut curr_offset = 0;
+    let mut in_fence = false;
+    for line in plan_content.split_inclusive('\n') {
+        let line_len = line.len();
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        } else if curr_offset > start_offset && !in_fence {
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if let Some((level, _)) = parse_heading(trimmed) {
+                if level <= target_level {
+                    end_offset = curr_offset;
+                    break;
+                }
+            }
+        }
+        curr_offset += line_len;
+    }
+
+    Some(plan_content[start_offset..end_offset].to_string())
+}
+
+fn extract_now_from_final_message(msg: &str) -> String {
+    for line in msg.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            return trimmed.chars().take(200).collect();
+        }
+    }
+    for line in msg.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            let stripped = trimmed.trim_start_matches(['#', ' ']).trim_end();
+            return stripped.chars().take(200).collect();
+        }
+    }
+    String::new()
+}
+
 struct LogInfo {
     turns: u64,
     last_tool: Option<String>,
@@ -534,10 +617,32 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
     }
 
     let mut jobs = Vec::new();
+    let mut plan_cache: std::collections::HashMap<PathBuf, Option<String>> =
+        std::collections::HashMap::new();
 
     for raw in raw_jobs {
         let title = extract_title(&raw.task);
         let plan = extract_plan(&raw.task);
+        let prompt_task_title = extract_prompt_task_title(&raw.task);
+
+        let task_content = if let (Some(ref p_str), Some(ref t_title)) = (&plan, &prompt_task_title)
+        {
+            let p_path = if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                expand_home(p_str, &home)
+            } else {
+                PathBuf::from(p_str)
+            };
+            let cached_plan = plan_cache
+                .entry(p_path.clone())
+                .or_insert_with(|| std::fs::read_to_string(&p_path).ok());
+            if let Some(plan_text) = cached_plan {
+                extract_task_from_plan(plan_text, t_title).unwrap_or_else(|| raw.task.clone())
+            } else {
+                raw.task.clone()
+            }
+        } else {
+            raw.task.clone()
+        };
 
         let mut tags = Vec::new();
         tags.push(format!("repo: {}", raw.repo));
@@ -651,9 +756,14 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
             };
 
             let report_final_msg = report["final_message"].as_str();
-            let now_str = if let Some(msg) = raw.summary_final_msg.as_deref().or(report_final_msg) {
-                let first_line = msg.lines().next().unwrap_or("");
-                first_line.chars().take(200).collect()
+            let now_from_msg = raw
+                .summary_final_msg
+                .as_deref()
+                .or(report_final_msg)
+                .map(extract_now_from_final_message)
+                .filter(|s| !s.is_empty());
+            let now_str = if let Some(s) = now_from_msg {
+                s
             } else if let Some(ref tool) = log_info.last_tool {
                 tool.clone()
             } else {
@@ -687,12 +797,25 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
             let elapsed_s = agy.duration_seconds.map(|d| d.round() as u64);
             let now_str = if status == "error" {
                 let err = agy.error.as_deref().unwrap_or("");
-                let first_line = err.lines().next().unwrap_or("");
-                first_line.chars().take(200).collect()
+                let s = extract_now_from_final_message(err);
+                if !s.is_empty() {
+                    s
+                } else {
+                    err.lines().next().unwrap_or("").chars().take(200).collect()
+                }
             } else {
                 let resp = agy.response.as_deref().unwrap_or("");
-                let first_line = resp.lines().next().unwrap_or("");
-                first_line.chars().take(200).collect()
+                let s = extract_now_from_final_message(resp);
+                if !s.is_empty() {
+                    s
+                } else {
+                    resp.lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect()
+                }
             };
 
             (
@@ -773,7 +896,7 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
             continue;
         }
 
-        let task_truncated: String = raw.task.chars().take(2000).collect();
+        let task_truncated: String = task_content.chars().take(2000).collect();
 
         jobs.push(Job {
             key: format!("{}/{}", raw.repo, raw.id),

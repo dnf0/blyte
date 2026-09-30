@@ -963,9 +963,29 @@
       }).join("");
     }
 
-    function render() {
+    function hasJobListSelection() {
+      const sel = window.getSelection && window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.toString()) return false;
+      const container = document.getElementById("table-body");
+      if (!container) return false;
+      if (container.contains(sel.anchorNode) || container.contains(sel.focusNode)) {
+        return true;
+      }
+      if (sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0);
+        if (range.intersectsNode && range.intersectsNode(container)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function render(isPoll = false) {
       renderLiveIndicator();
       renderSummaryStrip();
+      if (isPoll && hasJobListSelection()) {
+        return;
+      }
       renderViewsStrip();
       renderTagBanner();
       renderTable();
@@ -979,10 +999,10 @@
         currentData = data;
         lastSuccessfulUpdate = new Date();
         isOnline = true;
-        render();
+        render(true);
       } catch (err) {
         isOnline = false;
-        render();
+        render(true);
       }
     }
 

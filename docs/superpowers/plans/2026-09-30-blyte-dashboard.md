@@ -619,7 +619,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use blyte_cli::dashboard::{collect, Sources};
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 fn write(p: &Path, text: &str) {
@@ -642,7 +645,7 @@ fn the_task_is_its_section_of_the_plan_and_now_skips_headings() {
     let plan = tmp.path().join("plan.md");
     write(
         &plan,
-        "# The plan\n\n### Task 6: other\n\nsix\n\n### Task 7: the thing\n\nDo the thing.\n\n#### Step 1\n\nstep\n\n### Task 8: next\n\neight\n",
+        "# The plan\n\n### Task 6: other\n\nsix\n\n### Task 7: the thing\n\nDo the thing.\n\n```bash\n# run it\n```\n\n#### Step 1\n\nstep\n\n### Task 8: next\n\neight\n",
     );
     let runs = tmp.path().join("runs/repo-e");
     let prompt = format!(
@@ -653,26 +656,36 @@ fn the_task_is_its_section_of_the_plan_and_now_skips_headings() {
     write(&runs.join("P1.log"), "[Turn 3] \n");
     write(
         &runs.join("P1.report.json"),
-        r#"{"outcome":"verified","final_message":"### Summary of Changes\n\nAdded the thing.\nMore."}"#,
+        r####"{"outcome":"verified","final_message":"### Summary of Changes\n\nAdded the thing.\nMore."}"####,
     );
     // A second job on the same plan, whose title isn't in it, keeps its prompt.
     write(
         &runs.join("P2.prompt"),
-        &format!("Plan: {}\nTask: \"Task 9: missing\" ONLY.\n", plan.display()),
+        &format!(
+            "Plan: {}\nTask: \"Task 9: missing\" ONLY.\n",
+            plan.display()
+        ),
     );
     write(&runs.join("P2.log"), "[Turn 1] \n");
     write(
         &runs.join("P2.report.json"),
-        r##"{"outcome":"verified","final_message":"## Done\n\n"}"##,
+        r####"{"outcome":"verified","final_message":"## Done\n\n"}"####,
     );
 
-    let src = Sources { roots: vec![], runs_dirs: vec![tmp.path().join("runs")], hours: 24 };
+    let src = Sources {
+        roots: vec![],
+        runs_dirs: vec![tmp.path().join("runs")],
+        hours: 24,
+    };
     let v = collect(&src, now());
 
     let p1 = job(&v, "repo-e/P1");
     let task = p1["task"].as_str().unwrap();
     assert!(task.starts_with("### Task 7: the thing"), "{task}");
-    assert!(task.contains("Do the thing.") && task.contains("#### Step 1"), "{task}");
+    assert!(
+        task.contains("Do the thing.") && task.contains("#### Step 1"),
+        "{task}"
+    );
     assert!(!task.contains("Task 8") && !task.contains("ONLY"), "{task}");
     assert_eq!(p1["now"], "Added the thing.");
 
