@@ -134,13 +134,52 @@ fn parse_workflow_commands(content: &str) -> Vec<String> {
         i += 1;
     }
 
+    // A CI line often chains setup and the check (`mkdir -p out && uv run pytest`): each part
+    // is judged on its own.
     let mut result = Vec::new();
     for cmd in candidate_commands {
-        if let Some(kept) = filter_and_clean_command(&cmd) {
-            result.push(kept);
+        for part in split_chain(&cmd) {
+            if let Some(kept) = filter_and_clean_command(&part) {
+                result.push(kept);
+            }
         }
     }
     result
+}
+
+/// Split a shell line on `&&`, `||` and `;` outside quotes.
+fn split_chain(cmd: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            current.push(c);
+            if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+            current.push(c);
+        } else if (c == '&' || c == '|') && chars.get(i + 1) == Some(&c) {
+            parts.push(std::mem::take(&mut current));
+            i += 1;
+        } else if c == ';' {
+            parts.push(std::mem::take(&mut current));
+        } else {
+            current.push(c);
+        }
+        i += 1;
+    }
+    parts.push(current);
+    parts
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 fn join_continuation_lines(lines: &[&str]) -> Vec<String> {
@@ -237,16 +276,25 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         trimmed
     };
 
+    // Reporting options go, with their value when it is a separate word (`--cov-report xml:out`).
     let tokens = tokenize(text);
-    let kept_tokens: Vec<String> = tokens
-        .into_iter()
-        .filter(|tok| {
-            !tok.starts_with("--cov")
-                && !tok.starts_with("--junitxml")
-                && !tok.starts_with("--junit-xml")
-                && !tok.starts_with("--cov-report")
-        })
-        .collect();
+    let mut kept_tokens: Vec<String> = Vec::new();
+    let mut iter = tokens.into_iter().peekable();
+    while let Some(tok) = iter.next() {
+        let reporting = ["--cov", "--junitxml", "--junit-xml"]
+            .iter()
+            .any(|o| tok.starts_with(o));
+        if !reporting {
+            kept_tokens.push(tok);
+            continue;
+        }
+        // These always take a value; a bare `--cov` takes one unless it is the last word.
+        let value_follows = iter.peek().is_some_and(|n| !n.starts_with('-'));
+        let always = matches!(tok.as_str(), "--cov-report" | "--junitxml" | "--junit-xml");
+        if value_follows && (always || (tok == "--cov" && iter.len() > 1)) {
+            iter.next();
+        }
+    }
 
     Some(kept_tokens.join(" "))
 }
@@ -554,7 +602,7 @@ pub fn run(args: &InitArgs) -> i32 {
     }
 
     let ci_steps = detect_ci_with_sources(&root);
-    let (steps, is_ci) = if !ci_steps.is_empty() {
+    let (steps, _from_ci) = if !ci_steps.is_empty() {
         (
             ci_steps
                 .into_iter()
@@ -590,7 +638,7 @@ pub fn run(args: &InitArgs) -> i32 {
 
     let env = detect_env(&root);
 
-    let verified_steps = if is_ci && !args.no_verify {
+    let verified_steps = if !args.no_verify {
         verify_steps(
             &root,
             steps,
