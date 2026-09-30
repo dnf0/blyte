@@ -11,6 +11,8 @@ pub enum Command {
         #[arg(long)]
         print: bool,
     },
+    /// Serve a local dashboard of running and recent jobs
+    Dashboard(DashboardArgs),
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
     Dispatch(DispatchArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
@@ -35,6 +37,29 @@ pub enum Command {
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct DashboardArgs {
+    /// Port to listen on (0 for a free port)
+    #[arg(long, default_value = "7171", value_name = "N")]
+    pub port: u16,
+
+    /// Directory holding repositories or worktrees (repeatable)
+    #[arg(long = "root", value_name = "DIR")]
+    pub roots: Vec<PathBuf>,
+
+    /// Directory holding run logs and reports (repeatable)
+    #[arg(long = "runs-dir", value_name = "DIR")]
+    pub runs_dirs: Vec<PathBuf>,
+
+    /// How far back finished jobs are listed, in hours
+    #[arg(long, default_value = "24", value_name = "N")]
+    pub hours: u64,
+
+    /// Open the dashboard in the default browser
+    #[arg(long)]
+    pub open: bool,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
 pub struct DispatchArgs {
     /// Identifier for this dispatch (used for worktree and branch wip/<id>)
     pub id: String,
@@ -45,6 +70,10 @@ pub struct DispatchArgs {
     /// The check command; several lines are several steps, all of which must pass
     #[arg(short, long)]
     pub gate: Option<String>,
+
+    /// Tag for this dispatch (repeatable)
+    #[arg(long = "tag", value_name = "TEXT")]
+    pub tags: Vec<String>,
 
     /// The commit a new worktree starts from
     #[arg(long, default_value = "HEAD")]
