@@ -476,3 +476,144 @@ fn init_proves_each_step_and_leaves_out_the_ones_the_environment_breaks() {
 
 - [ ] **Step 2:** implement until the check passes.
 - [ ] **Step 3: commit** `feat(cli): blyte init takes the gate from CI and proves it in a fresh worktree`.
+
+### Task 4: the dashboard is global by default
+
+Needs Task 2 (both edit `dispatch.rs`); independent of Task 3.
+
+With no `~/.config/blyte/dashboard.toml`, `blyte dashboard` watched only the repository it was
+started in, and said nothing about it: a colleague saw an empty dashboard from the wrong folder
+(2026-09-30). Every dispatch now registers its repository machine-wide, and the dashboard watches
+every registered repository from any folder.
+
+**Files:** new `crates/blyte-cli/src/registry.rs` (`pub mod registry;` in `lib.rs`),
+`crates/blyte-cli/src/dispatch.rs` (one call), `crates/blyte-cli/src/dashboard.rs`
+(`Sources::from_args`, the start-up message), new `crates/blyte-cli/tests/test_dashboard_global.rs`,
+`docs/usage.md` (the Dashboard "Sources and configuration" part), `README.md` (the "Watch what's
+running" section: drop "for a single repository", say it shows every repository blyte has worked
+in).
+
+**Registry.** `registry.rs`:
+- `pub fn state_dir() -> Option<PathBuf>`: `$BLYTE_STATE_DIR` when set and non-empty, else
+  `$XDG_STATE_HOME/blyte` when set, else `$HOME/.local/state/blyte`.
+- `pub fn register(root: &Path)`: appends the canonical path of `root` as one line to
+  `<state_dir>/repos` (creating the directory), unless it is already listed. Errors are ignored.
+- `pub fn registered() -> Vec<PathBuf>`: the listed paths that still exist as directories, in file
+  order, without duplicates.
+
+`run_dispatch` calls `crate::registry::register(&root)` right after it resolves the repository
+root (before the gate check, so even a refused dispatch registers).
+
+**Sources.** `Sources::from_args`:
+- When `--root` or `--runs-dir` is given, use exactly those (as now).
+- Otherwise: the roots and runs dirs from `dashboard.toml` (as now) **plus** every
+  `registry::registered()` repository as a root (skipping one already listed). The fallback to the
+  current repository or directory is removed.
+- On start, before the existing URL line, print one line to **stderr**:
+  `blyte dashboard: watching <N> repositories and <M> run directories (<where from>)`, where
+  `<where from>` is `--root/--runs-dir`, or the parts that contributed from `dashboard.toml` and
+  `dispatch history`, joined with ` and `; with nothing to watch, instead:
+  `blyte dashboard: nothing to watch yet: run blyte dispatch in a repository, or list roots in ~/.config/blyte/dashboard.toml`.
+  The stdout URL line stays exactly as it is.
+
+- [ ] **Step 1: test.** Create `crates/blyte-cli/tests/test_dashboard_global.rs` exactly:
+
+```rust
+//! Every dispatch registers its repository, and the dashboard watches all of them from any folder,
+//! with no configuration: from the wrong folder a colleague saw nothing (2026-09-30).
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+fn blyte(dir: &Path, home: &Path, state: &Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_blyte"));
+    c.current_dir(dir)
+        .env("HOME", home)
+        .env("BLYTE_STATE_DIR", state)
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("BLYTE_MODEL");
+    c
+}
+
+#[test]
+fn a_dispatched_repository_shows_on_a_dashboard_started_elsewhere() {
+    let t = tempfile::tempdir().unwrap();
+    let (home, state, elsewhere) = (t.path().join("home"), t.path().join("state"), t.path().join("elsewhere"));
+    let repo = t.path().join("alpha");
+    for d in [&home, &elsewhere, &repo] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("f.txt"), "a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "i", "--no-gpg-sign"]);
+    std::fs::write(repo.join("task.md"), "x").unwrap();
+
+    // Nothing registered yet: the dashboard says so.
+    let mut c = blyte(&elsewhere, &home, &state)
+        .args(["dashboard", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(c.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    c.kill().unwrap();
+    let _ = c.wait();
+    let mut err = String::new();
+    c.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    assert!(err.contains("nothing to watch yet"), "{err}");
+
+    // A dispatch (it fails fast with no key) registers the repository.
+    let out = blyte(&repo, &home, &state)
+        .args(["dispatch", "G1", "task.md", "--gate", "true", "--sandbox", "off"])
+        .output()
+        .unwrap();
+    assert!(!out.stdout.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    let listed = std::fs::read_to_string(state.join("repos")).unwrap();
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+    // Registering again does not duplicate it.
+    let _ = blyte(&repo, &home, &state)
+        .args(["dispatch", "G2", "task.md", "--gate", "true", "--sandbox", "off"])
+        .output()
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(state.join("repos")).unwrap().lines().count(), 1);
+
+    let mut c = blyte(&elsewhere, &home, &state)
+        .args(["dashboard", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(c.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let addr = line.trim().strip_prefix("blyte dashboard: http://").unwrap().to_string();
+    let mut s = std::net::TcpStream::connect(&addr).unwrap();
+    s.write_all(b"GET /api/jobs HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+    c.kill().unwrap();
+    let _ = c.wait();
+    let mut err = String::new();
+    c.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    assert!(err.contains("watching 1 repositories") && err.contains("dispatch history"), "{err}");
+    assert!(resp.contains("\"alpha/G1\"") && resp.contains("\"alpha/G2\""), "{resp}");
+}
+```
+
+- [ ] **Step 2:** implement until the check passes.
+- [ ] **Step 3: commit** `feat(cli): the dashboard watches every repository blyte has dispatched in`.
