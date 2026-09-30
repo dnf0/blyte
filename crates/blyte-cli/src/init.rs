@@ -373,6 +373,11 @@ pub fn classify(output: &str, exit_code: i32) -> Verdict {
         return Verdict::Passed;
     }
 
+    let uv_patterns = [
+        "network connectivity is disabled",
+        "wasn't found in the cache",
+    ];
+
     // Words, not bare status codes: a test named `test_403_…` is not a 403.
     let patterns = [
         "unauthorized",
@@ -392,13 +397,19 @@ pub fn classify(output: &str, exit_code: i32) -> Verdict {
             continue;
         }
         let lower = line.to_ascii_lowercase();
-        if patterns.iter().any(|&p| lower.contains(p)) {
+        let is_uv = uv_patterns.iter().any(|&p| lower.contains(p));
+        if is_uv || patterns.iter().any(|&p| lower.contains(p)) {
             let trimmed = line.trim();
-            let s: String = if trimmed.chars().count() > 120 {
+            let mut s: String = if trimmed.chars().count() > 120 {
                 trimmed.chars().take(120).collect()
             } else {
                 trimmed.to_string()
             };
+            if is_uv {
+                s.push_str(
+                    " (run `uv sync` once online to fill uv's cache, then blyte init again)",
+                );
+            }
             return Verdict::Environment(s);
         }
     }
@@ -651,7 +662,7 @@ pub fn run(args: &InitArgs) -> i32 {
     }
 
     let ci_steps = detect_ci_with_sources(&root);
-    let (steps, _from_ci) = if !ci_steps.is_empty() {
+    let (steps, from_ci) = if !ci_steps.is_empty() {
         (
             ci_steps
                 .into_iter()
@@ -687,7 +698,7 @@ pub fn run(args: &InitArgs) -> i32 {
 
     let env = detect_env(&root);
 
-    let verified_steps = if !args.no_verify {
+    let mut verified_steps = if !args.no_verify {
         verify_steps(
             &root,
             steps,
@@ -698,6 +709,45 @@ pub fn run(args: &InitArgs) -> i32 {
     } else {
         steps
     };
+
+    if from_ci && !args.no_verify {
+        let any_passed = verified_steps
+            .iter()
+            .any(|s| matches!(s.verdict, Some(Verdict::Passed)));
+        if !any_passed {
+            let detected = crate::config::detect(&root);
+            let not_all_identical = !detected.is_empty()
+                && !detected
+                    .iter()
+                    .all(|d| verified_steps.iter().any(|s| &s.command == d));
+            if not_all_identical {
+                eprintln!(
+                    "init: every step from CI failed or was left out; trying the checks detected from the repository"
+                );
+                let detected_steps: Vec<InitStep> = detected
+                    .into_iter()
+                    .map(|cmd| InitStep {
+                        command: cmd,
+                        source: "detected".to_string(),
+                        verdict: None,
+                    })
+                    .collect();
+                let verified_detected = verify_steps(
+                    &root,
+                    detected_steps,
+                    &env,
+                    args.sandbox == "on",
+                    Duration::from_secs(args.step_timeout),
+                );
+                if verified_detected
+                    .iter()
+                    .any(|s| matches!(s.verdict, Some(Verdict::Passed)))
+                {
+                    verified_steps = verified_detected;
+                }
+            }
+        }
+    }
 
     let kept_count = verified_steps
         .iter()
