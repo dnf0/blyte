@@ -1,3 +1,9 @@
+## v0.4.0 (2026-09-30)
+
+### Feat
+
+- **cli**: blyte dashboard, a local page of running and recent jobs (#172)
+
 ## v0.3.0 (2026-09-30)
 
 ### Feat
