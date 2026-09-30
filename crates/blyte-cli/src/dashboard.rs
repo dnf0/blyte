@@ -382,37 +382,6 @@ fn get_process_etime(pid: i64) -> Option<u64> {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        extern "C" {
-            fn proc_pidinfo(
-                pid: libc::c_int,
-                flavor: libc::c_int,
-                arg: u64,
-                buffer: *mut libc::c_void,
-                buffersize: libc::c_int,
-            ) -> libc::c_int;
-        }
-        let mut buf = [0u8; 136];
-        let ret = unsafe {
-            proc_pidinfo(
-                pid as libc::c_int,
-                3, // PROC_PIDBSDINFO
-                0,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                136,
-            )
-        };
-        if ret == 136 {
-            let start_sec = u64::from_ne_bytes(buf[120..128].try_into().unwrap());
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            return Some(now.saturating_sub(start_sec));
-        }
-    }
-
     None
 }
 

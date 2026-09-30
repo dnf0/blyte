@@ -35,7 +35,7 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
     for (name, value) in &config.dispatch.env {
         if name.starts_with("BLYTE_") {
             return Err(format!(
-                "{}: variable `{name}` starts with BLYTE_; credentials are never set from blyte.toml",
+                "{}: variable `{name}` starts with BLYTE_: blyte's own settings are not set from blyte.toml",
                 path.display()
             ));
         }
