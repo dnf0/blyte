@@ -1,5 +1,1001 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>blyte dashboard</title></head>
-<body><p>Placeholder: replaced by the dashboard page (plan 2026-09-30-blyte-dashboard.md, Task 3).</p></body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>blyte dashboard</title>
+  <style>
+    :root {
+      --color-page: #f9f9fa;
+      --color-card: #ffffff;
+      --color-line: #eaecee;
+      --color-line-dark: #ced4db;
+      --color-text: #343a40;
+      --color-strong: #212529;
+      --color-muted: #6d767f;
+      --color-faint: #adb5bd;
+
+      --status-running: #212529;
+      --status-amber: #e8a33d;
+      --status-jade: #2bad72;
+      --status-jade-label: #1c7c51;
+      --status-red: #e52321;
+      --status-red-label: #a01920;
+      --status-grey: #adb5bd;
+
+      --focus-ring: #e52321;
+      --font-sans: "Graphik", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --font-mono: SFMono-Regular, Menlo, monospace;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-page: #171b1e;
+        --color-card: #1f2428;
+        --color-line: #2e343b;
+        --color-line-dark: #38404a;
+        --color-text: #e2e6e9;
+        --color-strong: #f0f3f6;
+        --color-muted: #9aa2ab;
+        --color-faint: #6e7681;
+
+        --status-running: #e2e6e9;
+        --status-amber: #e8a33d;
+        --status-jade: #2bad72;
+        --status-jade-label: #2bad72;
+        --status-red: #e52321;
+        --status-red-label: #e52321;
+        --status-grey: #adb5bd;
+
+        --focus-ring: #e52321;
+      }
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 32px 20px 64px;
+      background-color: var(--color-page);
+      color: var(--color-text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button:focus-visible, a:focus-visible {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: 2px;
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 28px;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .eyebrow {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .page-title {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--color-strong);
+      margin: 0;
+      line-height: 1.25;
+    }
+
+    .live-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 20px;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      color: var(--color-muted);
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .live-dot.jade {
+      background-color: var(--status-jade);
+    }
+
+    .live-dot.grey {
+      background-color: var(--status-grey);
+    }
+
+    /* Summary strip */
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+
+    .summary-tile {
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .tile-val {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--color-strong);
+      font-variant-numeric: tabular-nums;
+      line-height: 1.1;
+      margin-bottom: 4px;
+    }
+
+    .tile-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-text);
+      margin-bottom: 2px;
+    }
+
+    .tile-sub {
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    /* Views */
+    .views-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .view-pill {
+      min-height: 44px;
+      padding: 0 16px;
+      border-radius: 22px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-text);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+
+    .view-pill:hover {
+      background: var(--color-page);
+    }
+
+    .view-pill.active {
+      background: var(--color-strong);
+      border-color: var(--color-strong);
+      color: var(--color-card);
+    }
+
+    .view-count {
+      padding: 2px 7px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      background: var(--color-line);
+      color: var(--color-muted);
+    }
+
+    .view-pill.active .view-count {
+      background: var(--color-card);
+      color: var(--color-strong);
+    }
+
+    /* Tag banner */
+    .tag-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 16px;
+      background: var(--color-card);
+      border: 1px solid var(--color-line-dark);
+      border-radius: 6px;
+      margin-bottom: 16px;
+      font-size: 13px;
+    }
+
+    .tag-banner-text {
+      color: var(--color-strong);
+    }
+
+    .btn-clear {
+      min-height: 44px;
+      padding: 0 14px;
+      background: none;
+      border: 1px solid var(--color-line-dark);
+      border-radius: 6px;
+      color: var(--color-text);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .btn-clear:hover {
+      background: var(--color-page);
+    }
+
+    /* Table container */
+    .table-container {
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 8px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .table-scroll {
+      min-width: 820px;
+    }
+
+    .table-header {
+      display: grid;
+      grid-template-columns: 140px minmax(260px, 1fr) 140px 100px 90px 70px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--color-line);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .th-time, .th-cost, .th-turns {
+      text-align: right;
+    }
+
+    .job-item {
+      border-bottom: 1px solid var(--color-line);
+    }
+
+    .job-item:last-child {
+      border-bottom: none;
+    }
+
+    .job-row-btn {
+      width: 100%;
+      min-height: 52px;
+      display: grid;
+      grid-template-columns: 140px minmax(260px, 1fr) 140px 100px 90px 70px;
+      align-items: center;
+      padding: 10px 16px;
+      background: none;
+      border: none;
+      font-family: inherit;
+      font-size: 13px;
+      color: var(--color-text);
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+
+    .job-row-btn:hover {
+      background: var(--color-page);
+    }
+
+    .col-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .dot-running { background-color: var(--status-running); }
+    .dot-amber { background-color: var(--status-amber); }
+    .dot-verified { background-color: var(--status-jade); }
+    .dot-failed { background-color: var(--status-red); }
+    .dot-stopped { background-color: var(--status-grey); }
+
+    .status-label {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .label-running { color: var(--status-running); }
+    .label-amber { color: var(--status-amber); }
+    .label-verified { color: var(--status-jade-label); }
+    .label-failed { color: var(--status-red-label); }
+    .label-muted { color: var(--color-muted); }
+    .label-stopped { color: var(--status-grey); }
+
+    .col-job {
+      overflow: hidden;
+      padding-right: 16px;
+    }
+
+    .job-title {
+      font-weight: 500;
+      color: var(--color-strong);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.3;
+    }
+
+    .job-now {
+      font-size: 12px;
+      color: var(--color-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.3;
+      margin-top: 2px;
+    }
+
+    .col-repo {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--color-text);
+    }
+
+    .col-time, .col-cost, .col-turns {
+      text-align: right;
+    }
+
+    .font-mono {
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .tabular-nums {
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Row tags */
+    .row-tags-wrapper {
+      padding: 0 16px 10px 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tag-pill {
+      min-height: 44px;
+      padding: 0 12px;
+      border-radius: 22px;
+      background: var(--color-page);
+      border: 1px solid var(--color-line-dark);
+      font-family: inherit;
+      font-size: 11px;
+      color: var(--color-muted);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      transition: background 0.1s, color 0.1s, border-color 0.1s;
+    }
+
+    .tag-pill:hover {
+      border-color: var(--color-text);
+      color: var(--color-strong);
+    }
+
+    .tag-pill.active {
+      background: var(--color-strong);
+      border-color: var(--color-strong);
+      color: var(--color-card);
+    }
+
+    /* Detail area */
+    .job-detail {
+      display: none;
+      background: var(--color-page);
+      border-top: 1px solid var(--color-line);
+      padding: 20px;
+    }
+
+    .job-detail.is-open {
+      display: block;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr;
+      gap: 24px;
+    }
+
+    .detail-col {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .detail-heading {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+      margin: 0 0 4px 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--color-line);
+    }
+
+    .detail-task-text {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--color-strong);
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      padding: 10px 12px;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
+    .detail-field {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-size: 12px;
+    }
+
+    .field-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--color-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .field-val {
+      color: var(--color-text);
+      word-break: break-all;
+    }
+
+    .mono-block {
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--status-red-label);
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 180px;
+      overflow-y: auto;
+      margin: 0;
+    }
+
+    .mono-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .mono-list li {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-text);
+      word-break: break-all;
+    }
+
+    .commit-sha {
+      color: var(--color-muted);
+      font-weight: 600;
+    }
+
+    .gate-running-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--status-amber);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: 6px;
+    }
+
+    .text-faint {
+      color: var(--color-faint);
+    }
+
+    /* Empty state */
+    .empty-state {
+      padding: 48px 24px;
+      text-align: center;
+      color: var(--color-muted);
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="page-header">
+      <div class="header-left">
+        <div class="eyebrow">blyte · this machine</div>
+        <h1 class="page-title">What blyte is working on.</h1>
+      </div>
+      <div id="live-indicator" class="live-indicator">
+        <span class="live-dot grey"></span>
+        <span>Connecting…</span>
+      </div>
+    </header>
+
+    <!-- Summary strip -->
+    <div id="summary-strip" class="summary-strip"></div>
+
+    <!-- Views -->
+    <div id="views-strip" class="views-strip"></div>
+
+    <!-- Tag filter banner -->
+    <div id="tag-banner-container"></div>
+
+    <!-- Table -->
+    <div class="table-container">
+      <div class="table-scroll">
+        <div class="table-header" role="row">
+          <div class="th-status" role="columnheader">Status</div>
+          <div class="th-job" role="columnheader">Job</div>
+          <div class="th-repo" role="columnheader">Repository</div>
+          <div class="th-time" role="columnheader">Time</div>
+          <div class="th-cost" role="columnheader">Cost</div>
+          <div class="th-turns" role="columnheader">Turns</div>
+        </div>
+        <div id="table-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Status definitions matching the data contract
+    const STATUS_MAP = {
+      "running": { label: "Running", dot: "dot-running", text: "label-running" },
+      "verified": { label: "Verified", dot: "dot-verified", text: "label-verified" },
+      "gate_failed": { label: "Gate failed", dot: "dot-failed", text: "label-failed" },
+      "budget_exhausted": { label: "Out of budget", dot: "dot-amber", text: "label-muted" },
+      "no_changes": { label: "No changes", dot: "dot-stopped", text: "label-muted" },
+      "error": { label: "Error", dot: "dot-failed", text: "label-failed" },
+      "stopped": { label: "Stopped", dot: "dot-stopped", text: "label-stopped" }
+    };
+
+    let currentData = null;
+    let lastSuccessfulUpdate = null;
+    let isOnline = false;
+    let activeView = "all";
+    let activeTag = null;
+    const expandedKeys = new Set();
+
+    function formatTime(d) {
+      if (!d) return "--:--:--";
+      const pad = n => String(n).padStart(2, "0");
+      return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+    }
+
+    function formatElapsed(sec) {
+      if (sec == null || isNaN(sec)) return "—";
+      const s = Math.max(0, Math.floor(sec));
+      if (s < 60) return s + "s";
+      const m = Math.floor(s / 60);
+      const remS = s % 60;
+      if (m < 60) return m + "m " + String(remS).padStart(2, "0") + "s";
+      const h = Math.floor(s / 3600);
+      const remM = Math.floor((s % 3600) / 60);
+      return h + "h " + String(remM).padStart(2, "0") + "m";
+    }
+
+    function formatCost(cost) {
+      if (cost == null || isNaN(cost)) return "—";
+      return "$" + Number(cost).toFixed(2);
+    }
+
+    function escapeHtml(str) {
+      if (str == null) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function escapeAttr(str) {
+      return escapeHtml(str);
+    }
+
+    function isRunning(job) {
+      return job.status === "running";
+    }
+
+    function isNeedsAttention(job) {
+      if (job.status === "gate_failed" || job.status === "error" || job.status === "budget_exhausted" || job.status === "stopped") {
+        return true;
+      }
+      if (job.status === "running" && (job.gate_attempts || 0) > 0 && !job.gate_running) {
+        return true;
+      }
+      return false;
+    }
+
+    function isDone(job) {
+      return job.status === "verified" || job.status === "no_changes";
+    }
+
+    function getJobStatusInfo(job) {
+      if (job.status === "running") {
+        if (job.gate_running) {
+          return { label: "In gate", dot: "dot-amber", text: "label-amber" };
+        }
+        if ((job.gate_attempts || 0) > 0) {
+          return { label: "Retrying", dot: "dot-amber", text: "label-amber" };
+        }
+        return STATUS_MAP["running"];
+      }
+      if (STATUS_MAP[job.status]) {
+        return STATUS_MAP[job.status];
+      }
+      return { label: job.status || "Unknown", dot: "dot-stopped", text: "label-muted" };
+    }
+
+    function filterJobs(jobs) {
+      return jobs.filter(job => {
+        if (activeView === "running" && !isRunning(job)) return false;
+        if (activeView === "needs_attention" && !isNeedsAttention(job)) return false;
+        if (activeView === "done" && !isDone(job)) return false;
+
+        if (activeTag != null) {
+          if (!Array.isArray(job.tags) || !job.tags.includes(activeTag)) {
+            return false;
+          }
+        }
+        return true;
+      });
+    }
+
+    function setView(view) {
+      activeView = view;
+      render();
+    }
+
+    function onTagClick(e, tag) {
+      e.stopPropagation();
+      if (activeTag === tag) {
+        activeTag = null;
+      } else {
+        activeTag = tag;
+      }
+      render();
+    }
+
+    function clearTag() {
+      activeTag = null;
+      render();
+    }
+
+    function toggleExpand(key) {
+      if (expandedKeys.has(key)) {
+        expandedKeys.delete(key);
+      } else {
+        expandedKeys.add(key);
+      }
+      render();
+    }
+
+    function renderLiveIndicator() {
+      const el = document.getElementById("live-indicator");
+      if (!el) return;
+      if (isOnline) {
+        el.innerHTML = '<span class="live-dot jade"></span><span>Live · updated ' + escapeHtml(formatTime(lastSuccessfulUpdate)) + '</span>';
+      } else {
+        el.innerHTML = '<span class="live-dot grey"></span><span>Offline · last update ' + escapeHtml(formatTime(lastSuccessfulUpdate)) + '</span>';
+      }
+    }
+
+    function renderSummaryStrip() {
+      const el = document.getElementById("summary-strip");
+      if (!el) return;
+      const s = (currentData && currentData.summary) || {};
+      const jobs = (currentData && currentData.jobs) || [];
+
+      const running = s.running != null ? s.running : 0;
+      const last24h = s.last_24h != null ? s.last_24h : 0;
+      const repos = s.repos != null ? s.repos : 0;
+      const finished24h = s.finished_24h != null ? s.finished_24h : 0;
+      const passed24h = s.passed_24h != null ? s.passed_24h : 0;
+      const cost24h = s.cost_24h_usd != null ? Number(s.cost_24h_usd) : 0;
+
+      const passedPct = finished24h > 0 ? Math.round((passed24h / finished24h) * 100) + "%" : "—";
+      const costStr = "$" + cost24h.toFixed(2);
+      const avgCostStr = finished24h > 0 ? "avg $" + (cost24h / finished24h).toFixed(2) + " / job" : "avg — / job";
+      const needsAttentionCount = jobs.filter(isNeedsAttention).length;
+
+      el.innerHTML = `
+        <div class="summary-tile">
+          <div class="tile-val">${running}</div>
+          <div class="tile-label">Running now</div>
+          <div class="tile-sub">active jobs</div>
+        </div>
+        <div class="summary-tile">
+          <div class="tile-val">${last24h}</div>
+          <div class="tile-label">Jobs last 24h</div>
+          <div class="tile-sub">${repos} ${repos === 1 ? 'repository' : 'repositories'}</div>
+        </div>
+        <div class="summary-tile">
+          <div class="tile-val">${passedPct}</div>
+          <div class="tile-label">Passed check</div>
+          <div class="tile-sub">${passed24h} of ${finished24h} finished</div>
+        </div>
+        <div class="summary-tile">
+          <div class="tile-val">${costStr}</div>
+          <div class="tile-label">Gemini cost 24h</div>
+          <div class="tile-sub">${avgCostStr}</div>
+        </div>
+        <div class="summary-tile">
+          <div class="tile-val">${needsAttentionCount}</div>
+          <div class="tile-label">Needs attention</div>
+          <div class="tile-sub">failing, stopped or retrying</div>
+        </div>
+      `;
+    }
+
+    function renderViewsStrip() {
+      const el = document.getElementById("views-strip");
+      if (!el) return;
+      const jobs = (currentData && currentData.jobs) || [];
+
+      const countAll = jobs.length;
+      const countRunning = jobs.filter(isRunning).length;
+      const countNeeds = jobs.filter(isNeedsAttention).length;
+      const countDone = jobs.filter(isDone).length;
+
+      el.innerHTML = `
+        <button type="button" class="view-pill ${activeView === 'all' ? 'active' : ''}" onclick="setView('all')">
+          All <span class="view-count">${countAll}</span>
+        </button>
+        <button type="button" class="view-pill ${activeView === 'running' ? 'active' : ''}" onclick="setView('running')">
+          Running <span class="view-count">${countRunning}</span>
+        </button>
+        <button type="button" class="view-pill ${activeView === 'needs_attention' ? 'active' : ''}" onclick="setView('needs_attention')">
+          Needs attention <span class="view-count">${countNeeds}</span>
+        </button>
+        <button type="button" class="view-pill ${activeView === 'done' ? 'active' : ''}" onclick="setView('done')">
+          Done <span class="view-count">${countDone}</span>
+        </button>
+      `;
+    }
+
+    function renderTagBanner() {
+      const el = document.getElementById("tag-banner-container");
+      if (!el) return;
+      if (activeTag == null) {
+        el.innerHTML = "";
+      } else {
+        el.innerHTML = `
+          <div class="tag-banner">
+            <span class="tag-banner-text">Showing jobs tagged <strong>${escapeHtml(activeTag)}</strong></span>
+            <button type="button" class="btn-clear" onclick="clearTag()">Clear</button>
+          </div>
+        `;
+      }
+    }
+
+    function renderTable() {
+      const el = document.getElementById("table-body");
+      if (!el) return;
+      const allJobs = (currentData && currentData.jobs) || [];
+
+      if (!currentData || allJobs.length === 0) {
+        el.innerHTML = '<div class="empty-state">Nothing running, and no jobs in the last 24 hours.</div>';
+        return;
+      }
+
+      const jobs = filterJobs(allJobs);
+
+      if (jobs.length === 0) {
+        el.innerHTML = '<div class="empty-state">Nothing running, and no jobs in the last 24 hours.</div>';
+        return;
+      }
+
+      el.innerHTML = jobs.map(job => {
+        const isExpanded = expandedKeys.has(job.key);
+        const statusInfo = getJobStatusInfo(job);
+        const title = job.title || "Untitled task";
+        const now = job.now || "—";
+        const repo = job.repo || "—";
+        const elapsed = formatElapsed(job.elapsed_s);
+        const cost = formatCost(job.cost_usd);
+        const turns = job.turns != null ? job.turns : "—";
+        const tags = Array.isArray(job.tags) ? job.tags : [];
+
+        const taskSnippet = (job.task || "").slice(0, 600) + ((job.task || "").length > 600 ? "…" : "");
+        const plan = job.plan || null;
+        const lastTool = job.last_tool || job.now || "—";
+        const gateAttempts = job.gate_attempts ?? 0;
+        const gateRunning = !!job.gate_running;
+        const changedFiles = Array.isArray(job.changed_files) ? job.changed_files : [];
+        const gateFailures = Array.isArray(job.gate_failures) ? job.gate_failures : [];
+        const worktree = job.worktree || "—";
+        const log = job.log || "—";
+        const startedTime = job.started_at ? new Date(job.started_at * 1000).toLocaleString() : "—";
+        const verdict = job.verdict != null ? (typeof job.verdict === "object" ? JSON.stringify(job.verdict) : String(job.verdict)) : "—";
+        const commits = Array.isArray(job.commits) ? job.commits : [];
+
+        return `
+          <div class="job-item" data-key="${escapeAttr(job.key)}">
+            <button type="button" class="job-row-btn" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="detail-${escapeAttr(job.key)}" data-toggle-key="${escapeAttr(job.key)}">
+              <div class="col-status">
+                <span class="status-dot ${statusInfo.dot}"></span>
+                <span class="status-label ${statusInfo.text}">${escapeHtml(statusInfo.label)}</span>
+              </div>
+              <div class="col-job">
+                <div class="job-title" title="${escapeAttr(title)}">${escapeHtml(title)}</div>
+                <div class="job-now" title="${escapeAttr(now)}">${escapeHtml(now)}</div>
+              </div>
+              <div class="col-repo font-mono">${escapeHtml(repo)}</div>
+              <div class="col-time tabular-nums font-mono">${escapeHtml(elapsed)}</div>
+              <div class="col-cost tabular-nums font-mono">${escapeHtml(cost)}</div>
+              <div class="col-turns tabular-nums font-mono">${escapeHtml(String(turns))}</div>
+            </button>
+            ${tags.length > 0 ? `
+              <div class="row-tags-wrapper">
+                ${tags.map(tag => `
+                  <button type="button" class="tag-pill ${activeTag === tag ? 'active' : ''}" data-tag="${escapeAttr(tag)}">
+                    ${escapeHtml(tag)}
+                  </button>
+                `).join('')}
+              </div>
+            ` : ''}
+            <div id="detail-${escapeAttr(job.key)}" class="job-detail ${isExpanded ? 'is-open' : ''}" role="region" aria-label="Details for ${escapeAttr(title)}">
+              <div class="detail-grid">
+                <!-- Col 1: Task -->
+                <div class="detail-col">
+                  <h3 class="detail-heading">Task</h3>
+                  <div class="detail-task-text">${escapeHtml(taskSnippet || '—')}</div>
+                  <div class="detail-field">
+                    <span class="field-label">Plan</span>
+                    <span class="field-val ${plan ? 'font-mono' : 'text-faint'}">${escapeHtml(plan || '—')}</span>
+                  </div>
+                </div>
+                <!-- Col 2: Progress -->
+                <div class="detail-col">
+                  <h3 class="detail-heading">Progress</h3>
+                  <div class="detail-field">
+                    <span class="field-label">Last tool</span>
+                    <div class="field-val font-mono">${escapeHtml(lastTool)}</div>
+                  </div>
+                  <div class="detail-field">
+                    <span class="field-label">Gate attempts</span>
+                    <div class="field-val">
+                      <span class="tabular-nums font-mono">${gateAttempts}</span>
+                      ${gateRunning ? '<span class="gate-running-badge">⏳ Gate running</span>' : ''}
+                    </div>
+                  </div>
+                  <div class="detail-field">
+                    <span class="field-label">Changed files</span>
+                    ${changedFiles.length > 0
+                      ? `<ul class="mono-list">${changedFiles.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>`
+                      : '<span class="text-faint">None</span>'}
+                  </div>
+                  <div class="detail-field">
+                    <span class="field-label">Gate failures</span>
+                    ${gateFailures.length > 0
+                      ? `<pre class="mono-block">${escapeHtml(gateFailures.join('\n---\n'))}</pre>`
+                      : '<span class="text-faint">None</span>'}
+                  </div>
+                </div>
+                <!-- Col 3: Where -->
+                <div class="detail-col">
+                  <h3 class="detail-heading">Where</h3>
+                  <div class="detail-field">
+                    <span class="field-label">Worktree</span>
+                    <span class="field-val font-mono">${escapeHtml(worktree)}</span>
+                  </div>
+                  <div class="detail-field">
+                    <span class="field-label">Log</span>
+                    <span class="field-val font-mono">${escapeHtml(log)}</span>
+                  </div>
+                  <div class="detail-field">
+                    <span class="field-label">Started</span>
+                    <span class="field-val tabular-nums">${escapeHtml(startedTime)}</span>
+                  </div>
+                  <div class="detail-field">
+                    <span class="field-label">Verdict</span>
+                    <span class="field-val">${escapeHtml(verdict)}</span>
+                  </div>
+                  <div class="detail-field">
+                    <span class="field-label">Commits</span>
+                    ${commits.length > 0
+                      ? `<ul class="mono-list">${commits.map(c => `<li><span class="commit-sha">${escapeHtml((c.sha || '').slice(0, 8))}</span> ${escapeHtml(c.subject || '')}</li>`).join('')}</ul>`
+                      : '<span class="text-faint">None</span>'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function render() {
+      renderLiveIndicator();
+      renderSummaryStrip();
+      renderViewsStrip();
+      renderTagBanner();
+      renderTable();
+    }
+
+    async function fetchJobs() {
+      try {
+        const res = await fetch("/api/jobs");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        currentData = data;
+        lastSuccessfulUpdate = new Date();
+        isOnline = true;
+        render();
+      } catch (err) {
+        isOnline = false;
+        render();
+      }
+    }
+
+    // Keys and tags come from job data, so they travel in data attributes, not inline handlers.
+    document.addEventListener("click", (e) => {
+      const tagBtn = e.target.closest("[data-tag]");
+      if (tagBtn) return onTagClick(e, tagBtn.dataset.tag);
+      const rowBtn = e.target.closest("[data-toggle-key]");
+      if (rowBtn) toggleExpand(rowBtn.dataset.toggleKey);
+    });
+
+    // Initial fetch and poll every 5 seconds
+    fetchJobs();
+    setInterval(fetchJobs, 5000);
+  </script>
+</body>
 </html>
