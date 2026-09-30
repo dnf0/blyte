@@ -81,8 +81,8 @@ Please do not open a public issue for a vulnerability; see [SECURITY.md](https:/
 
 ## Licence
 
-By contributing you agree that your contribution is licensed under the project's licence,
-Apache-2.0 OR MIT, at the user's option.
+By contributing you agree that your contribution is licensed under the project's licence, the
+Apache License 2.0.
 
 ## Releases
 

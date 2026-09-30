@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/climate-x-org/blyte/actions/workflows/ci.yml"><img src="https://github.com/climate-x-org/blyte/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-3E6D64" alt="License: Apache-2.0 OR MIT">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-3E6D64" alt="License: Apache-2.0">
   <img src="https://img.shields.io/badge/rust-stable-A6441A" alt="Rust stable">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-56616A" alt="macOS and Linux">
 </p>
@@ -171,4 +171,4 @@ Security reports: [SECURITY.md](SECURITY.md).
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE) or MIT, at your option.
+Licensed under the [Apache License 2.0](LICENSE).

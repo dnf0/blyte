@@ -3,6 +3,7 @@ name = "blyte-agent"
 version.workspace = true
 description = "The blyte agent loop: tools, context, persistent shell sessions, search and the command sandbox."
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 serde.workspace = true
