@@ -370,6 +370,28 @@ pub fn parse_etime(s: &str) -> Option<u64> {
 }
 
 fn get_process_etime(pid: i64) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr() as *mut libc::c_void,
+                std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+            )
+        };
+        if ret == std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int {
+            let info = unsafe { info.assume_init() };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            return Some(now.saturating_sub(info.pbi_start_tvsec));
+        }
+    }
+
     if let Ok(output) = std::process::Command::new("ps")
         .args(["-o", "etime=", "-p", &pid.to_string()])
         .output()
