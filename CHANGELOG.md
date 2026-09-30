@@ -1,3 +1,9 @@
+## v0.6.0 (2026-09-30)
+
+### Feat
+
+- **cli**: the dashboard in blyte's palette, type and mark (#177)
+
 ## v0.5.0 (2026-09-30)
 
 ### Feat
