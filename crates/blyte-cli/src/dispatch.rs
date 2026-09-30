@@ -284,6 +284,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "started_at": started_at,
         "task_file": args.task_file.display().to_string(),
         "gate": gate,
+        "tags": args.tags,
     });
     let start_path = wt_parent.join(format!("{}.start.json", args.id));
     if let Ok(json_str) = serde_json::to_string_pretty(&start_json) {

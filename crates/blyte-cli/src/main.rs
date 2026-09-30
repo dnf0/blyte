@@ -74,6 +74,9 @@ fn main() {
                 }
                 std::process::exit(0);
             }
+            blyte_cli::cli::Command::Dashboard(args) => {
+                std::process::exit(blyte_cli::dashboard::run(&args));
+            }
             blyte_cli::cli::Command::Dispatch(args) => {
                 std::process::exit(blyte_cli::dispatch::run_dispatch(&args));
             }
