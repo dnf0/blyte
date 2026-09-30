@@ -139,6 +139,23 @@ next day) made blyte wait up to 27 minutes, or deadlocked both runs.
     | work repo: modes and a per-run report | 807 s, $1.25 | 408 s, $0.54 | 0.51×, 0.43× | equal; blyte's merged |
     | work repo: seed modes | 760 s, $0.73 | 237 s, $0.15 | 0.31×, 0.20× | blyte's merged |
 
+## In work repositories
+
+Since 29 September blyte has also been the implementer in Climate X work repositories, planned and
+reviewed by Claude Code, with an A/B against agy on a sample of tasks (the six work-repository
+pairs are in the table above).
+
+- **Reviewed runs (the dispatch ledger): 14 runs in three repositories, all reviewed: 8 merged
+  as-is, 6 needed a fix, none redone.** Four of the six fixes were the same out-of-scope edit (an
+  `AWS_PROFILE` workaround in a test fixture, because the sandbox denies `~/.aws` but passed the
+  profile variable); blyte now withholds that variable, and no run has made the edit since. The
+  other two: a missed `try/except` the plan asked for, and a wrong commit message.
+- **Unreviewed runs:** 20 more dispatches in four repositories were started with `blyte dispatch`
+  directly, outside the ledger, so they have no review verdict. By blyte's own reports, 18 passed
+  their gate and 2 ended in an error (a missing API key, before the key file); about $15.70 of
+  Gemini in total, a median of 7 minutes each. New sessions now route every task through the
+  ledger.
+
 ## FrontierHarness tasks
 
 [FrontierHarness](https://frontierharness.org/) runs 12 harness configurations on Kimi K3 over 30
