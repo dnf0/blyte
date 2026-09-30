@@ -87,6 +87,15 @@ fn parse_workflow_commands(content: &str) -> Vec<String> {
             trimmed_start.starts_with("run:")
         };
 
+        // The pre-commit action is a `uses:` step, not a `run:`; its default is every file.
+        let uses = trimmed_start
+            .strip_prefix("- ")
+            .unwrap_or(trimmed_start)
+            .trim_start();
+        if uses.starts_with("uses: pre-commit/action@") {
+            candidate_commands.push("pre-commit run --all-files".to_string());
+        }
+
         if is_run_key {
             let run_idx = line.find("run:").unwrap();
             let after_run = line[run_idx + 4..].trim();
@@ -364,9 +373,8 @@ pub fn classify(output: &str, exit_code: i32) -> Verdict {
         return Verdict::Passed;
     }
 
+    // Words, not bare status codes: a test named `test_403_…` is not a 403.
     let patterns = [
-        "401",
-        "403",
         "unauthorized",
         "forbidden",
         "not found in the package registry",
@@ -379,6 +387,10 @@ pub fn classify(output: &str, exit_code: i32) -> Verdict {
     ];
 
     for line in output.lines() {
+        // Test ids and result lines (`tests/x.py::test_y PASSED`) name tests, not the environment.
+        if line.contains("::") {
+            continue;
+        }
         let lower = line.to_ascii_lowercase();
         if patterns.iter().any(|&p| lower.contains(p)) {
             let trimmed = line.trim();
@@ -450,6 +462,33 @@ pub fn render_verified(steps: &[InitStep], env: &BTreeMap<String, String>) -> St
     out
 }
 
+/// Remove `.wt/init-<pid>` worktrees left by an init that was killed (its process is gone).
+fn remove_stale_init_worktrees(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root.join(".wt")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(pid) = name
+            .strip_prefix("init-")
+            .and_then(|p| p.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            let _ = Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(entry.path())
+                .current_dir(root)
+                .output();
+        }
+    }
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(root)
+        .output();
+}
+
 fn verify_steps(
     root: &Path,
     mut steps: Vec<InitStep>,
@@ -485,6 +524,7 @@ fn verify_steps(
         let _ = std::fs::write(&exclude_path, new_content);
     }
 
+    remove_stale_init_worktrees(root);
     let pid = std::process::id();
     let wt_dir = root.join(".wt").join(format!("init-{}", pid));
     let _ = std::fs::create_dir_all(root.join(".wt"));
@@ -544,38 +584,26 @@ fn verify_steps(
         let res = shell.exec(&step.command, &wt_dir, timeout);
         let elapsed = start.elapsed().as_secs();
 
-        match res {
-            Ok(output) => {
-                let verdict = classify(&output.merged(), output.exit_code);
-                match &verdict {
-                    Verdict::Passed => {
-                        eprintln!("init: {} ... passed ({}s)", step.command, elapsed);
-                    }
-                    Verdict::Environment(reason) => {
-                        eprintln!("init: {} ... left out: {}", step.command, reason);
-                    }
-                    Verdict::Failed => {
-                        eprintln!("init: {} ... failed on HEAD ({}s)", step.command, elapsed);
-                    }
-                }
-                step.verdict = Some(verdict);
+        // A run that could not finish (a timeout, say) counts as failing, with its error as output.
+        let (text, code) = match res {
+            Ok(output) => (output.merged(), output.exit_code),
+            Err(e) => (e, 1),
+        };
+        let verdict = classify(&text, code);
+        match &verdict {
+            Verdict::Passed => eprintln!("init: {} ... passed ({}s)", step.command, elapsed),
+            Verdict::Environment(reason) => {
+                eprintln!("init: {} ... left out: {}", step.command, reason)
             }
-            Err(e) => {
-                let verdict = classify(&e, 1);
-                match &verdict {
-                    Verdict::Passed => {
-                        eprintln!("init: {} ... passed ({}s)", step.command, elapsed);
-                    }
-                    Verdict::Environment(reason) => {
-                        eprintln!("init: {} ... left out: {}", step.command, reason);
-                    }
-                    Verdict::Failed => {
-                        eprintln!("init: {} ... failed on HEAD ({}s)", step.command, elapsed);
-                    }
+            Verdict::Failed => {
+                eprintln!("init: {} ... failed on HEAD ({}s)", step.command, elapsed);
+                let lines: Vec<&str> = text.lines().collect();
+                for l in &lines[lines.len().saturating_sub(15)..] {
+                    eprintln!("init:   | {l}");
                 }
-                step.verdict = Some(verdict);
             }
         }
+        step.verdict = Some(verdict);
     }
 
     steps
