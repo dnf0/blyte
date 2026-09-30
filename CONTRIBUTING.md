@@ -83,3 +83,13 @@ Please do not open a public issue for a vulnerability; see [SECURITY.md](https:/
 
 By contributing you agree that your contribution is licensed under the project's licence,
 Apache-2.0 OR MIT, at the user's option.
+
+## Releases
+
+Every merge to `main` is released automatically (`.github/workflows/release-on-merge.yml`). The
+squash-merge title is the commit message, so the pull request title decides the release: `feat:`
+bumps the minor version, `fix:`, `refactor:` and `perf:` the patch, and a breaking change (`!` or a
+`BREAKING CHANGE:` footer) the minor while the version is 0.x; `docs:`, `ci:`, `chore:`, `test:` and
+`style:` do not release. The workflow updates the version and `CHANGELOG.md` through a
+`chore(release): vX.Y.Z` pull request, tags `vX.Y.Z`, publishes the GitHub release and attaches the
+static binaries. The rules are in `.cz.toml` (commitizen).
