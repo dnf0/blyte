@@ -40,6 +40,33 @@ orchestrator. Each is looked for in the working tree, then in the main checkout 
 be untracked). Rules are capped at 12,000 characters. The run prints which file it used
 (`blyte: repository rules from …`). Container runs read none.
 
+## Dashboard
+
+`blyte dashboard` serves a local web page that monitors running and recent blyte jobs across repositories:
+
+```bash
+blyte dashboard
+```
+
+On start, it prints `blyte dashboard: http://127.0.0.1:<port>` and serves until killed. The server binds to `127.0.0.1` only, and the page makes requests only to its own server—it runs strictly on this machine and makes no network calls. Pass `--open` to open the URL in your default browser automatically.
+
+### Sources and configuration
+
+By default, when neither `--root` nor `--runs-dir` is passed on the command line, `blyte dashboard` reads sources from `~/.config/blyte/dashboard.toml`:
+
+```toml
+roots = ["~/repos", "~/work"]
+runs_dirs = ["~/.cache/blyte-runs"]
+```
+
+Leading `~/` paths expand to your home directory. If the config file is absent or lists no sources, `blyte dashboard` falls back to the current git repository's top-level checkout.
+
+You can also pass sources explicitly:
+- `--root <DIR>` (repeatable): directories containing repositories or `.wt` worktree folders.
+- `--runs-dir <DIR>` (repeatable): directories containing `<repo>/<id>.log` run logs.
+- `--hours <N>` (default 24): how many hours back to display finished or stopped jobs.
+- `--port <N>` (default 7171): port to listen on; pass `0` to have the OS choose a free port.
+
 ## Budgets
 
 | flag | default | stops the run when |

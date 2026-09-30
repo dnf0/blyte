@@ -11,7 +11,9 @@ Nothing at the moment; see Next.
 
 - **Codex as the planner, step 2 (2026-09-30).** Step 1, the end-to-end smoke test, passed (#164).
   Next: a Codex driver in the eval's offload arm, to compare Codex + blyte with Claude Code + blyte
-  on the same task. Uses the ChatGPT plan's Codex allowance; ask before running.
+  on the same task. Uses the ChatGPT plan's Codex allowance; ask before running. The first katex
+  comparison (2026-09-30) was stopped: both Codex runs failed to hand off to blyte (one had no key,
+  one sat silent for 17 minutes); find out why before running it again.
 - **Commit `blyte.toml` in team repositories** once a second person uses blyte in one, so nobody has
   to run `blyte init` (it is in the global git ignore on the user's machine for now).
 
@@ -20,6 +22,9 @@ Nothing at the moment; see Next.
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-09-30**
+  - `blyte dashboard`: a local page (127.0.0.1) of running and recent jobs across repositories and
+    run directories, with time, cost, turns, the task's section of its plan, and clickable tags
+    (repo, plan, harness, A/B) that group related jobs. `blyte dispatch --tag` adds tags.
   - A release on every merge (commitizen, semantic versioning, #157/#159/#162): a release PR, a
     `vX.Y.Z` tag, the GitHub release with its changelog, and static binaries for macOS and Linux.
   - `blyte update` installs the latest release in place, with `--check` and `--rollback` (#169).

@@ -8,11 +8,12 @@ A lean coding-agent harness with a sealed verification gate
 Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
 
 Commands:
-  dispatch  Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
-  review    Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
-  skill     Install or print the Claude Code skill for the plan, delegate, review workflow
-  update    Replace this binary with the latest release (the old one is kept as blyte.prev)
-  help      Print this message or the help of the given subcommand(s)
+  dashboard  Serve a local dashboard of running and recent jobs
+  dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
+  review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
+  skill      Install or print the Claude Code skill for the plan, delegate, review workflow
+  update     Replace this binary with the latest release (the old one is kept as blyte.prev)
+  help       Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PROMPT]  Direct task prompt to run in single-shot / headless mode
@@ -56,6 +57,24 @@ Options:
           Print version
 ```
 
+## blyte dashboard
+
+```text
+Serve a local dashboard of running and recent jobs
+
+Usage: blyte dashboard [OPTIONS]
+
+Options:
+      --port <N>        Port to listen on (0 for a free port) [default: 7171]
+      --root <DIR>      Directory holding repositories or worktrees (repeatable)
+      --runs-dir <DIR>  Directory holding run logs and reports (repeatable)
+      --hours <N>       How far back finished jobs are listed, in hours [default: 24]
+      --open            Open the dashboard in the default browser
+  -h, --help            Print help
+```
+
+A job with no report counts as running only when its PID is alive and that process started no later than 60 seconds after the job's `started_at` (guarding against reused PIDs). In the runs-dir layout, `<id>.json` is recognized as an agy summary: jobs with this file report status `finished` (or `error`), with their elapsed duration, turn count, and response text.
+
 ## blyte dispatch
 
 ```text
@@ -69,6 +88,7 @@ Arguments:
 
 Options:
   -g, --gate <GATE>                The check command; several lines are several steps, all of which must pass
+      --tag <TEXT>                 Tag for this dispatch (repeatable)
       --base <BASE>                The commit a new worktree starts from [default: HEAD]
   -m, --model <MODEL>              Model identifier or provider selection
       --max-seconds <MAX_SECONDS>  Wall-clock budget in seconds [default: 3600]
@@ -105,11 +125,12 @@ A lean coding-agent harness with a sealed verification gate
 Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
 
 Commands:
-  dispatch  Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
-  review    Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
-  skill     Install or print the Claude Code skill for the plan, delegate, review workflow
-  update    Replace this binary with the latest release (the old one is kept as blyte.prev)
-  help      Print this message or the help of the given subcommand(s)
+  dashboard  Serve a local dashboard of running and recent jobs
+  dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
+  review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
+  skill      Install or print the Claude Code skill for the plan, delegate, review workflow
+  update     Replace this binary with the latest release (the old one is kept as blyte.prev)
+  help       Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PROMPT]  Direct task prompt to run in single-shot / headless mode
@@ -161,11 +182,12 @@ A lean coding-agent harness with a sealed verification gate
 Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
 
 Commands:
-  dispatch  Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
-  review    Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
-  skill     Install or print the Claude Code skill for the plan, delegate, review workflow
-  update    Replace this binary with the latest release (the old one is kept as blyte.prev)
-  help      Print this message or the help of the given subcommand(s)
+  dashboard  Serve a local dashboard of running and recent jobs
+  dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
+  review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
+  skill      Install or print the Claude Code skill for the plan, delegate, review workflow
+  update     Replace this binary with the latest release (the old one is kept as blyte.prev)
+  help       Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PROMPT]  Direct task prompt to run in single-shot / headless mode

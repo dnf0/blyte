@@ -1,3 +1,4 @@
+use blyte_agent::run::Event;
 use blyte_cli::repl::{
     format_event, handle_repl_command, run_repl_stream, ReplConfig, ReplControl, ReplSession,
 };
@@ -136,8 +137,6 @@ fn test_repl_stream_driving() {
 
 #[test]
 fn test_format_event() {
-    use blyte_agent::run::Event;
-
     let e1 = Event::Turn {
         n: 1,
         text: "Thinking about plan",
@@ -203,4 +202,10 @@ fn test_prompt_submission() {
         res,
         ReplControl::SubmitPrompt("Fix the broken parser".to_string())
     );
+}
+
+#[test]
+fn a_gate_start_renders_as_gate_running() {
+    let e = Event::GateStart { attempt: 2 };
+    assert_eq!(format_event(&e), "⏳ Gate running (attempt 2)");
 }
