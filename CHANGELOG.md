@@ -1,3 +1,9 @@
+## v0.7.2 (2026-09-30)
+
+### Fix
+
+- **provider**: the default Gemini model runs at high effort, as the docs say (#180)
+
 ## v0.7.1 (2026-09-30)
 
 ### Fix
