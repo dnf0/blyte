@@ -113,8 +113,10 @@ Arguments:
   <ID>  
 
 Options:
-      --diff  
-  -h, --help  Print help
+      --diff               
+      --verdict <VERDICT>  [possible values: accepted, fixed, redone]
+      --notes <TEXT>       
+  -h, --help               Print help
 ```
 
 ## blyte skill install

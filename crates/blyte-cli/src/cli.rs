@@ -1,4 +1,5 @@
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
@@ -123,12 +124,43 @@ pub struct DispatchArgs {
     pub pass_env: Vec<String>,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[value(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewVerdict {
+    Accepted,
+    Fixed,
+    Redone,
+}
+
+impl ReviewVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Fixed => "fixed",
+            Self::Redone => "redone",
+        }
+    }
+}
+
+impl std::fmt::Display for ReviewVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(clap::Args, Debug, PartialEq, Clone)]
 pub struct ReviewArgs {
     pub id: String,
 
     #[arg(long)]
     pub diff: bool,
+
+    #[arg(long, value_enum)]
+    pub verdict: Option<ReviewVerdict>,
+
+    #[arg(long, value_name = "TEXT", requires = "verdict")]
+    pub notes: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
