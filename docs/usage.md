@@ -50,6 +50,47 @@ blyte dashboard
 
 On start, it prints `blyte dashboard: http://127.0.0.1:<port>` and serves until killed. The server binds to `127.0.0.1` only, and the page makes requests only to its own server—it runs strictly on this machine and makes no network calls. Pass `--open` to open the URL in your default browser automatically.
 
+The page refreshes every 5 seconds. Running jobs come first, then jobs that finished in the last
+24 hours. Each row shows the job's status, title, what it is doing now (the last tool call, "Gate
+running" while its check runs, or the first line of its final message), repository, time, cost
+and turns. Click a row for the task (its own section of the plan, when the prompt names a plan and
+a task title), the last tool, gate failures, changed files, commits, worktree, log and verdict.
+The summary strip counts running jobs, jobs and repositories in the last 24 hours, the share that
+passed their check, and their cost. Selecting text in a row pauses the list's refresh until you
+clear the selection, so a path can be copied.
+
+### Statuses
+
+| Status | Meaning |
+|---|---|
+| Running | The job's process is alive (for a run directory, only if that process started with the job, so a reused PID does not count) |
+| Verified | The run's report says its gate passed |
+| Gate failed · Out of budget · No changes | The report's outcome |
+| Error | The run stopped with an error (a blyte report, or an agy summary with `"status": "ERROR"`) |
+| Finished | An agy run that ended without error; agy runs no gate of its own |
+| Stopped | No report, and the process is gone |
+
+### Tags
+
+Every job is tagged `repo: <name>`, and `plan: <file stem>` when its prompt names a plan. Click a
+tag to show only the jobs that carry it; click it again, or **Clear**, to show all. More tags come
+from `blyte dispatch --tag "<text>"` (repeatable), or from a `<id>.tags.json` file (a JSON array of
+strings) beside a job's log. A `<id>.verdict.json` file (`{"verdict": "accepted", "notes": "..."}`)
+adds the reviewer's verdict to the details.
+
+### What it can see
+
+The dashboard reads files; it does not watch processes. It shows:
+
+- **`blyte dispatch` jobs**: `<root>/.wt/<id>.start.json` and `<root>/<repo>/.wt/<id>.start.json`
+  (one level below each root), with the log, report and JSON summary beside it.
+- **Run directories**: `<runs-dir>/<repo>/<id>.log`, with an optional `<id>.pid`, `<id>.prompt`,
+  `<id>.report.json` (blyte's `--report`), `<id>.json` (an agy summary) and `<id>.worktree`.
+  Scripts that start blyte or agy in the background can write these.
+
+A plain `blyte "..."` run in a terminal writes none of these, so it does not appear; start it with
+`blyte dispatch`, or write its log and `--report` into a run directory.
+
 ### Sources and configuration
 
 By default, when neither `--root` nor `--runs-dir` is passed on the command line, `blyte dashboard` reads sources from `~/.config/blyte/dashboard.toml`:
