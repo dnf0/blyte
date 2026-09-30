@@ -22,6 +22,25 @@ pub fn wrap_task(task: &str) -> String {
     )
 }
 
+pub fn quick_steps(gate: &str) -> Option<String> {
+    let lines: Vec<&str> = gate
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() < 2 {
+        return None;
+    }
+    let steps = lines[..lines.len() - 1]
+        .iter()
+        .map(|s| format!("`{s}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "The check's quick steps, to run yourself before you stop: {steps}. The last step, the full run, happens at the gate."
+    ))
+}
+
 pub fn dispatch_outcome(report_outcome: &str, commits: usize) -> &'static str {
     match report_outcome {
         "verified" => {
@@ -88,6 +107,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         return 2;
     }
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    crate::registry::register(&root);
 
     let repo_config = match crate::config::load(&root) {
         Ok(cfg) => cfg,
@@ -114,6 +134,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         .unwrap_or(3600);
     let max_turns = args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300);
     let max_cost = args.max_cost_usd.or(dispatch_cfg.max_cost);
+    let fold_budget = args.fold_budget.or(dispatch_cfg.fold_budget);
     let network = args
         .network
         .as_deref()
@@ -238,6 +259,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     cmd.stdout(log_file);
     cmd.stderr(log_file_err);
 
+    for (k, v) in &dispatch_cfg.env {
+        cmd.env(k, v);
+    }
+
     cmd.arg("--gate").arg(&gate);
     cmd.arg("--rollback=false");
     cmd.arg("--max-seconds").arg(max_seconds.to_string());
@@ -250,7 +275,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if let Some(c) = max_cost {
         cmd.arg("--max-cost").arg(c.to_string());
     }
-    if let Some(fb) = args.fold_budget {
+    if let Some(fb) = fold_budget {
         cmd.arg("--fold-budget").arg(fb.to_string());
     }
     cmd.arg("--sandbox").arg(&args.sandbox);
@@ -263,7 +288,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     cmd.arg("--");
-    cmd.arg(wrap_task(&task_content));
+    let mut task_prompt = wrap_task(&task_content);
+    if let Some(qs) = quick_steps(&gate) {
+        task_prompt.push_str("\n\n");
+        task_prompt.push_str(&qs);
+    }
+    cmd.arg(task_prompt);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -278,6 +308,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
     let start_json = serde_json::json!({
         "id": args.id,
         "pid": child.id(),
@@ -285,6 +316,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "task_file": args.task_file.display().to_string(),
         "gate": gate,
         "tags": args.tags,
+        "env": env_names,
     });
     let start_path = wt_parent.join(format!("{}.start.json", args.id));
     if let Ok(json_str) = serde_json::to_string_pretty(&start_json) {
@@ -442,6 +474,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     let json_str = serde_json::to_string_pretty(&summary).unwrap();
+    let summary_path = wt_parent.join(format!("{}.json", args.id));
+    let _ = std::fs::write(&summary_path, format!("{json_str}\n"));
     println!("{json_str}");
     exit
 }
@@ -459,6 +493,43 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         return 2;
     }
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+
+    if args.notes.is_some() && args.verdict.is_none() {
+        eprintln!("error: --notes requires --verdict");
+        return 2;
+    }
+
+    if let Some(ref v) = args.verdict {
+        let wt_dir = root.join(".wt");
+        if let Err(e) = std::fs::create_dir_all(&wt_dir) {
+            eprintln!("error creating directory {}: {e}", wt_dir.display());
+            return 2;
+        }
+        let verdict_path = wt_dir.join(format!("{}.verdict.json", args.id));
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let verdict_obj = serde_json::json!({
+            "verdict": v.as_str(),
+            "notes": args.notes.as_deref().unwrap_or(""),
+            "ts": ts,
+        });
+        let json_str = match serde_json::to_string_pretty(&verdict_obj) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error serializing verdict: {e}");
+                return 2;
+            }
+        };
+        if let Err(e) = std::fs::write(&verdict_path, json_str + "\n") {
+            eprintln!("error writing {}: {e}", verdict_path.display());
+            return 2;
+        }
+        println!("recorded verdict {} for {}", v.as_str(), args.id);
+        return 0;
+    }
+
     let wt = root.join(".wt").join(&args.id);
     if !wt.exists() {
         eprintln!("error: worktree {} does not exist", wt.display());
@@ -551,6 +622,18 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             }
         }
     }
+
+    let log_file = root.join(".wt").join(format!("{}.log", args.id));
+    if let Ok(log_content) = std::fs::read_to_string(&log_file) {
+        let hcmds = host_commands(&log_content);
+        if !hcmds.is_empty() {
+            println!("== host commands (may have changed things outside the worktree)");
+            for cmd in hcmds {
+                println!("{cmd}");
+            }
+        }
+    }
+
     if args.diff {
         println!("== diff");
         if !diff_out.is_empty() {
@@ -559,6 +642,140 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     }
 
     0
+}
+
+const OUTSIDE_PATHS: &[&str] = &[
+    "~/",
+    "$HOME",
+    "/Users/",
+    "/home/",
+    "/private/",
+    "/var/",
+    "/etc/",
+    "/opt/",
+    "/usr/",
+];
+
+const CHANGE_WORDS: &[&str] = &[
+    "rm", "rmdir", "mv", "cp", "chmod", "chown", "truncate", "dd", "tee", "ln",
+];
+
+fn contains_word(cmd: &str, word: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = cmd[start..].find(word) {
+        let abs_pos = start + pos;
+        let before_ok = if abs_pos == 0 {
+            true
+        } else {
+            let prev = cmd[..abs_pos].chars().next_back().unwrap();
+            !prev.is_alphanumeric() && prev != '_' && prev != '-'
+        };
+        let after_pos = abs_pos + word.len();
+        let after_ok = if after_pos >= cmd.len() {
+            true
+        } else {
+            let next = cmd[after_pos..].chars().next().unwrap();
+            !next.is_alphanumeric() && next != '_' && next != '-'
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs_pos + word.len();
+    }
+    false
+}
+
+fn has_non_dev_null_redirect(cmd: &str) -> bool {
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '>' {
+            while i < chars.len() && chars[i] == '>' {
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '|' {
+                i += 1;
+            }
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            if i >= chars.len() {
+                break;
+            }
+            if chars[i] == '&'
+                && i + 1 < chars.len()
+                && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '-')
+            {
+                i += 1;
+                continue;
+            }
+            let target_start = i;
+            while i < chars.len()
+                && !chars[i].is_whitespace()
+                && chars[i] != ';'
+                && chars[i] != '|'
+                && chars[i] != '&'
+                && chars[i] != ')'
+            {
+                i += 1;
+            }
+            let target: String = chars[target_start..i].iter().collect();
+            let target = target.trim_matches(|c| c == '\'' || c == '"');
+            if !target.is_empty() && target != "/dev/null" {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+fn changes_something(cmd: &str) -> bool {
+    for &word in CHANGE_WORDS {
+        if contains_word(cmd, word) {
+            return true;
+        }
+    }
+    has_non_dev_null_redirect(cmd)
+}
+
+fn is_host_command(cmd: &str) -> bool {
+    if cmd.contains("git push")
+        || cmd.contains("sudo ")
+        || cmd.contains("cache clean")
+        || cmd.contains("cache prune")
+        || cmd.contains("brew ")
+    {
+        return true;
+    }
+
+    let names_outside = OUTSIDE_PATHS.iter().any(|path| cmd.contains(path));
+    if names_outside && changes_something(cmd) {
+        return true;
+    }
+
+    false
+}
+
+pub fn host_commands(log: &str) -> Vec<String> {
+    let cleaned = strip_ansi(log);
+    let mut result = Vec::new();
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("● bash ") {
+            if let Some((cmd, _)) = rest.rsplit_once(" -> ") {
+                let cmd = cmd.trim();
+                if is_host_command(cmd) && !result.iter().any(|c| c == cmd) {
+                    result.push(cmd.to_string());
+                    if result.len() == 20 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 fn strip_ansi(s: &str) -> String {

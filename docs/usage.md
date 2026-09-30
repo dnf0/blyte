@@ -40,6 +40,48 @@ orchestrator. Each is looked for in the working tree, then in the main checkout 
 be untracked). Rules are capped at 12,000 characters. The run prints which file it used
 (`blyte: repository rules from …`). Container runs read none.
 
+## Repository configuration (`blyte.toml`)
+
+`blyte init` works out a repository's gate and environment settings, and proves each step in a
+fresh worktree before writing `blyte.toml`. It first extracts check commands from CI workflows
+(`.github/workflows/*.yml` and `*.yaml`), stripping reporting arguments (like `--cov` and `| tee`),
+or falls back to toolchain detection (Makefiles, Cargo, pyproject, package.json, go.mod). It detects
+environment needs such as `UV_FROZEN = "1"` (when `uv.lock` exists) and `UV_OFFLINE = "1"` (when a
+private index is configured). Unless `--no-verify` is passed, it proves each step in a detached
+worktree of `HEAD` (`.wt/init-<pid>`) using the sandboxed local shell, leaving out steps broken by
+the environment and flagging steps that fail on HEAD. `blyte dispatch` reads `blyte.toml` when flags
+are not passed:
+
+```toml
+# blyte.toml: how this repository's work is checked, for `blyte dispatch`.
+[dispatch]
+gate = """
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace --all-targets
+"""
+# model = "gemini-3.8-flash-high"
+max_seconds = 3600
+max_turns = 300
+# max_cost = 2.0
+# network = "on"
+# fold_budget = 60000
+
+# [dispatch.env]
+# UV_FROZEN = "1"   # settings for every command and the gate; never credentials
+```
+
+| key | type | meaning |
+|---|---|---|
+| `gate` | string | the check command; several lines are several steps |
+| `model` | string | model identifier or provider selection |
+| `max_seconds` | integer | wall-clock budget in seconds (default 3600) |
+| `max_turns` | integer | maximum turn budget (default 300) |
+| `max_cost` | float | maximum spend in USD |
+| `fold_budget` | integer | approximate token budget for verbatim tail before folding |
+| `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
+| `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
+
 ## Dashboard
 
 `blyte dashboard` serves a local web page that monitors running and recent blyte jobs across repositories:
@@ -93,14 +135,14 @@ A plain `blyte "..."` run in a terminal writes none of these, so it does not app
 
 ### Sources and configuration
 
-By default, when neither `--root` nor `--runs-dir` is passed on the command line, `blyte dashboard` reads sources from `~/.config/blyte/dashboard.toml`:
+By default, when neither `--root` nor `--runs-dir` is passed on the command line, `blyte dashboard` watches every repository where `blyte dispatch` has been run on this machine, plus any extra sources configured in `~/.config/blyte/dashboard.toml`:
 
 ```toml
 roots = ["~/repos", "~/work"]
 runs_dirs = ["~/.cache/blyte-runs"]
 ```
 
-Leading `~/` paths expand to your home directory. If the config file is absent or lists no sources, `blyte dashboard` falls back to the current git repository's top-level checkout.
+Leading `~/` paths expand to your home directory. Every dispatch records its repository in `$BLYTE_STATE_DIR/repos` (default `$XDG_STATE_HOME/blyte/repos` or `~/.local/state/blyte/repos`), so the dashboard finds all of them from any folder without needing to be started in the repository.
 
 You can also pass sources explicitly:
 - `--root <DIR>` (repeatable): directories containing repositories or `.wt` worktree folders.
@@ -149,3 +191,7 @@ cost, per-call token usage, where the time went, gate failures and the security 
 blyte is built to be dispatched: one task per run, in its own worktree, with a gate and a report,
 reviewed and merged by whoever dispatched it. [blyte as your implementer](orchestration.md)
 describes the pattern, `blyte dispatch` and `blyte review`, and the Claude Code skill.
+
+### Recording a verdict
+
+Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. It works even after the worktree has been removed.

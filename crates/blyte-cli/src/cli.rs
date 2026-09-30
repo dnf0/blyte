@@ -1,16 +1,12 @@
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Detect this repository's checks and write blyte.toml
-    Init {
-        #[arg(long)]
-        force: bool,
-        #[arg(long)]
-        print: bool,
-    },
+    Init(InitArgs),
     /// Serve a local dashboard of running and recent jobs
     Dashboard(DashboardArgs),
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
@@ -34,6 +30,33 @@ pub enum Command {
         #[arg(long)]
         rollback: bool,
     },
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct InitArgs {
+    /// Overwrite an existing blyte.toml
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print the file instead of writing it
+    #[arg(long)]
+    pub print: bool,
+
+    /// Skip gate verification on HEAD
+    #[arg(long)]
+    pub no_verify: bool,
+
+    /// Sandbox local command execution: 'on' or 'off' (default 'on')
+    #[arg(
+        long,
+        default_value = "on",
+        value_parser = ["on", "off"]
+    )]
+    pub sandbox: String,
+
+    /// Timeout in seconds for each verification step (default 600)
+    #[arg(long, default_value = "600", value_name = "SECONDS")]
+    pub step_timeout: u64,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
@@ -123,12 +146,43 @@ pub struct DispatchArgs {
     pub pass_env: Vec<String>,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[value(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewVerdict {
+    Accepted,
+    Fixed,
+    Redone,
+}
+
+impl ReviewVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Fixed => "fixed",
+            Self::Redone => "redone",
+        }
+    }
+}
+
+impl std::fmt::Display for ReviewVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(clap::Args, Debug, PartialEq, Clone)]
 pub struct ReviewArgs {
     pub id: String,
 
     #[arg(long)]
     pub diff: bool,
+
+    #[arg(long, value_enum)]
+    pub verdict: Option<ReviewVerdict>,
+
+    #[arg(long, value_name = "TEXT", requires = "verdict")]
+    pub notes: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
