@@ -1,3 +1,9 @@
+## v0.7.3 (2026-09-30)
+
+### Fix
+
+- **cli**: the repository registry gets one whole line per dispatch, and no temp repositories (#185)
+
 ## v0.7.2 (2026-09-30)
 
 ### Fix
