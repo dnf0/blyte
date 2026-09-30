@@ -22,6 +22,12 @@ Nothing at the moment; see Next.
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-09-30**
+  - blyte owns the whole dispatch workflow, so the operator's local wrapper scripts can retire:
+    `blyte review --verdict` records the reviewer's verdict; `review` flags commands that reached
+    outside the worktree; `blyte.toml` takes `[dispatch.env]` and `fold_budget`; dispatch saves its
+    summary and names the gate's quick steps; `blyte init` takes the gate from CI, sets what the
+    environment needs and proves each step in a fresh sandboxed worktree; the dashboard watches
+    every repository blyte has dispatched in; the skill has tasks declare their dependencies.
   - `blyte dashboard`: a local page (127.0.0.1) of running and recent jobs across repositories and
     run directories, with time, cost, turns, the task's section of its plan, and clickable tags
     (repo, plan, harness, A/B) that group related jobs. `blyte dispatch --tag` adds tags.
