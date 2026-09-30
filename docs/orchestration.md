@@ -186,7 +186,7 @@ on planning and review; the implementation runs on whichever model blyte is conf
 For another harness, `blyte skill print` writes the same instructions to stdout, to adapt into
 its own format.
 
-## With Codex (untested)
+## With Codex
 
 ```bash
 blyte skill install --harness codex        # or --harness all for Claude Code and Codex
@@ -198,8 +198,21 @@ older versions; `.agents/skills` with `--project`), adds the default block to `~
 exactly `blyte dispatch` and `blyte review` to run outside Codex's sandbox: they need the network
 to reach blyte's model, and blyte applies its own sandbox to everything the implementer runs.
 Codex has no notification when a background command exits, so it starts parallel dispatches
-together and waits for them. The rules file has been checked with `codex execpolicy check`; the
-whole workflow has **not yet been run end to end under Codex**.
+together and waits for them.
+
+Codex must ask for escalated permissions on those two commands (`sandbox_permissions:
+"require_escalated"`): the rules file approves an escalation, but a command run without one stays
+in Codex's sandbox, where `.git` is read-only and there is no network, so `blyte dispatch` cannot
+create its worktree. The skill tells Codex so. Merging a result also writes to `.git`, so Codex
+needs escalation for it too, or leaves the merge to you.
+
+**Run end to end on 2026-09-30** (Codex CLI 0.157, `gpt-5.6-terra`, a small Python task with a
+`unittest` gate): Codex picked up the skill from the `AGENTS.md` default, wrote the task, ran
+`blyte dispatch` outside its sandbox, followed it with `blyte status`, reviewed it with `blyte
+review --diff` and left the verified commit on `wip/T1` for the merge (blyte: 27 turns, under two
+minutes, $0.19). Before the skill named `sandbox_permissions`, Codex ran the dispatch inside its
+sandbox, where it failed, and then wrote the code itself; `codex exec` also needs
+`--sandbox workspace-write` and `-c approval_policy=on-request` for escalation to be possible.
 
 ## Next
 

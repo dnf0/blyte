@@ -90,10 +90,14 @@ wait
 last command and gate attempts. A run that is `dead`, or many turns in with no gate attempt,
 is worth a look at its log (`.wt/T1.log`) before you wait longer.
 
-**Under Codex:** run `blyte dispatch` and `blyte review` outside Codex's sandbox (request
-escalated permissions for them; `blyte skill install --harness codex` pre-approves exactly these
-two commands). They need the network to reach blyte's model, and blyte applies its own sandbox
-to everything the implementer runs.
+**Under Codex:** run `blyte dispatch` and `blyte review` outside Codex's sandbox, with escalated
+permissions: set `sandbox_permissions` to `"require_escalated"` on that shell command, with a
+one-line justification. They reach blyte's model over the network and create git worktrees, which
+Codex's sandbox does not allow (it makes `.git` read-only); blyte applies its own sandbox to
+everything the implementer runs. `blyte skill install --harness codex` pre-approves exactly these
+two commands, so no prompt appears. Merging a result into the main checkout also writes to `.git`:
+run it with escalated permissions too, or leave the merge to the user. If `blyte dispatch` cannot
+run, stop and say why; do not implement the change yourself.
 
 Each dispatch prints one JSON object: `outcome` (`verified`, `no_changes`, `gate_failed`,
 `budget_exhausted`, `error`), `exit` (0 only for `verified`), `commits`, `changed_files`,
