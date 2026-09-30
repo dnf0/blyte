@@ -1,3 +1,9 @@
+## v0.7.4 (2026-09-30)
+
+### Fix
+
+- **cli**: linked worktrees use the main checkout's blyte.toml; init falls back when CI is stale (#188)
+
 ## v0.7.3 (2026-09-30)
 
 ### Fix
