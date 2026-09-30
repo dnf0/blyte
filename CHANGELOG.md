@@ -1,3 +1,9 @@
+## v0.2.1 (2026-09-30)
+
+### Fix
+
+- **build**: the sibling crate pins follow the release version (#162)
+
 ## v0.2.0 (2026-09-30)
 
 ### Feat
