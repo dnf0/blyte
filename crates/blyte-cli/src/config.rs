@@ -1,5 +1,6 @@
 //! `blyte.toml` repository configuration: gate detection, rendering, and loading.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
@@ -10,7 +11,10 @@ pub struct DispatchConfig {
     pub max_seconds: Option<u64>,
     pub max_turns: Option<u32>,
     pub max_cost: Option<f64>,
+    pub fold_budget: Option<usize>,
     pub network: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
@@ -28,6 +32,20 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let config: RepoConfig =
         toml::from_str(&content).map_err(|e| format!("{}: {e}", path.display()))?;
+    for (name, value) in &config.dispatch.env {
+        if name.starts_with("BLYTE_") {
+            return Err(format!(
+                "{}: variable `{name}` starts with BLYTE_: blyte's own settings are not set from blyte.toml",
+                path.display()
+            ));
+        }
+        if blyte_agent::shell::credential_like(name, value) {
+            return Err(format!(
+                "{}: variable `{name}` looks like a credential; credentials are never set from blyte.toml",
+                path.display()
+            ));
+        }
+    }
     Ok(Some(config))
 }
 
@@ -127,6 +145,10 @@ max_seconds = 3600
 max_turns = 300
 # max_cost = 2.0
 # network = "on"
+# fold_budget = 60000
+
+# [dispatch.env]
+# UV_FROZEN = "1"   # settings for every command and the gate; never credentials
 "#
     )
 }
