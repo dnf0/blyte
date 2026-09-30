@@ -49,7 +49,9 @@ or falls back to toolchain detection (Makefiles, Cargo, pyproject, package.json,
 environment needs such as `UV_FROZEN = "1"` (when `uv.lock` exists) and `UV_OFFLINE = "1"` (when a
 private index is configured). Unless `--no-verify` is passed, it proves each step in a detached
 worktree of `HEAD` (`.wt/init-<pid>`) using the sandboxed local shell, leaving out steps broken by
-the environment and flagging steps that fail on HEAD. `blyte dispatch` reads `blyte.toml` when flags
+the environment and flagging steps that fail on HEAD. When every step taken from CI fails on HEAD
+or is left out, it verifies the checks detected from the repository and uses them if any passes.
+`blyte dispatch` reads `blyte.toml` when flags
 are not passed:
 
 ```toml
