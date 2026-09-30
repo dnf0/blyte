@@ -246,20 +246,33 @@ fn extract_task_from_plan(plan_content: &str, title: &str) -> Option<String> {
 }
 
 fn extract_now_from_final_message(msg: &str) -> String {
-    for line in msg.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            return trimmed.chars().take(200).collect();
+    let pick = msg
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .or_else(|| msg.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or("");
+    plain_line(pick.trim_start_matches(['#', ' ']))
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// One line of markdown as plain text: no list marker, no `**`, `__` or backticks.
+fn plain_line(line: &str) -> String {
+    let mut l = line.trim();
+    if let Some(rest) = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")) {
+        l = rest;
+    } else if let Some((n, rest)) = l.split_once(". ") {
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            l = rest;
         }
     }
-    for line in msg.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            let stripped = trimmed.trim_start_matches(['#', ' ']).trim_end();
-            return stripped.chars().take(200).collect();
-        }
-    }
-    String::new()
+    l.replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .trim()
+        .to_string()
 }
 
 struct LogInfo {
@@ -370,6 +383,30 @@ pub fn parse_etime(s: &str) -> Option<u64> {
 }
 
 fn get_process_etime(pid: i64) -> Option<u64> {
+    // macOS: ask the kernel for the start time. `ps` is setuid there, so blyte's own sandbox
+    // cannot run it, and this also saves a process per PID.
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if ret == size && info.pbi_start_tvsec > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            return Some(now.saturating_sub(info.pbi_start_tvsec));
+        }
+    }
+
     if let Ok(output) = std::process::Command::new("ps")
         .args(["-o", "etime=", "-p", &pid.to_string()])
         .output()
@@ -997,6 +1034,22 @@ pub fn route(path: &str, src: &Sources) -> (u16, &'static str, Vec<u8>) {
         "/" | "/index.html" => {
             let html = include_str!("../assets/dashboard/index.html");
             (200, "text/html; charset=utf-8", html.as_bytes().to_vec())
+        }
+        "/favicon.svg" => {
+            let svg = include_bytes!("../assets/dashboard/favicon.svg");
+            (200, "image/svg+xml", svg.to_vec())
+        }
+        "/fonts/archivo.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/archivo.woff2");
+            (200, "font/woff2", font.to_vec())
+        }
+        "/fonts/plex-mono-400.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-400.woff2");
+            (200, "font/woff2", font.to_vec())
+        }
+        "/fonts/plex-mono-500.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-500.woff2");
+            (200, "font/woff2", font.to_vec())
         }
         "/api/jobs" => {
             let now = std::time::SystemTime::now()

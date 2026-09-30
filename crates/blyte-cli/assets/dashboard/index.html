@@ -4,50 +4,80 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>blyte dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>
+    @font-face {
+      font-family: "Archivo";
+      src: url("/fonts/archivo.woff2") format("woff2");
+      font-weight: 400 900;
+      font-stretch: 62% 125%;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("/fonts/plex-mono-400.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("/fonts/plex-mono-500.woff2") format("woff2");
+      font-weight: 500;
+      font-style: normal;
+      font-display: swap;
+    }
+
     :root {
-      --color-page: #f9f9fa;
-      --color-card: #ffffff;
-      --color-line: #eaecee;
-      --color-line-dark: #ced4db;
-      --color-text: #343a40;
-      --color-strong: #212529;
-      --color-muted: #6d767f;
-      --color-faint: #adb5bd;
+      --color-page: #ECEFF0;
+      --color-card: #F4F6F7;
+      --color-line: #C9D0D4;
+      --color-line-dark: #B3BCC1;
+      --color-text: #2A3238;
+      --color-strong: #141A1E;
+      --color-muted: #56616A;
+      --color-faint: #8A959C;
 
-      --status-running: #212529;
-      --status-amber: #e8a33d;
-      --status-jade: #2bad72;
-      --status-jade-label: #1c7c51;
-      --status-red: #e52321;
-      --status-red-label: #a01920;
-      --status-grey: #adb5bd;
+      --status-running: #A6441A;
+      --status-amber: #8A6A12;
+      --status-jade: #2E7A4D;
+      --status-jade-label: #2E7A4D;
+      --status-red: #A93A36;
+      --status-red-label: #A93A36;
+      --status-grey: #8A959C;
 
-      --focus-ring: #e52321;
-      --font-sans: "Graphik", "Helvetica Neue", Helvetica, Arial, sans-serif;
-      --font-mono: SFMono-Regular, Menlo, monospace;
+      --focus-ring: #A6441A;
+      --brand-rust: #A6441A;
+      --brand-rust-soft: #E8C8B7;
+
+      --font-sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     }
 
     @media (prefers-color-scheme: dark) {
       :root {
-        --color-page: #171b1e;
-        --color-card: #1f2428;
-        --color-line: #2e343b;
-        --color-line-dark: #38404a;
-        --color-text: #e2e6e9;
-        --color-strong: #f0f3f6;
-        --color-muted: #9aa2ab;
-        --color-faint: #6e7681;
+        --color-page: #0F1315;
+        --color-card: #171D20;
+        --color-line: #283136;
+        --color-line-dark: #36414A;
+        --color-text: #C9D1D5;
+        --color-strong: #E2E7E9;
+        --color-muted: #93A0A7;
+        --color-faint: #5F6C73;
 
-        --status-running: #e2e6e9;
-        --status-amber: #e8a33d;
-        --status-jade: #2bad72;
-        --status-jade-label: #2bad72;
-        --status-red: #e52321;
-        --status-red-label: #e52321;
-        --status-grey: #adb5bd;
+        --status-running: #E27A44;
+        --status-amber: #D9B45A;
+        --status-jade: #6CC08E;
+        --status-jade-label: #6CC08E;
+        --status-red: #E27B76;
+        --status-red-label: #E27B76;
+        --status-grey: #5F6C73;
 
-        --focus-ring: #e52321;
+        --focus-ring: #E27A44;
+        --brand-rust: #E27A44;
+        --brand-rust-soft: #4A2B1D;
       }
     }
 
@@ -71,6 +101,15 @@
       outline-offset: 2px;
     }
 
+    a {
+      color: var(--brand-rust);
+    }
+
+    a:hover {
+      color: var(--brand-rust);
+      text-decoration: underline;
+    }
+
     .container {
       max-width: 1240px;
       margin: 0 auto;
@@ -86,17 +125,52 @@
     }
 
     .eyebrow {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--color-muted);
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 10px;
       margin-bottom: 4px;
+    }
+
+    .brand-mark {
+      flex-shrink: 0;
+    }
+
+    .m-i {
+      fill: var(--color-strong);
+    }
+
+    .m-s {
+      fill: var(--brand-rust-soft);
+    }
+
+    .m-r {
+      fill: var(--brand-rust);
+    }
+
+    .brand-word {
+      font-family: var(--font-sans);
+      font-weight: 900;
+      font-variation-settings: "wdth" 125;
+      letter-spacing: -0.02em;
+      font-size: 20px;
+      color: var(--color-strong);
+      text-transform: none;
+      line-height: 1;
+    }
+
+    .brand-sub {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
     }
 
     .page-title {
       font-size: 26px;
-      font-weight: 700;
+      font-weight: 800;
+      font-variation-settings: "wdth" 112;
+      letter-spacing: -0.02em;
       color: var(--color-strong);
       margin: 0;
       line-height: 1.25;
@@ -149,7 +223,7 @@
 
     .tile-val {
       font-size: 26px;
-      font-weight: 700;
+      font-weight: 800;
       color: var(--color-strong);
       font-variant-numeric: tabular-nums;
       line-height: 1.1;
@@ -196,12 +270,13 @@
 
     .view-pill:hover {
       background: var(--color-page);
+      border-color: var(--brand-rust);
     }
 
     .view-pill.active {
-      background: var(--color-strong);
-      border-color: var(--color-strong);
-      color: var(--color-card);
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust-soft);
+      color: var(--color-strong);
     }
 
     .view-count {
@@ -254,6 +329,7 @@
 
     .btn-clear:hover {
       background: var(--color-page);
+      border-color: var(--brand-rust);
     }
 
     /* Table container */
@@ -274,11 +350,12 @@
       grid-template-columns: 140px minmax(260px, 1fr) 140px 100px 90px 70px;
       padding: 12px 16px;
       border-bottom: 1px solid var(--color-line);
+      font-family: var(--font-mono);
       font-size: 12px;
       font-weight: 600;
       color: var(--color-muted);
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.05em;
     }
 
     .th-time, .th-cost, .th-turns {
@@ -406,13 +483,14 @@
     }
 
     .tag-pill {
-      min-height: 44px;
-      padding: 0 12px;
-      border-radius: 22px;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 3px;
       background: var(--color-page);
       border: 1px solid var(--color-line-dark);
-      font-family: inherit;
+      font-family: var(--font-mono);
       font-size: 11px;
+      letter-spacing: 0.02em;
       color: var(--color-muted);
       cursor: pointer;
       display: inline-flex;
@@ -421,14 +499,14 @@
     }
 
     .tag-pill:hover {
-      border-color: var(--color-text);
-      color: var(--color-strong);
+      border-color: var(--brand-rust);
+      color: var(--brand-rust);
     }
 
     .tag-pill.active {
-      background: var(--color-strong);
-      border-color: var(--color-strong);
-      color: var(--color-card);
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust-soft);
+      color: var(--color-strong);
     }
 
     /* Detail area */
@@ -544,7 +622,7 @@
       padding: 2px 6px;
       border-radius: 4px;
       background: var(--status-amber);
-      color: #ffffff;
+      color: var(--color-card);
       font-size: 11px;
       font-weight: 600;
       margin-left: 6px;
@@ -567,7 +645,21 @@
   <div class="container">
     <header class="page-header">
       <div class="header-left">
-        <div class="eyebrow">blyte · this machine</div>
+        <div class="eyebrow">
+          <svg class="brand-mark" viewBox="0 0 100 100" width="22" height="22" aria-hidden="true">
+            <rect class="m-i" x="10" y="10" width="24" height="24" rx="3"/>
+            <rect class="m-i" x="38" y="10" width="24" height="24" rx="3"/>
+            <rect class="m-i" x="66" y="10" width="24" height="24" rx="3"/>
+            <rect class="m-i" x="10" y="38" width="24" height="24" rx="3"/>
+            <rect class="m-s" x="38" y="38" width="24" height="24" rx="3"/>
+            <rect class="m-r" x="66" y="38" width="24" height="24" rx="3"/>
+            <rect class="m-i" x="10" y="66" width="24" height="24" rx="3"/>
+            <rect class="m-r" x="38" y="66" width="24" height="24" rx="3"/>
+            <rect class="m-r" x="66" y="66" width="24" height="24" rx="3"/>
+          </svg>
+          <span class="brand-word">blyte</span>
+          <span class="brand-sub">dashboard · this machine</span>
+        </div>
         <h1 class="page-title">What blyte is working on.</h1>
       </div>
       <div id="live-indicator" class="live-indicator">
