@@ -328,7 +328,7 @@ another, through `blyte_agent::shell::LocalShell` — sandboxed with
 environment set (`detect_env`) and the step timeout. Print `init: <step> ... passed (12s)` (or the
 outcome) to stderr as it goes. Then remove the worktree (`git worktree remove --force`), even on
 error. Classify each step with `pub fn classify(output: &str, exit_code: i32) -> Verdict` where
-`pub enum Verdict { Passed, Environment(String), Failed }`:
+`#[derive(Debug, Clone, PartialEq)] pub enum Verdict { Passed, Environment(String), Failed }`:
 - exit 0 → `Passed`;
 - the output contains (case-insensitive) `401`, `403`, `unauthorized`, `forbidden`,
   `not found in the package registry`, `could not resolve host`, `network is unreachable`,
