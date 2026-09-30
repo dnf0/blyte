@@ -18,8 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
-blyte-agent = { path = "../blyte-agent", version = "0.2.0" }
-blyte-provider = { path = "../blyte-provider", version = "0.2.0" }
+blyte-agent = { path = "../blyte-agent", version = "0.2.1" }
+blyte-provider = { path = "../blyte-provider", version = "0.2.1" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
