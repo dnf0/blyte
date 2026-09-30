@@ -297,7 +297,7 @@ new `crates/blyte-cli/tests/test_init_verified.rs`, `docs/usage.md` (rewrite the
 paragraph: sources, environment, verification), `docs/reference/cli.md`. Keep
 `config::detect` and `config::render` and their behaviour; `init` uses `detect` as its fallback.
 
-**Flags.** `blyte init [--force] [--print] [--no-verify] [--sandbox <auto|off>] [--step-timeout <SECONDS, default 600>]`.
+**Flags.** `blyte init [--force] [--print] [--no-verify] [--sandbox <on|off>, default on] [--step-timeout <SECONDS, default 600>]`.
 `--print` prints the file instead of writing it (verification still runs unless `--no-verify`).
 
 **1. Where the gate comes from, in order:**
