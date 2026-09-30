@@ -1,0 +1,196 @@
+## v0.1.1 (2026-09-30)
+
+### Fix
+
+- **cli**: skill install --no-default removes an earlier default block (#156)
+
+## v0.1.0 (2026-09-29)
+
+### Feat
+
+- **cli**: read provider keys from ~/.config/blyte/env when they are not exported (#151)
+- **agent**: the run report records the turn of each gate attempt (#146)
+- **agent**: read takes several paths, so one call can bring several files into one turn (#136)
+- **provider**: Gemini on Vertex AI with the user's Application Default Credentials (vertex/ model prefix) (#135)
+- **agent**: the prompt shows the model how to batch independent calls in one turn (#134)
+- **agent**: ungated, blyte re-runs the searches that found the problems before it stops (#122)
+- **agent**: a gate retry runs the failing steps first and stops if they still fail (#121)
+- **agent**: gates take a machine-wide slot, so parallel runs do not all build and test at once (#119)
+- **cli**: blyte status shows what a running dispatch is doing (#118)
+- **agent**: on Linux, commands can read only system directories, the workspace, tool caches and grants (#116)
+- **cli**: blyte.toml records a repository's gate and budgets; blyte init detects them (#115)
+- **cli**: blyte skill install --harness codex sets up Codex CLI as the orchestrator (#109)
+- **cli**: installing the skill makes blyte Claude Code's default implementer, with parallel dispatch (#107)
+- **cli**: blyte dispatch, blyte review and blyte skill install (#103)
+- **cli**: the run report records the sandbox, network mode, read grants and withheld environment names (#100)
+- **agent**: --network=off stops the commands blyte runs from connecting out (#99)
+- **agent**: on Linux blyte's shell runs under Landlock, refusing writes outside the workspace (#97)
+- **agent**: commands no longer inherit credential-looking environment variables (#96)
+- **agent**: the macOS sandbox refuses reads of credential stores and .env files (#95)
+- **agent**: --max-cost stops a run once list-price spend reaches the cap (#94)
+- **provider**: ChatGPT-login provider (chatgpt/) (#92)
+- **agent**: on macOS blyte's shell runs sandboxed, refusing writes outside the workspace (#91)
+- **report**: keep each failed gate attempt's output; name the failing steps (#88)
+- **provider**: OpenAI-compatible provider (openai/, openrouter/) (#82)
+- **report**: model, tool and gate time per run, and calls per tool (#77)
+- **cli**: the binary knows the commit it was built from (#76)
+- **agent**: glob respects .gitignore and skips .git (#65)
+- fast tools — persistent shell sessions, native ripgrep, one HTTP client (#63)
+- **agent**: model-free harness benchmark (#62)
+- **agent**: adaptive context — fold budget grows on re-fetch of folded content (#59)
+- per-turn usage in the run report, and --fold-budget (#57)
+- resilience — server retry hints, cost cap, journal and resume (#56)
+- **agent**: fold notes (--fold-notes) (#55)
+- folded default context, completeness review gate (--review), compact context (#53)
+- **agent**: parallel tool calls travel as whole turn blocks (#51)
+- **agent**: folded context and provider retry; superstate matches agy with history kept (#50)
+- **agent**: state-window context keeps the last tool results in view (#48)
+- native harness autonomous TDD gating (--tdd) (#47)
+- native harness eval surface (run report, deadline, ablatable loop-breaker, effort parity) (#46)
+- **agent**: implement harness-observed working set and loop-breaker guard (#44)
+- **provider**: multi-provider cloud model discovery and interactive selection (#43)
+- **cli**: unified interactive agent harness and headless solver (#42)
+- **agent**: shell process groups and container seam parity (#41)
+- **guard**: deterministic PreToolUse file read guard and AST shunting (#39)
+- **daemon**: milestone-scoped test impact slicing (#38)
+- **core**: add DaemonError::Blocked, unique milestone IDs, and strict delimiter matching
+- **cli**: verify and test diamond DAG daemon execution from CLI
+- **daemon**: wire DAG milestone transitions, checkpoint commits, and scoped rollback
+- **core**: implement DAG milestone resolution and deadlock detection in advance_step
+- **shunt**: implement native tool output shunting layer (Spotify Portal pattern) (#35)
+- **daemon**: enable deterministic git rollback by default (#34)
+- **daemon**: implement deterministic git rollback on verification failure (#33)
+- **daemon**: add advisory gate mode to match superstate_mcp's stopping rule
+- **daemon**: do not accept an unconditional gate pass as completion
+- **daemon**: make the retry budget progress-aware
+- **core**: implement automatic worktree merge and completion artifact on daemon success
+- **mcp**: streamline tool catalog to strict detached handoff gateway
+- **mcp**: support from_agent, to_agent, and turnkey resumption in superstate_handoff
+- **cli**: add superstate state handoff subcommand for cross-agent transitions
+- **core**: implement standardized cross-agent handoff artifact and resumption generator
+- **core**: implement autonomous driver preset expansion for claude and agy
+- **mcp**: add multi-daemon fleet visibility to state_list, state_status, and handoff
+- **cli**: support multi-daemon fleet management, state-scoped PIDs, and worktree integration
+- **core**: harden DaemonRunner with StepAdvancer, driver rescue, and rich retries
+- **mcp**: support detached autonomous execution in superstate_handoff
+- **cli**: implement detached daemon lifecycle and interrogation commands
+- **core**: implement DaemonRunner for autonomous milestone execution
+- **mcp**: add schema parity and end-to-end progressive verification
+- **core**: implement infer_impacted_tests for automated test slicing
+- **mcp**: support verify_stage and generous pre-merge timeout for progressive verification
+- **mcp**: implement worktree_merge pre-merge regression verification gate
+- **Task 6**: Full Verification, Binary Build & End-to-End Suite
+- **Task 5**: Worktree Lifecycle Handlers (`crates/superstate-mcp/src/server.rs`)
+- **mcp**: implement worktree_list, worktree_remove, and worktree_clean handlers
+- **Task 4**: Maintenance, Reconciliation, DAG & Parameter Parity (`crates/superstate-mcp/src/server.rs`)
+- **mcp**: implement maintenance, reconciliation, DAG tools, and parameter parity
+- **Task 3**: Safety, Checkpoint, Rollback & Atomic Exec Handlers (`crates/superstate-mcp/src/server.rs`)
+- **mcp**: implement state_checkpoint, state_rollback, and state_exec handlers
+- **Task 2**: State Inspection, Status & Briefing Handlers (`crates/superstate-mcp/src/server.rs`)
+- **mcp**: implement state_status, state_show, state_resume, and state_metrics handlers
+- **mcp**: declare schemas for all CLI parity tools and parameters
+- **cli,mcp**: default state init to in-place execution with explicit worktree opt-in and MCP tool parity
+- **core**: record global goal in ExecutionState and render in turnkey prompts
+- **cli**: add --ignore-untracked-glob support to state next for full agent-rules compatibility (#15)
+- **worktree**: namespace worktree branches and paths by feature branch slug
+- **mcp**: support branch-scoped state resolution for concurrent agents
+- **cli**: add branch-scoped state resolution and state list command
+- **core**: add branch-scoped state paths and worktree reverse lookup
+- **mcp**: support multi-milestone handoff and sequential worktree transitions
+- **cli**: add --milestones flag and automatic sequential worktree progression
+- **worktree**: add current_branch detection and target active feature branch
+- **core**: add MilestoneSpec and init_state_milestones DAG initialization
+- **mcp**: implement superstate_preflight and superstate_handoff with tools/call dispatch
+- **cli**: support direct state initialization from goal and verify-cmd
+- native worktree milestone lifecycle (#11)
+- **cli**: add superstate worktree subcommand with create, list, merge, remove
+- **worktree**: implement worktree lifecycle engine with atomic merge and destroy
+- **worktree**: implement reflink cache sharing powered by worktrunk
+- **worktree**: scaffold superstate-worktree crate with worktrunk dependency
+- **cli**: auto-initialize git baseline and harness exclusions in state init
+- **state**: complete the command surface — sync, exec, doctor, validate, apply, resume, metrics, decompose
+- **state**: add `checkpoint` and `rollback`
+- **state**: share one command surface, target prompts by task, replay the ledger
+- **state**: add `state ready` for DAG-unblocked task selection
+- **cd**: add gated crates.io CD workflow and configure manifest dependency versions
+- **cli**: implement unified superstate CLI, 5-step handshake, doctor, and documentation
+- **rules,mcp**: implement minijinja guidance generator and native stdio MCP server
+- **review**: implement daemon-less adversarial code review engine and diff analyzer
+- **syntax**: implement native polyglot tree-sitter AST symbol extractor
+- **core**: implement deterministic state machine, plan parser, and multi-gate verifier
+
+### Fix
+
+- **agent**: withhold AWS_PROFILE and AWS_DEFAULT_PROFILE with the credentials (#150)
+- **cli**: skill install says Claude Code writes the plan and delegates, not plans and reviews (#148)
+- **agent**: the run report keeps the head and the tail of a failed gate's output (#143)
+- **agent**: the grep tool's fallback uses extended regex, so alternation matches without rg (#124)
+- **agent**: gate slots never deadlock: only the blyte command takes them, and not from inside a gate (#123)
+- **agent**: grep shows the matches inside a long line (#117)
+- **cli**: the skill runs dispatch in the foreground in a headless session (#105)
+- **agent**: commands keep the inherited PATH in front of the login profile's (#104)
+- **agent**: an exhausted usage quota stops the run at once; ChatGPT login problems are authentication errors (#98)
+- **agent**: the shell session recreates its temp directory before each command (#93)
+- **agent**: ungated, the prompt says nothing checks the work and asks for a full test run (#89)
+- **agent**: blyte tells the model to change nothing outside the repository (#87)
+- **agent**: commands never inherit provider credentials or BLYTE_* configuration (#69)
+- **agent**: the event log shows a read's line range (#58)
+- **agent**: bound every tool result by size; grep fallback skips dependency trees (#52)
+- **review**: ignore sigpipe on unix in code reviewer and test diagnostics
+- **daemon**: ignore sigpipe on unix and enforce terminal rollback on failure
+- **daemon**: pass --no-gpg-sign on in-place milestone checkpoint commits
+- **core**: fail closed on initial deadlock and prevent prefix collisions in dependency satisfaction
+- **daemon**: detect progress inside untracked directories
+- **core**: fall back to root state.json on feature branch when branch state does not exist
+- **core**: ensure state_path resolution in resume briefing and sanitize slug in handoff package
+- **core**: ensure token-exact matching and agent-specific permission flags in driver preset resolution
+- add cross-platform kill_pid support and eliminate concurrent completion.json race
+- **core,e2e**: scope completion report by slug and verify genuine branch worktree isolation in fleet test
+- **cli**: resolve daemon pid cleanup, ancestor state resolution, and cancel deduplication
+- **core**: bound driver stderr note and write prompt to stdin in background thread
+- **mcp**: relativize synthesized test cmd to worktree and enforce as blocking gate
+- **mcp**: handle JSON-RPC notifications gracefully without responses
+- **mcp**: align inputSchema naming, state_apply oneOf patch, and worktree slug matching
+- **cli,mcp**: refine worktree defaults, exclude initialization, and MCP schema parity
+- **core**: skip rendering global goal heading when goal is empty or whitespace
+- **worktree**: stage pre-existing files in baseline commit before worktree creation
+- **core**: centralize project root resolution and turnkey prompt state contract
+- **cli**: address code review findings for state list and prompt path quoting
+- **cli**: capture base_branch and safe unwrap in single goal init
+- **core**: address Task 1 review findings in state machine and cli tests
+- **mcp**: enforce verification gates, worktree merge, and preflight timeout in MCP server
+- **cli**: robust cwd starts_with fallback and detached head test
+- **cli**: guard detached HEAD in merge and active CWD in remove
+- **cli**: validate base branch, prevent cache conflict, and add inner cwd tests
+- **cli**: guard primary worktree and resolve repo root in merge and remove
+- **state**: find the project's state from anywhere inside it
+- **state**: use the relative-path-safe repo root everywhere
+- **state**: accept checkbox plans and record gate failures in state
+- **cd**: handle dry-run verification for interdependent workspace crates
+
+### Refactor
+
+- **agent**: remove the commit footer (it did not reduce git-inspection turns) (#86)
+- remove --review and --tdd (the orchestrator owns completeness) (#70)
+- remove the note tool; sweep dead code and unused dependencies (#68)
+- remove the loop-breaker, working set and action ledger (#67)
+- remove what did not earn its place (#66)
+- rename superstate to blyte (#61)
+- **mcp**: deduplicate daemon status resolution and harden test lifecycle
+- **worktree**: simplify init status fallback check
+- **ledger**: read both locations instead of migrating
+- **ledger**: keep findings in an append-only file beside the state
+
+### Perf
+
+- **provider**: Anthropic requests mark cache breakpoints; cache writes count as input (#85)
+- **agent**: a successful git commit reports the new commit and the tree state (#84)
+- **agent**: read keeps lines up to 2,000 characters whole (#83)
+- **provider**: Ollama thinking is off unless the model name ends in +think (#79)
+- **agent**: the prompt asks for the gate's quick checks before stopping (#74)
+- **agent**: a read from line 1 of a file that fits returns the whole file (#73)
+- **agent**: a multi-line gate runs every step and reports all failures at once (#72)
+- **agent**: read returns whole files up to 2,000 lines (#71)
+- **agent**: lean session protocol and native glob (#64)
+- **agent**: compact masks superseded outputs only at folds (#54)
+- **agent**: keep a stable prompt prefix so Gemini's implicit cache applies (#49)
