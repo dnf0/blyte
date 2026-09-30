@@ -30,6 +30,16 @@ keeps the tree as the model left it.
     Rollback discards uncommitted changes and untracked files, including any you made before the
     run. Commit or stash your own work first, or run blyte in its own worktree.
 
+## Repository rules
+
+blyte reads the repository's own rules for agents on every run and puts them in its system prompt,
+however it was started (a direct `blyte dispatch`, a script, another agent). The first file found
+wins: `.blyte/rules.md` (written for blyte), `.claude/agy-rules.md` (implementer rules kept for
+headless agents), then `AGENTS.md`. `CLAUDE.md` is not read, because it is written for the
+orchestrator. Each is looked for in the working tree, then in the main checkout (a rules file may
+be untracked). Rules are capped at 12,000 characters. The run prints which file it used
+(`blyte: repository rules from …`). Container runs read none.
+
 ## Budgets
 
 | flag | default | stops the run when |
