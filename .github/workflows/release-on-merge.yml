@@ -37,13 +37,21 @@ jobs:
       - name: Bump the version and changelog
         id: bump
         run: |
+          # Ask for the next version first: with the scm provider, `cz version --project` reads the
+          # last tag, not the bump (the first run, 2026-09-30, labelled v0.1.1 as v0.1.0).
+          # Exit 3: no commits since the last tag; 21: none that release. Both skip.
           set +e
-          cz bump --files-only --yes 2>&1 | tee bump.log
-          code=${PIPESTATUS[0]}
+          next=$(cz bump --get-next 2>&1)
+          code=$?
           set -e
-          if [ "$code" -eq 21 ]; then echo "Nothing to release since the last tag."; exit 0; fi
+          echo "$next"
+          if [ "$code" -eq 3 ] || [ "$code" -eq 21 ]; then echo "Nothing to release since the last tag."; exit 0; fi
           [ "$code" -eq 0 ] || exit "$code"
-          echo "tag=v$(cz version --project)" >> "$GITHUB_OUTPUT"
+          next=$(echo "$next" | tail -1)
+          echo "$next" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "unexpected next version: $next"; exit 1; }
+          cz bump --files-only --yes
+          grep -q "^version = \"$next\"" Cargo.toml || { echo "Cargo.toml was not bumped to $next"; exit 1; }
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
 
       - name: Land the release through a pull request
         if: steps.bump.outputs.tag != ''
