@@ -29,8 +29,22 @@ pub fn state_dir() -> Option<PathBuf> {
 
 /// Appends the canonical path of `root` as one line to `<state_dir>/repos` (creating the directory),
 /// unless it is already listed. Errors are ignored.
+///
+/// A repository under the system temp directory is not registered unless `BLYTE_STATE_DIR` is set:
+/// it is transient, and every test run that dispatched in one wrote it to the operator's real list.
 pub fn register(root: &Path) {
+    if std::env::var_os("BLYTE_STATE_DIR").is_none() && is_transient(root) {
+        return;
+    }
     let _ = register_in(root, state_dir());
+}
+
+/// Whether `root` lies under the system temp directory.
+pub fn is_transient(root: &Path) -> bool {
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.canonicalize().unwrap_or(tmp);
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    root.starts_with(&tmp)
 }
 
 fn register_in(root: &Path, dir: Option<PathBuf>) -> std::io::Result<()> {
@@ -55,20 +69,13 @@ fn register_in(root: &Path, dir: Option<PathBuf>) -> std::io::Result<()> {
 
     std::fs::create_dir_all(&dir)?;
 
-    let needs_leading_newline = repos_file.is_file()
-        && std::fs::read_to_string(&repos_file)
-            .map(|s| !s.is_empty() && !s.ends_with('\n'))
-            .unwrap_or(false);
-
+    // One write of the whole line: an O_APPEND write this small is atomic, so dispatches
+    // registering at the same moment cannot run their lines together (they did, 2026-09-30).
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&repos_file)?;
-
-    if needs_leading_newline {
-        writeln!(file)?;
-    }
-    writeln!(file, "{canonical_str}")?;
+    file.write_all(format!("{canonical_str}\n").as_bytes())?;
     Ok(())
 }
 
@@ -106,6 +113,37 @@ fn registered_from(dir: Option<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_registrations_each_get_a_whole_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let roots: Vec<PathBuf> = (0..24)
+            .map(|i| {
+                let d = temp.path().join(format!("repo-{i}"));
+                std::fs::create_dir(&d).unwrap();
+                d
+            })
+            .collect();
+        std::thread::scope(|s| {
+            for r in &roots {
+                let state = state.clone();
+                s.spawn(move || register_in(r, Some(state)).unwrap());
+            }
+        });
+        let listed = std::fs::read_to_string(state.join("repos")).unwrap();
+        assert_eq!(listed.lines().count(), 24, "{listed}");
+        assert!(listed.lines().all(|l| Path::new(l).is_dir()), "{listed}");
+    }
+
+    #[test]
+    fn a_repository_in_the_temp_directory_is_transient() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(is_transient(temp.path()));
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(!is_transient(Path::new(&home)));
+        }
+    }
 
     #[test]
     fn registered_skips_missing_and_deduplicates_in_order() {
