@@ -11,6 +11,7 @@ Commands:
   dispatch  Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review    Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
   skill     Install or print the Claude Code skill for the plan, delegate, review workflow
+  update    Replace this binary with the latest release (the old one is kept as blyte.prev)
   help      Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -107,6 +108,7 @@ Commands:
   dispatch  Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review    Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
   skill     Install or print the Claude Code skill for the plan, delegate, review workflow
+  update    Replace this binary with the latest release (the old one is kept as blyte.prev)
   help      Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -162,6 +164,7 @@ Commands:
   dispatch  Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review    Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
   skill     Install or print the Claude Code skill for the plan, delegate, review workflow
+  update    Replace this binary with the latest release (the old one is kept as blyte.prev)
   help      Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -205,6 +208,23 @@ Options:
   -V, --version
           Print version
 ```
+
+## blyte update
+
+```text
+Replace this binary with the latest release (the old one is kept as blyte.prev)
+
+Usage: blyte update [OPTIONS]
+
+Options:
+      --check     Only show the installed and latest versions
+      --rollback  Swap back to the previous build (blyte.prev)
+  -h, --help      Print help
+```
+
+It downloads this machine's binary from the latest GitHub release through the GitHub CLI (`gh`,
+signed in with access to the repository), checks that it runs, keeps the old binary beside it as
+`blyte.prev`, and refreshes the Claude Code skill if the installed copy is unedited.
 
 ## Environment
 
