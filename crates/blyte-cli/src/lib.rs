@@ -3,6 +3,7 @@ pub mod config;
 pub mod dashboard;
 pub mod dispatch;
 pub mod env_file;
+pub mod init;
 pub mod registry;
 pub mod repl;
 pub mod report;

@@ -8,6 +8,7 @@ A lean coding-agent harness with a sealed verification gate
 Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
 
 Commands:
+  init       Detect this repository's checks and write blyte.toml
   dashboard  Serve a local dashboard of running and recent jobs
   dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
@@ -55,6 +56,22 @@ Options:
           Print help
   -V, --version
           Print version
+```
+
+## blyte init
+
+```text
+Detect this repository's checks and write blyte.toml
+
+Usage: blyte init [OPTIONS]
+
+Options:
+      --force                   Overwrite an existing blyte.toml
+      --print                   Print the file instead of writing it
+      --no-verify               Skip gate verification on HEAD
+      --sandbox <SANDBOX>       Sandbox local command execution: 'on' or 'off' (default 'on') [default: on] [possible values: on, off]
+      --step-timeout <SECONDS>  Timeout in seconds for each verification step (default 600) [default: 600]
+  -h, --help                    Print help
 ```
 
 ## blyte dashboard
