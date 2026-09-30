@@ -1,3 +1,9 @@
+## v0.7.1 (2026-09-30)
+
+### Fix
+
+- **cli**: a run never outlives --max-seconds by more than 30 s, and always leaves a report (#179)
+
 ## v0.7.0 (2026-09-30)
 
 ### Feat
