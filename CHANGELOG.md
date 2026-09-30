@@ -1,3 +1,9 @@
+## v0.7.0 (2026-09-30)
+
+### Feat
+
+- **cli**: blyte owns the dispatch workflow: verdicts, env, a proven init, a global dashboard (#178)
+
 ## v0.6.0 (2026-09-30)
 
 ### Feat
