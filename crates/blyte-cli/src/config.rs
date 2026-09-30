@@ -1,7 +1,8 @@
 //! `blyte.toml` repository configuration: gate detection, rendering, and loading.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +48,40 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
         }
     }
     Ok(Some(config))
+}
+
+pub fn main_checkout(root: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    let parent = common.parent()?;
+    let parent_canon = parent.canonicalize().ok()?;
+    let root_canon = root.canonicalize().ok()?;
+    if parent_canon == root_canon {
+        return None;
+    }
+    Some(parent.to_path_buf())
+}
+
+pub fn load_with_fallback(root: &Path) -> Result<Option<(RepoConfig, bool)>, String> {
+    if let Some(cfg) = load(root)? {
+        return Ok(Some((cfg, false)));
+    }
+    if let Some(main) = main_checkout(root) {
+        if let Some(cfg) = load(&main)? {
+            return Ok(Some((cfg, true)));
+        }
+    }
+    Ok(None)
 }
 
 pub fn detect(root: &Path) -> Vec<String> {

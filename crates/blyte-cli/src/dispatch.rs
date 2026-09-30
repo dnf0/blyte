@@ -109,8 +109,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
     crate::registry::register(&root);
 
-    let repo_config = match crate::config::load(&root) {
-        Ok(cfg) => cfg,
+    let (repo_config, from_main) = match crate::config::load_with_fallback(&root) {
+        Ok(Some((cfg, from_main))) => (Some(cfg), from_main),
+        Ok(None) => (None, false),
         Err(e) => {
             eprintln!("{e}");
             return 2;
@@ -121,7 +122,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let (gate, gate_source) = if let Some(ref g) = args.gate {
         (g.clone(), "flag")
     } else if let Some(ref g) = dispatch_cfg.gate {
-        (g.clone(), "blyte.toml")
+        let source = if from_main {
+            "blyte.toml (main checkout)"
+        } else {
+            "blyte.toml"
+        };
+        (g.clone(), source)
     } else {
         eprintln!("no gate: pass --gate, or run blyte init to write blyte.toml");
         return 2;
