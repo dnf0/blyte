@@ -246,20 +246,33 @@ fn extract_task_from_plan(plan_content: &str, title: &str) -> Option<String> {
 }
 
 fn extract_now_from_final_message(msg: &str) -> String {
-    for line in msg.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            return trimmed.chars().take(200).collect();
+    let pick = msg
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .or_else(|| msg.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or("");
+    plain_line(pick.trim_start_matches(['#', ' ']))
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// One line of markdown as plain text: no list marker, no `**`, `__` or backticks.
+fn plain_line(line: &str) -> String {
+    let mut l = line.trim();
+    if let Some(rest) = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")) {
+        l = rest;
+    } else if let Some((n, rest)) = l.split_once(". ") {
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            l = rest;
         }
     }
-    for line in msg.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            let stripped = trimmed.trim_start_matches(['#', ' ']).trim_end();
-            return stripped.chars().take(200).collect();
-        }
-    }
-    String::new()
+    l.replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .trim()
+        .to_string()
 }
 
 struct LogInfo {
