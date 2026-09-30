@@ -53,3 +53,17 @@ fn a_test_named_after_a_status_code_is_not_an_environment_failure() {
         Verdict::Environment(_)
     ));
 }
+
+#[test]
+fn a_failure_shows_the_runner_summary_not_shutdown_noise() {
+    use blyte_cli::init::failure_excerpt;
+    let out = "FAILED tests/a.py::test_x - KeyError\n= 1 failed, 900 passed in 190s =\nERROR asyncio - Task was destroyed but it is pending!\ntask: <Task pending>\n";
+    assert_eq!(
+        failure_excerpt(out),
+        vec![
+            "FAILED tests/a.py::test_x - KeyError",
+            "= 1 failed, 900 passed in 190s ="
+        ]
+    );
+    assert_eq!(failure_excerpt("a\nb\n"), vec!["a", "b"]);
+}

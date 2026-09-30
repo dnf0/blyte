@@ -462,6 +462,28 @@ pub fn render_verified(steps: &[InitStep], env: &BTreeMap<String, String>) -> St
     out
 }
 
+/// What to show of a failing step: the test runner's own summary lines when it printed any
+/// (`FAILED …`, `ERROR …`, `== 2 failed, 900 passed ==`), else the last lines. A tail alone can be
+/// all shutdown noise.
+pub fn failure_excerpt(text: &str) -> Vec<&str> {
+    let summary: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            // pytest's summary lines name a test file; a logger's `ERROR …` line does not.
+            let names_test = t.contains("::") || t.contains(".py");
+            ((t.starts_with("FAILED ") || t.starts_with("ERROR ")) && names_test)
+                || (t.starts_with('=') && (t.contains(" failed") || t.contains(" error")))
+        })
+        .collect();
+    let lines: Vec<&str> = if summary.is_empty() {
+        text.lines().collect()
+    } else {
+        summary
+    };
+    lines[lines.len().saturating_sub(15)..].to_vec()
+}
+
 /// Remove `.wt/init-<pid>` worktrees left by an init that was killed (its process is gone).
 fn remove_stale_init_worktrees(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root.join(".wt")) else {
@@ -597,8 +619,7 @@ fn verify_steps(
             }
             Verdict::Failed => {
                 eprintln!("init: {} ... failed on HEAD ({}s)", step.command, elapsed);
-                let lines: Vec<&str> = text.lines().collect();
-                for l in &lines[lines.len().saturating_sub(15)..] {
+                for l in failure_excerpt(&text) {
                     eprintln!("init:   | {l}");
                 }
             }
