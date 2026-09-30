@@ -73,6 +73,8 @@ Options:
   -h, --help            Print help
 ```
 
+A job with no report counts as running only when its PID is alive and that process started no later than 60 seconds after the job's `started_at` (guarding against reused PIDs). In the runs-dir layout, `<id>.json` is recognized as an agy summary: jobs with this file report status `finished` (or `error`), with their elapsed duration, turn count, and response text.
+
 ## blyte dispatch
 
 ```text
