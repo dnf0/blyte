@@ -5,10 +5,7 @@ decisions; the evidence behind them is in `docs/evidence.md` and the plans in `d
 
 ## In progress
 
-- **More evidence, on `katex-multicolumn-array-spans` (TypeScript), 2026-09-29:** v2 repeated on a
-  second task (does the Sonnet saving hold?), and a fair parallel test (the same split for both arms;
-  only whether the parts run at once differs). Plan: blyte-eval
-  `docs/superpowers/plans/2026-09-29-parallel-offload-comparison.md`.
+Nothing at the moment; see Next.
 
 ## Next
 
@@ -24,7 +21,16 @@ decisions; the evidence behind them is in `docs/evidence.md` and the plans in `d
 
 ## Done
 
+Kept for about the last four weeks; older items are in the git history and the evidence page.
+
+- **2026-09-30**
+  - `blyte skill install --no-default` removes an earlier default block, so switching from on to
+    "only when asked" needs no uninstall first.
+  - Every blyte run is recorded for reporting, including ones started with `blyte dispatch`
+    directly, with a check of whether each one's work reached main (local tooling).
 - **2026-09-29**
+  - More evidence on katex: v2 repeated (Claude usage down 86%), and a parallel test that showed
+    splitting one feature does not pay (evidence page, #154; blyte-eval #88).
   - Provider keys from `~/.config/blyte/env` when they are not exported (#151): a session started
     without the key failed every dispatch at turn 0.
   - `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` withheld with the credentials (#150): blyte had edited a

@@ -98,3 +98,39 @@ fn the_skill_is_a_default_and_teaches_parallel_dispatch() {
         assert!(SKILL_MD.contains(s), "{s} missing");
     }
 }
+
+#[test]
+fn install_with_no_default_removes_an_earlier_default_block() {
+    // Switching from "on" to "only when asked" must not need an uninstall first (2026-09-30).
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let md = home.path().join(".claude/CLAUDE.md");
+    std::fs::create_dir_all(md.parent().unwrap()).unwrap();
+    std::fs::write(&md, "# My rules\n").unwrap();
+    assert_eq!(
+        blyte(cwd.path(), home.path(), &["skill", "install"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert!(std::fs::read_to_string(&md)
+        .unwrap()
+        .contains(DEFAULT_BLOCK));
+
+    let out = blyte(
+        cwd.path(),
+        home.path(),
+        &["skill", "install", "--no-default"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), "# My rules\n");
+    assert!(home
+        .path()
+        .join(".claude/skills/blyte-implementer/SKILL.md")
+        .exists());
+}

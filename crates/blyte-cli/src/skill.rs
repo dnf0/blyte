@@ -196,8 +196,8 @@ pub fn install_for(
         written.push(skill_path);
     }
 
+    let md_path = instructions_path(harness, project)?;
     if !no_default {
-        let md_path = instructions_path(harness, project)?;
         if let Some(parent) = md_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
@@ -212,6 +212,17 @@ pub fn install_for(
         std::fs::write(&md_path, updated)
             .map_err(|e| format!("failed to write {}: {e}", md_path.display()))?;
         written.push(md_path);
+    } else if md_path.exists() {
+        // Switching to "only when asked" drops the default block an earlier install wrote, so it
+        // does not need an uninstall first (2026-09-30).
+        let existing = std::fs::read_to_string(&md_path)
+            .map_err(|e| format!("failed to read {}: {e}", md_path.display()))?;
+        let updated = remove_default_block(&existing);
+        if updated != existing {
+            std::fs::write(&md_path, updated)
+                .map_err(|e| format!("failed to write {}: {e}", md_path.display()))?;
+            written.push(md_path);
+        }
     }
 
     if harness == Harness::Codex && !project {
