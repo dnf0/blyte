@@ -197,7 +197,7 @@ describes the pattern, `blyte dispatch` and `blyte review`, and the Claude Code 
 
 ### Recording a verdict
 
-Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. It works even after the worktree has been removed.
+Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. It works even after the worktree has been removed. Without `--verdict`, `blyte review` flags commands that may have changed things outside the worktree under `== host commands`, and reads of other terminals or files outside the repository under `== reads outside the repository`.
 
 ## Research
 
@@ -212,4 +212,6 @@ In research mode, blyte runs in an isolated scratch repository under `.wt/<id>` 
 a worktree of the repository. The task prompt directs the model to read the code under the repository root
 by absolute path and write findings to `report.md`. The gate is `test -s report.md`, verifying that a
 non-empty report was written. When finished, the report is copied to `.wt/<id>.report.md` (and to
-`--report-to` when given), and `blyte review <id>` displays its contents.
+`--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to
+80 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
+`--max-seconds` flags still win).

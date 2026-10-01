@@ -3,8 +3,8 @@
 //! Releases carry one static binary per platform (release-on-merge.yml). The repository is private,
 //! so the download goes through the GitHub CLI (`gh`), which already holds the user's access;
 //! blyte handles no token. The new binary must run before it replaces the old one, the old one is
-//! kept beside it as `blyte.prev` (`blyte update --rollback` swaps them back), and the Claude Code
-//! skill is refreshed when the installed copy is this version's, unedited.
+//! kept beside it as `blyte.prev` (`blyte update --rollback` swaps them back), and every installed
+//! copy of the skill is refreshed when unedited, for every harness (2026-10-01).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -105,36 +105,103 @@ fn rollback(exe: &Path) -> Result<String, String> {
     Ok(version_of(exe).unwrap_or_else(|| "blyte (version unknown)".into()))
 }
 
-/// Refresh the installed Claude Code skill with `new_exe` when the installed copy is this
-/// version's own, unedited, keeping whether blyte is the default. Returns a line to print.
-fn refresh_skill(new_exe: &Path) -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let skill = PathBuf::from(&home).join(".claude/skills/blyte-implementer/SKILL.md");
-    let installed = std::fs::read_to_string(&skill).ok()?;
-    if installed != crate::skill::SKILL_MD {
-        return Some(format!(
-            "skill not refreshed: {} has been edited (run `blyte skill install --force` to replace it)",
-            skill.display()
-        ));
+/// Refresh every installed skill copy with `new_exe` when unedited, keeping whether blyte is the default.
+pub fn refresh_skills(new_exe: &Path, home: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    struct HarnessConfig {
+        name: &'static str,
+        skill_dirs: Vec<PathBuf>,
+        instructions_file: PathBuf,
+        install_args: Vec<&'static str>,
     }
-    let claude_md = PathBuf::from(&home).join(".claude/CLAUDE.md");
-    let default_on = std::fs::read_to_string(claude_md)
-        .map(|t| t.contains("<!-- blyte:default -->"))
-        .unwrap_or(false);
-    let mut args = vec!["skill", "install", "--force"];
-    if !default_on {
-        args.push("--no-default");
+
+    let harnesses = [
+        HarnessConfig {
+            name: "Claude Code",
+            skill_dirs: vec![home.join(".claude/skills/blyte-implementer")],
+            instructions_file: home.join(".claude/CLAUDE.md"),
+            install_args: vec!["skill", "install", "--force"],
+        },
+        HarnessConfig {
+            name: "Codex",
+            skill_dirs: vec![
+                home.join(".agents/skills/blyte-implementer"),
+                home.join(".codex/skills/blyte-implementer"),
+            ],
+            instructions_file: home.join(".codex/AGENTS.md"),
+            install_args: vec!["skill", "install", "--force", "--harness", "codex"],
+        },
+    ];
+
+    for harness in harnesses {
+        let existing_skills: Vec<(PathBuf, PathBuf)> = harness
+            .skill_dirs
+            .iter()
+            .map(|d| (d.join("SKILL.md"), d.join(".blyte-installed")))
+            .filter(|(s, _)| s.exists())
+            .collect();
+
+        if existing_skills.is_empty() {
+            continue;
+        }
+
+        let mut first_edited: Option<PathBuf> = None;
+        for (skill_file, installed_file) in &existing_skills {
+            let is_unedited = match std::fs::read_to_string(skill_file) {
+                Ok(skill_text) => {
+                    if installed_file.exists() {
+                        std::fs::read_to_string(installed_file)
+                            .map(|inst_text| inst_text == skill_text)
+                            .unwrap_or(false)
+                    } else {
+                        skill_text == crate::skill::SKILL_MD
+                    }
+                }
+                Err(_) => false,
+            };
+
+            if !is_unedited {
+                first_edited = Some(skill_file.clone());
+                break;
+            }
+        }
+
+        if let Some(edited_path) = first_edited {
+            lines.push(format!(
+                "skill not refreshed for {}: {} has been edited (run blyte skill install --force to replace it)",
+                harness.name,
+                edited_path.display()
+            ));
+        } else {
+            let default_on = std::fs::read_to_string(&harness.instructions_file)
+                .map(|t| t.contains("<!-- blyte:default -->"))
+                .unwrap_or(false);
+
+            let mut args = harness.install_args.clone();
+            if !default_on {
+                args.push("--no-default");
+            }
+
+            let ok = Command::new(new_exe)
+                .args(&args)
+                .env("HOME", home)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if ok {
+                lines.push(format!("skill refreshed for {}", harness.name));
+            } else {
+                lines.push(format!(
+                    "skill not refreshed for {}: blyte skill install failed; run it by hand",
+                    harness.name
+                ));
+            }
+        }
     }
-    let ok = Command::new(new_exe)
-        .args(&args)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    Some(if ok {
-        "skill refreshed (new Claude Code sessions pick it up)".to_string()
-    } else {
-        "skill not refreshed: `blyte skill install` failed; run it by hand".to_string()
-    })
+
+    lines
 }
 
 fn update(check: bool) -> Result<(), String> {
@@ -202,8 +269,10 @@ fn update(check: bool) -> Result<(), String> {
         prev.display()
     );
     println!("`blyte update --rollback` restores it");
-    if let Some(line) = refresh_skill(&exe) {
-        println!("{line}");
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for line in refresh_skills(&exe, &home) {
+            println!("{line}");
+        }
     }
     Ok(())
 }

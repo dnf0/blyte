@@ -267,7 +267,7 @@ Options:
 
 It downloads this machine's binary from the latest GitHub release through the GitHub CLI (`gh`,
 signed in with access to the repository), checks that it runs, keeps the old binary beside it as
-`blyte.prev`, and refreshes the Claude Code skill if the installed copy is unedited.
+`blyte.prev`, and refreshes every unedited copy of the skill it installed (for Claude Code and Codex).
 
 ## Environment
 
