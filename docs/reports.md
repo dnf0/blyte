@@ -56,8 +56,8 @@ removed; new fields are added without a bump.
 | field | meaning |
 |---|---|
 | `harness_build` | the commit blyte was built from |
-| `outcome` | `verified`, `budget_exhausted`, `gate_failed` or `error` |
-| `error` | the error message for an `error` outcome, else `null` |
+| `outcome` | `verified`, `budget_exhausted`, `gate_failed`, `blocked` or `error` |
+| `error` | the error message for an `error` or `blocked` outcome, else `null` |
 | `model_requested` / `model_id` | the `--model` given, and what the provider actually called |
 | `effort` | the effort level when the model supports it, else `null` |
 | `context` | `folded` or `conversational` |

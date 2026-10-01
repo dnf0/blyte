@@ -70,6 +70,7 @@ pub fn dispatch_outcome(report_outcome: &str, commits: usize) -> &'static str {
         }
         "gate_failed" => "gate_failed",
         "budget_exhausted" => "budget_exhausted",
+        "blocked" => "blocked",
         "error" => "error",
         _ => "error",
     }
@@ -79,6 +80,7 @@ pub fn exit_code(outcome: &str) -> i32 {
     match outcome {
         "verified" => 0,
         "no_changes" => 4,
+        "blocked" => 5,
         _ => 1,
     }
 }
@@ -587,6 +589,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             "verified" => "verified",
             "gate_failed" => "gate_failed",
             "budget_exhausted" => "budget_exhausted",
+            "blocked" => "blocked",
             _ => "error",
         }
     } else {
