@@ -1,7 +1,7 @@
 //! `blyte dispatch` and `blyte review` commands.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::{DispatchArgs, ReviewArgs};
@@ -20,6 +20,21 @@ pub fn wrap_task(task: &str) -> String {
         "You are implementing exactly one task. Your working directory is a git worktree on its own branch; work only there.\n\n{}\n\n{}",
         task.trim(),
         DISPATCH_RULES
+    )
+}
+
+pub const RESEARCH_RULES: &str = r#"Rules:
+- Do not create, modify, move or delete any file anywhere except `report.md` in your working directory.
+- Do not run git commands that change state (no checkout, pull, commit, stash, worktree), and do not build, install, push, open pull requests, or write to any service.
+- Answer the question with evidence: file paths with line numbers, and quote only what is needed.
+- Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them. The harness checks that `report.md` exists."#;
+
+pub fn wrap_research(question: &str, root: &Path) -> String {
+    format!(
+        "READ-ONLY RESEARCH TASK. The code to research is under {}: read it there by absolute path.\n\n{}\n\n{}",
+        root.display(),
+        question.trim(),
+        RESEARCH_RULES
     )
 }
 
@@ -92,6 +107,7 @@ pub struct DispatchSummary {
     pub log: String,
     pub report: String,
     pub gate_source: &'static str,
+    pub research_report: Option<String>,
 }
 
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
@@ -120,7 +136,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
     let dispatch_cfg = repo_config.map(|c| c.dispatch).unwrap_or_default();
 
-    let (gate, gate_source) = if let Some(ref g) = args.gate {
+    let (gate, gate_source) = if args.research {
+        ("test -s report.md".to_string(), "research")
+    } else if let Some(ref g) = args.gate {
         (g.clone(), "flag")
     } else if let Some(ref g) = dispatch_cfg.gate {
         let source = if from_main {
@@ -152,7 +170,65 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let worktree_dir = wt_parent.join(&args.id);
     let branch = format!("wip/{}", args.id);
 
-    if !worktree_dir.exists() {
+    if args.research {
+        if worktree_dir.exists() {
+            eprintln!("error: {} already exists", worktree_dir.display());
+            return 2;
+        }
+        if let Err(e) = std::fs::create_dir_all(&worktree_dir) {
+            eprintln!(
+                "error creating scratch directory {}: {e}",
+                worktree_dir.display()
+            );
+            return 2;
+        }
+        let init_out = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&worktree_dir)
+            .output();
+        match init_out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                eprintln!(
+                    "error: git init failed: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: failed to execute git init: {e}");
+                return 2;
+            }
+        }
+        let commit_out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=blyte",
+                "-c",
+                "user.email=blyte@local",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "research",
+            ])
+            .current_dir(&worktree_dir)
+            .output();
+        match commit_out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                eprintln!(
+                    "error: git commit failed: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: failed to execute git commit: {e}");
+                return 2;
+            }
+        }
+    } else if !worktree_dir.exists() {
         let add_out = Command::new("git")
             .args([
                 "worktree",
@@ -237,6 +313,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if report_path.exists() {
         let _ = std::fs::remove_file(&report_path);
     }
+    let research_report_path = wt_parent.join(format!("{}.report.md", args.id));
+    if research_report_path.exists() {
+        let _ = std::fs::remove_file(&research_report_path);
+    }
 
     let log_file = match std::fs::File::create(&log_path) {
         Ok(f) => f,
@@ -295,11 +375,16 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     cmd.arg("--");
-    let mut task_prompt = wrap_task(&task_content);
-    if let Some(qs) = quick_steps(&gate) {
-        task_prompt.push_str("\n\n");
-        task_prompt.push_str(&qs);
-    }
+    let task_prompt = if args.research {
+        wrap_research(&task_content, &root)
+    } else {
+        let mut prompt = wrap_task(&task_content);
+        if let Some(qs) = quick_steps(&gate) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&qs);
+        }
+        prompt
+    };
     cmd.arg(task_prompt);
 
     let mut child = match cmd.spawn() {
@@ -316,21 +401,46 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         .unwrap_or(0);
 
     let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
-    let start_json = serde_json::json!({
+    let mut tags = args.tags.clone();
+    if args.research {
+        tags.push("research".to_string());
+    }
+    let mut start_json = serde_json::json!({
         "id": args.id,
         "pid": child.id(),
         "started_at": started_at,
         "task_file": args.task_file.display().to_string(),
         "gate": gate,
-        "tags": args.tags,
+        "tags": tags,
         "env": env_names,
     });
+    if args.research {
+        start_json["research"] = serde_json::json!(true);
+    }
     let start_path = wt_parent.join(format!("{}.start.json", args.id));
     if let Ok(json_str) = serde_json::to_string_pretty(&start_json) {
         let _ = std::fs::write(&start_path, json_str + "\n");
     }
 
     let _ = child.wait();
+
+    let scratch_report = worktree_dir.join("report.md");
+    if args.research {
+        let is_non_empty = std::fs::metadata(&scratch_report)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if is_non_empty {
+            let _ = std::fs::copy(&scratch_report, &research_report_path);
+            if let Some(ref report_to) = args.report_to {
+                if let Some(parent) = report_to.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+                let _ = std::fs::copy(&scratch_report, report_to);
+            }
+        }
+    }
 
     // 5. Read report, commits and changed files
     let log_out = Command::new("git")
@@ -455,8 +565,23 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         ),
     };
 
-    let outcome = dispatch_outcome(&report_outcome, commits.len());
+    let outcome = if args.research {
+        match report_outcome.as_str() {
+            "verified" => "verified",
+            "gate_failed" => "gate_failed",
+            "budget_exhausted" => "budget_exhausted",
+            _ => "error",
+        }
+    } else {
+        dispatch_outcome(&report_outcome, commits.len())
+    };
     let exit = exit_code(outcome);
+
+    let research_report = if args.research && research_report_path.exists() {
+        Some(research_report_path.display().to_string())
+    } else {
+        None
+    };
 
     // 6. Print JSON summary
     let summary = DispatchSummary {
@@ -478,6 +603,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         log: log_path.display().to_string(),
         report: report_path.display().to_string(),
         gate_source,
+        research_report,
     };
 
     let json_str = serde_json::to_string_pretty(&summary).unwrap();
@@ -561,7 +687,34 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .output();
     let base = match mb_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => root_head_sha,
+        _ => {
+            let has_root_head = Command::new("git")
+                .args(["cat-file", "-e", &format!("{root_head_sha}^{{commit}}")])
+                .current_dir(&wt)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if has_root_head {
+                root_head_sha
+            } else {
+                Command::new("git")
+                    .args(["rev-list", "--max-parents=0", "HEAD"])
+                    .current_dir(&wt)
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    })
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(root_head_sha)
+            }
+        }
     };
 
     let commits_out = Command::new("git")
@@ -626,6 +779,17 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             }
             if let Some(msg) = v.get("final_message").and_then(|x| x.as_str()) {
                 println!("final_message: {msg}");
+            }
+        }
+    }
+
+    let research_report_file = root.join(".wt").join(format!("{}.report.md", args.id));
+    if research_report_file.exists() {
+        println!("== research report");
+        println!("{}", research_report_file.display());
+        if let Ok(content) = std::fs::read_to_string(&research_report_file) {
+            for line in content.lines().take(40) {
+                println!("{line}");
             }
         }
     }

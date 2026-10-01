@@ -198,3 +198,18 @@ describes the pattern, `blyte dispatch` and `blyte review`, and the Claude Code 
 ### Recording a verdict
 
 Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. It works even after the worktree has been removed.
+
+## Research
+
+Read-only investigations ("how does X work", "what would break if Y") save model usage when blyte
+does the reading and writes a report. Run them as a dispatch with `--research`:
+
+```bash
+blyte dispatch Q1 question.md --research [--report-to <path>]
+```
+
+In research mode, blyte runs in an isolated scratch repository under `.wt/<id>` instead of creating
+a worktree of the repository. The task prompt directs the model to read the code under the repository root
+by absolute path and write findings to `report.md`. The gate is `test -s report.md`, verifying that a
+non-empty report was written. When finished, the report is copied to `.wt/<id>.report.md` (and to
+`--report-to` when given), and `blyte review <id>` displays its contents.
