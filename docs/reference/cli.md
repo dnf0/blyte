@@ -12,6 +12,7 @@ Commands:
   dashboard  Serve a local dashboard of running and recent jobs
   dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
+  clean      Remove finished worktrees and merged branches
   skill      Install or print the Claude Code skill for the plan, delegate, review workflow
   update     Replace this binary with the latest release (the old one is kept as blyte.prev)
   help       Print this message or the help of the given subcommand(s)
@@ -142,6 +143,20 @@ Options:
   -h, --help               Print help
 ```
 
+## blyte clean
+
+```text
+Remove finished worktrees and merged branches
+
+Usage: blyte clean [OPTIONS]
+
+Options:
+      --dry-run            Show what would be removed without deleting anything
+      --older-than <DAYS>  Worktrees older than this many days are removable without a verdict (default 14) [default: 14]
+      --all                Clean every repository in the registry
+  -h, --help               Print help
+```
+
 ## blyte skill install
 
 ```text
@@ -153,6 +168,7 @@ Commands:
   dashboard  Serve a local dashboard of running and recent jobs
   dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
+  clean      Remove finished worktrees and merged branches
   skill      Install or print the Claude Code skill for the plan, delegate, review workflow
   update     Replace this binary with the latest release (the old one is kept as blyte.prev)
   help       Print this message or the help of the given subcommand(s)
@@ -212,6 +228,7 @@ Commands:
   dashboard  Serve a local dashboard of running and recent jobs
   dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
+  clean      Remove finished worktrees and merged branches
   skill      Install or print the Claude Code skill for the plan, delegate, review workflow
   update     Replace this binary with the latest release (the old one is kept as blyte.prev)
   help       Print this message or the help of the given subcommand(s)
