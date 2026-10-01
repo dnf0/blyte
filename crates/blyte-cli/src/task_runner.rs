@@ -131,6 +131,11 @@ pub fn run_task(
     let started = std::time::Instant::now();
     let progress = Arc::new(Mutex::new(Progress::default()));
     if let Some(s) = config.max_seconds {
+        // BLYTE_WATCHDOG_GRACE_SECS exists for tests.
+        let grace_secs: u64 = std::env::var("BLYTE_WATCHDOG_GRACE_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(30);
         let watchdog_config = config.clone();
         let watchdog_progress = Arc::clone(&progress);
         std::thread::spawn(move || {
@@ -140,7 +145,7 @@ pub fn run_task(
                     Err(e) => e.into_inner().gate_wait_ms,
                 };
                 let deadline = started
-                    + std::time::Duration::from_secs(s.saturating_add(30))
+                    + std::time::Duration::from_secs(s.saturating_add(grace_secs))
                     + std::time::Duration::from_millis(wait_ms);
                 match deadline.checked_duration_since(std::time::Instant::now()) {
                     Some(remaining) if !remaining.is_zero() => {
@@ -155,12 +160,12 @@ pub fn run_task(
             };
             let msg = if p.in_gate {
                 format!(
-                    "stopped 30 s past --max-seconds {s}: gate attempt {} was still running",
+                    "stopped {grace_secs} s past --max-seconds {s}: gate attempt {} was still running",
                     p.gate_attempts
                 )
             } else {
                 format!(
-                    "stopped 30 s past --max-seconds {s} during turn {}: a model call or command never returned",
+                    "stopped {grace_secs} s past --max-seconds {s} during turn {}: a model call or command never returned",
                     p.turns
                 )
             };
