@@ -1,3 +1,9 @@
+## v0.7.6 (2026-10-01)
+
+### Fix
+
+- **cli**: the dispatch rules tell the model not to run the full suite itself (#192)
+
 ## v0.7.5 (2026-10-01)
 
 ### Fix
