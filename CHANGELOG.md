@@ -1,3 +1,9 @@
+## v0.11.2 (2026-10-01)
+
+### Fix
+
+- **dashboard**: an honest Needs attention list, running-only Plans, one colour per node (#208)
+
 ## v0.11.1 (2026-10-01)
 
 ### Fix
