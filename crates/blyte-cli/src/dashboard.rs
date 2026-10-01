@@ -485,6 +485,52 @@ struct RawJob {
     agy_summary_path: Option<PathBuf>,
 }
 
+pub fn repo_name(checkout: &Path) -> String {
+    let from_git = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(checkout)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let common = PathBuf::from(s.trim());
+            if common.file_name().and_then(|n| n.to_str()) == Some(".git") {
+                common
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.to_string())
+            } else {
+                None
+            }
+        });
+
+    let raw = from_git.unwrap_or_else(|| {
+        checkout
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.to_string())
+            .or_else(|| {
+                checkout
+                    .canonicalize()
+                    .ok()
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    });
+
+    if let Some((prefix, _)) = raw.split_once("--") {
+        if !prefix.is_empty() {
+            return prefix.to_string();
+        }
+    }
+    raw
+}
+
 pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
     let mut raw_jobs = Vec::new();
     let mut seen_keys = HashSet::new();
@@ -512,10 +558,8 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
     for wt_dir in &wt_dirs {
         let repo = wt_dir
             .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+            .map(repo_name)
+            .unwrap_or_else(|| "unknown".to_string());
 
         if let Ok(entries) = std::fs::read_dir(wt_dir) {
             for entry in entries.flatten() {
