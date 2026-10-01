@@ -209,7 +209,9 @@ blyte dispatch Q1 question.md --research [--report-to <path>]
 ```
 
 In research mode, blyte runs in an isolated scratch repository under `.wt/<id>` instead of creating
-a worktree of the repository. The task prompt directs the model to read the code under the repository root
+a worktree of the repository. The dispatch passes `--read-root <repository root>` to the child run,
+allowing the `read` and `grep` tools to inspect the repository by absolute path while writing remains
+strictly sealed to the scratch workspace. The task prompt directs the model to read the code under the repository root
 by absolute path and write findings to `report.md`. The gate is `test -s report.md`, verifying that a
 non-empty report was written. When finished, the report is copied to `.wt/<id>.report.md` (and to
 `--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to

@@ -52,6 +52,8 @@ Options:
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
           Pass this environment variable to commands even though it looks like a credential (repeatable)
+      --read-root <DIR>
+          Directory allowed for reading with the read and grep tools (repeatable)
   -h, --help
           Print help
   -V, --version
@@ -189,6 +191,8 @@ Options:
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
           Pass this environment variable to commands even though it looks like a credential (repeatable)
+      --read-root <DIR>
+          Directory allowed for reading with the read and grep tools (repeatable)
   -h, --help
           Print help
   -V, --version
@@ -246,6 +250,8 @@ Options:
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
           Pass this environment variable to commands even though it looks like a credential (repeatable)
+      --read-root <DIR>
+          Directory allowed for reading with the read and grep tools (repeatable)
   -h, --help
           Print help
   -V, --version

@@ -345,4 +345,8 @@ pub struct Cli {
     /// Pass this environment variable to commands even though it looks like a credential (repeatable)
     #[arg(long = "pass-env")]
     pub pass_env: Vec<String>,
+
+    /// Directory allowed for reading with the read and grep tools (repeatable)
+    #[arg(long = "read-root", value_name = "DIR")]
+    pub read_roots: Vec<PathBuf>,
 }
