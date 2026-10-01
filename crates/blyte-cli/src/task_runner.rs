@@ -320,7 +320,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
     let (outcome, report) = runner.run(state);
     if let Some(path) = &config.report {
         let model_id = blyte_provider::Provider::model_id(provider.as_ref());
-        let record = crate::report::RunRecord::from_run(
+        let mut record = crate::report::RunRecord::from_run(
             config,
             &model_id,
             &outcome,
@@ -328,6 +328,7 @@ pub fn run_task_with_state_and_writer<W: Write>(
             state,
             started.elapsed(),
         );
+        record.effort = provider.effort();
         crate::report::write(path, &record)?;
     }
     Ok((outcome, report))

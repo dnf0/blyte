@@ -188,6 +188,10 @@ pub trait Provider {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError>;
     /// Identifier recorded in telemetry, e.g. `gemini/gemini-3.8-flash`.
     fn model_id(&self) -> String;
+    /// Effort level if configured for this provider, e.g. "high".
+    fn effort(&self) -> Option<String> {
+        None
+    }
     /// Lists available models supported by this provider for the configured credentials.
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(Vec::new())

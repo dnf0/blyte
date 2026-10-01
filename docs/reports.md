@@ -13,6 +13,7 @@ removed; new fields are added without a bump.
   "error": null,
   "model_requested": "gemini-3.8-flash-high",
   "model_id": "gemini/gemini-3.8-flash",
+  "effort": "high",
   "context": "folded",
   "gated": true,
   "gate_source": "user",
@@ -58,6 +59,7 @@ removed; new fields are added without a bump.
 | `outcome` | `verified`, `budget_exhausted`, `gate_failed` or `error` |
 | `error` | the error message for an `error` outcome, else `null` |
 | `model_requested` / `model_id` | the `--model` given, and what the provider actually called |
+| `effort` | the effort level when the model supports it, else `null` |
 | `context` | `folded` or `conversational` |
 | `gated`, `gate_source` | whether a gate was given; `user` or `none` |
 | `duration_seconds` | wall-clock time of the run |
