@@ -28,6 +28,13 @@ Nothing at the moment; see Next.
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-10-01**
+  - The dashboard's **Plans view**: each plan as a swimlane flow of its tasks (lanes by area of code,
+    columns by dependency), coloured by state (merged, verified, running, failed, redone, ready,
+    waiting), with the selected task's details, the plan's activity and decisions, all from files
+    blyte already writes (`/api/plans`). `blyte dispatch --plan/--plan-task` links a dispatch to its
+    plan task; older dispatches are matched by tag, task text and their `Plan:` line.
+  - Research runs read the repository with the `read` and `grep` tools, default to 120 turns, and
+    keep their report current; every run is warned ten turns before its turn budget ends.
   - `blyte dispatch --research`: read-only research as a dispatch (a scratch workspace under `.wt/`,
     gate "report.md written", the report copied beside the run), so it gets the registry, status,
     dashboard and review like any dispatch; the skill says when to use it. Run reports record the

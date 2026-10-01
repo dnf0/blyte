@@ -26,8 +26,10 @@ pub fn wrap_task(task: &str) -> String {
 pub const RESEARCH_RULES: &str = r#"Rules:
 - Do not create, modify, move or delete any file anywhere except `report.md` in your working directory.
 - Do not run git commands that change state (no checkout, pull, commit, stash, worktree), and do not build, install, push, open pull requests, or write to any service.
+- Read the code with the read and grep tools, using absolute paths under the repository; use the shell only when they cannot do what you need.
 - Answer the question with evidence: file paths with line numbers, and quote only what is needed.
-- Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them. The harness checks that `report.md` exists."#;
+- Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them. The harness checks that `report.md` exists.
+- Start report.md early, after your first findings, and keep it updated as you go, so it always holds your best answer."#;
 
 pub fn wrap_research(question: &str, root: &Path) -> String {
     format!(
@@ -156,7 +158,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let (max_seconds, max_turns) = if args.research {
         (
             args.max_seconds.unwrap_or(1800),
-            args.max_turns.unwrap_or(80),
+            args.max_turns.unwrap_or(120),
         )
     } else {
         (
@@ -381,6 +383,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     for p in &args.pass_env {
         cmd.arg("--pass-env").arg(p);
     }
+    if args.research {
+        cmd.arg("--read-root").arg(&root);
+    }
 
     cmd.arg("--");
     let task_prompt = if args.research {
@@ -423,6 +428,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "env": env_names,
         "max_turns": max_turns,
         "max_seconds": max_seconds,
+        "plan": args.plan,
+        "plan_task": args.plan_task,
     });
     if args.research {
         start_json["research"] = serde_json::json!(true);

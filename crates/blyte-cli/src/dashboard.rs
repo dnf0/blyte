@@ -138,6 +138,17 @@ pub struct Job {
     pub changed_files: Vec<String>,
     pub tags: Vec<String>,
     pub verdict: Option<String>,
+    pub root: Option<PathBuf>,
+    pub plan_file: Option<String>,
+    pub plan_task: Option<String>,
+    #[serde(skip)]
+    pub start_plan: Option<String>,
+    #[serde(skip)]
+    pub file_tags: Vec<String>,
+    #[serde(skip)]
+    pub verdict_notes: Option<String>,
+    #[serde(skip)]
+    pub verdict_ts: Option<u64>,
     #[serde(skip)]
     pub log_mtime: Option<u64>,
 }
@@ -222,6 +233,29 @@ fn extract_prompt_task_title(prompt: &str) -> Option<String> {
             if let Some(end) = rest.find('"') {
                 return Some(rest[..end].to_string());
             }
+        }
+    }
+    None
+}
+
+fn extract_first_task_id(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let plain = plain_line(line);
+        let mut idx = 0;
+        while let Some(pos) = plain[idx..].find("Task") {
+            let start = idx + pos;
+            let after = &plain[start + 4..];
+            if after.starts_with(' ') || after.starts_with('\t') {
+                let trimmed = after.trim_start();
+                let id: String = trimmed
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                if !id.is_empty() {
+                    return Some(format!("Task {id}"));
+                }
+            }
+            idx = start + 4;
         }
     }
     None
@@ -469,9 +503,12 @@ struct AgySummary {
 struct RawJob {
     id: String,
     repo: String,
+    root: Option<PathBuf>,
     task: String,
     pid: Option<i64>,
     started_at: Option<u64>,
+    start_plan: Option<String>,
+    start_plan_task: Option<String>,
     file_tags: Vec<String>,
     log_path: PathBuf,
     report_path: PathBuf,
@@ -531,7 +568,7 @@ pub fn repo_name(checkout: &Path) -> String {
     raw
 }
 
-pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
+pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
     let mut raw_jobs = Vec::new();
     let mut seen_keys = HashSet::new();
 
@@ -577,6 +614,16 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
                     let pid = start_val.as_ref().and_then(|v| v["pid"].as_i64());
                     let started_at = start_val.as_ref().and_then(|v| v["started_at"].as_u64());
+                    let start_plan = start_val
+                        .as_ref()
+                        .and_then(|v| v["plan"].as_str())
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty());
+                    let start_plan_task = start_val
+                        .as_ref()
+                        .and_then(|v| v["plan_task"].as_str())
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty());
                     let task_file = start_val.as_ref().and_then(|v| v["task_file"].as_str());
                     let task = task_file
                         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -627,9 +674,12 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                     raw_jobs.push(RawJob {
                         id: id.clone(),
                         repo: repo.clone(),
+                        root: wt_dir.parent().map(|p| p.to_path_buf()),
                         task,
                         pid,
                         started_at,
+                        start_plan,
+                        start_plan_task,
                         file_tags,
                         log_path: wt_dir.join(format!("{id}.log")),
                         report_path: wt_dir.join(format!("{id}.report.json")),
@@ -697,6 +747,66 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                                     None
                                 };
 
+                                let root = worktree.as_ref().and_then(|wt_str| {
+                                    let p = Path::new(wt_str.trim_end_matches('/'));
+                                    if p.exists() {
+                                        if let Ok(out) = std::process::Command::new("git")
+                                            .args(["rev-parse", "--git-common-dir"])
+                                            .current_dir(p)
+                                            .output()
+                                        {
+                                            if out.status.success() {
+                                                let s = String::from_utf8_lossy(&out.stdout)
+                                                    .trim()
+                                                    .to_string();
+                                                let common = PathBuf::from(s);
+                                                let abs = if common.is_relative() {
+                                                    p.join(common)
+                                                } else {
+                                                    common
+                                                };
+                                                if abs.file_name().and_then(|n| n.to_str())
+                                                    == Some(".git")
+                                                {
+                                                    if let Some(parent) = abs.parent() {
+                                                        return Some(parent.to_path_buf());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if p.parent()
+                                        .and_then(|par| par.file_name())
+                                        .and_then(|n| n.to_str())
+                                        == Some(".wt")
+                                    {
+                                        return p
+                                            .parent()
+                                            .and_then(|par| par.parent())
+                                            .map(Path::to_path_buf);
+                                    }
+                                    if let (Some(par), Some(grandpar)) =
+                                        (p.parent(), p.parent().and_then(|par| par.parent()))
+                                    {
+                                        if par.file_name().and_then(|n| n.to_str())
+                                            == Some("worktrees")
+                                            && grandpar.file_name().and_then(|n| n.to_str())
+                                                == Some(".claude")
+                                        {
+                                            return grandpar.parent().map(Path::to_path_buf);
+                                        }
+                                    }
+                                    if let Some(file_name) = p.file_name().and_then(|n| n.to_str())
+                                    {
+                                        if let Some((base, _)) = file_name.split_once("--") {
+                                            if !base.is_empty() {
+                                                return p.parent().map(|par| par.join(base));
+                                            }
+                                        }
+                                    }
+                                    Some(p.to_path_buf())
+                                });
+
                                 let agy_summary_path = {
                                     let p = repo_path.join(format!("{id}.json"));
                                     if p.is_file() {
@@ -709,9 +819,12 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                                 raw_jobs.push(RawJob {
                                     id: id.clone(),
                                     repo: repo.clone(),
+                                    root,
                                     task,
                                     pid,
                                     started_at,
+                                    start_plan: None,
+                                    start_plan_task: None,
                                     file_tags: Vec::new(),
                                     log_path: repo_path.join(format!("{id}.log")),
                                     report_path: repo_path.join(format!("{id}.report.json")),
@@ -740,6 +853,12 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
         let title = extract_title(&raw.task);
         let plan = extract_plan(&raw.task);
         let prompt_task_title = extract_prompt_task_title(&raw.task);
+        let plan_file = raw.start_plan.clone().or_else(|| plan.clone());
+        let plan_task = raw.start_plan_task.clone().or_else(|| {
+            prompt_task_title
+                .clone()
+                .or_else(|| extract_first_task_id(&raw.task))
+        });
 
         let task_content = if let (Some(ref p_str), Some(ref t_title)) = (&plan, &prompt_task_title)
         {
@@ -760,6 +879,19 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
             raw.task.clone()
         };
 
+        let mut file_tags = raw.file_tags.clone();
+        if raw.tags_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&raw.tags_path) {
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
+                    for t in arr {
+                        if !file_tags.contains(&t) {
+                            file_tags.push(t);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut tags = Vec::new();
         tags.push(format!("repo: {}", raw.repo));
         if let Some(ref p) = plan {
@@ -767,30 +899,29 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
                 tags.push(format!("plan: {stem}"));
             }
         }
-        for t in raw.file_tags {
-            if !tags.contains(&t) {
-                tags.push(t);
-            }
-        }
-        if raw.tags_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&raw.tags_path) {
-                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
-                    for t in arr {
-                        if !tags.contains(&t) {
-                            tags.push(t);
-                        }
-                    }
-                }
+        for t in &file_tags {
+            if !tags.contains(t) {
+                tags.push(t.clone());
             }
         }
 
-        let verdict = if raw.verdict_path.is_file() {
-            std::fs::read_to_string(&raw.verdict_path)
+        let (verdict, verdict_notes, verdict_ts) = if raw.verdict_path.is_file() {
+            let val = std::fs::read_to_string(&raw.verdict_path)
                 .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v["verdict"].as_str().map(|s| s.to_string()))
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let v = val
+                .as_ref()
+                .and_then(|obj| obj["verdict"].as_str().map(|s| s.to_string()));
+            let notes = val
+                .as_ref()
+                .and_then(|obj| obj["notes"].as_str().map(|s| s.to_string()));
+            let ts = val
+                .as_ref()
+                .and_then(|obj| obj["ts"].as_u64())
+                .or_else(|| file_mtime(&raw.verdict_path));
+            (v, notes, ts)
         } else {
-            None
+            (None, None, None)
         };
 
         let log_info = parse_log(&raw.log_path);
@@ -1039,6 +1170,13 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
             changed_files: raw.changed_files,
             tags,
             verdict,
+            root: raw.root,
+            plan_file,
+            plan_task,
+            start_plan: raw.start_plan,
+            file_tags,
+            verdict_notes,
+            verdict_ts,
             log_mtime: log_info.mtime,
         });
     }
@@ -1063,6 +1201,11 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
         }
     });
 
+    jobs
+}
+
+pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
+    let jobs = collect_jobs(src, now);
     let running = jobs.iter().filter(|j| j.status == "running").count();
     let last_24h = jobs
         .iter()
@@ -1139,6 +1282,15 @@ pub fn route(path: &str, src: &Sources) -> (u16, &'static str, Vec<u8>) {
             let body = serde_json::to_vec(&val).unwrap_or_default();
             (200, "application/json", body)
         }
+        "/api/plans" => {
+            let now = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let val = crate::plans::collect_plans(src, now);
+            let body = serde_json::to_vec(&val).unwrap_or_default();
+            (200, "application/json", body)
+        }
         _ => (404, "text/plain; charset=utf-8", b"Not Found\n".to_vec()),
     }
 }
@@ -1172,7 +1324,7 @@ fn handle_connection(mut stream: std::net::TcpStream, src: &Sources) {
         404 => "Not Found",
         _ => "OK",
     };
-    let extra = if clean_path == "/api/jobs" {
+    let extra = if clean_path == "/api/jobs" || clean_path == "/api/plans" {
         "Cache-Control: no-store\r\n"
     } else {
         ""

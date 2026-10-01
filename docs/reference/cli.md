@@ -52,6 +52,8 @@ Options:
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
           Pass this environment variable to commands even though it looks like a credential (repeatable)
+      --read-root <DIR>
+          Directory allowed for reading with the read and grep tools (repeatable)
   -h, --help
           Print help
   -V, --version
@@ -106,6 +108,8 @@ Arguments:
 Options:
   -g, --gate <GATE>                The check command; several lines are several steps, all of which must pass
       --tag <TEXT>                 Tag for this dispatch (repeatable)
+      --plan <PATH>                Path to the plan file this dispatch belongs to
+      --plan-task <TEXT>           Plan task this dispatch implements
       --base <BASE>                The commit a new worktree starts from [default: HEAD]
       --research                   Run read-only research: scratch repository, report gate, findings in report.md
       --report-to <PATH>           Copy the finished research report to this path (only with --research)
@@ -189,6 +193,8 @@ Options:
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
           Pass this environment variable to commands even though it looks like a credential (repeatable)
+      --read-root <DIR>
+          Directory allowed for reading with the read and grep tools (repeatable)
   -h, --help
           Print help
   -V, --version
@@ -246,6 +252,8 @@ Options:
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
           Pass this environment variable to commands even though it looks like a credential (repeatable)
+      --read-root <DIR>
+          Directory allowed for reading with the read and grep tools (repeatable)
   -h, --help
           Print help
   -V, --version

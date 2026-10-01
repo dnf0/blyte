@@ -194,6 +194,8 @@ cost, per-call token usage, where the time went, gate failures and the security 
 blyte is built to be dispatched: one task per run, in its own worktree, with a gate and a report,
 reviewed and merged by whoever dispatched it. [blyte as your implementer](orchestration.md)
 describes the pattern, `blyte dispatch` and `blyte review`, and the Claude Code skill.
+`--plan <path>` and `--plan-task <text>` record which plan task the dispatch implements, so the
+dashboard can show plans.
 
 ### Recording a verdict
 
@@ -209,9 +211,11 @@ blyte dispatch Q1 question.md --research [--report-to <path>]
 ```
 
 In research mode, blyte runs in an isolated scratch repository under `.wt/<id>` instead of creating
-a worktree of the repository. The task prompt directs the model to read the code under the repository root
+a worktree of the repository. The dispatch passes `--read-root <repository root>` to the child run,
+allowing the `read` and `grep` tools to inspect the repository by absolute path while writing remains
+strictly sealed to the scratch workspace. The task prompt directs the model to read the code under the repository root
 by absolute path and write findings to `report.md`. The gate is `test -s report.md`, verifying that a
 non-empty report was written. When finished, the report is copied to `.wt/<id>.report.md` (and to
 `--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to
-80 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
+120 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
 `--max-seconds` flags still win).

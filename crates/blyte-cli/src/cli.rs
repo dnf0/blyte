@@ -98,6 +98,14 @@ pub struct DispatchArgs {
     #[arg(long = "tag", value_name = "TEXT")]
     pub tags: Vec<String>,
 
+    /// Path to the plan file this dispatch belongs to
+    #[arg(long, value_name = "PATH")]
+    pub plan: Option<String>,
+
+    /// Plan task this dispatch implements
+    #[arg(long, value_name = "TEXT")]
+    pub plan_task: Option<String>,
+
     /// The commit a new worktree starts from
     #[arg(long, default_value = "HEAD")]
     pub base: String,
@@ -345,4 +353,8 @@ pub struct Cli {
     /// Pass this environment variable to commands even though it looks like a credential (repeatable)
     #[arg(long = "pass-env")]
     pub pass_env: Vec<String>,
+
+    /// Directory allowed for reading with the read and grep tools (repeatable)
+    #[arg(long = "read-root", value_name = "DIR")]
+    pub read_roots: Vec<PathBuf>,
 }

@@ -1,4 +1,4 @@
-//! Research runs default to 80 turns and 30 minutes; a run looped for 300 turns (2026-10-01).
+//! Research runs default to 120 turns and 30 minutes; a run looped for 300 turns (2026-10-01).
 
 use std::path::Path;
 use std::process::Command;
@@ -56,7 +56,7 @@ fn research_defaults_to_a_tight_budget_and_flags_still_win() {
     );
     assert_eq!(
         (s["max_turns"].as_u64(), s["max_seconds"].as_u64()),
-        (Some(80), Some(1800))
+        (Some(120), Some(1800))
     );
 
     let s = start(
