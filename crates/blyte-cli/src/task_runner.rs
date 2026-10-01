@@ -5,7 +5,15 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+/// Tracks turn and gate progress across the run, for the deadline watchdog.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Progress {
+    pub turns: u32,
+    pub gate_attempts: u32,
+    pub in_gate: bool,
+}
 
 /// Execution parameters for running an autonomous solver task to completion.
 #[derive(Debug, Clone)]
@@ -120,8 +128,10 @@ pub fn run_task(
     config: TaskConfig,
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     let started = std::time::Instant::now();
+    let progress = Arc::new(Mutex::new(Progress::default()));
     if let Some(s) = config.max_seconds {
         let watchdog_config = config.clone();
+        let watchdog_progress = Arc::clone(&progress);
         std::thread::spawn(move || {
             let deadline = started + std::time::Duration::from_secs(s.saturating_add(30));
             while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
@@ -130,19 +140,27 @@ pub fn run_task(
                 }
                 std::thread::sleep(remaining);
             }
-            let msg = format!(
-                "stopped {} s past --max-seconds {s}: a model call or command never returned",
-                30
-            );
+            let p = match watchdog_progress.lock() {
+                Ok(g) => *g,
+                Err(e) => *e.into_inner(),
+            };
+            let msg = if p.in_gate {
+                format!(
+                    "stopped 30 s past --max-seconds {s}: gate attempt {} was still running",
+                    p.gate_attempts
+                )
+            } else {
+                format!(
+                    "stopped 30 s past --max-seconds {s} during turn {}: a model call or command never returned",
+                    p.turns
+                )
+            };
             if let Some(path) = &watchdog_config.report {
-                let _ = crate::report::write(
-                    path,
-                    &crate::report::RunRecord::from_error(
-                        &watchdog_config,
-                        &msg,
-                        started.elapsed(),
-                    ),
-                );
+                let mut record =
+                    crate::report::RunRecord::from_error(&watchdog_config, &msg, started.elapsed());
+                record.turns = p.turns;
+                record.gate_attempts = p.gate_attempts;
+                let _ = crate::report::write(path, &record);
             }
             eprintln!("blyte: {msg}");
             std::process::exit(1);
@@ -152,7 +170,8 @@ pub fn run_task(
     let mut state = blyte_agent::state::State::new(&config.prompt, verification_cmd);
     state.orchestrator.max_cost_usd = config.max_cost_usd;
     let mut stdout = std::io::stdout();
-    let result = run_task_with_state_and_writer(&config, &mut state, &mut stdout);
+    let result =
+        run_task_with_state_writer_and_progress(&config, &mut state, &mut stdout, progress);
     // The loop writes its own report; this covers a run that never reached it (e.g. no API
     // key), so a caller always finds one. An absent report would read as a crash.
     if let (Err(e), Some(path)) = (&result, &config.report) {
@@ -181,6 +200,18 @@ pub fn run_task_with_state_and_writer<W: Write>(
     config: &TaskConfig,
     state: &mut blyte_agent::state::State,
     writer: &mut W,
+) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
+    let progress = Arc::new(Mutex::new(Progress::default()));
+    run_task_with_state_writer_and_progress(config, state, writer, progress)
+}
+
+/// Executes an autonomous solver run against an existing mutable `State`, streaming events to `writer`
+/// and updating the shared `progress` record.
+pub fn run_task_with_state_writer_and_progress<W: Write>(
+    config: &TaskConfig,
+    state: &mut blyte_agent::state::State,
+    writer: &mut W,
+    progress: Arc<Mutex<Progress>>,
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
     let started = std::time::Instant::now();
@@ -297,6 +328,26 @@ pub fn run_task_with_state_and_writer<W: Write>(
     // 4. Wrap writer in a Mutex so the event callback satisfies Fn trait bounds.
     let writer_mutex = Mutex::new(writer);
     let on_event = |event: blyte_agent::run::Event<'_>| {
+        {
+            let mut p = match progress.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            match &event {
+                blyte_agent::run::Event::Turn { n, .. } => {
+                    p.turns = *n;
+                    p.in_gate = false;
+                }
+                blyte_agent::run::Event::GateStart { attempt } => {
+                    p.gate_attempts = *attempt;
+                    p.in_gate = true;
+                }
+                blyte_agent::run::Event::Gate { .. } => {
+                    p.in_gate = false;
+                }
+                _ => {}
+            }
+        }
         if let Ok(mut w) = writer_mutex.lock() {
             let _ = writeln!(w, "{}", crate::repl::format_event(&event));
         }
