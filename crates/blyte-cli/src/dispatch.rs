@@ -803,6 +803,17 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                 println!("{cmd}");
             }
         }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let allowed = [root.clone(), wt.clone()];
+        let reads = outside_reads(&log_content, &allowed, &home);
+        if !reads.is_empty() {
+            println!("== reads outside the repository");
+            for cmd in reads {
+                println!("{cmd}");
+            }
+        }
     }
 
     if args.diff {
@@ -938,6 +949,111 @@ pub fn host_commands(log: &str) -> Vec<String> {
             if let Some((cmd, _)) = rest.rsplit_once(" -> ") {
                 let cmd = cmd.trim();
                 if is_host_command(cmd) && !result.iter().any(|c| c == cmd) {
+                    result.push(cmd.to_string());
+                    if result.len() == 20 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+const TERMINAL_READS: &[&str] = &[
+    "herdr pane read",
+    "tmux capture-pane",
+    "screen -X hardcopy",
+    "zellij action dump-screen",
+    "wezterm cli get-text",
+];
+
+const TOOL_CACHES: &[&str] = &[
+    ".cargo",
+    ".rustup",
+    ".cache",
+    ".npm",
+    ".local",
+    "Library/Caches",
+    ".gradle",
+    ".m2",
+    "go",
+];
+
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            _ => out.push(comp),
+        }
+    }
+    out
+}
+
+fn is_outside_read(cmd: &str, allowed: &[PathBuf], home: &Path, tool_caches: &[PathBuf]) -> bool {
+    if TERMINAL_READS.iter().any(|pattern| cmd.contains(pattern)) {
+        return true;
+    }
+
+    for raw_word in cmd.split_whitespace() {
+        let word = raw_word.trim_end_matches(&[':', ',', ')', '\'', '"'][..]);
+        let raw_path = if let Some(suffix) = word.strip_prefix("~/") {
+            Some(home.join(suffix))
+        } else if let Some(suffix) = word.strip_prefix("$HOME/") {
+            Some(home.join(suffix))
+        } else if word.starts_with('/') {
+            Some(PathBuf::from(word))
+        } else {
+            None
+        };
+
+        if let Some(path) = raw_path {
+            let norm_path = normalize_path(&path);
+            if !norm_path.starts_with(home) {
+                continue;
+            }
+            let under_allowed = allowed.iter().any(|a| norm_path.starts_with(a));
+            if under_allowed {
+                continue;
+            }
+            let under_cache = tool_caches.iter().any(|c| norm_path.starts_with(c));
+            if under_cache {
+                continue;
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn outside_reads(log: &str, allowed: &[PathBuf], home: &Path) -> Vec<String> {
+    let host_cmds = host_commands(log);
+    let norm_home = normalize_path(home);
+    let norm_allowed: Vec<PathBuf> = allowed.iter().map(|p| normalize_path(p)).collect();
+    let cache_dirs: Vec<PathBuf> = TOOL_CACHES
+        .iter()
+        .map(|c| normalize_path(&norm_home.join(c)))
+        .collect();
+
+    let cleaned = strip_ansi(log);
+    let mut result = Vec::new();
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("● bash ") {
+            if let Some((cmd, _)) = rest.rsplit_once(" -> ") {
+                let cmd = cmd.trim();
+                if host_cmds.iter().any(|c| c == cmd) {
+                    continue;
+                }
+                if is_outside_read(cmd, &norm_allowed, &norm_home, &cache_dirs)
+                    && !result.iter().any(|c| c == cmd)
+                {
                     result.push(cmd.to_string());
                     if result.len() == 20 {
                         break;
@@ -1188,5 +1304,104 @@ pub fn run_status(id: &str, json: bool) -> i32 {
     match state {
         "running" | "finished" => 0,
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outside_reads_excludes_commands_in_host_commands() {
+        let home = Path::new("/Users/u");
+        let allowed = vec![PathBuf::from("/Users/u/repos/app")];
+        // rm -rf ~/repos/other is a host command (names outside and changes something)
+        // cat ~/repos/other is not a host command (only reads)
+        let log = "\
+● bash rm -rf ~/repos/other/file.py -> exit 0
+● bash cat ~/repos/other/file.py -> exit 0
+";
+        assert_eq!(
+            host_commands(log),
+            vec!["rm -rf ~/repos/other/file.py".to_string()]
+        );
+        assert_eq!(
+            outside_reads(log, &allowed, home),
+            vec!["cat ~/repos/other/file.py".to_string()]
+        );
+    }
+
+    #[test]
+    fn outside_reads_all_terminal_patterns() {
+        let home = Path::new("/Users/u");
+        let allowed = vec![PathBuf::from("/Users/u/repos/app")];
+        let log = "\
+● bash herdr pane read p1 -> exit 0
+● bash tmux capture-pane -t 1 -> exit 0
+● bash screen -X hardcopy /tmp/screen.log -> exit 0
+● bash zellij action dump-screen /tmp/dump -> exit 0
+● bash wezterm cli get-text --pane-id 1 -> exit 0
+";
+        let reads = outside_reads(log, &allowed, home);
+        assert_eq!(
+            reads,
+            vec![
+                "herdr pane read p1",
+                "tmux capture-pane -t 1",
+                "screen -X hardcopy /tmp/screen.log",
+                "zellij action dump-screen /tmp/dump",
+                "wezterm cli get-text --pane-id 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn outside_reads_all_tool_caches_ignored() {
+        let home = Path::new("/Users/u");
+        let allowed = vec![PathBuf::from("/Users/u/repos/app")];
+        let log = "\
+● bash ls ~/.cargo/bin -> exit 0
+● bash ls ~/.rustup/toolchains -> exit 0
+● bash ls ~/.cache/pip -> exit 0
+● bash ls ~/.npm/_cacache -> exit 0
+● bash ls ~/.local/share -> exit 0
+● bash ls ~/Library/Caches/com.apple -> exit 0
+● bash ls ~/.gradle/caches -> exit 0
+● bash ls ~/.m2/repository -> exit 0
+● bash ls ~/go/pkg -> exit 0
+";
+        assert!(outside_reads(log, &allowed, home).is_empty());
+    }
+
+    #[test]
+    fn outside_reads_trailing_punctuations_stripped() {
+        let home = Path::new("/Users/u");
+        let allowed = vec![PathBuf::from("/Users/u/repos/app")];
+        let log = "\
+● bash ls ~/secret: -> exit 0
+● bash ls ~/secret, -> exit 0
+● bash (ls ~/secret) -> exit 0
+● bash bash -c 'ls ~/secret' -> exit 0
+● bash bash -c \"ls ~/secret\" -> exit 0
+";
+        let reads = outside_reads(log, &allowed, home);
+        // Deduplicated, so only one instance of the command or distinct commands:
+        assert_eq!(reads.len(), 5);
+    }
+
+    #[test]
+    fn outside_reads_caps_at_20_and_deduplicates() {
+        let home = Path::new("/Users/u");
+        let allowed = vec![PathBuf::from("/Users/u/repos/app")];
+        let mut log = String::new();
+        for i in 0..30 {
+            log.push_str(&format!("● bash cat ~/secret/{i}.txt -> exit 0\n"));
+        }
+        // Duplicate the first one
+        log.push_str("● bash cat ~/secret/0.txt -> exit 0\n");
+        let reads = outside_reads(&log, &allowed, home);
+        assert_eq!(reads.len(), 20);
+        assert_eq!(reads[0], "cat ~/secret/0.txt");
+        assert_eq!(reads[19], "cat ~/secret/19.txt");
     }
 }
