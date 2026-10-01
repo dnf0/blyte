@@ -9,6 +9,14 @@ Nothing at the moment; see Next.
 
 ## Next
 
+- **Watch dispatch time after v0.7.6.** The rules now tell the model not to run the full suite
+  itself (8 of 9 runs did under v0.7.5, at 2-3 minutes each). The first runs on v0.7.6 spent 84 s
+  and 50 s on tools, against 198 s before; check the next few, including work repositories.
+- **A shared Cargo build directory for worktrees**, measured first: each `.wt/<id>` compiles the
+  workspace from scratch. Needs a sandbox allowance for that directory, and parallel dispatches
+  would queue on cargo's lock.
+- **Research inside blyte** (`blyte dispatch --research`), replacing the operator's local
+  `research.sh` wrapper (read-only runs in a scratch directory, gate "report.md exists").
 - **Codex as the planner, step 2 (2026-09-30).** Step 1, the end-to-end smoke test, passed (#164).
   Next: a Codex driver in the eval's offload arm, to compare Codex + blyte with Claude Code + blyte
   on the same task. Uses the ChatGPT plan's Codex allowance; ask before running. The first katex
@@ -21,6 +29,22 @@ Nothing at the moment; see Next.
 
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
+- **2026-10-01**
+  - Dispatch rules tell the model not to run the full suite itself (v0.7.6): tools time had risen
+    from a median of 44 s to 198 s after the switch to plain `blyte dispatch`.
+  - The running dashboard sees repositories registered after it started; `blyte init` recognises
+    `python -m pytest`/`unittest`, `tox` and `nox` (v0.7.5), and keeps one of two pytest steps that
+    test the same files.
+  - The sandbox lets a worktree write the tool caches of an enclosing `node_modules` (vitest's
+    `.vite-temp`), never its packages.
+  - Linked worktrees use the main checkout's `blyte.toml`; `init` falls back to the repository's
+    own checks when CI is stale, and calls a cold uv cache an environment problem (v0.7.4).
+  - The repository registry writes one whole line per dispatch and skips temp directories (v0.7.3).
+  - The default Gemini model runs at high effort, as the docs said (v0.7.2); a run never outlives
+    `--max-seconds` by more than 30 s and always leaves a report (v0.7.1).
+  - The operator's local dispatch scripts and their sampled A/B against agy are retired (74 paired
+    tasks: 0.55x agy's time, 0.64x its cost). Every repository on the operator's machine now
+    dispatches with plain `blyte dispatch`.
 - **2026-09-30**
   - blyte owns the whole dispatch workflow, so the operator's local wrapper scripts can retire:
     `blyte review --verdict` records the reviewer's verdict; `review` flags commands that reached
