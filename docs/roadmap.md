@@ -33,7 +33,7 @@ Kept for about the last four weeks; older items are in the git history and the e
     waiting), with the selected task's details, the plan's activity and decisions, all from files
     blyte already writes (`/api/plans`). `blyte dispatch --plan/--plan-task` links a dispatch to its
     plan task; older dispatches are matched by tag, task text and their `Plan:` line.
-  - Research runs read the repository with the `read` and `grep` tools, default to 120 turns, and
+  - Research runs read the repository with the `read` and `grep` tools, default to 300 turns, and
     keep their report current; every run is warned ten turns before its turn budget ends.
   - `blyte dispatch --research`: read-only research as a dispatch (a scratch workspace under `.wt/`,
     gate "report.md written", the report copied beside the run), so it gets the registry, status,

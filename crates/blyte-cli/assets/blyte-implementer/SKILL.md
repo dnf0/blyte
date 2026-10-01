@@ -143,6 +143,8 @@ You do not need to re-run the gate: it ran the repository's checks and they pass
 verbatim) when the gate failed or the budget ran out, when the change is risky (security, data
 handling, migrations, a public interface), or when the diff surprises you.
 
+- `blocked` means the check already fails at the base commit, so the task cannot pass until that is fixed: confirm it, then fix the base (or tell the user) before redispatching, rather than redispatching as it is.
+
 **Record your verdict** once you have checked it, so the repository keeps an honest record of
 how blyte does:
 
@@ -178,13 +180,12 @@ model. Write the question to a file, saying what the answer must contain (paths 
 table, a recommendation), and from the repository:
 
 ```bash
-blyte dispatch R1 /abs/question-R1.md --research --max-turns 80
+blyte dispatch R1 /abs/question-R1.md --research
 ```
 
 blyte works in a scratch directory under `.wt/R1`, reads the repository by absolute path, and cannot
 change it; the run passes when it has written a report, copied to `.wt/R1.report.md` (and to
-`--report-to <path>`). Keep the budget tight: research that does not converge in about 80 turns is
-not going to. Check any claim you will act on against the code it cites.
+`--report-to <path>`). Leave the budget at its default (300 turns, 30 minutes) rather than tightening it: a run cut short wastes what it spent, and it is warned ten turns before the end to finish its report. Check any claim you will act on against the code it cites.
 
 ## Rules
 

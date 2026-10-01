@@ -925,7 +925,8 @@
       "no_changes": { label: "No changes", dot: "dot-stopped", text: "label-muted" },
       "error": { label: "Error", dot: "dot-failed", text: "label-failed" },
       "stopped": { label: "Stopped", dot: "dot-stopped", text: "label-stopped" },
-      "finished": { label: "Finished", dot: "dot-stopped", text: "label-muted" }
+      "finished": { label: "Finished", dot: "dot-stopped", text: "label-muted" },
+      "blocked": { label: "Blocked: fails before this change", dot: "dot-failed", text: "label-failed" }
     };
 
     let currentData = null;
@@ -977,7 +978,7 @@
     }
 
     function isNeedsAttention(job) {
-      if (job.status === "gate_failed" || job.status === "error" || job.status === "budget_exhausted" || job.status === "stopped") {
+      if (job.status === "gate_failed" || job.status === "error" || job.status === "budget_exhausted" || job.status === "stopped" || job.status === "blocked") {
         return true;
       }
       if (job.status === "running" && (job.gate_attempts || 0) > 0 && !job.gate_running) {

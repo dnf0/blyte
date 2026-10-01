@@ -20,7 +20,7 @@
 //! reset a worker's committed feature five times (FINDINGS 13.2).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use blyte_provider::{Message, Provider, ProviderError, Request, Usage};
@@ -41,6 +41,8 @@ pub enum Outcome {
     BudgetExhausted,
     /// The model stopped calling tools and the gate kept failing.
     GateFailed,
+    /// The check already fails at the base commit, so the task cannot pass until that is fixed.
+    Blocked(String),
     /// The provider or environment broke. Distinct from failing work.
     Error(String),
 }
@@ -260,6 +262,21 @@ pub struct Runner<'a> {
     pub on_event: Option<&'a dyn Fn(Event<'_>)>,
 }
 
+const CLAIM_PHRASES: &[&str] = &[
+    "not caused by",
+    "pre-existing",
+    "preexisting",
+    "already fail",
+    "unrelated to",
+    "fails on main",
+    "fails on the base",
+    "was failing before",
+];
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 impl<'a> Runner<'a> {
     fn emit(&self, e: Event<'_>) {
         if let Some(f) = self.on_event {
@@ -421,11 +438,12 @@ impl<'a> Runner<'a> {
 
     /// Run one gate command: exit status and its bounded output.
     fn run_step(&self, cmd: &str) -> (bool, String) {
+        self.run_step_in(cmd, &self.root)
+    }
+
+    fn run_step_in(&self, cmd: &str, dir: &Path) -> (bool, String) {
         let wrapped = format!("(export {}=1\n{cmd}\n)", gate_slots::IN_GATE_ENV);
-        match self
-            .shell
-            .exec(&wrapped, &self.root, Duration::from_secs(1800))
-        {
+        match self.shell.exec(&wrapped, dir, Duration::from_secs(1800)) {
             Ok(o) => {
                 let body = tools::bound_output(o.merged().trim_end());
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
@@ -434,6 +452,91 @@ impl<'a> Runner<'a> {
             // an ungated run gets mistaken for a verified one.
             Err(e) => (false, format!("verification command could not run: {e}")),
         }
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        let head = self
+            .shell
+            .exec("git rev-parse HEAD", &self.root, Duration::from_secs(30))
+            .ok()?;
+        if head.exit_code != 0 {
+            return None;
+        }
+        let status = self
+            .shell
+            .exec(
+                "git status --porcelain",
+                &self.root,
+                Duration::from_secs(30),
+            )
+            .ok()?;
+        if status.exit_code != 0 {
+            return None;
+        }
+        Some(format!("{}\n{}", head.stdout, status.stdout))
+    }
+
+    fn check_blocked_at_base(&self, base_commit: &str, failing_steps: &[String]) -> bool {
+        if failing_steps.is_empty() {
+            return false;
+        }
+
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = format!(
+            "blyte-base-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let wt_path = std::env::temp_dir().join(unique);
+
+        let add_cmd = format!(
+            "git worktree add --detach {} {}",
+            sh_quote(&wt_path.to_string_lossy()),
+            sh_quote(base_commit)
+        );
+        let add_out = match self
+            .shell
+            .exec(&add_cmd, &self.root, Duration::from_secs(60))
+        {
+            Ok(o) if o.exit_code == 0 => o,
+            _ => return false,
+        };
+        let _ = add_out;
+
+        struct Guard<'a> {
+            shell: &'a dyn Shell,
+            root: &'a Path,
+            path: PathBuf,
+        }
+        impl<'a> Drop for Guard<'a> {
+            fn drop(&mut self) {
+                let cmd = format!(
+                    "git worktree remove --force {}",
+                    sh_quote(&self.path.to_string_lossy())
+                );
+                let _ = self.shell.exec(&cmd, self.root, Duration::from_secs(60));
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+        }
+
+        let _guard = Guard {
+            shell: self.shell,
+            root: &self.root,
+            path: wt_path.clone(),
+        };
+
+        let mut all_failed = true;
+        for step in failing_steps {
+            let (passed, _) = self.run_step_in(step, &wt_path);
+            if passed {
+                all_failed = false;
+            }
+        }
+        all_failed
     }
 
     fn checkpoint(&self) -> Option<String> {
@@ -472,6 +575,7 @@ impl<'a> Runner<'a> {
         let baseline = self.checkpoint();
         let mut last_sent: Option<Vec<Message>> = None;
         let mut last_failed: Vec<String> = Vec::new();
+        let mut last_fingerprint: Option<String> = None;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -648,6 +752,28 @@ impl<'a> Runner<'a> {
             }
 
             // --- the model stopped calling tools: the runtime decides -----------------------
+            if report.gate_attempts > 0
+                && CLAIM_PHRASES
+                    .iter()
+                    .any(|&p| resp.text.to_lowercase().contains(p))
+            {
+                if let (Some(last_fp), Some(curr_fp), Some(base_commit)) =
+                    (&last_fingerprint, self.fingerprint(), &baseline)
+                {
+                    if *last_fp == curr_fp && self.check_blocked_at_base(base_commit, &last_failed)
+                    {
+                        let steps = last_failed.join("; ");
+                        let text: String = resp.text.chars().take(300).collect();
+                        return (
+                            Outcome::Blocked(format!(
+                                "the check fails at the base commit too ({steps}); the model said: {text}"
+                            )),
+                            report,
+                        );
+                    }
+                }
+            }
+
             report.gate_attempts += 1;
             report.gate_turns.push(turn);
             self.emit(Event::GateStart {
@@ -667,6 +793,8 @@ impl<'a> Runner<'a> {
                 return (Outcome::Verified, report);
             }
             report.gate_failures.push(cut_gate_output(&output));
+
+            last_fingerprint = self.fingerprint();
 
             if self.rollback {
                 if let Some(base) = &baseline {
