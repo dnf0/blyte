@@ -217,5 +217,5 @@ strictly sealed to the scratch workspace. The task prompt directs the model to r
 by absolute path and write findings to `report.md`. The gate is `test -s report.md`, verifying that a
 non-empty report was written. When finished, the report is copied to `.wt/<id>.report.md` (and to
 `--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to
-120 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
+300 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
 `--max-seconds` flags still win).

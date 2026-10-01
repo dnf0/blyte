@@ -160,7 +160,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let (max_seconds, max_turns) = if args.research {
         (
             args.max_seconds.unwrap_or(1800),
-            args.max_turns.unwrap_or(120),
+            args.max_turns.unwrap_or(300),
         )
     } else {
         (
