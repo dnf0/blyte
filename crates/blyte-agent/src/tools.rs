@@ -18,6 +18,18 @@ use serde_json::{json, Value};
 use crate::fs::Fs;
 use crate::shell::Shell;
 
+static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Extra directories allowed for reading with `read` and `grep`.
+///
+/// Later calls replace earlier ones.
+pub fn set_read_roots(roots: Vec<PathBuf>) {
+    match READ_ROOTS.write() {
+        Ok(mut lock) => *lock = roots,
+        Err(poisoned) => *poisoned.into_inner() = roots,
+    }
+}
+
 /// Output over this many lines is distilled to head and tail before entering context.
 ///
 /// Sized from measurement, not intuition: across 64 recorded command outputs the median was
@@ -366,6 +378,41 @@ fn resolve_in_workspace(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, 
     Ok(joined)
 }
 
+/// Reject a path that escapes the workspace, unless an absolute path is inside a read root.
+fn resolve_for_read(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, String> {
+    if let Ok(p) = resolve_in_workspace(fs, root, raw) {
+        return Ok(p);
+    }
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        let joined = lexically_normalize(p);
+        let roots = READ_ROOTS
+            .read()
+            .map(|r| r.clone())
+            .unwrap_or_else(|e| e.into_inner().clone());
+        let mut probe = joined.as_path();
+        let probe_c = loop {
+            if let Ok(c) = fs.canonicalize(probe) {
+                break Some(c);
+            }
+            match probe.parent() {
+                Some(p) => probe = p,
+                None => break None,
+            }
+        };
+        if let Some(probe_c) = probe_c {
+            for r in &roots {
+                if let Ok(rc) = fs.canonicalize(r) {
+                    if probe_c.starts_with(&rc) {
+                        return Ok(joined);
+                    }
+                }
+            }
+        }
+    }
+    Err(format!("path escapes the workspace: {raw}"))
+}
+
 /// Single-quote for `bash -lc`, so a pattern containing spaces, `$` or `"` is passed verbatim.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -536,7 +583,7 @@ fn execute_unbounded(
     };
     match name {
         "read" => {
-            let path = match resolve_in_workspace(fs, root, &s("path")) {
+            let path = match resolve_for_read(fs, root, &s("path")) {
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
@@ -692,7 +739,7 @@ fn execute_unbounded(
                     p
                 }
             };
-            if let Err(e) = resolve_in_workspace(fs, root, &sub) {
+            if let Err(e) = resolve_for_read(fs, root, &sub) {
                 return ToolOutcome::err(e);
             }
             let glob_str = s("glob");

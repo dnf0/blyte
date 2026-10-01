@@ -50,6 +50,7 @@ pub struct TaskConfig {
 impl From<&crate::cli::Cli> for TaskConfig {
     /// Maps parsed CLI flags into a concrete `TaskConfig` configuration.
     fn from(cli: &crate::cli::Cli) -> Self {
+        blyte_agent::tools::set_read_roots(cli.read_roots.clone());
         // Fall back to current working directory if not running in container mode
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
