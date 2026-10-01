@@ -28,6 +28,16 @@ Nothing at the moment; see Next.
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-10-01**
+  - Honest outcomes: a gate that fails the same way before the change ends the run as `blocked`
+    (exit 5) instead of burning the budget; the deadline watchdog says what was running when it
+    stopped a run (v0.11.0). Gate slots default to a quarter of the cores (at least 2), time
+    waiting for one no longer counts against the run's deadline, and research skips them; a long
+    failed gate keeps the test runner's summary lines (v0.11.1).
+  - Needs attention lists only runs nobody has dealt with (no verdict, not superseded by a later
+    run, worktree still there, under three days old); the Plans view lists plans with a running
+    task, keeps each node's state colour when selected, shows a task's merged run before its
+    latest, and draws follow-up tasks dispatched with `--plan` but not written in the plan as
+    "added during the work" (v0.11.2). The two watchdog tests take a second instead of 32 s.
   - The dashboard's **Plans view**: each plan as a swimlane flow of its tasks (lanes by area of code,
     columns by dependency), coloured by state (merged, verified, running, failed, redone, ready,
     waiting), with the selected task's details, the plan's activity and decisions, all from files
