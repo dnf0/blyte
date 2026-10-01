@@ -1,3 +1,9 @@
+## v0.13.0 (2026-10-01)
+
+### Feat
+
+- **cli**: blyte clean removes worktrees once their work is merged (#212)
+
 ## v0.12.0 (2026-10-01)
 
 ### Feat
