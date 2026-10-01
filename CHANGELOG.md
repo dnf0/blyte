@@ -1,3 +1,9 @@
+## v0.8.0 (2026-10-01)
+
+### Feat
+
+- **cli**: blyte dispatch --research, and run reports record the effort level (#198)
+
 ## v0.7.8 (2026-10-01)
 
 ### Fix
