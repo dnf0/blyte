@@ -297,6 +297,41 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
         }
     }
 
+    // Allow tool caches in enclosing node_modules above the worktree (vitest's .vite-temp, etc.).
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    let home_canon = home.as_deref().and_then(|h| h.canonicalize().ok());
+    let is_home = |p: &Path| -> bool {
+        if let Some(h) = home.as_deref() {
+            if p == h {
+                return true;
+            }
+        }
+        if let Some(hc) = home_canon.as_deref() {
+            if p == hc || p.canonicalize().ok().as_deref() == Some(hc) {
+                return true;
+            }
+        }
+        false
+    };
+
+    if !is_home(root) {
+        for a in root.ancestors().skip(1) {
+            if is_home(a) {
+                break;
+            }
+            let nm = a.join("node_modules");
+            if nm.is_dir() {
+                for name in [".vite-temp", ".vite", ".cache"] {
+                    let dir = nm.join(name);
+                    let _ = std::fs::create_dir_all(&dir);
+                    allowed.push(dir);
+                }
+            }
+        }
+    }
+
     allowed
 }
 
