@@ -12,6 +12,7 @@ pub const DISPATCH_RULES: &str = r#"Rules:
 - Do not push, open pull requests, or read secrets.
 - Commit locally before you stop, with the exact commit message the task gives (or a conventional one if it gives none).
 - When you believe the task is done and committed, stop calling tools: the harness then runs the check. Before that, run the check's quick steps (formatting, lint, the tests for your change) yourself; the full run happens at the gate.
+- Do not run the full test suite or the whole check yourself, not before you start and not while you work: the gate runs it when you stop, and each extra run costs minutes. Run the tests for the code you change.
 - Finish with a short report: what you changed, what you ran, and anything that deviated from the task."#;
 
 pub fn wrap_task(task: &str) -> String {
