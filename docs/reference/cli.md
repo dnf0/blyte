@@ -97,7 +97,7 @@ A job with no report counts as running only when its PID is alive and that proce
 ```text
 Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
 
-Usage: blyte dispatch [OPTIONS] --gate <GATE> <ID> <TASK_FILE>
+Usage: blyte dispatch [OPTIONS] <ID> <TASK_FILE>
 
 Arguments:
   <ID>         Identifier for this dispatch (used for worktree and branch wip/<id>)
@@ -107,13 +107,15 @@ Options:
   -g, --gate <GATE>                The check command; several lines are several steps, all of which must pass
       --tag <TEXT>                 Tag for this dispatch (repeatable)
       --base <BASE>                The commit a new worktree starts from [default: HEAD]
+      --research                   Run read-only research: scratch repository, report gate, findings in report.md
+      --report-to <PATH>           Copy the finished research report to this path (only with --research)
   -m, --model <MODEL>              Model identifier or provider selection
-      --max-seconds <MAX_SECONDS>  Wall-clock budget in seconds [default: 3600]
-      --max-turns <MAX_TURNS>      Maximum turn budget [default: 300]
+      --max-seconds <MAX_SECONDS>  Wall-clock budget in seconds (default 3600)
+      --max-turns <MAX_TURNS>      Maximum turn budget (default 300)
       --max-cost <MAX_COST_USD>    Maximum spend in USD
       --fold-budget <FOLD_BUDGET>  Approximate token budget for the verbatim tail before folding
       --sandbox <SANDBOX>          Sandbox local command execution: 'on' or 'off' (default 'on') [default: on] [possible values: on, off]
-      --network <NETWORK>          Outbound network mode: 'on' or 'off' (default 'on') [default: on] [possible values: on, off]
+      --network <NETWORK>          Outbound network mode: 'on' or 'off' (default 'on') [possible values: on, off]
       --allow-read <ALLOW_READ>    Let sandboxed commands read this path despite credential deny-list (repeatable)
       --pass-env <PASS_ENV>        Pass this environment variable to commands (repeatable)
   -h, --help                       Print help

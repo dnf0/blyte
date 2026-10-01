@@ -102,6 +102,14 @@ pub struct DispatchArgs {
     #[arg(long, default_value = "HEAD")]
     pub base: String,
 
+    /// Run read-only research: scratch repository, report gate, findings in report.md
+    #[arg(long, conflicts_with = "gate", conflicts_with = "base")]
+    pub research: bool,
+
+    /// Copy the finished research report to this path (only with --research)
+    #[arg(long = "report-to", requires = "research", value_name = "PATH")]
+    pub report_to: Option<PathBuf>,
+
     /// Model identifier or provider selection
     #[arg(short, long)]
     pub model: Option<String>,

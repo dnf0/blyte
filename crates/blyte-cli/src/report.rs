@@ -35,7 +35,7 @@ fn outcome_name(outcome: &Outcome) -> (&'static str, Option<String>) {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct RunRecord {
     pub schema_version: u32,
     /// The commit this blyte was built from (`build.rs`), or `unknown`.
@@ -45,6 +45,7 @@ pub struct RunRecord {
     pub final_message: Option<String>,
     pub model_requested: Option<String>,
     pub model_id: Option<String>,
+    pub effort: Option<String>,
     pub context: String,
     pub gated: bool,
     /// Where the gate came from: `none` (ungated) or `user` (`--gate`).
@@ -111,6 +112,7 @@ impl RunRecord {
             final_message: None,
             model_requested: config.model.clone(),
             model_id: None,
+            effort: None,
             context: config.context_strategy.clone(),
             gated,
             gate_source: if gated { "user" } else { "none" }.into(),
