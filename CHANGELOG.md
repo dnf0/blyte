@@ -1,3 +1,9 @@
+## v0.12.0 (2026-10-01)
+
+### Feat
+
+- **plans**: follow-up tasks dispatched with a plan show as added during the work (#210)
+
 ## v0.11.2 (2026-10-01)
 
 ### Fix
