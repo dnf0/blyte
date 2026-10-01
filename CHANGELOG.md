@@ -1,3 +1,9 @@
+## v0.7.5 (2026-10-01)
+
+### Fix
+
+- **cli**: the running dashboard sees newly registered repos; init recognises python -m checks (#190)
+
 ## v0.7.4 (2026-09-30)
 
 ### Fix
