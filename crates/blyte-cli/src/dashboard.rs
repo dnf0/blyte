@@ -1186,13 +1186,21 @@ pub fn run(args: &crate::cli::DashboardArgs) -> i32 {
         }
     }
 
-    let src = std::sync::Arc::new(sources);
+    let live = args.roots.is_empty() && args.runs_dirs.is_empty();
+    let fixed_src = std::sync::Arc::new(sources);
+    let args = std::sync::Arc::new(args.clone());
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let src = std::sync::Arc::clone(&src);
+                let fixed = std::sync::Arc::clone(&fixed_src);
+                let args = std::sync::Arc::clone(&args);
                 std::thread::spawn(move || {
-                    handle_connection(stream, &src);
+                    if live {
+                        let src = Sources::from_args(&args);
+                        handle_connection(stream, &src);
+                    } else {
+                        handle_connection(stream, &fixed);
+                    }
                 });
             }
             Err(_) => {
