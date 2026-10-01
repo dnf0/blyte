@@ -1,7 +1,7 @@
 //! `blyte init`: extracts the gate from CI workflows, detects environment settings,
 //! and proves each step in a fresh worktree before writing `blyte.toml`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -24,10 +24,12 @@ pub struct InitStep {
 
 /// Detect check commands from `.github/workflows/*.yml` and `*.yaml`.
 pub fn detect_ci(root: &Path) -> Vec<String> {
-    detect_ci_with_sources(root)
-        .into_iter()
-        .map(|(cmd, _)| cmd)
-        .collect()
+    drop_overlapping(
+        detect_ci_with_sources(root)
+            .into_iter()
+            .map(|(cmd, _)| cmd)
+            .collect(),
+    )
 }
 
 /// Detect check commands and keep the file name of the workflow where each was first found.
@@ -70,6 +72,163 @@ pub fn detect_ci_with_sources(root: &Path) -> Vec<(String, String)> {
         }
     }
     result
+}
+
+#[derive(Debug)]
+struct PytestInfo {
+    prefix: String,
+    runner: String,
+    positional: Vec<String>,
+    narrowness: usize,
+}
+
+fn parse_pytest_step(cmd: &str) -> Option<PytestInfo> {
+    let trimmed = cmd.trim();
+    let prefixes = ["uv run ", "poetry run ", "pdm run ", "pipenv run "];
+    let (prefix, after_prefix) = if let Some(p) = prefixes.iter().find(|&&p| trimmed.starts_with(p))
+    {
+        (*p, &trimmed[p.len()..])
+    } else {
+        ("", trimmed)
+    };
+
+    let runners = ["python3 -m pytest", "python -m pytest", "pytest"];
+    let (runner, rest) = runners.iter().find_map(|&r| {
+        if after_prefix == r {
+            Some((r, ""))
+        } else if let Some(rest) = after_prefix.strip_prefix(r) {
+            if rest.starts_with(char::is_whitespace) {
+                Some((r, rest.trim_start()))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    })?;
+
+    let tokens = tokenize(rest);
+    let mut positional = Vec::new();
+    let mut narrowness = 0;
+    let mut i = 0;
+
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        if tok == "--" {
+            i += 1;
+            while i < tokens.len() {
+                positional.push(tokens[i].clone());
+                i += 1;
+            }
+            break;
+        }
+
+        if tok == "-m" || tok == "-k" {
+            narrowness += 1;
+            i += 1;
+            if i < tokens.len() {
+                narrowness += tokens[i].matches(" and ").count();
+                i += 1;
+            }
+        } else if tok.starts_with("-m=") || tok.starts_with("-k=") {
+            narrowness += 1;
+            let val = &tok[3..];
+            narrowness += val.matches(" and ").count();
+            i += 1;
+        } else if tok == "--ignore" || tok == "--deselect" {
+            narrowness += 1;
+            i += 1;
+            if i < tokens.len() {
+                i += 1;
+            }
+        } else if tok.starts_with("--ignore=") || tok.starts_with("--deselect=") {
+            narrowness += 1;
+            i += 1;
+        } else if tok == "-p" {
+            i += 1;
+            if i < tokens.len() {
+                i += 1;
+            }
+        } else if tok.starts_with('-') {
+            i += 1;
+        } else {
+            positional.push(tok.clone());
+            i += 1;
+        }
+    }
+
+    Some(PytestInfo {
+        prefix: prefix.to_string(),
+        runner: runner.to_string(),
+        positional,
+        narrowness,
+    })
+}
+
+/// Drop overlapping pytest steps, keeping only the broader of two that test the same files.
+pub fn drop_overlapping(steps: Vec<String>) -> Vec<String> {
+    let n = steps.len();
+    if n <= 1 {
+        return steps;
+    }
+
+    let parsed: Vec<Option<PytestInfo>> = steps.iter().map(|s| parse_pytest_step(s)).collect();
+
+    let mut adj = vec![Vec::new(); n];
+    for i in 0..n {
+        let Some(ref a) = parsed[i] else { continue };
+        for j in (i + 1)..n {
+            let Some(ref b) = parsed[j] else { continue };
+            if a.prefix == b.prefix
+                && a.runner == b.runner
+                && (a.positional == b.positional
+                    || a.positional.is_empty()
+                    || b.positional.is_empty())
+            {
+                adj[i].push(j);
+                adj[j].push(i);
+            }
+        }
+    }
+
+    let mut visited = vec![false; n];
+    let mut result_slots: Vec<Option<String>> = vec![None; n];
+
+    for i in 0..n {
+        if visited[i] {
+            continue;
+        }
+        visited[i] = true;
+        let mut comp = vec![i];
+        let mut q = VecDeque::new();
+        q.push_back(i);
+        while let Some(u) = q.pop_front() {
+            for &v in &adj[u] {
+                if !visited[v] {
+                    visited[v] = true;
+                    comp.push(v);
+                    q.push_back(v);
+                }
+            }
+        }
+
+        if comp.len() == 1 {
+            result_slots[i] = Some(steps[i].clone());
+        } else {
+            let first_pos = *comp.iter().min().unwrap();
+            let best = *comp
+                .iter()
+                .min_by(|&&a, &&b| {
+                    let na = parsed[a].as_ref().unwrap().narrowness;
+                    let nb = parsed[b].as_ref().unwrap().narrowness;
+                    na.cmp(&nb).then_with(|| a.cmp(&b))
+                })
+                .unwrap();
+            result_slots[first_pos] = Some(steps[best].clone());
+        }
+    }
+
+    result_slots.into_iter().flatten().collect()
 }
 
 fn parse_workflow_commands(content: &str) -> Vec<String> {
@@ -669,13 +828,21 @@ pub fn run(args: &InitArgs) -> i32 {
 
     let ci_steps = detect_ci_with_sources(&root);
     let (steps, from_ci) = if !ci_steps.is_empty() {
+        let commands: Vec<String> = ci_steps.iter().map(|(cmd, _)| cmd.clone()).collect();
+        let kept = drop_overlapping(commands);
         (
-            ci_steps
-                .into_iter()
-                .map(|(cmd, src)| InitStep {
-                    command: cmd,
-                    source: src,
-                    verdict: None,
+            kept.into_iter()
+                .map(|cmd| {
+                    let src = ci_steps
+                        .iter()
+                        .find(|(c, _)| c == &cmd)
+                        .map(|(_, s)| s.clone())
+                        .unwrap_or_default();
+                    InitStep {
+                        command: cmd,
+                        source: src,
+                        verdict: None,
+                    }
                 })
                 .collect::<Vec<_>>(),
             true,
