@@ -54,13 +54,14 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
         .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"))
         .env("OPENAI_API_KEY", "test")
         .env("BLYTE_MODEL", "openai/test-model")
+        .env("BLYTE_WATCHDOG_GRACE_SECS", "1")
         .output()
         .unwrap();
     let took = started.elapsed();
 
-    assert!(took < Duration::from_secs(60), "ran {took:?}");
+    assert!(took < Duration::from_secs(10), "ran {took:?}");
     assert!(
-        took >= Duration::from_secs(30),
+        took >= Duration::from_secs(2),
         "ended before the watchdog: {took:?}"
     );
     assert_eq!(
@@ -70,7 +71,7 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
         String::from_utf8_lossy(&out.stderr)
     );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("past --max-seconds 2"), "{err}");
+    assert!(err.contains("stopped 1 s past --max-seconds 2"), "{err}");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).expect("a report")).unwrap();
     assert!(

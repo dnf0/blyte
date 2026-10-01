@@ -75,6 +75,7 @@
       --merged: #3E6D64;
       --merged-soft: #C3D6D1;
       --lane: #E6EAEC;
+      --ink: #141A1E;
       --sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
       --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     }
@@ -122,6 +123,7 @@
         --merged: #7FB2A6;
         --merged-soft: #1F3431;
         --lane: #131A1D;
+        --ink: #E2E7E9;
       }
     }
 
@@ -762,7 +764,9 @@
     .flow-head h2 { margin: 0; font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
     .node { cursor: pointer; outline: none; }
     .node:hover .node-box { filter: brightness(0.97); }
-    .node:focus-visible .node-box { stroke: var(--rust); stroke-width: 3; }
+    .node .node-outline { display: none; }
+    .node.sel .node-outline,
+    .node:focus-visible .node-outline { display: block; }
     .node text { font-family: var(--sans); }
     .edge { fill: none; stroke: var(--line-2); stroke-width: 1.5; }
     .edge.done { stroke: var(--merged); opacity: .55; }
@@ -873,7 +877,7 @@
 
     <!-- Plans view -->
     <div id="plans-view" style="display: none;">
-      <div id="plans-empty" class="empty-state" style="display: none;">No plans with dispatches in the last 7 days.</div>
+      <div id="plans-empty" class="empty-state" style="display: none;">Nothing running. A plan shows here while one of its tasks is dispatched.</div>
       <div id="plans-content" class="plans-wrap" style="display: none;">
         <div class="picker" id="plan-picker" aria-label="Plans"></div>
 
@@ -977,14 +981,50 @@
       return job.status === "running";
     }
 
-    function isNeedsAttention(job) {
-      if (job.status === "gate_failed" || job.status === "error" || job.status === "budget_exhausted" || job.status === "stopped" || job.status === "blocked") {
-        return true;
+    function isNeedsAttention(job, allJobs) {
+      const ATTENTION_STATUSES = new Set(["gate_failed", "error", "budget_exhausted", "stopped", "blocked"]);
+      if (!ATTENTION_STATUSES.has(job.status)) {
+        return false;
       }
-      if (job.status === "running" && (job.gate_attempts || 0) > 0 && !job.gate_running) {
-        return true;
+      if (job.verdict != null && String(job.verdict).trim() !== "") {
+        return false;
       }
-      return false;
+      if (job.worktree_exists === false) {
+        return false;
+      }
+      const nowSec = (currentData && currentData.generated_at) || Math.floor(Date.now() / 1000);
+      const threeDaysSec = 3 * 86400;
+      if (!job.started_at || job.started_at < nowSec - threeDaysSec) {
+        return false;
+      }
+
+      const jobsList = Array.isArray(allJobs) ? allJobs : ((currentData && currentData.jobs) || []);
+      const jobStart = job.started_at || 0;
+      const isSuperseded = jobsList.some(other => {
+        if (other === job || (other.key && job.key && other.key === job.key)) return false;
+        if (other.repo !== job.repo) return false;
+        const otherStart = other.started_at || 0;
+        if (otherStart <= jobStart) return false;
+        if (other.status !== "running" && other.status !== "verified") return false;
+
+        const sameId = Boolean(job.id && other.id === job.id);
+        const samePlanTask = Boolean(
+          job.plan &&
+          job.plan_task &&
+          other.plan === job.plan &&
+          other.plan_task === job.plan_task
+        );
+        const sameTitle = Boolean(
+          job.title &&
+          job.title.trim() !== "" &&
+          other.title &&
+          other.title.trim() === job.title.trim()
+        );
+
+        return sameId || samePlanTask || sameTitle;
+      });
+
+      return !isSuperseded;
     }
 
     function isDone(job) {
@@ -1010,7 +1050,7 @@
     function filterJobs(jobs) {
       return jobs.filter(job => {
         if (activeView === "running" && !isRunning(job)) return false;
-        if (activeView === "needs_attention" && !isNeedsAttention(job)) return false;
+        if (activeView === "needs_attention" && !isNeedsAttention(job, jobs)) return false;
         if (activeView === "done" && !isDone(job)) return false;
 
         if (activeTag != null) {
@@ -1077,7 +1117,7 @@
       const passedPct = finished24h > 0 ? Math.round((passed24h / finished24h) * 100) + "%" : "—";
       const costStr = "$" + cost24h.toFixed(2);
       const avgCostStr = finished24h > 0 ? "avg $" + (cost24h / finished24h).toFixed(2) + " / job" : "avg — / job";
-      const needsAttentionCount = jobs.filter(isNeedsAttention).length;
+      const needsAttentionCount = jobs.filter(j => isNeedsAttention(j, jobs)).length;
 
       el.innerHTML = `
         <div class="summary-tile">
@@ -1115,7 +1155,7 @@
 
       const countAll = jobs.length;
       const countRunning = jobs.filter(isRunning).length;
-      const countNeeds = jobs.filter(isNeedsAttention).length;
+      const countNeeds = jobs.filter(j => isNeedsAttention(j, jobs)).length;
       const countDone = jobs.filter(isDone).length;
 
       el.innerHTML = `
@@ -1374,11 +1414,15 @@
       if (!currentPlansData || !Array.isArray(currentPlansData.plans) || currentPlansData.plans.length === 0) {
         return null;
       }
+      const plans = currentPlansData.plans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
+      if (plans.length === 0) {
+        return null;
+      }
       if (selectedPlanKey) {
-        const found = currentPlansData.plans.find(p => p.key === selectedPlanKey);
+        const found = plans.find(p => p.key === selectedPlanKey);
         if (found) return found;
       }
-      return currentPlansData.plans[0];
+      return plans[0];
     }
 
     function formatEventTime(at) {
@@ -1432,7 +1476,8 @@
     function drawPicker() {
       const container = document.getElementById("plan-picker");
       if (!container) return;
-      const plans = (currentPlansData && currentPlansData.plans) || [];
+      const allPlans = (currentPlansData && currentPlansData.plans) || [];
+      const plans = allPlans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
       if (plans.length === 0) {
         container.innerHTML = "";
         return;
@@ -1656,7 +1701,8 @@
         const m = STATUS[st] || STATUS["waiting"];
         const isSel = t.id === selectedTaskId;
         sv += '<g class="node' + (isSel ? ' sel' : '') + '" data-task-id="' + escapeAttr(t.id) + '" tabindex="0" role="button" aria-pressed="' + isSel + '" aria-label="' + escapeAttr(t.id + ': ' + (t.title || '') + ', ' + m.label) + '" transform="translate(' + p.x + ',' + p.y + ')">';
-        sv += '<rect class="node-box" width="' + NW + '" height="' + NH + '" rx="6" fill="' + v(m.bg) + '" stroke="' + v(isSel ? "rust" : m.c) + '" stroke-width="' + (isSel ? 2.5 : 1.5) + '"' + (m.dash ? ' stroke-dasharray="4 3"' : '') + '/>';
+        sv += '<rect class="node-outline" x="-4" y="-4" width="' + (NW + 8) + '" height="' + (NH + 8) + '" rx="8" fill="none" stroke="var(--ink)" stroke-width="2"/>';
+        sv += '<rect class="node-box" width="' + NW + '" height="' + NH + '" rx="6" fill="' + v(m.bg) + '" stroke="' + v(m.c) + '" stroke-width="1.5"' + (m.dash ? ' stroke-dasharray="4 3"' : '') + '/>';
         sv += '<rect width="4" height="' + NH + '" rx="2" fill="' + v(m.c) + '"/>';
         sv += '<text x="14" y="20" fill="' + v(m.c === "faint" ? "muted" : m.c) + '" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11.5" font-weight="500">' + escapeHtml(t.id) + '</text>';
         sv += '<circle' + (st === "running" ? ' class="pulse"' : '') + ' cx="' + (NW - 14) + '" cy="16" r="4.5" fill="' + v(m.c) + '"/>';
@@ -1830,7 +1876,8 @@
     function renderPlans() {
       renderLiveIndicator();
       initLegend();
-      const plans = (currentPlansData && currentPlansData.plans) || [];
+      const allPlans = (currentPlansData && currentPlansData.plans) || [];
+      const plans = allPlans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
       const emptyEl = document.getElementById("plans-empty");
       const contentEl = document.getElementById("plans-content");
 
@@ -1855,11 +1902,13 @@
         const res = await fetch("/api/plans");
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
+        const allPlans = data.plans || [];
+        const plans = allPlans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
+        data.plans = plans;
         currentPlansData = data;
         lastSuccessfulUpdate = new Date();
         isOnline = true;
 
-        const plans = data.plans || [];
         if (plans.length > 0) {
           if (!selectedPlanKey || !plans.some(p => p.key === selectedPlanKey)) {
             selectedPlanKey = plans[0].key;

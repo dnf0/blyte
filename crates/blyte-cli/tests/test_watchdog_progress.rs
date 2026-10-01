@@ -82,6 +82,7 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
         .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"))
         .env("OPENAI_API_KEY", "test")
         .env("BLYTE_MODEL", "openai/test-model")
+        .env("BLYTE_WATCHDOG_GRACE_SECS", "1")
         .output()
         .unwrap();
     assert_eq!(
@@ -93,6 +94,7 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
     let err = v["error"].as_str().unwrap();
+    assert!(err.contains("stopped 1 s past --max-seconds 2"), "{err}");
     assert!(err.contains("gate attempt 1 was still running"), "{err}");
     assert_eq!(v["turns"], 1, "{v}");
     assert_eq!(v["gate_attempts"], 1, "{v}");

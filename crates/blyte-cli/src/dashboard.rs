@@ -133,6 +133,7 @@ pub struct Job {
     pub model: Option<String>,
     pub last_tool: Option<String>,
     pub worktree: Option<String>,
+    pub worktree_exists: Option<bool>,
     pub log: String,
     pub commits: Vec<CommitRecord>,
     pub changed_files: Vec<String>,
@@ -1144,6 +1145,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
         }
 
         let task_truncated: String = task_content.chars().take(2000).collect();
+        let worktree_exists = raw.worktree.as_deref().map(|wt| Path::new(wt).is_dir());
 
         jobs.push(Job {
             key: format!("{}/{}", raw.repo, raw.id),
@@ -1165,6 +1167,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             model,
             last_tool: log_info.last_tool,
             worktree: raw.worktree,
+            worktree_exists,
             log: raw.log_path.display().to_string(),
             commits: raw.commits,
             changed_files: raw.changed_files,

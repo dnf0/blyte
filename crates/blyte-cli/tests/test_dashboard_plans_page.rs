@@ -7,7 +7,7 @@ fn the_page_has_a_plans_view_that_polls_its_own_api() {
     for needle in [
         "/api/plans",
         "#plans",
-        "No plans with dispatches in the last 7 days.",
+        "Nothing running. A plan shows here while one of its tasks is dispatched.",
         "Waits on",
         "Unblocks",
     ] {
