@@ -1,3 +1,9 @@
+## v0.11.0 (2026-10-01)
+
+### Feat
+
+- honest errors (blocked, watchdog progress) and a 300-turn research default (#204)
+
 ## v0.10.0 (2026-10-01)
 
 ### Feat
