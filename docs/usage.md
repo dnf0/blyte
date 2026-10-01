@@ -45,7 +45,8 @@ be untracked). Rules are capped at 12,000 characters. The run prints which file 
 `blyte init` works out a repository's gate and environment settings, and proves each step in a
 fresh worktree before writing `blyte.toml`. It first extracts check commands from CI workflows
 (`.github/workflows/*.yml` and `*.yaml`), stripping reporting arguments (like `--cov` and `| tee`),
-or falls back to toolchain detection (Makefiles, Cargo, pyproject, package.json, go.mod). It detects
+or falls back to toolchain detection (Makefiles, Cargo, pyproject, package.json, go.mod). Of overlapping
+pytest steps that test the same files, it keeps only the broader one. It detects
 environment needs such as `UV_FROZEN = "1"` (when `uv.lock` exists) and `UV_OFFLINE = "1"` (when a
 private index is configured). Unless `--no-verify` is passed, it proves each step in a detached
 worktree of `HEAD` (`.wt/init-<pid>`) using the sandboxed local shell, leaving out steps broken by
