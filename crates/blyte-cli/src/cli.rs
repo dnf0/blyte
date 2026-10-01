@@ -13,6 +13,8 @@ pub enum Command {
     Dispatch(DispatchArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
     Review(ReviewArgs),
+    /// Remove finished worktrees and merged branches
+    Clean(CleanArgs),
     /// Show what a dispatch is doing
     Status {
         id: String,
@@ -199,6 +201,21 @@ pub struct ReviewArgs {
 
     #[arg(long, value_name = "TEXT", requires = "verdict")]
     pub notes: Option<String>,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct CleanArgs {
+    /// Show what would be removed without deleting anything
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Worktrees older than this many days are removable without a verdict (default 7)
+    #[arg(long, default_value = "7", value_name = "DAYS")]
+    pub older_than: u64,
+
+    /// Clean every repository in the registry
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]

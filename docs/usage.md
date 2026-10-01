@@ -204,7 +204,31 @@ dashboard can show plans.
 
 ### Recording a verdict
 
-Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. It works even after the worktree has been removed. Without `--verdict`, `blyte review` flags commands that may have changed things outside the worktree under `== host commands`, and reads of other terminals or files outside the repository under `== reads outside the repository`.
+Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. Recording the verdict removes the run's worktree under the clean rules (`removed .wt/<id>; branch wip/<id> kept`), while keeping the branch `wip/<id>` until merged. A worktree with uncommitted changes is kept. It works even after the worktree has been removed. Without `--verdict`, `blyte review` flags commands that may have changed things outside the worktree under `== host commands`, and reads of other terminals or files outside the repository under `== reads outside the repository`.
+
+## Cleaning finished worktrees (`blyte clean`)
+
+Finished dispatches leave their worktree at `.wt/<id>` and branch `wip/<id>`. Worktrees are cleaned up automatically on review and at the start of new dispatches, or on demand with `blyte clean`:
+
+```bash
+blyte clean [--dry-run] [--older-than DAYS] [--all]
+```
+
+`blyte clean` inspects `.wt/<id>` directories with a corresponding `.wt/<id>.start.json`. A worktree is removable when the run is finished (no live process, or a `.wt/<id>.json` summary exists) and one of:
+1. a verdict is recorded (`.wt/<id>.verdict.json` exists);
+2. the outcome in `.wt/<id>.json` is `no_changes`;
+3. it is a research run (`research: true`) and its report was copied out (`.wt/<id>.report.md` exists);
+4. it finished more than `--older-than` days ago (default 7), by the summary file's mtime.
+
+A worktree with uncommitted changes (`git status --porcelain` not empty) is never removed, and is reported as kept (`kept .wt/<id> (uncommitted changes)`). Research scratch directories are removed directly; git worktrees are removed with `git worktree remove` (without `--force`) and `git worktree prune`. The run's record files (`.wt/<id>.log`, `.report.json`, `.json`, `.start.json`, `.verdict.json`, `.report.md`) are never removed.
+
+After removing a worktree, its branch `wip/<id>` is deleted only when its work is on the default branch: every commit listed by `git cherry <default> wip/<id>` is marked `-` (patch already applied) or `git branch --contains <tip>` lists a branch not starting with `wip/`. The default branch is `origin/HEAD`'s target, else `main`, else `master`.
+
+- `--dry-run`: shows what would be removed and deleted without making any changes.
+- `--older-than DAYS`: worktrees older than this many days are removable without a verdict (default 7).
+- `--all`: cleans every repository in the registry (`~/.local/state/blyte/repos`).
+
+Before creating a new worktree, `blyte dispatch` (except for `--research`) quietly cleans the repository, printing `blyte: removed N finished worktrees (X GB)` on stderr only if worktrees were removed.
 
 ## Research
 

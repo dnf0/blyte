@@ -182,6 +182,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let worktree_dir = wt_parent.join(&args.id);
     let branch = format!("wip/{}", args.id);
 
+    if !args.research {
+        crate::clean::clean_quiet(&root, Some(&args.id));
+    }
+
     if args.research {
         if worktree_dir.exists() {
             eprintln!("error: {} already exists", worktree_dir.display());
@@ -681,6 +685,7 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             return 2;
         }
         println!("recorded verdict {} for {}", v.as_str(), args.id);
+        crate::clean::clean_on_review(&root, &args.id);
         return 0;
     }
 

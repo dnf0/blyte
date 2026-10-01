@@ -42,6 +42,9 @@ fn main() {
             blyte_cli::cli::Command::Review(args) => {
                 std::process::exit(blyte_cli::dispatch::run_review(&args));
             }
+            blyte_cli::cli::Command::Clean(args) => {
+                std::process::exit(blyte_cli::clean::run(&args));
+            }
             blyte_cli::cli::Command::Status { id, json } => {
                 std::process::exit(blyte_cli::dispatch::run_status(&id, json));
             }
