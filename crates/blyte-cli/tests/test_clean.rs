@@ -831,3 +831,51 @@ fn test_dispatch_cleans_quietly() {
     );
     assert!(!wt_old.exists(), "old worktree should have been removed");
 }
+
+/// A local main far behind origin/main (1,292 commits in one repository, 2026-10-01): work merged
+/// on the remote counts as merged as of the last fetch.
+#[test]
+fn test_clean_merged_on_origin_main_only() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    let wt_path = root.join(".wt/T1");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/T1", wt_path.to_str().unwrap()],
+    );
+    write_file(&wt_path.join("file.txt"), "some work\n");
+    git(&wt_path, &["add", "."]);
+    git(&wt_path, &["commit", "-qm", "feat: work", "--no-gpg-sign"]);
+    let tip = git(&wt_path, &["rev-parse", "HEAD"]);
+
+    // origin/main has the work; local main does not.
+    git(root, &["update-ref", "refs/remotes/origin/main", &tip]);
+
+    let wt_dir = root.join(".wt");
+    write_file(
+        &wt_dir.join("T1.start.json"),
+        &serde_json::json!({ "id": "T1", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1.json"),
+        &serde_json::json!({ "outcome": "verified" }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        stdout.contains("removed .wt/T1 (merged"),
+        "stdout was: {stdout}"
+    );
+    assert!(!wt_path.exists());
+}

@@ -28,6 +28,11 @@ Nothing at the moment; see Next.
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-10-01**
+  - `blyte clean` (also run quietly by every `blyte dispatch`): a run's worktree goes once its
+    work is on the default branch (local or `origin/`, including squash merges of several runs),
+    it was redone or made no changes, its research report is saved, or 14 days have passed; never
+    with uncommitted changes, and the run's record files stay. Branches go only when merged. 29
+    worktrees held 15 GB on the author's machine, 21 of them for reviewed runs.
   - Honest outcomes: a gate that fails the same way before the change ends the run as `blocked`
     (exit 5) instead of burning the budget; the deadline watchdog says what was running when it
     stopped a run (v0.11.0). Gate slots default to a quarter of the cores (at least 2), time

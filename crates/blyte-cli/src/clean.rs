@@ -356,10 +356,35 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
     };
 
     let default_branch = find_default_branch(root);
+    // The local default branch can be far behind the remote one (1,292 commits in one repository,
+    // 2026-10-01), so the remote-tracking branch, as of the last fetch, counts too.
+    let name = default_branch
+        .strip_prefix("origin/")
+        .unwrap_or(&default_branch);
+    let remote = format!("origin/{name}");
+    let mut targets = vec![default_branch.clone()];
+    if remote != default_branch && git_ok(root, &["rev-parse", "--verify", "--quiet", &remote]) {
+        targets.push(remote);
+    }
+    targets
+        .iter()
+        .any(|target| merged_into(root, &tip_sha, branch_name, target))
+}
 
+fn git_ok(root: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether the branch's work is already on `default_branch`.
+fn merged_into(root: &Path, tip_sha: &str, branch_name: &str, default_branch: &str) -> bool {
     // 1. `git merge-base --is-ancestor <tip> <default>` succeeds
     let ancestor_check = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", &tip_sha, &default_branch])
+        .args(["merge-base", "--is-ancestor", tip_sha, default_branch])
         .current_dir(root)
         .output();
     if ancestor_check.map(|c| c.status.success()).unwrap_or(false) {
@@ -368,7 +393,7 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
 
     // 2. every commit `git cherry <default> <branch>` lists is marked `-`
     let cherry_out = std::process::Command::new("git")
-        .args(["cherry", &default_branch, branch_name])
+        .args(["cherry", default_branch, branch_name])
         .current_dir(root)
         .output();
     if let Ok(o) = cherry_out {
@@ -395,7 +420,7 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
         if tree_o.status.success() {
             let default_tree = String::from_utf8_lossy(&tree_o.stdout).trim().to_string();
             let merge_tree_out = std::process::Command::new("git")
-                .args(["merge-tree", "--write-tree", &default_branch, branch_name])
+                .args(["merge-tree", "--write-tree", default_branch, branch_name])
                 .current_dir(root)
                 .output();
             if let Ok(mt_o) = merge_tree_out {
