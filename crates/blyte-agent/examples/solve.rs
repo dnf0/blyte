@@ -70,6 +70,7 @@ fn main() {
                 if is_error { "!" } else { "-" }
             ),
             GateStart { attempt } => println!("    GATE #{attempt} START"),
+            GateSlotWait { ms } => println!("    GATE WAIT {ms}ms"),
             Gate {
                 attempt,
                 passed,

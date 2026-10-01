@@ -146,7 +146,9 @@ fn main() {
         }
     }
 
-    blyte_agent::gate_slots::enable();
+    if !cli.no_gate_slot {
+        blyte_agent::gate_slots::enable();
+    }
 
     if let Some(ref prompt) = cli.prompt {
         if prompt.trim().is_empty() {

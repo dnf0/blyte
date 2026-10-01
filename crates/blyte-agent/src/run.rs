@@ -153,6 +153,10 @@ pub enum Event<'e> {
     GateStart {
         attempt: u32,
     },
+    /// A gate waited for a machine-wide slot before running.
+    GateSlotWait {
+        ms: u64,
+    },
     Gate {
         attempt: u32,
         passed: bool,
@@ -345,13 +349,15 @@ impl<'a> Runner<'a> {
             let slot_dir = gate_slots::slot_dir();
             match gate_slots::acquire(max_slots, &slot_dir, Duration::from_millis(500)) {
                 Ok((guard, waited)) => {
-                    if !waited.is_zero() {
+                    let wait_ms = waited.as_millis() as u64;
+                    if wait_ms > 0 {
                         eprintln!(
                             "gate: waited {}s for a gate slot ({max_slots} in use)",
                             waited.as_secs()
                         );
+                        self.emit(Event::GateSlotWait { ms: wait_ms });
                     }
-                    (Some(guard), waited.as_millis() as u64)
+                    (Some(guard), wait_ms)
                 }
                 Err(e) => {
                     eprintln!("gate: slot acquisition failed: {e}");
@@ -568,6 +574,7 @@ impl<'a> Runner<'a> {
         state: &mut State,
         deadline: Option<std::time::Instant>,
     ) -> (Outcome, RunReport) {
+        let mut deadline = deadline;
         let mut report = RunReport::default();
         let mut history = vec![Message::User(format!("Begin. {}", state.orchestrator.goal))];
         let system = self.system_prompt(state);
@@ -784,6 +791,9 @@ impl<'a> Runner<'a> {
             last_failed = failing;
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);
+            if let Some(d) = deadline.as_mut() {
+                *d += Duration::from_millis(wait_ms);
+            }
             self.emit(Event::Gate {
                 attempt: report.gate_attempts,
                 passed,
