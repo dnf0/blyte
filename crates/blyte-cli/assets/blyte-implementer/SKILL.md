@@ -76,6 +76,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test'
 ```
 
+- **The plan:** when the task comes from a plan file, say which one:
+  `--plan docs/plans/my-plan.md --plan-task "Task 2: the parser"` (the task's heading). The
+  dashboard's Plans view then shows the plan as a flow of its tasks, each coloured by its state.
+
 - **The gate:** if the repository has a `blyte.toml`, leave `--gate` out: blyte uses the
   repository's own checks. If it has none, run `blyte init` first. It takes the checks from the
   repository's CI, sets what the environment needs (`[dispatch.env]`, such as `UV_FROZEN`), runs
