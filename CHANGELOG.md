@@ -1,3 +1,9 @@
+## v0.7.7 (2026-10-01)
+
+### Fix
+
+- Node tool caches under the sandbox, and init drops overlapping pytest steps (#194)
+
 ## v0.7.6 (2026-10-01)
 
 ### Fix
