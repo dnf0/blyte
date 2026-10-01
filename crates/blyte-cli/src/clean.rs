@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RemovalReason {
+    Merged,
     Verdict(String),
     NoChanges,
     ResearchReport,
@@ -13,6 +14,7 @@ pub enum RemovalReason {
 impl std::fmt::Display for RemovalReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Merged => write!(f, "merged"),
             Self::Verdict(v) => {
                 if v.is_empty() {
                     write!(f, "verdict")
@@ -22,13 +24,7 @@ impl std::fmt::Display for RemovalReason {
             }
             Self::NoChanges => write!(f, "no changes"),
             Self::ResearchReport => write!(f, "research report"),
-            Self::OlderThan(d) => {
-                if *d == 1 {
-                    write!(f, "older than 1 day")
-                } else {
-                    write!(f, "older than {d} days")
-                }
-            }
+            Self::OlderThan(d) => write!(f, "finished over {d} days ago"),
         }
     }
 }
@@ -38,6 +34,7 @@ pub enum KeptReason {
     UncommittedChanges,
     Running,
     NoVerdict,
+    NotMergedYet,
     NoReport,
     Custom(String),
 }
@@ -48,6 +45,7 @@ impl std::fmt::Display for KeptReason {
             Self::UncommittedChanges => write!(f, "uncommitted changes"),
             Self::Running => write!(f, "running"),
             Self::NoVerdict => write!(f, "no verdict"),
+            Self::NotMergedYet => write!(f, "not merged yet"),
             Self::NoReport => write!(f, "no report"),
             Self::Custom(s) => write!(f, "{s}"),
         }
@@ -207,10 +205,14 @@ pub fn check_removable(
         }
     }
 
-    // Now check the removal conditions:
-    // 1. A verdict is recorded (.wt/<id>.verdict.json exists)
-    if verdict_path.is_file() {
-        let verdict_str = std::fs::read_to_string(&verdict_path)
+    let is_res = start_json
+        .as_ref()
+        .and_then(|s| s.get("research").and_then(|r| r.as_bool()))
+        .unwrap_or(false);
+
+    // Rule 2: Discarded (the verdict is redone, or the outcome is no_changes)
+    let verdict_str = if verdict_path.is_file() {
+        std::fs::read_to_string(&verdict_path)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| {
@@ -218,11 +220,15 @@ pub fn check_removable(
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string())
             })
-            .unwrap_or_default();
-        return Ok(RemovalReason::Verdict(verdict_str));
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    if verdict_str == "redone" {
+        return Ok(RemovalReason::Verdict("redone".to_string()));
     }
 
-    // 2. The outcome in .wt/<id>.json is no_changes
     if summary_exists {
         if let Ok(summary_str) = std::fs::read_to_string(&summary_path) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&summary_str) {
@@ -233,17 +239,18 @@ pub fn check_removable(
         }
     }
 
-    // 3. Research run and its report was copied out (.wt/<id>.report.md exists)
-    let is_res = start_json
-        .as_ref()
-        .and_then(|s| s.get("research").and_then(|r| r.as_bool()))
-        .unwrap_or(false);
-
+    // Rule 3: Research run and its report was copied out (.wt/<id>.report.md exists)
     if is_res && report_path.is_file() {
         return Ok(RemovalReason::ResearchReport);
     }
 
-    // 4. Finished more than older_than days ago, by the summary file's mtime
+    // Rule 1: Merged (its work is on the default branch)
+    let branch_name = format!("wip/{id}");
+    if !is_res && is_branch_merged(root, &branch_name) {
+        return Ok(RemovalReason::Merged);
+    }
+
+    // Rule 4: Finished more than older_than days ago, by the summary file's mtime
     if summary_exists {
         if let Ok(meta) = std::fs::metadata(&summary_path) {
             if let Ok(mtime) = meta.modified() {
@@ -255,6 +262,11 @@ pub fn check_removable(
                 }
             }
         }
+    }
+
+    // A verdict of accepted or fixed on its own no longer makes a worktree removable
+    if !verdict_str.is_empty() {
+        return Err(KeptReason::NotMergedYet);
     }
 
     if is_res {
@@ -316,9 +328,11 @@ pub fn find_default_branch(root: &Path) -> String {
     "main".to_string()
 }
 
-/// Checks whether a branch's work is on the default branch:
-/// every commit `git cherry <default> wip/<id>` lists is marked `-`
-/// or `git branch --contains <tip>` lists a branch not starting with `wip/`.
+/// Checks whether a branch's work is on the default branch when any of:
+/// - `git merge-base --is-ancestor <tip> <default>` succeeds;
+/// - every commit `git cherry <default> <branch>` lists is marked `-`;
+/// - merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0
+///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`.
 pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
     let check = std::process::Command::new("git")
         .args([
@@ -343,7 +357,16 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
 
     let default_branch = find_default_branch(root);
 
-    // Condition A: every commit `git cherry <default> wip/<id>` lists is marked `-`
+    // 1. `git merge-base --is-ancestor <tip> <default>` succeeds
+    let ancestor_check = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", &tip_sha, &default_branch])
+        .current_dir(root)
+        .output();
+    if ancestor_check.map(|c| c.status.success()).unwrap_or(false) {
+        return true;
+    }
+
+    // 2. every commit `git cherry <default> <branch>` lists is marked `-`
     let cherry_out = std::process::Command::new("git")
         .args(["cherry", &default_branch, branch_name])
         .current_dir(root)
@@ -362,25 +385,27 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
         }
     }
 
-    // Condition B: `git branch --contains <tip>` lists a branch not starting with `wip/`
-    let contains_out = std::process::Command::new("git")
-        .args(["branch", "--contains", &tip_sha])
+    // 3. merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0
+    // and the tree id it prints equals `git rev-parse <default>^{tree}`
+    let default_tree_out = std::process::Command::new("git")
+        .args(["rev-parse", &format!("{default_branch}^{{tree}}")])
         .current_dir(root)
         .output();
-    if let Ok(o) = contains_out {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout);
-            for line in s.lines() {
-                let trimmed = line
-                    .trim()
-                    .trim_start_matches('*')
-                    .trim_start_matches('+')
-                    .trim();
-                if !trimmed.is_empty()
-                    && !trimmed.starts_with("wip/")
-                    && !trimmed.starts_with("(HEAD detached")
-                {
-                    return true;
+    if let Ok(tree_o) = default_tree_out {
+        if tree_o.status.success() {
+            let default_tree = String::from_utf8_lossy(&tree_o.stdout).trim().to_string();
+            let merge_tree_out = std::process::Command::new("git")
+                .args(["merge-tree", "--write-tree", &default_branch, branch_name])
+                .current_dir(root)
+                .output();
+            if let Ok(mt_o) = merge_tree_out {
+                if mt_o.status.success() {
+                    let mt_stdout = String::from_utf8_lossy(&mt_o.stdout);
+                    if let Some(first_line) = mt_stdout.lines().next() {
+                        if first_line.trim() == default_tree {
+                            return true;
+                        }
+                    }
                 }
             }
         }
@@ -544,7 +569,7 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
 /// then one line `blyte: removed N finished worktrees (X GB)` on stderr.
 /// Never fails the dispatch: logs errors to stderr and goes on.
 pub fn clean_quiet(root: &Path, skip_id: Option<&str>) {
-    let stats = clean_repo(root, 7, false, skip_id, true);
+    let stats = clean_repo(root, 14, false, skip_id, true);
     if stats.removed_worktrees > 0 {
         eprintln!(
             "blyte: removed {} finished worktrees ({})",
@@ -555,8 +580,9 @@ pub fn clean_quiet(root: &Path, skip_id: Option<&str>) {
 }
 
 /// Removes a run's worktree on review after recording the verdict under the same rules.
-/// Prints `removed .wt/<id>; branch wip/<id> kept` (or the kept reason).
-/// Deletes the branch only if it is merged.
+/// Removes the worktree only when the rules allow it now (e.g. redone, or work already merged);
+/// otherwise prints nothing extra beyond the verdict line, except for accepted/fixed prints
+/// `worktree .wt/<id> kept until wip/<id> is merged`.
 pub fn clean_on_review(root: &Path, id: &str) {
     let wt_path = root.join(".wt").join(id);
     if !wt_path.exists() {
@@ -575,21 +601,26 @@ pub fn clean_on_review(root: &Path, id: &str) {
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    if let Err(kept_reason) = check_removable(root, id, 7) {
-        if branch_exists {
-            println!("kept .wt/{id} ({kept_reason}); branch {branch_name} kept");
-        } else {
-            println!("kept .wt/{id} ({kept_reason})");
-        }
-        return;
-    }
+    let verdict_path = root.join(".wt").join(format!("{id}.verdict.json"));
+    let verdict_str = std::fs::read_to_string(&verdict_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("verdict")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
 
     let is_res = is_research(root, id);
-    if !is_res && has_uncommitted_changes(&wt_path) {
-        if branch_exists {
-            println!("kept .wt/{id} (uncommitted changes); branch {branch_name} kept");
-        } else {
-            println!("kept .wt/{id} (uncommitted changes)");
+    let removable = match check_removable(root, id, 14) {
+        Ok(_) => is_res || !has_uncommitted_changes(&wt_path),
+        Err(_) => false,
+    };
+
+    if !removable {
+        if verdict_str == "accepted" || verdict_str == "fixed" {
+            println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
         return;
     }
@@ -609,10 +640,8 @@ pub fn clean_on_review(root: &Path, id: &str) {
     };
 
     if !removed_ok {
-        if branch_exists {
-            println!("kept .wt/{id} (worktree remove failed); branch {branch_name} kept");
-        } else {
-            println!("kept .wt/{id} (worktree remove failed)");
+        if verdict_str == "accepted" || verdict_str == "fixed" {
+            println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
         return;
     }

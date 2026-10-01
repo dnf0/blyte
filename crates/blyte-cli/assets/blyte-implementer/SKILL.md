@@ -157,7 +157,7 @@ blyte review T1 --verdict fixed --notes "what you changed"    # merged after a s
 blyte review T1 --verdict redone --notes "why"                # not used; redone or rewritten
 ```
 
-Recording the verdict removes the run's worktree (its branch `wip/<id>` stays until merged), so look at or test the worktree before you record it, and merge from the branch. `blyte clean` removes the rest.
+A run's worktree is removed once its work is merged into the default branch (or it was redone, or 14 days have passed): by the next `blyte dispatch` in the repository or by `blyte clean`. Until then you can still test or fix in it.
 
 If it falls short: fix a trivial issue yourself, or write a follow-up task saying exactly what to
 change and dispatch it (`blyte dispatch T1b follow-up.md --base wip/T1 --gate ...`). If the task was

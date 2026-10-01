@@ -152,7 +152,7 @@ Usage: blyte clean [OPTIONS]
 
 Options:
       --dry-run            Show what would be removed without deleting anything
-      --older-than <DAYS>  Worktrees older than this many days are removable without a verdict (default 7) [default: 7]
+      --older-than <DAYS>  Worktrees older than this many days are removable without a verdict (default 14) [default: 14]
       --all                Clean every repository in the registry
   -h, --help               Print help
 ```

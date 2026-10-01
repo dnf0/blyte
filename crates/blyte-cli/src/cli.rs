@@ -209,8 +209,8 @@ pub struct CleanArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Worktrees older than this many days are removable without a verdict (default 7)
-    #[arg(long, default_value = "7", value_name = "DAYS")]
+    /// Worktrees older than this many days are removable without a verdict (default 14)
+    #[arg(long, default_value = "14", value_name = "DAYS")]
     pub older_than: u64,
 
     /// Clean every repository in the registry
