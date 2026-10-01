@@ -428,6 +428,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "env": env_names,
         "max_turns": max_turns,
         "max_seconds": max_seconds,
+        "plan": args.plan,
+        "plan_task": args.plan_task,
     });
     if args.research {
         start_json["research"] = serde_json::json!(true);

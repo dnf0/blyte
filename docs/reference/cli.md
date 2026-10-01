@@ -108,6 +108,8 @@ Arguments:
 Options:
   -g, --gate <GATE>                The check command; several lines are several steps, all of which must pass
       --tag <TEXT>                 Tag for this dispatch (repeatable)
+      --plan <PATH>                Path to the plan file this dispatch belongs to
+      --plan-task <TEXT>           Plan task this dispatch implements
       --base <BASE>                The commit a new worktree starts from [default: HEAD]
       --research                   Run read-only research: scratch repository, report gate, findings in report.md
       --report-to <PATH>           Copy the finished research report to this path (only with --research)
