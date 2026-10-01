@@ -142,6 +142,10 @@ pub struct Job {
     pub plan_file: Option<String>,
     pub plan_task: Option<String>,
     #[serde(skip)]
+    pub start_plan: Option<String>,
+    #[serde(skip)]
+    pub file_tags: Vec<String>,
+    #[serde(skip)]
     pub verdict_notes: Option<String>,
     #[serde(skip)]
     pub verdict_ts: Option<u64>,
@@ -743,6 +747,66 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     None
                                 };
 
+                                let root = worktree.as_ref().and_then(|wt_str| {
+                                    let p = Path::new(wt_str.trim_end_matches('/'));
+                                    if p.exists() {
+                                        if let Ok(out) = std::process::Command::new("git")
+                                            .args(["rev-parse", "--git-common-dir"])
+                                            .current_dir(p)
+                                            .output()
+                                        {
+                                            if out.status.success() {
+                                                let s = String::from_utf8_lossy(&out.stdout)
+                                                    .trim()
+                                                    .to_string();
+                                                let common = PathBuf::from(s);
+                                                let abs = if common.is_relative() {
+                                                    p.join(common)
+                                                } else {
+                                                    common
+                                                };
+                                                if abs.file_name().and_then(|n| n.to_str())
+                                                    == Some(".git")
+                                                {
+                                                    if let Some(parent) = abs.parent() {
+                                                        return Some(parent.to_path_buf());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if p.parent()
+                                        .and_then(|par| par.file_name())
+                                        .and_then(|n| n.to_str())
+                                        == Some(".wt")
+                                    {
+                                        return p
+                                            .parent()
+                                            .and_then(|par| par.parent())
+                                            .map(Path::to_path_buf);
+                                    }
+                                    if let (Some(par), Some(grandpar)) =
+                                        (p.parent(), p.parent().and_then(|par| par.parent()))
+                                    {
+                                        if par.file_name().and_then(|n| n.to_str())
+                                            == Some("worktrees")
+                                            && grandpar.file_name().and_then(|n| n.to_str())
+                                                == Some(".claude")
+                                        {
+                                            return grandpar.parent().map(Path::to_path_buf);
+                                        }
+                                    }
+                                    if let Some(file_name) = p.file_name().and_then(|n| n.to_str())
+                                    {
+                                        if let Some((base, _)) = file_name.split_once("--") {
+                                            if !base.is_empty() {
+                                                return p.parent().map(|par| par.join(base));
+                                            }
+                                        }
+                                    }
+                                    Some(p.to_path_buf())
+                                });
+
                                 let agy_summary_path = {
                                     let p = repo_path.join(format!("{id}.json"));
                                     if p.is_file() {
@@ -755,7 +819,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                 raw_jobs.push(RawJob {
                                     id: id.clone(),
                                     repo: repo.clone(),
-                                    root: None,
+                                    root,
                                     task,
                                     pid,
                                     started_at,
@@ -815,6 +879,19 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             raw.task.clone()
         };
 
+        let mut file_tags = raw.file_tags.clone();
+        if raw.tags_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&raw.tags_path) {
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
+                    for t in arr {
+                        if !file_tags.contains(&t) {
+                            file_tags.push(t);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut tags = Vec::new();
         tags.push(format!("repo: {}", raw.repo));
         if let Some(ref p) = plan {
@@ -822,20 +899,9 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                 tags.push(format!("plan: {stem}"));
             }
         }
-        for t in raw.file_tags {
-            if !tags.contains(&t) {
-                tags.push(t);
-            }
-        }
-        if raw.tags_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&raw.tags_path) {
-                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
-                    for t in arr {
-                        if !tags.contains(&t) {
-                            tags.push(t);
-                        }
-                    }
-                }
+        for t in &file_tags {
+            if !tags.contains(t) {
+                tags.push(t.clone());
             }
         }
 
@@ -1107,6 +1173,8 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             root: raw.root,
             plan_file,
             plan_task,
+            start_plan: raw.start_plan,
+            file_tags,
             verdict_notes,
             verdict_ts,
             log_mtime: log_info.mtime,
