@@ -157,16 +157,24 @@ fn parse_task_lane(lines: &[&str], files: &[String]) -> String {
 }
 
 pub fn parse_plan(text: &str) -> PlanDoc {
-    let mut title = String::new();
-    let mut in_code_fence = false;
+    let mut lines = Vec::new();
+    let mut in_fence = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("```") {
-            in_code_fence = !in_code_fence;
+            in_fence = !in_fence;
             continue;
         }
-        if !in_code_fence && trimmed.starts_with("# ") {
-            let t = trimmed["# ".len()..].trim();
+        if !in_fence {
+            lines.push(line);
+        }
+    }
+
+    let mut title = String::new();
+    for line in &lines {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            let t = rest.trim();
             let t = t
                 .strip_suffix(" — Plan")
                 .or_else(|| t.strip_suffix(" – Plan"))
@@ -183,19 +191,10 @@ pub fn parse_plan(text: &str) -> PlanDoc {
         line_idx: usize,
     }
 
-    let lines: Vec<&str> = text.lines().collect();
     let mut headings = Vec::new();
-    in_code_fence = false;
 
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_fence = !in_code_fence;
-            continue;
-        }
-        if in_code_fence {
-            continue;
-        }
         let hashes = trimmed.chars().take_while(|&c| c == '#').count();
         if (1..=4).contains(&hashes) {
             let after = &trimmed[hashes..];
@@ -226,26 +225,42 @@ pub fn parse_plan(text: &str) -> PlanDoc {
             if let Some(after_task) = h.text.strip_prefix("Task ") {
                 if let Some((n_part, title_part)) = after_task.split_once(':') {
                     let n = n_part.trim();
-                    let task_title = title_part.trim();
-                    if !n.is_empty() && !task_title.is_empty() {
-                        let id = if n.chars().all(|c| c.is_ascii_digit()) {
-                            format!("T{n}")
+                    let (first_word, rest_of_n) = match n.split_once(char::is_whitespace) {
+                        Some((w, r)) => (w, r.trim()),
+                        None => (n, ""),
+                    };
+                    if !first_word.is_empty() {
+                        let id = if first_word.chars().all(|c| c.is_ascii_digit()) {
+                            format!("T{first_word}")
                         } else {
-                            n.to_string()
+                            first_word.to_string()
                         };
-                        let heading = h.text.clone();
-                        let deps = parse_task_deps(section_lines);
-                        let files = parse_task_files(section_lines);
-                        let lane = parse_task_lane(section_lines, &files);
 
-                        tasks.push(PlanTask {
-                            id,
-                            title: task_title.to_string(),
-                            heading,
-                            deps,
-                            lane,
-                            files,
-                        });
+                        let raw_title = if rest_of_n.is_empty() {
+                            title_part.trim().to_string()
+                        } else if title_part.trim().is_empty() {
+                            rest_of_n.to_string()
+                        } else {
+                            format!("{rest_of_n} {}", title_part.trim())
+                        };
+
+                        let task_title = raw_title.replace('`', "").trim().to_string();
+
+                        if !task_title.is_empty() {
+                            let heading = h.text.clone();
+                            let deps = parse_task_deps(section_lines);
+                            let files = parse_task_files(section_lines);
+                            let lane = parse_task_lane(section_lines, &files);
+
+                            tasks.push(PlanTask {
+                                id,
+                                title: task_title,
+                                heading,
+                                deps,
+                                lane,
+                                files,
+                            });
+                        }
                     }
                 }
             }
@@ -276,7 +291,14 @@ fn matches_task(task: &PlanTask, pt: &str) -> bool {
     if pt.is_empty() {
         return false;
     }
-    if pt == task.heading || pt == task.title || pt == task.id {
+    let pt_clean = pt.replace('`', "");
+    let heading_clean = task.heading.replace('`', "");
+    if pt == task.heading
+        || pt == task.title
+        || pt == task.id
+        || pt_clean == task.title
+        || pt_clean == heading_clean
+    {
         return true;
     }
     if let Some(after_task) = task.heading.strip_prefix("Task ") {
@@ -289,6 +311,13 @@ fn matches_task(task: &PlanTask, pt: &str) -> bool {
             if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
                 return true;
             }
+        }
+    }
+    let id_num = task.id.strip_prefix('T').unwrap_or(&task.id);
+    let id_prefix = format!("Task {id_num}");
+    if let Some(rest) = pt.strip_prefix(&id_prefix) {
+        if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
+            return true;
         }
     }
     false
@@ -539,31 +568,53 @@ fn read_plan_content(
 }
 
 fn is_merged(job: &Job, root: &Path) -> bool {
-    let Some(last_commit) = job.commits.last() else {
-        return false;
-    };
-    let Ok(output) = std::process::Command::new("git")
-        .args([
-            "branch",
-            "--contains",
-            &last_commit.sha,
-            "--format=%(refname:short)",
-        ])
-        .current_dir(root)
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
+    let mut merged_by_branch = false;
+    if let Some(last_commit) = job.commits.last() {
+        if let Ok(output) = std::process::Command::new("git")
+            .args([
+                "branch",
+                "--contains",
+                &last_commit.sha,
+                "--format=%(refname:short)",
+            ])
+            .current_dir(root)
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let b = line.trim();
+                    if !b.is_empty() && !b.starts_with("wip/") && !b.starts_with('(') {
+                        merged_by_branch = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let b = line.trim();
-        if !b.is_empty() && !b.starts_with("wip/") && !b.starts_with('(') {
+    if merged_by_branch {
+        return true;
+    }
+
+    let is_accepted_or_fixed = job
+        .verdict
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("accepted") || v.eq_ignore_ascii_case("fixed"));
+
+    if is_accepted_or_fixed && !job.id.is_empty() {
+        let branch_ref = format!("refs/heads/wip/{}", job.id);
+        let Ok(output) = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &branch_ref])
+            .current_dir(root)
+            .output()
+        else {
+            return false;
+        };
+        if !output.status.success() {
             return true;
         }
     }
+
     false
 }
 
