@@ -194,6 +194,8 @@ cost, per-call token usage, where the time went, gate failures and the security 
 blyte is built to be dispatched: one task per run, in its own worktree, with a gate and a report,
 reviewed and merged by whoever dispatched it. [blyte as your implementer](orchestration.md)
 describes the pattern, `blyte dispatch` and `blyte review`, and the Claude Code skill.
+`--plan <path>` and `--plan-task <text>` record which plan task the dispatch implements, so the
+dashboard can show plans.
 
 ### Recording a verdict
 

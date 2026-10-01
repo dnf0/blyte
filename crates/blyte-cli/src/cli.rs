@@ -98,6 +98,14 @@ pub struct DispatchArgs {
     #[arg(long = "tag", value_name = "TEXT")]
     pub tags: Vec<String>,
 
+    /// Path to the plan file this dispatch belongs to
+    #[arg(long, value_name = "PATH")]
+    pub plan: Option<String>,
+
+    /// Plan task this dispatch implements
+    #[arg(long, value_name = "TEXT")]
+    pub plan_task: Option<String>,
+
     /// The commit a new worktree starts from
     #[arg(long, default_value = "HEAD")]
     pub base: String,
