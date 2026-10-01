@@ -153,11 +153,19 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     let model = args.model.as_ref().or(dispatch_cfg.model.as_ref());
-    let max_seconds = args
-        .max_seconds
-        .or(dispatch_cfg.max_seconds)
-        .unwrap_or(3600);
-    let max_turns = args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300);
+    let (max_seconds, max_turns) = if args.research {
+        (
+            args.max_seconds.unwrap_or(1800),
+            args.max_turns.unwrap_or(80),
+        )
+    } else {
+        (
+            args.max_seconds
+                .or(dispatch_cfg.max_seconds)
+                .unwrap_or(3600),
+            args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300),
+        )
+    };
     let max_cost = args.max_cost_usd.or(dispatch_cfg.max_cost);
     let fold_budget = args.fold_budget.or(dispatch_cfg.fold_budget);
     let network = args
@@ -413,6 +421,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "gate": gate,
         "tags": tags,
         "env": env_names,
+        "max_turns": max_turns,
+        "max_seconds": max_seconds,
     });
     if args.research {
         start_json["research"] = serde_json::json!(true);
