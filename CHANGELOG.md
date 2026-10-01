@@ -1,3 +1,9 @@
+## v0.11.1 (2026-10-01)
+
+### Fix
+
+- gate slots stop eating deadlines, failing tests survive the output cut, Plans shows the run that counts (#206)
+
 ## v0.11.0 (2026-10-01)
 
 ### Feat
