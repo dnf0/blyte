@@ -143,6 +143,8 @@ You do not need to re-run the gate: it ran the repository's checks and they pass
 verbatim) when the gate failed or the budget ran out, when the change is risky (security, data
 handling, migrations, a public interface), or when the diff surprises you.
 
+- `blocked` means the check already fails at the base commit, so the task cannot pass until that is fixed: confirm it, then fix the base (or tell the user) before redispatching, rather than redispatching as it is.
+
 **Record your verdict** once you have checked it, so the repository keeps an honest record of
 how blyte does:
 
