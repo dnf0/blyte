@@ -1,0 +1,327 @@
+<title>blyte Plan View</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --page: #ECEFF0; --card: #F4F6F7; --line: #C9D0D4; --line-2: #B3BCC1;
+  --text: #2A3238; --strong: #141A1E; --muted: #56616A; --faint: #8A959C;
+  --rust: #A6441A; --rust-soft: #E8C8B7; --pass: #2E7A4D; --pass-soft: #CFE3D6;
+  --fail: #A93A36; --fail-soft: #F0D3D1; --amber: #8A6A12; --amber-soft: #EFE3BF; --merged: #3E6D64; --merged-soft: #C3D6D1; --lane: #E6EAEC;
+  --sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0F1315; --card: #171D20; --line: #283136; --line-2: #36414A;
+    --text: #C9D1D5; --strong: #E2E7E9; --muted: #93A0A7; --faint: #5F6C73;
+    --rust: #E27A44; --rust-soft: #4A2B1D; --pass: #6CC08E; --pass-soft: #1E3428;
+    --fail: #E27B76; --fail-soft: #3A2120; --amber: #D9B45A; --amber-soft: #3A3218; --merged: #7FB2A6; --merged-soft: #1F3431; --lane: #131A1D;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0F1315; --card: #171D20; --line: #283136; --line-2: #36414A;
+  --text: #C9D1D5; --strong: #E2E7E9; --muted: #93A0A7; --faint: #5F6C73;
+  --rust: #E27A44; --rust-soft: #4A2B1D; --pass: #6CC08E; --pass-soft: #1E3428;
+  --fail: #E27B76; --fail-soft: #3A2120; --amber: #D9B45A; --amber-soft: #3A3218; --merged: #7FB2A6; --merged-soft: #1F3431; --lane: #131A1D;
+}
+* { box-sizing: border-box; }
+body { background: var(--page); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.45; padding-inline: 20px; padding-block: 28px 56px; }
+.wrap { max-width: 1240px; margin: 0 auto; display: grid; gap: 18px; }
+.mono { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header, like the dashboard */
+header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand svg { width: 22px; height: 22px; }
+.m-i { fill: var(--strong); } .m-s { fill: var(--rust-soft); } .m-r { fill: var(--rust); }
+.word { font-weight: 900; font-variation-settings: "wdth" 125; letter-spacing: -.02em; font-size: 20px; color: var(--strong); }
+.sub { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.tabs { display: flex; gap: 6px; }
+.tab { font-family: var(--mono); font-size: 12px; padding: 6px 12px; border: 1px solid var(--line-2); border-radius: 4px; color: var(--muted); background: transparent; }
+.tab.on { background: var(--rust-soft); border-color: var(--rust-soft); color: var(--strong); }
+.example { font-family: var(--mono); font-size: 11px; color: var(--amber); border: 1px dashed var(--amber); border-radius: 3px; padding: 3px 8px; }
+
+/* plan picker */
+.picker { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.picker .lbl { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
+.chip { font-family: var(--mono); font-size: 12px; padding: 4px 10px; border-radius: 3px; border: 1px solid var(--line-2); color: var(--text); background: var(--card); }
+.chip.on { border-color: var(--rust); color: var(--strong); box-shadow: inset 0 0 0 1px var(--rust); }
+.chip small { color: var(--muted); margin-left: 6px; }
+
+/* plan summary */
+.plan { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; display: grid; gap: 14px; }
+.plan h1 { margin: 0; font-size: 22px; font-weight: 800; font-variation-settings: "wdth" 112; letter-spacing: -.01em; color: var(--strong); text-wrap: balance; }
+.plan .path { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.stats { display: flex; flex-wrap: wrap; gap: 26px; }
+.stat b { display: block; font-size: 20px; font-weight: 800; color: var(--strong); font-variant-numeric: tabular-nums; }
+.stat span { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.bar { height: 8px; border-radius: 4px; background: var(--line); display: flex; overflow: hidden; }
+.bar i { display: block; height: 100%; }
+
+/* main grid */
+.main { display: grid; }
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; min-width: 0; }
+.panel h2 { margin: 0 0 12px; font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.flow { overflow-x: auto; }
+.flow svg { display: block; }
+.flow-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; margin-bottom: 10px; }
+.flow-head h2 { margin: 0; }
+.node { cursor: pointer; outline: none; }
+.node:hover .node-box { filter: brightness(0.97); }
+.node:focus-visible .node-box { stroke: var(--rust); stroke-width: 3; }
+.node text { font-family: var(--sans); }
+.edge { fill: none; stroke: var(--line-2); stroke-width: 1.5; }
+.edge.done { stroke: var(--merged); opacity: .55; }
+.edge.hot { stroke: var(--rust); stroke-width: 2.2; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.pulse { animation: pulse 1.6s ease-in-out infinite; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; border: 1.5px solid var(--c); background: var(--c-soft); }
+.legend i.dash { border-style: dashed; }
+
+/* detail */
+.detail { display: grid; gap: 12px; }
+.detail .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.detail h3 { margin: 0; font-size: 16px; font-weight: 700; color: var(--strong); text-wrap: balance; }
+.pill { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 3px; white-space: nowrap; color: var(--strong); background: var(--c-soft); border: 1px solid var(--c); }
+.kv { display: grid; grid-template-columns: 7.5rem 1fr; gap: 6px 12px; font-size: 13px; }
+.kv dt { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding-top: 2px; }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.kv ul { margin: 0; padding-left: 16px; font-family: var(--mono); font-size: 12px; }
+.note { font-size: 13px; background: var(--page); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; }
+.note b { font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); display: block; margin-bottom: 4px; }
+
+/* lower */
+.lower { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 18px; align-items: start; }
+.side { display: grid; gap: 18px; min-width: 0; }
+.events { list-style: none; margin: 0; padding: 0; display: grid; }
+.events li { display: grid; grid-template-columns: 3.2rem 2.4rem 1fr; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.events li:first-child { border-top: 0; }
+.events time { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.events .t { font-family: var(--mono); font-size: 12px; color: var(--strong); }
+.events li.sel .t { color: var(--rust); }
+.decisions { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.decisions li { font-size: 13px; border-left: 3px solid var(--line-2); padding-left: 10px; }
+.decisions li small { display: block; font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+.foot { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+@media (max-width: 860px) {
+  .main, .lower { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .kv { grid-template-columns: 1fr; }
+  .events li { grid-template-columns: 3rem 1fr; }
+  .events li .t { grid-column: 2; }
+  .events li span:last-child { grid-column: 1 / -1; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 100 100" aria-hidden="true"><rect class="m-i" x="10" y="10" width="24" height="24" rx="3"/><rect class="m-i" x="38" y="10" width="24" height="24" rx="3"/><rect class="m-i" x="66" y="10" width="24" height="24" rx="3"/><rect class="m-i" x="10" y="38" width="24" height="24" rx="3"/><rect class="m-s" x="38" y="38" width="24" height="24" rx="3"/><rect class="m-r" x="66" y="38" width="24" height="24" rx="3"/><rect class="m-i" x="10" y="66" width="24" height="24" rx="3"/><rect class="m-r" x="38" y="66" width="24" height="24" rx="3"/><rect class="m-r" x="66" y="66" width="24" height="24" rx="3"/></svg>
+      <span class="word">blyte</span><span class="sub">dashboard · this machine</span>
+    </div>
+    <div class="tabs" role="tablist" aria-label="View">
+      <span class="tab" role="tab" aria-selected="false">Jobs</span>
+      <span class="tab on" role="tab" aria-selected="true">Plans</span>
+    </div>
+    <span class="example">Mock-up · example data from the 30 Sept dashboard plan, shown mid-run</span>
+  </header>
+
+  <div class="picker" aria-label="Plans">
+    <span class="lbl">Plans</span>
+    <span class="chip on">blyte-dashboard<small>blyte · 1 of 5</small></span>
+    <span class="chip">blyte-owns-dispatch<small>blyte · done</small></span>
+    <span class="chip">regions-from-pigeonhole<small>provision · 1 running</small></span>
+    <span class="chip">store-lineage-from-hazard-sources<small>climate-x-data-platform · done</small></span>
+  </div>
+
+  <section class="plan" aria-label="Plan summary">
+    <div>
+      <h1>blyte dashboard: what blyte is working on</h1>
+      <div class="path">blyte · docs/superpowers/plans/2026-09-30-blyte-dashboard.md</div>
+    </div>
+    <div class="bar" id="bar" aria-hidden="true"></div>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <div class="main">
+    <section class="panel" aria-label="Plan flow">
+      <div class="flow-head"><h2>Flow · lanes are areas of the code, columns are dependency order</h2><div class="legend" id="legend"></div></div>
+      <div class="flow" id="flow"></div>
+    </section>
+  </div>
+
+  <div class="lower">
+    <section class="panel detail" id="detail" aria-live="polite" aria-label="Selected task"></section>
+    <div class="side">
+      <section class="panel" aria-label="Activity">
+        <h2>Activity · this plan, newest first</h2>
+        <ol class="events" id="events"></ol>
+      </section>
+      <section class="panel" aria-label="Decisions">
+        <h2>Decisions · from verdict notes and the plan</h2>
+        <ul class="decisions" id="decisions"></ul>
+      </section>
+    </div>
+  </div>
+
+  <div class="foot">Everything here would come from files blyte already writes: the plan's <code>Depends on:</code> lines, each dispatch's start, summary and report, and <code>blyte review --verdict</code>. Nothing for the orchestrator to update; local only.</div>
+</div>
+
+<script>
+(function () {
+  var LANES = [
+    { id: "agent", label: "Agent loop" },
+    { id: "server", label: "Collector & server" },
+    { id: "page", label: "Page" }
+  ];
+  var TASKS = [
+    { id: "D1", lane: "agent", key: "D1-gate-start-blyte", title: "A gate-start event, logged as Gate running", deps: [], state: "merged",
+      time: "4m 44s", cost: 0.30, turns: 36, gates: "1 of 1 passed", files: ["crates/blyte-agent/src/run.rs", "crates/blyte-cli/src/repl.rs", "crates/blyte-cli/tests/test_repl_commands.rs"],
+      commit: "db34b44 feat(agent): a gate-start event, logged as “⏳ Gate running”", verdict: "accepted",
+      notes: "To plan. Moved the Event import to the top of the test file because the plan wrongly said it was already there." },
+    { id: "D2", lane: "server", key: "D2-dashboard-server-blyte", title: "The server, the job collector and --tag", deps: [], state: "verified",
+      time: "8m 55s", cost: 1.02, turns: 67, gates: "1 of 1 passed", files: ["crates/blyte-cli/src/dashboard.rs", "crates/blyte-cli/src/cli.rs", "crates/blyte-cli/src/dispatch.rs", "crates/blyte-cli/tests/test_dashboard.rs", "docs/usage.md"],
+      commit: "cb551ac feat(cli): blyte dashboard serves running and recent jobs locally", verdict: null,
+      waiting: "Verified; no review yet. Review it (blyte review D2-dashboard-server-blyte --diff), merge, then record the verdict. D4 starts as soon as D2 and D3 are merged." },
+    { id: "D3", lane: "page", key: "D3-dashboard-page-blyte", title: "The page: rows, tags, details, live polling", deps: [], state: "running",
+      time: "6m 10s", cost: 0.41, turns: 19, gates: "gate running, attempt 1", now: "⏳ Gate running (attempt 1)",
+      files: ["crates/blyte-cli/assets/dashboard/index.html", "crates/blyte-cli/tests/test_dashboard_page.rs"], commit: null, verdict: null },
+    { id: "D4", lane: "server", key: "D4-dashboard-live-fixes", title: "Fixes from the first live run: reused PIDs, agy summaries", deps: ["D2", "D3"], state: "waiting",
+      files: ["crates/blyte-cli/src/dashboard.rs", "crates/blyte-cli/assets/dashboard/index.html"], commit: null, verdict: null },
+    { id: "D5", lane: "page", key: "D5-dashboard-polish", title: "Polish: the plan's task section, plain summaries", deps: ["D4"], state: "waiting",
+      files: ["crates/blyte-cli/src/dashboard.rs", "crates/blyte-cli/assets/dashboard/index.html"], commit: null, verdict: null }
+  ];
+  var EVENTS = [
+    ["13:12", "D3", "gate started (attempt 1)"],
+    ["13:09", "D2", "verified: gate passed on the first attempt"],
+    ["13:05", "D1", "merged into feat/blyte-dashboard · verdict accepted"],
+    ["13:04", "D1", "verified: gate passed on the first attempt"],
+    ["13:00", "D1", "dispatched"],
+    ["13:00", "D2", "dispatched"],
+    ["13:00", "D3", "dispatched"]
+  ];
+  var DECISIONS = [
+    ["D1, D2 and D3 run at once: they touch different files (the agent loop, the collector, the page).", "plan · Depends on"],
+    ["The page loads nothing from the network: fonts and icons are served by the dashboard itself.", "plan · Task 3"],
+    ["The plan said the test file already imported Event; it did not. D1's fix was right.", "D1 verdict note"]
+  ];
+  var STATUS = {
+    merged:   { label: "Merged",            c: "merged", bg: "merged-soft" },
+    verified: { label: "Verified · review", c: "pass", bg: "pass-soft" },
+    running:  { label: "Running",           c: "rust",   bg: "rust-soft" },
+    failed:   { label: "Gate failed",       c: "fail",   bg: "fail-soft" },
+    ready:    { label: "Ready to dispatch", c: "amber",  bg: "amber-soft" },
+    waiting:  { label: "Waiting",           c: "faint",  bg: "page", dash: true }
+  };
+  var ORDER = ["merged", "verified", "running", "failed", "ready", "waiting"];
+  var byId = {}; TASKS.forEach(function (t) { byId[t.id] = t; });
+  // A waiting task whose dependencies have all merged is ready to dispatch.
+  function shown(t) { return t.state === "waiting" && t.deps.every(function (d) { return byId[d].state === "merged"; }) ? "ready" : t.state; }
+  var selected = "D3";
+  function el(id) { return document.getElementById(id); }
+  function esc(x) { return String(x).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function v(name) { return "var(--" + name + ")"; }
+
+  el("legend").innerHTML = ORDER.map(function (k) { var m = STATUS[k]; return '<span><i class="' + (m.dash ? "dash" : "") + '" style="--c:' + v(m.c) + ';--c-soft:' + v(m.bg) + '"></i>' + m.label + '</span>'; }).join("");
+
+  // summary
+  var counts = {}; ORDER.forEach(function (k) { counts[k] = 0; });
+  var cost = 0; TASKS.forEach(function (t) { counts[shown(t)]++; cost += t.cost || 0; });
+  el("bar").innerHTML = ORDER.filter(function (k) { return counts[k]; }).map(function (k) {
+    return '<i style="width:' + (100 * counts[k] / TASKS.length) + '%;background:' + v(STATUS[k].c) + (k === "waiting" ? ';opacity:.45' : '') + '"></i>'; }).join("");
+  el("stats").innerHTML = [
+    [counts.merged + " of " + TASKS.length, "merged"], [String(counts.verified), "verified, waiting for review"], [String(counts.running), "running"],
+    [String(counts.waiting + counts.ready), "not started"], ["$" + cost.toFixed(2), "Gemini so far"], ["3", "ran at once, at most"]
+  ].map(function (x) { return '<div class="stat"><b class="num">' + x[0] + '</b><span>' + x[1] + '</span></div>'; }).join("");
+
+  function depth(id, memo) { if (memo[id] != null) return memo[id]; memo[id] = 0; var dd = 0; byId[id].deps.forEach(function (d) { dd = Math.max(dd, depth(d, memo) + 1); }); return (memo[id] = dd); }
+  function wrapText(text, n) { var w = String(text).split(" "), lines = [""]; w.forEach(function (x) { var l = lines[lines.length - 1]; if (l && (l + " " + x).length > n) lines.push(x); else lines[lines.length - 1] = (l ? l + " " : "") + x; }); if (lines.length > 2) { lines = lines.slice(0, 2); lines[1] = lines[1].replace(/\W*$/, "") + "…"; } return lines; }
+
+  function drawFlow() {
+    var NW = 196, NH = 72, CG = 56, RG = 14, LANE_W = 150, PADY = 14, LANE_GAP = 6;
+    var memo = {}, col = {}, maxCol = 0;
+    TASKS.forEach(function (t) { col[t.id] = depth(t.id, memo); maxCol = Math.max(maxCol, col[t.id]); });
+    var pos = {}, laneY = {}, y = 0;
+    LANES.forEach(function (lane) {
+      var inLane = TASKS.filter(function (t) { return t.lane === lane.id; });
+      var stack = {}, most = 1;
+      inLane.forEach(function (t) { stack[col[t.id]] = (stack[col[t.id]] || 0) + 1; most = Math.max(most, stack[col[t.id]]); });
+      var h = PADY * 2 + most * NH + (most - 1) * RG, placed = {};
+      laneY[lane.id] = { y: y, h: h };
+      inLane.forEach(function (t) { var c = col[t.id], k = placed[c] || 0; placed[c] = k + 1; pos[t.id] = { x: LANE_W + 16 + c * (NW + CG), y: y + PADY + k * (NH + RG) }; });
+      y += h + LANE_GAP;
+    });
+    var W = Math.max(LANE_W + 16 + (maxCol + 1) * (NW + CG) - CG + 16, el("flow").clientWidth || 0), H = y - LANE_GAP;
+    var sv = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" role="img" aria-label="Plan flow: ' + TASKS.length + ' tasks in ' + LANES.length + ' lanes; arrows run from each task to the tasks that wait on it.">';
+    sv += '<defs>' + [["a", "line-2"], ["h", "rust"], ["d", "merged"]].map(function (m) {
+      return '<marker id="arr-' + m[0] + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="' + v(m[1]) + '"/></marker>'; }).join("") + '</defs>';
+    LANES.forEach(function (lane) {
+      var ly = laneY[lane.id];
+      sv += '<rect x="0" y="' + ly.y + '" width="' + W + '" height="' + ly.h + '" rx="4" fill="' + v("lane") + '"/>';
+      sv += '<text x="14" y="' + (ly.y + 24) + '" fill="' + v("muted") + '" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11" letter-spacing="0.06em">' + esc(lane.label.toUpperCase()) + '</text>';
+    });
+    var hot = {}, sel = byId[selected];
+    sel.deps.forEach(function (d) { hot[d + ">" + sel.id] = 1; });
+    TASKS.forEach(function (t) { if (t.deps.indexOf(sel.id) >= 0) hot[sel.id + ">" + t.id] = 1; });
+    TASKS.forEach(function (t) { t.deps.forEach(function (d) {
+      var a = pos[d], b = pos[t.id], x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x - 3, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
+      var isHot = hot[d + ">" + t.id], done = byId[d].state === "merged" && t.state === "merged";
+      sv += '<path class="edge' + (isHot ? " hot" : done ? " done" : "") + '" d="M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2 + '" marker-end="url(#arr-' + (isHot ? "h" : done ? "d" : "a") + ')"/>';
+    }); });
+    TASKS.forEach(function (t) {
+      var p = pos[t.id], st = shown(t), m = STATUS[st], isSel = t.id === selected;
+      sv += '<g class="node' + (isSel ? " sel" : "") + '" data-id="' + t.id + '" tabindex="0" role="button" aria-pressed="' + isSel + '" aria-label="' + esc(t.id + ": " + t.title + ", " + m.label) + '" transform="translate(' + p.x + ',' + p.y + ')">';
+      sv += '<rect class="node-box" width="' + NW + '" height="' + NH + '" rx="6" fill="' + v(m.bg) + '" stroke="' + v(isSel ? "rust" : m.c) + '" stroke-width="' + (isSel ? 2.5 : 1.5) + '"' + (m.dash ? ' stroke-dasharray="4 3"' : '') + '/>';
+      sv += '<rect width="4" height="' + NH + '" rx="2" fill="' + v(m.c) + '"/>';
+      sv += '<text x="14" y="20" fill="' + v(m.c === "faint" ? "muted" : m.c) + '" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11.5" font-weight="500">' + t.id + '</text>';
+      sv += '<circle' + (st === "running" ? ' class="pulse"' : '') + ' cx="' + (NW - 14) + '" cy="16" r="4.5" fill="' + v(m.c) + '"/>';
+      wrapText(t.title, 27).forEach(function (line, i) { sv += '<text x="14" y="' + (40 + i * 16) + '" fill="' + v("strong") + '" font-size="12.5" font-weight="500">' + esc(line) + '</text>'; });
+      sv += '</g>';
+    });
+    var host = el("flow"), left = host.scrollLeft;
+    host.innerHTML = sv + '</svg>';
+    host.scrollLeft = left;
+  }
+
+  function chips(ids) { return ids.map(function (id) { return '<span class="chip" style="padding:1px 6px">' + id + '</span>'; }).join(" "); }
+  function drawDetail() {
+    var t = byId[selected], st = shown(t), m = STATUS[st];
+    var waits = TASKS.filter(function (x) { return x.deps.indexOf(t.id) >= 0; }).map(function (x) { return x.id; });
+    var h = '<h2>Selected task</h2><div class="top"><h3>' + esc(t.id + " · " + t.title) + '</h3><span class="pill" style="--c:' + v(m.c) + ';--c-soft:' + v(m.bg) + '">' + m.label + '</span></div>';
+    h += '<dl class="kv">';
+    h += '<dt>Dispatch</dt><dd class="mono">' + esc(t.key) + '</dd>';
+    h += '<dt>Lane</dt><dd>' + esc(LANES.filter(function (l) { return l.id === t.lane; })[0].label) + '</dd>';
+    h += '<dt>Waits on</dt><dd>' + (t.deps.length ? chips(t.deps) : "nothing") + '</dd>';
+    h += '<dt>Unblocks</dt><dd>' + (waits.length ? chips(waits) : "nothing") + '</dd>';
+    if (t.now) h += '<dt>Now</dt><dd class="mono">' + esc(t.now) + '</dd>';
+    if (t.gates) h += '<dt>Gate</dt><dd>' + esc(t.gates) + '</dd>';
+    if (t.time) h += '<dt>Time · cost</dt><dd class="num">' + t.time + ' · $' + t.cost.toFixed(2) + ' · ' + t.turns + ' turns</dd>';
+    h += '<dt>Files</dt><dd><ul>' + t.files.map(function (f) { return '<li>' + esc(f) + '</li>'; }).join("") + '</ul></dd>';
+    h += '<dt>Commit</dt><dd class="mono">' + (t.commit ? esc(t.commit) : "not yet") + '</dd>';
+    h += '<dt>Verdict</dt><dd>' + (t.verdict ? esc(t.verdict) : "none yet") + '</dd>';
+    h += '</dl>';
+    if (t.notes) h += '<div class="note"><b>Reviewer’s note</b>' + esc(t.notes) + '</div>';
+    if (t.waiting) h += '<div class="note"><b>Next</b>' + esc(t.waiting) + '</div>';
+    if (st === "waiting") h += '<div class="note"><b>Next</b>Starts when ' + t.deps.filter(function (d) { return byId[d].state !== "merged"; }).join(" and ") + ' ' + (t.deps.filter(function (d) { return byId[d].state !== "merged"; }).length > 1 ? "are" : "is") + ' merged.</div>';
+    el("detail").innerHTML = h;
+  }
+  function drawLists() {
+    el("events").innerHTML = EVENTS.map(function (e) { return '<li class="' + (e[1] === selected ? "sel" : "") + '"><time>' + e[0] + '</time><span class="t">' + e[1] + '</span><span>' + esc(e[2]) + '</span></li>'; }).join("");
+    el("decisions").innerHTML = DECISIONS.map(function (x) { return '<li>' + esc(x[0]) + '<small>' + esc(x[1]) + '</small></li>'; }).join("");
+  }
+  function render() { drawFlow(); drawDetail(); drawLists(); }
+  function pick(target) { var g = target.closest && target.closest(".node"); if (!g) return; selected = g.getAttribute("data-id"); render(); var n = document.querySelector('.node[data-id="' + selected + '"]'); if (n) n.focus(); }
+  el("flow").addEventListener("click", function (e) { pick(e.target); });
+  el("flow").addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(e.target); } });
+  render();
+  window.addEventListener("resize", function () { drawFlow(); });
+})();
+</script>
