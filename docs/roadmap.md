@@ -15,8 +15,6 @@ Nothing at the moment; see Next.
 - **A shared Cargo build directory for worktrees**, measured first: each `.wt/<id>` compiles the
   workspace from scratch. Needs a sandbox allowance for that directory, and parallel dispatches
   would queue on cargo's lock.
-- **Research inside blyte** (`blyte dispatch --research`), replacing the operator's local
-  `research.sh` wrapper (read-only runs in a scratch directory, gate "report.md exists").
 - **Codex as the planner, step 2 (2026-09-30).** Step 1, the end-to-end smoke test, passed (#164).
   Next: a Codex driver in the eval's offload arm, to compare Codex + blyte with Claude Code + blyte
   on the same task. Uses the ChatGPT plan's Codex allowance; ask before running. The first katex
@@ -30,6 +28,11 @@ Nothing at the moment; see Next.
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-10-01**
+  - `blyte dispatch --research`: read-only research as a dispatch (a scratch workspace under `.wt/`,
+    gate "report.md written", the report copied beside the run), so it gets the registry, status,
+    dashboard and review like any dispatch; the skill says when to use it. Run reports record the
+    model's effort level (`effort`), which `model_id` hides.
+  - The dashboard names a dispatch after its repository, not its worktree's folder (v0.7.8).
   - Dispatch rules tell the model not to run the full suite itself (v0.7.6): tools time had risen
     from a median of 44 s to 198 s after the switch to plain `blyte dispatch`.
   - The running dashboard sees repositories registered after it started; `blyte init` recognises

@@ -166,6 +166,22 @@ first (`git -C .wt/T2 rebase <branch>`), re-run its gate in the worktree, then m
 last merge, run the full check once more on the merged branch. Push or open a pull request only if
 the user asks.
 
+## Read-only research
+
+A question that would otherwise take many file reads of your own (how something works, where
+something is used, what a change would break) can go to blyte too, so the reading costs the cheaper
+model. Write the question to a file, saying what the answer must contain (paths with line numbers, a
+table, a recommendation), and from the repository:
+
+```bash
+blyte dispatch R1 /abs/question-R1.md --research --max-turns 80
+```
+
+blyte works in a scratch directory under `.wt/R1`, reads the repository by absolute path, and cannot
+change it; the run passes when it has written a report, copied to `.wt/R1.report.md` (and to
+`--report-to <path>`). Keep the budget tight: research that does not converge in about 80 turns is
+not going to. Check any claim you will act on against the code it cites.
+
 ## Rules
 
 - One task per dispatch; never hand over a whole plan.
