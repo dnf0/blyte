@@ -1,3 +1,9 @@
+## v0.9.0 (2026-10-01)
+
+### Feat
+
+- **cli**: research budget, update refreshes every skill copy, review flags outside reads (#200)
+
 ## v0.8.0 (2026-10-01)
 
 ### Feat
