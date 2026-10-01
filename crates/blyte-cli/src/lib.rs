@@ -4,6 +4,7 @@ pub mod dashboard;
 pub mod dispatch;
 pub mod env_file;
 pub mod init;
+pub mod plans;
 pub mod registry;
 pub mod repl;
 pub mod report;
