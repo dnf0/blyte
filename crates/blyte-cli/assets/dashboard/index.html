@@ -1723,7 +1723,11 @@
         gateText = t.gates;
       } else if (t.gate_attempts != null && t.gate_attempts > 0) {
         if (st === "merged" || st === "verified") {
-          gateText = t.gate_attempts + " of " + t.gate_attempts + " passed";
+          if (t.gate_attempts === 1) {
+            gateText = "passed on the first attempt";
+          } else {
+            gateText = "passed on attempt " + t.gate_attempts + " (" + (t.gate_attempts - 1) + " failed)";
+          }
         } else {
           gateText = t.gate_attempts + (t.gate_attempts === 1 ? " attempt" : " attempts");
         }

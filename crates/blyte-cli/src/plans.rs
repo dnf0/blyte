@@ -618,6 +618,47 @@ fn is_merged(job: &Job, root: &Path) -> bool {
     false
 }
 
+fn choose_task_job<'a>(jobs: &[&'a Job], root: &Path) -> Option<&'a Job> {
+    // 1. a job that is running (the latest running one);
+    if let Some(j) = jobs
+        .iter()
+        .copied()
+        .filter(|j| j.status == "running")
+        .max_by_key(|j| j.started_at.unwrap_or(0))
+    {
+        return Some(j);
+    }
+
+    // 2. else a verified job for which is_merged(job, &root) is true (the latest such one);
+    if let Some(j) = jobs
+        .iter()
+        .copied()
+        .filter(|j| j.status == "verified" && is_merged(j, root))
+        .max_by_key(|j| j.started_at.unwrap_or(0))
+    {
+        return Some(j);
+    }
+
+    // 3. else a job whose verdict is accepted or fixed (the latest such one);
+    if let Some(j) = jobs
+        .iter()
+        .copied()
+        .filter(|j| {
+            j.verdict.as_deref().is_some_and(|v| {
+                v.eq_ignore_ascii_case("accepted") || v.eq_ignore_ascii_case("fixed")
+            })
+        })
+        .max_by_key(|j| j.started_at.unwrap_or(0))
+    {
+        return Some(j);
+    }
+
+    // 4. else the latest job, as today.
+    jobs.iter()
+        .copied()
+        .max_by_key(|j| j.started_at.unwrap_or(0))
+}
+
 struct PlanItem {
     key: String,
     has_running: bool,
@@ -736,18 +777,18 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
         }
 
         let mut task_states: HashMap<String, String> = HashMap::new();
-        let mut latest_jobs: HashMap<String, &Job> = HashMap::new();
+        let mut chosen_jobs: HashMap<String, &Job> = HashMap::new();
 
         for task in &doc.tasks {
             if let Some(m_jobs) = task_jobs.get(&task.id) {
-                if let Some(latest) = m_jobs.iter().max_by_key(|j| j.started_at.unwrap_or(0)) {
-                    latest_jobs.insert(task.id.clone(), *latest);
-                    let state = if latest.status == "running" {
+                if let Some(chosen) = choose_task_job(m_jobs, &root) {
+                    chosen_jobs.insert(task.id.clone(), chosen);
+                    let state = if chosen.status == "running" {
                         "running".to_string()
-                    } else if latest.verdict.as_deref() == Some("redone") {
+                    } else if chosen.verdict.as_deref() == Some("redone") {
                         "redone".to_string()
-                    } else if latest.status == "verified" {
-                        if is_merged(latest, &root) {
+                    } else if chosen.status == "verified" {
+                        if is_merged(chosen, &root) {
                             "merged".to_string()
                         } else {
                             "verified".to_string()
@@ -775,7 +816,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
         for task in &doc.tasks {
             let state = task_states.get(&task.id).unwrap().clone();
             let lane_id = task.lane.to_lowercase().replace(' ', "-");
-            let task_val = if let Some(job) = latest_jobs.get(&task.id) {
+            let task_val = if let Some(job) = chosen_jobs.get(&task.id) {
                 let files = if !job.changed_files.is_empty() {
                     job.changed_files.clone()
                 } else {
@@ -876,7 +917,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             }));
         }
         for task in &doc.tasks {
-            if let Some(job) = latest_jobs.get(&task.id) {
+            if let Some(job) = chosen_jobs.get(&task.id) {
                 if let Some(ref notes) = job.verdict_notes {
                     if !notes.trim().is_empty() {
                         decisions_json.push(serde_json::json!({
