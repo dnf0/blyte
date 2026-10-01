@@ -357,4 +357,8 @@ pub struct Cli {
     /// Directory allowed for reading with the read and grep tools (repeatable)
     #[arg(long = "read-root", value_name = "DIR")]
     pub read_roots: Vec<PathBuf>,
+
+    /// Gates in this run do not take a machine-wide slot
+    #[arg(long)]
+    pub no_gate_slot: bool,
 }

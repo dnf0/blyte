@@ -13,6 +13,7 @@ pub struct Progress {
     pub turns: u32,
     pub gate_attempts: u32,
     pub in_gate: bool,
+    pub gate_wait_ms: u64,
 }
 
 /// Execution parameters for running an autonomous solver task to completion.
@@ -133,12 +134,20 @@ pub fn run_task(
         let watchdog_config = config.clone();
         let watchdog_progress = Arc::clone(&progress);
         std::thread::spawn(move || {
-            let deadline = started + std::time::Duration::from_secs(s.saturating_add(30));
-            while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
-                if remaining.is_zero() {
-                    break;
+            loop {
+                let wait_ms = match watchdog_progress.lock() {
+                    Ok(g) => g.gate_wait_ms,
+                    Err(e) => e.into_inner().gate_wait_ms,
+                };
+                let deadline = started
+                    + std::time::Duration::from_secs(s.saturating_add(30))
+                    + std::time::Duration::from_millis(wait_ms);
+                match deadline.checked_duration_since(std::time::Instant::now()) {
+                    Some(remaining) if !remaining.is_zero() => {
+                        std::thread::sleep(remaining.min(std::time::Duration::from_millis(500)));
+                    }
+                    _ => break,
                 }
-                std::thread::sleep(remaining);
             }
             let p = match watchdog_progress.lock() {
                 Ok(g) => *g,
@@ -341,6 +350,9 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
                 blyte_agent::run::Event::GateStart { attempt } => {
                     p.gate_attempts = *attempt;
                     p.in_gate = true;
+                }
+                blyte_agent::run::Event::GateSlotWait { ms } => {
+                    p.gate_wait_ms += ms;
                 }
                 blyte_agent::run::Event::Gate { .. } => {
                     p.in_gate = false;

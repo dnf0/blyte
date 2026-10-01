@@ -26,6 +26,11 @@ started from (`git reset --hard` and `git clean -fd`) before the model tries aga
 attempts do not pile up and the model starts each attempt from known files. `--rollback=false`
 keeps the tree as the model left it.
 
+Gates take a machine-wide slot (`BLYTE_GATE_SLOTS`, defaulting to a quarter of the cores, at least 2)
+so parallel runs do not saturate the machine running full test suites at once. Time spent waiting
+for a slot does not count against `--max-seconds`. Research runs (`blyte dispatch --research`) and
+runs with `--no-gate-slot` skip slot acquisition.
+
 !!! warning "Start from a clean tree"
     Rollback discards uncommitted changes and untracked files, including any you made before the
     run. Commit or stash your own work first, or run blyte in its own worktree.
