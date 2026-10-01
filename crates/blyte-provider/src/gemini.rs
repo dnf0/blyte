@@ -309,6 +309,10 @@ impl Provider for Gemini {
         format!("gemini/{}", self.model)
     }
 
+    fn effort(&self) -> Option<String> {
+        self.thinking_level().map(String::from)
+    }
+
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let url = API_ROOT;
         // Build an agent with bounded connection and read timeouts.
