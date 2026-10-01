@@ -193,6 +193,9 @@ pub fn install_for(
             .map_err(|e| format!("failed to create directory {}: {e}", dir.display()))?;
         std::fs::write(&skill_path, SKILL_MD)
             .map_err(|e| format!("failed to write {}: {e}", skill_path.display()))?;
+        let marker = dir.join(".blyte-installed");
+        std::fs::write(&marker, SKILL_MD)
+            .map_err(|e| format!("failed to write {}: {e}", marker.display()))?;
         written.push(skill_path);
     }
 
@@ -244,6 +247,12 @@ pub fn uninstall_for(harness: Harness, project: bool) -> Result<Vec<PathBuf>, St
     let mut changed = Vec::new();
 
     for dir in dirs {
+        let marker = dir.join(".blyte-installed");
+        if marker.exists() {
+            std::fs::remove_file(&marker)
+                .map_err(|e| format!("failed to remove {}: {e}", marker.display()))?;
+        }
+
         let skill_path = dir.join("SKILL.md");
         if skill_path.exists() {
             std::fs::remove_file(&skill_path)
