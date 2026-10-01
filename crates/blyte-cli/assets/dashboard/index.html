@@ -1709,6 +1709,9 @@
         wrapText(t.title || t.heading || "", 27).forEach((line, i) => {
           sv += '<text x="14" y="' + (40 + i * 16) + '" fill="' + v("strong") + '" font-size="12.5" font-weight="500">' + escapeHtml(line) + '</text>';
         });
+        if (t.added) {
+          sv += '<text x="' + (NW - 10) + '" y="' + (NH - 8) + '" text-anchor="end" fill="' + v("muted") + '" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">added</text>';
+        }
         sv += '</g>';
       });
 
@@ -1748,7 +1751,12 @@
 
       let h = '<h2>Selected task</h2>';
       h += '<div class="top">';
+      h += '<div>';
       h += '<h3>' + escapeHtml(t.id + " · " + (t.title || t.heading || "")) + '</h3>';
+      if (t.added) {
+        h += '<div style="font-size: 12px; color: var(--muted); margin-top: 4px;">Added during the work: dispatched with this plan but not written in it.</div>';
+      }
+      h += '</div>';
       h += '<span class="pill" style="--c:' + v(m.c) + ';--c-soft:' + v(m.bg) + '">' + escapeHtml(m.label) + '</span>';
       h += '</div>';
 

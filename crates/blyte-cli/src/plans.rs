@@ -323,6 +323,46 @@ fn matches_task(task: &PlanTask, pt: &str) -> bool {
     false
 }
 
+fn parse_added_task_id_and_title(
+    name: &str,
+    fallback_job_id: &str,
+    fallback_job_title: &str,
+) -> (String, String) {
+    let clean = name.replace('`', "");
+    let trimmed = clean.trim();
+    let after_task = if let Some(rest) = trimmed.strip_prefix("Task ") {
+        rest.trim_start()
+    } else {
+        trimmed
+    };
+
+    let first_token = after_task
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    let id = if first_token.is_empty() {
+        fallback_job_id.to_string()
+    } else {
+        first_token.to_string()
+    };
+
+    let title_candidate = if let Some(rest) = after_task.strip_prefix(&id) {
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix(':').unwrap_or(rest);
+        rest.trim()
+    } else {
+        ""
+    };
+
+    let title = if title_candidate.is_empty() {
+        fallback_job_title.to_string()
+    } else {
+        title_candidate.to_string()
+    };
+
+    (id, title)
+}
+
 fn first_backticked_plan_path(text: &str) -> Option<String> {
     let mut in_code_fence = false;
     for line in text.lines() {
@@ -766,6 +806,75 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             task_jobs.insert(task.id.clone(), matched);
         }
 
+        let mut added_groups: Vec<(String, Vec<&Job>)> = Vec::new();
+        for job in &jobs_in_group {
+            if all_matched_jobs.iter().any(|j| j.id == job.id) {
+                continue;
+            }
+            let is_explicit = job.start_plan.is_some() || find_tag_plan_stem(job).is_some();
+            if !is_explicit {
+                continue;
+            }
+            let name = job
+                .plan_task
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&job.id)
+                .to_string();
+
+            if let Some((_, group_jobs)) = added_groups.iter_mut().find(|(n, _)| *n == name) {
+                group_jobs.push(*job);
+            } else {
+                added_groups.push((name, vec![*job]));
+            }
+        }
+
+        struct AddedTaskInfo<'a> {
+            id: String,
+            title: String,
+            heading: String,
+            jobs: Vec<&'a Job>,
+            chosen: &'a Job,
+            state: String,
+        }
+
+        let mut added_tasks: Vec<AddedTaskInfo> = Vec::new();
+        for (name, group_jobs) in added_groups {
+            let Some(chosen) = choose_task_job(&group_jobs, &root) else {
+                continue;
+            };
+            let (id, title) = parse_added_task_id_and_title(&name, &chosen.id, &chosen.title);
+            let state = if chosen.status == "running" {
+                "running".to_string()
+            } else if chosen.verdict.as_deref() == Some("redone") {
+                "redone".to_string()
+            } else if chosen.status == "verified" {
+                if is_merged(chosen, &root) {
+                    "merged".to_string()
+                } else {
+                    "verified".to_string()
+                }
+            } else {
+                "failed".to_string()
+            };
+
+            for job in &group_jobs {
+                if !all_matched_jobs.iter().any(|j| j.id == job.id) {
+                    all_matched_jobs.push(*job);
+                }
+            }
+
+            added_tasks.push(AddedTaskInfo {
+                id,
+                title,
+                heading: name,
+                jobs: group_jobs,
+                chosen,
+                state,
+            });
+        }
+
         let seven_days = 7 * 24 * 3600;
         let any_dispatched = all_matched_jobs.iter().any(|j| {
             j.status == "running"
@@ -812,6 +921,19 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             }
         }
 
+        for added in &added_tasks {
+            task_jobs.insert(added.id.clone(), added.jobs.clone());
+            task_states.insert(added.id.clone(), added.state.clone());
+            chosen_jobs.insert(added.id.clone(), added.chosen);
+        }
+
+        if !added_tasks.is_empty() {
+            lanes.push(serde_json::json!({
+                "id": "added",
+                "label": "Added during the work",
+            }));
+        }
+
         let mut tasks_json = Vec::new();
         for task in &doc.tasks {
             let state = task_states.get(&task.id).unwrap().clone();
@@ -840,6 +962,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                     "commits": job.commits,
                     "verdict": job.verdict,
                     "notes": job.verdict_notes,
+                    "added": false,
                 })
             } else {
                 serde_json::json!({
@@ -860,19 +983,58 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                     "commits": [],
                     "verdict": serde_json::Value::Null,
                     "notes": serde_json::Value::Null,
+                    "added": false,
                 })
             };
             tasks_json.push(task_val);
         }
 
+        for added in &added_tasks {
+            let state = task_states.get(&added.id).unwrap().clone();
+            let job = added.chosen;
+            let files = if !job.changed_files.is_empty() {
+                job.changed_files.clone()
+            } else {
+                Vec::new()
+            };
+            let task_val = serde_json::json!({
+                "id": added.id,
+                "title": added.title,
+                "heading": added.heading,
+                "lane": "added",
+                "deps": serde_json::json!([]),
+                "state": state,
+                "dispatch": job.key,
+                "now": job.now,
+                "gate_running": job.gate_running,
+                "gate_attempts": job.gate_attempts,
+                "elapsed_s": job.elapsed_s,
+                "cost_usd": job.cost_usd,
+                "turns": job.turns,
+                "files": files,
+                "commits": job.commits,
+                "verdict": job.verdict,
+                "notes": job.verdict_notes,
+                "added": true,
+            });
+            tasks_json.push(task_val);
+        }
+
+        let all_task_ids: Vec<String> = doc
+            .tasks
+            .iter()
+            .map(|t| t.id.clone())
+            .chain(added_tasks.iter().map(|t| t.id.clone()))
+            .collect();
+
         let mut events: Vec<PlanEvent> = Vec::new();
-        for task in &doc.tasks {
-            if let Some(m_jobs) = task_jobs.get(&task.id) {
+        for task_id in &all_task_ids {
+            if let Some(m_jobs) = task_jobs.get(task_id) {
                 for job in m_jobs {
                     if let Some(st) = job.started_at {
                         events.push(PlanEvent {
                             at: st,
-                            task: task.id.clone(),
+                            task: task_id.clone(),
                             text: "dispatched".to_string(),
                         });
                     }
@@ -880,7 +1042,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                         if let Some(fin) = job.finished_at.or(job.log_mtime) {
                             events.push(PlanEvent {
                                 at: fin,
-                                task: task.id.clone(),
+                                task: task_id.clone(),
                                 text: job.status.clone(),
                             });
                         }
@@ -889,7 +1051,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                         if let Some(ts) = job.verdict_ts {
                             events.push(PlanEvent {
                                 at: ts,
-                                task: task.id.clone(),
+                                task: task_id.clone(),
                                 text: format!("verdict {v}"),
                             });
                         }
@@ -916,20 +1078,20 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                 "source": "plan",
             }));
         }
-        for task in &doc.tasks {
-            if let Some(job) = chosen_jobs.get(&task.id) {
+        for task_id in &all_task_ids {
+            if let Some(job) = chosen_jobs.get(task_id) {
                 if let Some(ref notes) = job.verdict_notes {
                     if !notes.trim().is_empty() {
                         decisions_json.push(serde_json::json!({
                             "text": notes,
-                            "source": format!("{} verdict note", task.id),
+                            "source": format!("{} verdict note", task_id),
                         }));
                     }
                 }
             }
         }
 
-        let tasks_count = doc.tasks.len();
+        let tasks_count = doc.tasks.len() + added_tasks.len();
         let merged_count = task_states
             .values()
             .filter(|s| s.as_str() == "merged")

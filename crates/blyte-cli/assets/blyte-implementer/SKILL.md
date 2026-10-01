@@ -79,6 +79,9 @@ cargo test'
 - **The plan:** when the task comes from a plan file, say which one:
   `--plan docs/plans/my-plan.md --plan-task "Task 2: the parser"` (the task's heading). The
   dashboard's Plans view then shows the plan as a flow of its tasks, each coloured by its state.
+  A follow-up task for work that has a plan (a fix found in review, an extra step) takes the same
+  `--plan` with its own `--plan-task` name, such as `--plan-task "H2: pin signature is data only"`;
+  do not edit the plan file for it. The Plans view shows it as added during the work.
 
 - **The gate:** if the repository has a `blyte.toml`, leave `--gate` out: blyte uses the
   repository's own checks. If it has none, run `blyte init` first. It takes the checks from the
