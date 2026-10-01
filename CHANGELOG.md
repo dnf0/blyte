@@ -1,3 +1,9 @@
+## v0.7.8 (2026-10-01)
+
+### Fix
+
+- **cli**: the dashboard names a dispatch after its repository, not its worktree's folder (#196)
+
 ## v0.7.7 (2026-10-01)
 
 ### Fix
