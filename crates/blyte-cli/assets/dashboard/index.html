@@ -54,6 +54,29 @@
 
       --font-sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
       --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+      /* Plan view tokens */
+      --page: #ECEFF0;
+      --card: #F4F6F7;
+      --line: #C9D0D4;
+      --line-2: #B3BCC1;
+      --text: #2A3238;
+      --strong: #141A1E;
+      --muted: #56616A;
+      --faint: #8A959C;
+      --rust: #A6441A;
+      --rust-soft: #E8C8B7;
+      --pass: #2E7A4D;
+      --pass-soft: #CFE3D6;
+      --fail: #A93A36;
+      --fail-soft: #F0D3D1;
+      --amber: #8A6A12;
+      --amber-soft: #EFE3BF;
+      --merged: #3E6D64;
+      --merged-soft: #C3D6D1;
+      --lane: #E6EAEC;
+      --sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -78,6 +101,27 @@
         --focus-ring: #E27A44;
         --brand-rust: #E27A44;
         --brand-rust-soft: #4A2B1D;
+
+        /* Plan view dark tokens */
+        --page: #0F1315;
+        --card: #171D20;
+        --line: #283136;
+        --line-2: #36414A;
+        --text: #C9D1D5;
+        --strong: #E2E7E9;
+        --muted: #93A0A7;
+        --faint: #5F6C73;
+        --rust: #E27A44;
+        --rust-soft: #4A2B1D;
+        --pass: #6CC08E;
+        --pass-soft: #1E3428;
+        --fail: #E27B76;
+        --fail-soft: #3A2120;
+        --amber: #D9B45A;
+        --amber-soft: #3A3218;
+        --merged: #7FB2A6;
+        --merged-soft: #1F3431;
+        --lane: #131A1D;
       }
     }
 
@@ -174,6 +218,47 @@
       color: var(--color-strong);
       margin: 0;
       line-height: 1.25;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+    }
+
+    .tab {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 6px 12px;
+      border: 1px solid var(--color-line-dark);
+      border-radius: 4px;
+      color: var(--color-muted);
+      background: transparent;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      line-height: 1.4;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+
+    .tab:hover {
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+      text-decoration: none;
+    }
+
+    .tab.on {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust-soft);
+      color: var(--color-strong);
+      font-weight: 500;
     }
 
     .live-indicator {
@@ -639,6 +724,91 @@
       color: var(--color-muted);
       font-size: 14px;
     }
+
+    /* Plans view styles */
+    .plans-wrap {
+      display: grid;
+      gap: 18px;
+    }
+
+    .mono { font-family: var(--mono); }
+    .num { font-variant-numeric: tabular-nums; }
+
+    /* plan picker */
+    .picker { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .picker .lbl { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
+    .chip { font-family: var(--mono); font-size: 12px; padding: 4px 10px; border-radius: 3px; border: 1px solid var(--line-2); color: var(--text); background: var(--card); cursor: pointer; display: inline-flex; align-items: center; line-height: 1.4; text-align: left; }
+    .chip:hover { border-color: var(--rust); }
+    .chip.on { border-color: var(--rust); color: var(--strong); box-shadow: inset 0 0 0 1px var(--rust); }
+    .chip small { color: var(--muted); margin-left: 6px; }
+
+    /* plan summary */
+    .plan { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; display: grid; gap: 14px; }
+    .plan h1 { margin: 0; font-size: 22px; font-weight: 800; font-variation-settings: "wdth" 112; letter-spacing: -.01em; color: var(--strong); text-wrap: balance; }
+    .plan .path { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .stats { display: flex; flex-wrap: wrap; gap: 26px; }
+    .stat b { display: block; font-size: 20px; font-weight: 800; color: var(--strong); font-variant-numeric: tabular-nums; }
+    .stat span { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    .bar { height: 8px; border-radius: 4px; background: var(--line); display: flex; overflow: hidden; }
+    .bar i { display: block; height: 100%; }
+
+    /* main grid */
+    .main { display: grid; }
+    .panel { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; min-width: 0; }
+    .panel h2 { margin: 0 0 12px; font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .flow { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .flow svg { display: block; }
+    .flow-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; margin-bottom: 10px; }
+    .flow-head h2 { margin: 0; font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .node { cursor: pointer; outline: none; }
+    .node:hover .node-box { filter: brightness(0.97); }
+    .node:focus-visible .node-box { stroke: var(--rust); stroke-width: 3; }
+    .node text { font-family: var(--sans); }
+    .edge { fill: none; stroke: var(--line-2); stroke-width: 1.5; }
+    .edge.done { stroke: var(--merged); opacity: .55; }
+    .edge.hot { stroke: var(--rust); stroke-width: 2.2; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+    .pulse { animation: pulse 1.6s ease-in-out infinite; }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; border: 1.5px solid var(--c); background: var(--c-soft); }
+    .legend i.dash { border-style: dashed; }
+
+    /* detail */
+    .detail { display: grid; gap: 12px; }
+    .detail .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .detail h3 { margin: 0; font-size: 16px; font-weight: 700; color: var(--strong); text-wrap: balance; }
+    .pill { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 3px; white-space: nowrap; color: var(--strong); background: var(--c-soft); border: 1px solid var(--c); }
+    .kv { display: grid; grid-template-columns: 7.5rem 1fr; gap: 6px 12px; font-size: 13px; }
+    .kv dt { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding-top: 2px; }
+    .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .kv ul { margin: 0; padding-left: 16px; font-family: var(--mono); font-size: 12px; }
+    .note { font-size: 13px; background: var(--page); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; }
+    .note b { font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); display: block; margin-bottom: 4px; }
+
+    /* lower */
+    .lower { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 18px; align-items: start; }
+    .side { display: grid; gap: 18px; min-width: 0; }
+    .events { list-style: none; margin: 0; padding: 0; display: grid; }
+    .events li { display: grid; grid-template-columns: 3.2rem 2.4rem 1fr; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+    .events li:first-child { border-top: 0; }
+    .events time { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .events .t { font-family: var(--mono); font-size: 12px; color: var(--strong); }
+    .events li.sel .t { color: var(--rust); font-weight: 600; }
+    .decisions { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+    .decisions li { font-size: 13px; border-left: 3px solid var(--line-2); padding-left: 10px; }
+    .decisions li small { display: block; font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .foot { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+    @media (max-width: 860px) {
+      .main, .lower { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 520px) {
+      .kv { grid-template-columns: 1fr; }
+      .events li { grid-template-columns: 3rem 1fr; }
+      .events li .t { grid-column: 2; }
+      .events li span:last-child { grid-column: 1 / -1; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
   </style>
 </head>
 <body>
@@ -662,33 +832,85 @@
         </div>
         <h1 class="page-title">What blyte is working on.</h1>
       </div>
-      <div id="live-indicator" class="live-indicator">
-        <span class="live-dot grey"></span>
-        <span>Connecting…</span>
+      <div class="header-right">
+        <div class="tabs" role="tablist" aria-label="View">
+          <button type="button" class="tab on" id="tab-jobs" role="tab" aria-selected="true" onclick="switchTab('jobs')">Jobs</button>
+          <button type="button" class="tab" id="tab-plans" role="tab" aria-selected="false" onclick="switchTab('plans')">Plans</button>
+        </div>
+        <div id="live-indicator" class="live-indicator">
+          <span class="live-dot grey"></span>
+          <span>Connecting…</span>
+        </div>
       </div>
     </header>
 
-    <!-- Summary strip -->
-    <div id="summary-strip" class="summary-strip"></div>
+    <!-- Jobs view -->
+    <div id="jobs-view">
+      <!-- Summary strip -->
+      <div id="summary-strip" class="summary-strip"></div>
 
-    <!-- Views -->
-    <div id="views-strip" class="views-strip"></div>
+      <!-- Views -->
+      <div id="views-strip" class="views-strip"></div>
 
-    <!-- Tag filter banner -->
-    <div id="tag-banner-container"></div>
+      <!-- Tag filter banner -->
+      <div id="tag-banner-container"></div>
 
-    <!-- Table -->
-    <div class="table-container">
-      <div class="table-scroll">
-        <div class="table-header" role="row">
-          <div class="th-status" role="columnheader">Status</div>
-          <div class="th-job" role="columnheader">Job</div>
-          <div class="th-repo" role="columnheader">Repository</div>
-          <div class="th-time" role="columnheader">Time</div>
-          <div class="th-cost" role="columnheader">Cost</div>
-          <div class="th-turns" role="columnheader">Turns</div>
+      <!-- Table -->
+      <div class="table-container">
+        <div class="table-scroll">
+          <div class="table-header" role="row">
+            <div class="th-status" role="columnheader">Status</div>
+            <div class="th-job" role="columnheader">Job</div>
+            <div class="th-repo" role="columnheader">Repository</div>
+            <div class="th-time" role="columnheader">Time</div>
+            <div class="th-cost" role="columnheader">Cost</div>
+            <div class="th-turns" role="columnheader">Turns</div>
+          </div>
+          <div id="table-body"></div>
         </div>
-        <div id="table-body"></div>
+      </div>
+    </div>
+
+    <!-- Plans view -->
+    <div id="plans-view" style="display: none;">
+      <div id="plans-empty" class="empty-state" style="display: none;">No plans with dispatches in the last 7 days.</div>
+      <div id="plans-content" class="plans-wrap" style="display: none;">
+        <div class="picker" id="plan-picker" aria-label="Plans"></div>
+
+        <section class="plan" aria-label="Plan summary">
+          <div>
+            <h1 id="plan-title"></h1>
+            <div class="path" id="plan-path"></div>
+          </div>
+          <div class="bar" id="plan-bar" aria-hidden="true"></div>
+          <div class="stats" id="plan-stats"></div>
+        </section>
+
+        <div class="main">
+          <section class="panel" aria-label="Plan flow">
+            <div class="flow-head">
+              <h2>Flow · lanes are areas of the code, columns are dependency order</h2>
+              <div class="legend" id="plan-legend"></div>
+            </div>
+            <div class="flow" id="plan-flow"></div>
+          </section>
+        </div>
+
+        <div class="lower">
+          <section class="panel detail" id="plan-detail" aria-live="polite" aria-label="Selected task"></section>
+          <div class="side">
+            <section class="panel" aria-label="Activity">
+              <h2>Activity · this plan, newest first</h2>
+              <ol class="events" id="plan-events"></ol>
+            </section>
+            <section class="panel" aria-label="Decisions">
+              <h2>Decisions · from verdict notes and the plan</h2>
+              <ul class="decisions" id="plan-decisions"></ul>
+            </section>
+          </div>
+        </div>
+
+        <div class="foot">Everything here would come from files blyte already writes: the plan's <code>Depends on:</code> lines, each dispatch's start, summary and report, and <code>blyte review --verdict</code>. Nothing for the orchestrator to update; local only.</div>
       </div>
     </div>
   </div>
@@ -1106,15 +1328,662 @@
       }
     }
 
-    // Keys and tags come from job data, so they travel in data attributes, not inline handlers.
+    /* ==========================================================================
+       Plans View Logic
+       ========================================================================== */
+    const STATUS = {
+      merged:   { label: "Merged",            c: "merged", bg: "merged-soft" },
+      verified: { label: "Verified · review", c: "pass",   bg: "pass-soft" },
+      running:  { label: "Running",           c: "rust",   bg: "rust-soft" },
+      failed:   { label: "Gate failed",       c: "fail",   bg: "fail-soft" },
+      redone:   { label: "Redone",            c: "fail",   bg: "fail-soft" },
+      ready:    { label: "Ready to dispatch", c: "amber",  bg: "amber-soft" },
+      waiting:  { label: "Waiting",           c: "faint",  bg: "page", dash: true }
+    };
+    const STATUS_ORDER = ["merged", "verified", "running", "failed", "redone", "ready", "waiting"];
+
+    let currentPlansData = null;
+    let selectedPlanKey = null;
+    let selectedTaskId = null;
+    let plansPollInterval = null;
+
+    try {
+      selectedPlanKey = localStorage.getItem("blyte_selected_plan");
+      selectedTaskId = localStorage.getItem("blyte_selected_task");
+    } catch (_) {}
+
+    function v(name) {
+      return "var(--" + name + ")";
+    }
+
+    function planStem(plan) {
+      if (plan.path) {
+        const parts = plan.path.split("/");
+        const filename = parts[parts.length - 1];
+        return filename.replace(/\.[^/.]+$/, "");
+      }
+      if (plan.key) {
+        const parts = plan.key.split("/");
+        return parts[parts.length - 1];
+      }
+      return plan.title || "plan";
+    }
+
+    function getCurrentPlan() {
+      if (!currentPlansData || !Array.isArray(currentPlansData.plans) || currentPlansData.plans.length === 0) {
+        return null;
+      }
+      if (selectedPlanKey) {
+        const found = currentPlansData.plans.find(p => p.key === selectedPlanKey);
+        if (found) return found;
+      }
+      return currentPlansData.plans[0];
+    }
+
+    function formatEventTime(at) {
+      if (typeof at === "string") return at;
+      if (!at || isNaN(at)) return "--:--";
+      const d = new Date(at > 1e11 ? at : at * 1000);
+      const pad = n => String(n).padStart(2, "0");
+      return pad(d.getHours()) + ":" + pad(d.getMinutes());
+    }
+
+    function wrapText(text, n) {
+      const w = String(text).split(" ");
+      const lines = [""];
+      w.forEach(x => {
+        const l = lines[lines.length - 1];
+        if (l && (l + " " + x).length > n) lines.push(x);
+        else lines[lines.length - 1] = (l ? l + " " : "") + x;
+      });
+      if (lines.length > 2) {
+        lines = lines.slice(0, 2);
+        lines[1] = lines[1].replace(/\W*$/, "") + "…";
+      }
+      return lines;
+    }
+
+    function selectPlan(key) {
+      selectedPlanKey = key;
+      try { localStorage.setItem("blyte_selected_plan", key); } catch (_) {}
+      const plan = currentPlansData && currentPlansData.plans && currentPlansData.plans.find(p => p.key === key);
+      if (plan && plan.tasks && plan.tasks.length > 0) {
+        const running = plan.tasks.find(t => t.state === "running");
+        const unmerged = plan.tasks.find(t => t.state !== "merged");
+        selectedTaskId = (running || unmerged || plan.tasks[0]).id;
+        try { localStorage.setItem("blyte_selected_task", selectedTaskId); } catch (_) {}
+      } else {
+        selectedTaskId = null;
+        try { localStorage.removeItem("blyte_selected_task"); } catch (_) {}
+      }
+      renderPlans();
+    }
+
+    function selectTask(id) {
+      selectedTaskId = id;
+      try {
+        if (id) localStorage.setItem("blyte_selected_task", id);
+        else localStorage.removeItem("blyte_selected_task");
+      } catch (_) {}
+      renderPlans();
+    }
+
+    function drawPicker() {
+      const container = document.getElementById("plan-picker");
+      if (!container) return;
+      const plans = (currentPlansData && currentPlansData.plans) || [];
+      if (plans.length === 0) {
+        container.innerHTML = "";
+        return;
+      }
+
+      let h = '<span class="lbl">Plans</span>';
+      plans.forEach(p => {
+        const isSel = p.key === selectedPlanKey;
+        const stem = planStem(p);
+        const repo = p.repo || "";
+        const stats = p.stats || {};
+        const total = stats.tasks != null ? stats.tasks : (p.tasks || []).length;
+        const merged = stats.merged != null ? stats.merged : (p.tasks || []).filter(t => t.state === "merged").length;
+        const running = stats.running != null ? stats.running : (p.tasks || []).filter(t => t.state === "running").length;
+
+        let prog = "";
+        if (total > 0 && merged === total) {
+          prog = "done";
+        } else if (running > 0) {
+          prog = running + " running";
+        } else {
+          prog = merged + " of " + total;
+        }
+
+        const sub = repo ? repo + " · " + prog : prog;
+
+        h += '<button type="button" class="chip ' + (isSel ? 'on' : '') + '" data-plan-key="' + escapeAttr(p.key) + '" aria-pressed="' + isSel + '">';
+        h += escapeHtml(stem);
+        h += '<small>' + escapeHtml(sub) + '</small>';
+        h += '</button>';
+      });
+
+      container.innerHTML = h;
+    }
+
+    function drawPlanSummary() {
+      const plan = getCurrentPlan();
+      if (!plan) return;
+      const titleEl = document.getElementById("plan-title");
+      const pathEl = document.getElementById("plan-path");
+      const barEl = document.getElementById("plan-bar");
+      const statsEl = document.getElementById("plan-stats");
+
+      if (titleEl) titleEl.textContent = plan.title || "Untitled plan";
+      if (pathEl) {
+        const parts = [];
+        if (plan.repo) parts.push(plan.repo);
+        if (plan.path) parts.push(plan.path);
+        pathEl.textContent = parts.join(" · ");
+      }
+
+      const tasks = plan.tasks || [];
+      const counts = {};
+      STATUS_ORDER.forEach(k => { counts[k] = 0; });
+      tasks.forEach(t => {
+        const st = t.state || "waiting";
+        if (counts[st] != null) counts[st]++;
+        else counts["waiting"]++;
+      });
+
+      if (barEl) {
+        if (tasks.length === 0) {
+          barEl.innerHTML = "";
+        } else {
+          barEl.innerHTML = STATUS_ORDER.filter(k => counts[k] > 0).map(k => {
+            const pct = (100 * counts[k] / tasks.length);
+            const m = STATUS[k] || STATUS["waiting"];
+            return '<i style="width:' + pct + '%;background:' + v(m.c) + (k === "waiting" ? ';opacity:.45' : '') + '"></i>';
+          }).join("");
+        }
+      }
+
+      if (statsEl) {
+        const stats = plan.stats || {};
+        const totalTasks = stats.tasks != null ? stats.tasks : tasks.length;
+        const mergedCount = stats.merged != null ? stats.merged : (counts.merged || 0);
+        const verifiedCount = stats.verified != null ? stats.verified : (counts.verified || 0);
+        const runningCount = stats.running != null ? stats.running : (counts.running || 0);
+        const notStartedCount = stats.not_started != null ? stats.not_started : ((counts.waiting || 0) + (counts.ready || 0));
+        const costVal = stats.cost_usd != null ? Number(stats.cost_usd) : tasks.reduce((sum, t) => sum + (Number(t.cost_usd) || 0), 0);
+        const maxPar = stats.max_parallel != null ? stats.max_parallel : (runningCount || 0);
+
+        const items = [
+          [mergedCount + " of " + totalTasks, "merged"],
+          [String(verifiedCount), "verified, waiting for review"],
+          [String(runningCount), "running"],
+          [String(notStartedCount), "not started"],
+          ["$" + costVal.toFixed(2), "Gemini so far"],
+          [String(maxPar), "ran at once, at most"]
+        ];
+
+        statsEl.innerHTML = items.map(x => '<div class="stat"><b class="num">' + escapeHtml(x[0]) + '</b><span>' + escapeHtml(x[1]) + '</span></div>').join("");
+      }
+    }
+
+    function initLegend() {
+      const legendEl = document.getElementById("plan-legend");
+      if (!legendEl) return;
+      legendEl.innerHTML = STATUS_ORDER.map(k => {
+        const m = STATUS[k];
+        return '<span><i class="' + (m.dash ? "dash" : "") + '" style="--c:' + v(m.c) + ';--c-soft:' + v(m.bg) + '"></i>' + escapeHtml(m.label) + '</span>';
+      }).join("");
+    }
+
+    function drawFlow() {
+      const flowEl = document.getElementById("plan-flow");
+      if (!flowEl) return;
+      const plan = getCurrentPlan();
+      if (!plan || !plan.tasks || plan.tasks.length === 0) {
+        flowEl.innerHTML = '<div class="empty-state">No tasks to display.</div>';
+        return;
+      }
+
+      const tasks = plan.tasks;
+      const lanes = (plan.lanes || []).slice();
+      tasks.forEach(t => {
+        if (t.lane && !lanes.some(l => l.id === t.lane)) {
+          lanes.push({ id: t.lane, label: t.lane });
+        }
+      });
+      if (lanes.length === 0) {
+        lanes.push({ id: "tasks", label: "Tasks" });
+      }
+
+      const byId = {};
+      tasks.forEach(t => { byId[t.id] = t; });
+
+      function depth(id, memo) {
+        if (memo[id] != null) return memo[id];
+        memo[id] = 0;
+        let dd = 0;
+        const t = byId[id];
+        if (t && Array.isArray(t.deps)) {
+          t.deps.forEach(d => {
+            if (byId[d]) {
+              dd = Math.max(dd, depth(d, memo) + 1);
+            }
+          });
+        }
+        return (memo[id] = dd);
+      }
+
+      const memo = {};
+      const col = {};
+      let maxCol = 0;
+      tasks.forEach(t => {
+        col[t.id] = depth(t.id, memo);
+        maxCol = Math.max(maxCol, col[t.id]);
+      });
+
+      const NW = 196, NH = 72, CG = 56, RG = 14, LANE_W = 150, PADY = 14, LANE_GAP = 6;
+      const pos = {}, laneY = {};
+      let y = 0;
+
+      lanes.forEach(lane => {
+        const inLane = tasks.filter(t => (t.lane || lanes[0].id) === lane.id);
+        const stack = {};
+        let most = 1;
+        inLane.forEach(t => {
+          const c = col[t.id] || 0;
+          stack[c] = (stack[c] || 0) + 1;
+          most = Math.max(most, stack[c]);
+        });
+        const h = PADY * 2 + most * NH + (most - 1) * RG;
+        const placed = {};
+        laneY[lane.id] = { y: y, h: h };
+        inLane.forEach(t => {
+          const c = col[t.id] || 0;
+          const k = placed[c] || 0;
+          placed[c] = k + 1;
+          pos[t.id] = {
+            x: LANE_W + 16 + c * (NW + CG),
+            y: y + PADY + k * (NH + RG)
+          };
+        });
+        y += h + LANE_GAP;
+      });
+
+      const clientW = flowEl.clientWidth || 0;
+      const W = Math.max(LANE_W + 16 + (maxCol + 1) * (NW + CG) - CG + 16, clientW);
+      const H = Math.max(y - LANE_GAP, 100);
+
+      let sv = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" role="img" aria-label="Plan flow: ' + tasks.length + ' tasks in ' + lanes.length + ' lanes; arrows run from each task to the tasks that wait on it.">';
+      sv += '<defs>' + [["a", "line-2"], ["h", "rust"], ["d", "merged"]].map(m => {
+        return '<marker id="arr-' + m[0] + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="' + v(m[1]) + '"/></marker>';
+      }).join("") + '</defs>';
+
+      lanes.forEach(lane => {
+        const ly = laneY[lane.id];
+        if (!ly) return;
+        sv += '<rect x="0" y="' + ly.y + '" width="' + W + '" height="' + ly.h + '" rx="4" fill="' + v("lane") + '"/>';
+        sv += '<text x="14" y="' + (ly.y + 24) + '" fill="' + v("muted") + '" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11" letter-spacing="0.06em">' + escapeHtml((lane.label || lane.id).toUpperCase()) + '</text>';
+      });
+
+      const hot = {};
+      const sel = byId[selectedTaskId];
+      if (sel) {
+        (sel.deps || []).forEach(d => { hot[d + ">" + sel.id] = 1; });
+        tasks.forEach(t => {
+          if ((t.deps || []).includes(sel.id)) hot[sel.id + ">" + t.id] = 1;
+        });
+      }
+
+      tasks.forEach(t => {
+        (t.deps || []).forEach(d => {
+          const a = pos[d], b = pos[t.id];
+          if (!a || !b) return;
+          const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x - 3, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
+          const isHot = hot[d + ">" + t.id];
+          const isDone = byId[d] && byId[d].state === "merged" && t.state === "merged";
+          const edgeClass = "edge" + (isHot ? " hot" : (isDone ? " done" : ""));
+          const markerId = isHot ? "h" : (isDone ? "d" : "a");
+          sv += '<path class="' + edgeClass + '" d="M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2 + '" marker-end="url(#arr-' + markerId + ')"/>';
+        });
+      });
+
+      tasks.forEach(t => {
+        const p = pos[t.id];
+        if (!p) return;
+        const st = t.state || "waiting";
+        const m = STATUS[st] || STATUS["waiting"];
+        const isSel = t.id === selectedTaskId;
+        sv += '<g class="node' + (isSel ? ' sel' : '') + '" data-task-id="' + escapeAttr(t.id) + '" tabindex="0" role="button" aria-pressed="' + isSel + '" aria-label="' + escapeAttr(t.id + ': ' + (t.title || '') + ', ' + m.label) + '" transform="translate(' + p.x + ',' + p.y + ')">';
+        sv += '<rect class="node-box" width="' + NW + '" height="' + NH + '" rx="6" fill="' + v(m.bg) + '" stroke="' + v(isSel ? "rust" : m.c) + '" stroke-width="' + (isSel ? 2.5 : 1.5) + '"' + (m.dash ? ' stroke-dasharray="4 3"' : '') + '/>';
+        sv += '<rect width="4" height="' + NH + '" rx="2" fill="' + v(m.c) + '"/>';
+        sv += '<text x="14" y="20" fill="' + v(m.c === "faint" ? "muted" : m.c) + '" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11.5" font-weight="500">' + escapeHtml(t.id) + '</text>';
+        sv += '<circle' + (st === "running" ? ' class="pulse"' : '') + ' cx="' + (NW - 14) + '" cy="16" r="4.5" fill="' + v(m.c) + '"/>';
+        wrapText(t.title || t.heading || "", 27).forEach((line, i) => {
+          sv += '<text x="14" y="' + (40 + i * 16) + '" fill="' + v("strong") + '" font-size="12.5" font-weight="500">' + escapeHtml(line) + '</text>';
+        });
+        sv += '</g>';
+      });
+
+      sv += '</svg>';
+      const scrollLeft = flowEl.scrollLeft;
+      flowEl.innerHTML = sv;
+      flowEl.scrollLeft = scrollLeft;
+    }
+
+    function drawDetail() {
+      const container = document.getElementById("plan-detail");
+      if (!container) return;
+      const plan = getCurrentPlan();
+      if (!plan || !plan.tasks || plan.tasks.length === 0) {
+        container.innerHTML = '<div class="empty-state">No tasks in this plan.</div>';
+        return;
+      }
+      const byId = {};
+      plan.tasks.forEach(x => { byId[x.id] = x; });
+      const t = byId[selectedTaskId] || plan.tasks[0];
+      if (!t) {
+        container.innerHTML = '<div class="empty-state">No task selected.</div>';
+        return;
+      }
+
+      const st = t.state || "waiting";
+      const m = STATUS[st] || STATUS["waiting"];
+      const deps = t.deps || [];
+      const unblocks = plan.tasks.filter(x => (x.deps || []).includes(t.id)).map(x => x.id);
+
+      function chips(ids) {
+        return ids.map(id => '<button type="button" class="chip" data-task-id="' + escapeAttr(id) + '" style="padding:1px 6px;cursor:pointer">' + escapeHtml(id) + '</button>').join(" ");
+      }
+
+      const laneObj = (plan.lanes || []).find(l => l.id === t.lane);
+      const laneLabel = laneObj ? laneObj.label : (t.lane || "Tasks");
+
+      let h = '<h2>Selected task</h2>';
+      h += '<div class="top">';
+      h += '<h3>' + escapeHtml(t.id + " · " + (t.title || t.heading || "")) + '</h3>';
+      h += '<span class="pill" style="--c:' + v(m.c) + ';--c-soft:' + v(m.bg) + '">' + escapeHtml(m.label) + '</span>';
+      h += '</div>';
+
+      h += '<dl class="kv">';
+      h += '<dt>Dispatch</dt><dd class="mono">' + (t.dispatch ? escapeHtml(t.dispatch) : (t.key ? escapeHtml(t.key) : "not yet")) + '</dd>';
+      h += '<dt>Lane</dt><dd>' + escapeHtml(laneLabel) + '</dd>';
+      h += '<dt>Waits on</dt><dd>' + (deps.length ? chips(deps) : "nothing") + '</dd>';
+      h += '<dt>Unblocks</dt><dd>' + (unblocks.length ? chips(unblocks) : "nothing") + '</dd>';
+
+      if (t.now) {
+        h += '<dt>Now</dt><dd class="mono">' + escapeHtml(t.now) + '</dd>';
+      }
+
+      let gateText = "";
+      if (t.gate_running) {
+        gateText = "gate running, attempt " + (t.gate_attempts || 1);
+      } else if (t.gates) {
+        gateText = t.gates;
+      } else if (t.gate_attempts != null && t.gate_attempts > 0) {
+        if (st === "merged" || st === "verified") {
+          gateText = t.gate_attempts + " of " + t.gate_attempts + " passed";
+        } else {
+          gateText = t.gate_attempts + (t.gate_attempts === 1 ? " attempt" : " attempts");
+        }
+      }
+      if (gateText) {
+        h += '<dt>Gate</dt><dd>' + escapeHtml(gateText) + '</dd>';
+      }
+
+      if (t.elapsed_s != null || t.cost_usd != null || t.turns != null || t.time != null || t.cost != null) {
+        const elapsedStr = t.time || formatElapsed(t.elapsed_s);
+        const costVal = t.cost_usd != null ? Number(t.cost_usd) : (t.cost != null ? Number(t.cost) : null);
+        const costStr = costVal != null ? "$" + costVal.toFixed(2) : "—";
+        const turnsStr = t.turns != null ? t.turns + " turns" : "";
+        const parts = [elapsedStr, costStr];
+        if (turnsStr) parts.push(turnsStr);
+        h += '<dt>Time · cost</dt><dd class="num">' + escapeHtml(parts.join(" · ")) + '</dd>';
+      }
+
+      const files = t.files || [];
+      h += '<dt>Files</dt><dd>' + (files.length > 0 ? '<ul>' + files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") + '</ul>' : '<span class="text-faint">none</span>') + '</dd>';
+
+      const commits = t.commits || [];
+      if (commits.length > 0) {
+        h += '<dt>Commits</dt><dd class="mono"><ul>' + commits.map(c => '<li><span class="commit-sha">' + escapeHtml((c.sha || "").slice(0, 7)) + '</span> ' + escapeHtml(c.subject || "") + '</li>').join("") + '</ul></dd>';
+      } else if (t.commit) {
+        h += '<dt>Commit</dt><dd class="mono">' + escapeHtml(t.commit) + '</dd>';
+      } else {
+        h += '<dt>Commit</dt><dd class="mono text-faint">not yet</dd>';
+      }
+
+      const verdict = t.verdict != null ? (typeof t.verdict === "object" ? JSON.stringify(t.verdict) : String(t.verdict)) : null;
+      h += '<dt>Verdict</dt><dd>' + (verdict ? escapeHtml(verdict) : '<span class="text-faint">none yet</span>') + '</dd>';
+
+      h += '</dl>';
+
+      if (t.notes) {
+        h += '<div class="note"><b>Reviewer’s note</b>' + escapeHtml(t.notes) + '</div>';
+      }
+
+      if (t.waiting) {
+        h += '<div class="note"><b>Next</b>' + escapeHtml(t.waiting) + '</div>';
+      } else if (st === "verified") {
+        const unmergedWaiters = plan.tasks.filter(x => (x.deps || []).includes(t.id));
+        const waiterNote = unmergedWaiters.length > 0
+          ? " " + unmergedWaiters.map(x => x.id).join(" and ") + (unmergedWaiters.length > 1 ? " start" : " starts") + " as soon as " + t.id + " is merged."
+          : "";
+        const reviewCmd = t.dispatch ? " (blyte review " + t.dispatch + " --diff)" : "";
+        h += '<div class="note"><b>Next</b>Verified; no review yet. Review it' + escapeHtml(reviewCmd) + ', merge, then record the verdict.' + escapeHtml(waiterNote) + '</div>';
+      } else if (st === "ready") {
+        h += '<div class="note"><b>Next</b>Ready to dispatch.</div>';
+      } else if (st === "waiting") {
+        const unmergedDeps = deps.filter(d => !byId[d] || byId[d].state !== "merged");
+        const depStr = unmergedDeps.length > 0 ? unmergedDeps.join(" and ") : "dependencies";
+        const verb = unmergedDeps.length > 1 ? "are" : "is";
+        h += '<div class="note"><b>Next</b>Starts when ' + escapeHtml(depStr) + ' ' + verb + ' merged.</div>';
+      }
+
+      container.innerHTML = h;
+    }
+
+    function drawLists() {
+      const plan = getCurrentPlan();
+      if (!plan) return;
+      const events = plan.events || [];
+      const decisions = plan.decisions || [];
+
+      const evEl = document.getElementById("plan-events");
+      if (evEl) {
+        if (events.length === 0) {
+          evEl.innerHTML = '<li style="border:none;color:var(--color-muted);">No activity recorded yet.</li>';
+        } else {
+          evEl.innerHTML = events.map(function (e) {
+            const at = e.at != null ? e.at : (Array.isArray(e) ? e[0] : "");
+            const task = e.task != null ? e.task : (Array.isArray(e) ? e[1] : "");
+            const text = e.text != null ? e.text : (Array.isArray(e) ? e[2] : "");
+            const isSel = task === selectedTaskId;
+            return '<li class="' + (isSel ? "sel" : "") + '"' + (task ? ' data-task-id="' + escapeAttr(task) + '" style="cursor:pointer"' : '') + '>' +
+              '<time>' + escapeHtml(formatEventTime(at)) + '</time>' +
+              '<span class="t">' + escapeHtml(task) + '</span>' +
+              '<span>' + escapeHtml(text) + '</span>' +
+              '</li>';
+          }).join("");
+        }
+      }
+
+      const decEl = document.getElementById("plan-decisions");
+      if (decEl) {
+        if (decisions.length === 0) {
+          decEl.innerHTML = '<li style="border:none;color:var(--color-muted);">No decisions recorded yet.</li>';
+        } else {
+          decEl.innerHTML = decisions.map(function (x) {
+            const text = x.text != null ? x.text : (Array.isArray(x) ? x[0] : (typeof x === "string" ? x : ""));
+            const src = x.source != null ? x.source : (Array.isArray(x) ? x[1] : "");
+            return '<li>' + escapeHtml(text) + (src ? '<small>' + escapeHtml(src) + '</small>' : '') + '</li>';
+          }).join("");
+        }
+      }
+    }
+
+    function renderPlans() {
+      renderLiveIndicator();
+      initLegend();
+      const plans = (currentPlansData && currentPlansData.plans) || [];
+      const emptyEl = document.getElementById("plans-empty");
+      const contentEl = document.getElementById("plans-content");
+
+      if (!currentPlansData || plans.length === 0) {
+        if (emptyEl) emptyEl.style.display = "block";
+        if (contentEl) contentEl.style.display = "none";
+        return;
+      }
+
+      if (emptyEl) emptyEl.style.display = "none";
+      if (contentEl) contentEl.style.display = "grid";
+
+      drawPicker();
+      drawPlanSummary();
+      drawFlow();
+      drawDetail();
+      drawLists();
+    }
+
+    async function fetchPlans() {
+      try {
+        const res = await fetch("/api/plans");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        currentPlansData = data;
+        lastSuccessfulUpdate = new Date();
+        isOnline = true;
+
+        const plans = data.plans || [];
+        if (plans.length > 0) {
+          if (!selectedPlanKey || !plans.some(p => p.key === selectedPlanKey)) {
+            selectedPlanKey = plans[0].key;
+            try { localStorage.setItem("blyte_selected_plan", selectedPlanKey); } catch (_) {}
+          }
+          const plan = plans.find(p => p.key === selectedPlanKey) || plans[0];
+          const tasks = plan.tasks || [];
+          if (tasks.length > 0) {
+            if (!selectedTaskId || !tasks.some(t => t.id === selectedTaskId)) {
+              const running = tasks.find(t => t.state === "running");
+              const unmerged = tasks.find(t => t.state !== "merged");
+              selectedTaskId = (running || unmerged || tasks[0]).id;
+              try { localStorage.setItem("blyte_selected_task", selectedTaskId); } catch (_) {}
+            }
+          } else {
+            selectedTaskId = null;
+          }
+        } else {
+          selectedPlanKey = null;
+          selectedTaskId = null;
+        }
+
+        renderPlans();
+      } catch (err) {
+        isOnline = false;
+        renderPlans();
+      }
+    }
+
+    function startPlansPolling() {
+      if (plansPollInterval) return;
+      fetchPlans();
+      plansPollInterval = setInterval(fetchPlans, 5000);
+    }
+
+    function stopPlansPolling() {
+      if (plansPollInterval) {
+        clearInterval(plansPollInterval);
+        plansPollInterval = null;
+      }
+    }
+
+    function switchTab(mode) {
+      if (mode === "plans") {
+        window.location.hash = "#plans";
+      } else {
+        window.location.hash = "";
+      }
+      syncViewFromHash();
+    }
+
+    function syncViewFromHash() {
+      const isPlans = window.location.hash === "#plans";
+      const jobsView = document.getElementById("jobs-view");
+      const plansView = document.getElementById("plans-view");
+      const tabJobs = document.getElementById("tab-jobs");
+      const tabPlans = document.getElementById("tab-plans");
+
+      if (isPlans) {
+        if (jobsView) jobsView.style.display = "none";
+        if (plansView) plansView.style.display = "block";
+        if (tabJobs) {
+          tabJobs.classList.remove("on");
+          tabJobs.setAttribute("aria-selected", "false");
+        }
+        if (tabPlans) {
+          tabPlans.classList.add("on");
+          tabPlans.setAttribute("aria-selected", "true");
+        }
+        startPlansPolling();
+        renderPlans();
+      } else {
+        if (plansView) plansView.style.display = "none";
+        if (jobsView) jobsView.style.display = "block";
+        if (tabPlans) {
+          tabPlans.classList.remove("on");
+          tabPlans.setAttribute("aria-selected", "false");
+        }
+        if (tabJobs) {
+          tabJobs.classList.add("on");
+          tabJobs.setAttribute("aria-selected", "true");
+        }
+        stopPlansPolling();
+        render();
+      }
+    }
+
+    // Document click listeners for tags, job expand, plans picker, and task chips
     document.addEventListener("click", (e) => {
       const tagBtn = e.target.closest("[data-tag]");
       if (tagBtn) return onTagClick(e, tagBtn.dataset.tag);
       const rowBtn = e.target.closest("[data-toggle-key]");
-      if (rowBtn) toggleExpand(rowBtn.dataset.toggleKey);
+      if (rowBtn) return toggleExpand(rowBtn.dataset.toggleKey);
+      const planBtn = e.target.closest("[data-plan-key]");
+      if (planBtn) return selectPlan(planBtn.dataset.planKey);
+      const taskChip = e.target.closest("[data-task-id]");
+      if (taskChip && !taskChip.classList.contains("node")) return selectTask(taskChip.dataset.taskId);
     });
 
-    // Initial fetch and poll every 5 seconds
+    const flowEl = document.getElementById("plan-flow");
+    if (flowEl) {
+      function onFlowClickOrKey(e) {
+        const node = e.target.closest && e.target.closest(".node");
+        if (!node) return;
+        const taskId = node.dataset.taskId;
+        if (!taskId) return;
+        selectTask(taskId);
+        const n = document.querySelector('.node[data-task-id="' + taskId + '"]');
+        if (n) n.focus();
+      }
+      flowEl.addEventListener("click", onFlowClickOrKey);
+      flowEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onFlowClickOrKey(e);
+        }
+      });
+    }
+
+    window.addEventListener("resize", () => {
+      if (window.location.hash === "#plans") {
+        drawFlow();
+      }
+    });
+
+    window.addEventListener("hashchange", syncViewFromHash);
+    syncViewFromHash();
+
+    // Initial fetch of jobs and poll every 5 seconds
     fetchJobs();
     setInterval(fetchJobs, 5000);
   </script>
