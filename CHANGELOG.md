@@ -1,3 +1,9 @@
+## v0.10.0 (2026-10-01)
+
+### Feat
+
+- **cli**: the dashboard's Plans view; research reads the repository directly (#202)
+
 ## v0.9.0 (2026-10-01)
 
 ### Feat
