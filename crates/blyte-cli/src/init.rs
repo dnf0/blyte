@@ -241,6 +241,12 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
 
     let check_cmds = [
         "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+        "python -m unittest",
+        "python3 -m unittest",
+        "tox",
+        "nox",
         "ruff",
         "pyright",
         "mypy",
