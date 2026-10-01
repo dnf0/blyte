@@ -864,41 +864,139 @@ pub fn retry_order<'a>(steps: &[&'a str], last_failed: &[String]) -> (Vec<&'a st
     (failed, others)
 }
 
-/// Cuts gate output longer than 4,000 characters, keeping the head and the tail.
-fn cut_gate_output(output: &str) -> String {
+/// Summary lines from test runners (cargo, pytest, rustc).
+fn is_summary_line(line: &str) -> bool {
+    let t = line.trim();
+    ((t.starts_with("FAILED ") || t.starts_with("ERROR "))
+        && (t.contains("::") || t.contains(".py")))
+        || (t.starts_with('=') && (t.contains(" failed") || t.contains(" error")))
+        || (t.starts_with("test ") && t.ends_with("FAILED"))
+        || t.starts_with("error[")
+        || t.starts_with("error:")
+        || t.starts_with("test result: FAILED")
+}
+
+/// Collects up to 40 unique summary lines in order of appearance.
+fn summary_lines(output: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in output.lines() {
+        let t = line.trim();
+        if is_summary_line(t) && seen.insert(t) {
+            lines.push(t);
+            if lines.len() == 40 {
+                break;
+            }
+        }
+    }
+    lines
+}
+
+/// Checks if a line matches blyte's own "N of M steps failed: …" header format.
+fn is_blyte_header(line: &str) -> bool {
+    let t = line.trim();
+    let Some((n, rest)) = t.split_once(" of ") else {
+        return false;
+    };
+    if !n.chars().all(|c| c.is_ascii_digit()) || n.is_empty() {
+        return false;
+    }
+    let Some((m, _)) = rest.split_once(" steps failed:") else {
+        return false;
+    };
+    m.chars().all(|c| c.is_ascii_digit()) && !m.is_empty()
+}
+
+/// Cuts gate output longer than 4,000 characters, keeping test runner summary lines,
+/// the header, and the head and tail.
+pub fn cut_gate_output(output: &str) -> String {
     const MAX_CHARS: usize = 4_000;
-    const HEAD_CHARS: usize = 1_000;
-    const TAIL_CHARS: usize = 3_000;
 
     let total_chars = output.chars().count();
     if total_chars <= MAX_CHARS {
         return output.to_string();
     }
 
-    let head_cand_end = output
-        .char_indices()
-        .nth(HEAD_CHARS)
-        .map(|(i, _)| i)
-        .unwrap_or(output.len());
-    let head_cand = &output[..head_cand_end];
-    let head = match head_cand.rfind('\n') {
-        Some(idx) => &head_cand[..idx],
-        None => head_cand,
+    let sum_lines = summary_lines(output);
+    let has_summary = !sum_lines.is_empty();
+
+    let first_line = output.lines().next().unwrap_or("");
+    let has_blyte_header = is_blyte_header(first_line);
+
+    let (header, rem) = if has_summary && has_blyte_header {
+        let rem = &output[first_line.len()..];
+        let rem = rem.trim_start_matches(['\r', '\n']);
+        (Some(first_line), rem)
+    } else {
+        (None, output)
     };
 
-    let tail_cand_start = output
-        .char_indices()
-        .nth(total_chars - TAIL_CHARS)
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let tail_cand = &output[tail_cand_start..];
-    let tail = match tail_cand.find('\n') {
-        Some(idx) => &tail_cand[idx + 1..],
-        None => tail_cand,
+    let summary_block = if has_summary {
+        let mut block = String::from("Failing, from the full output:\n");
+        block.push_str(&sum_lines.join("\n"));
+        Some(block)
+    } else {
+        None
     };
 
-    let dropped = total_chars - head.chars().count() - tail.chars().count();
-    format!("{head}\n… [{dropped} characters cut] …\n{tail}")
+    let prefix_chars = header.map(|h| h.chars().count() + 1).unwrap_or(0)
+        + summary_block
+            .as_ref()
+            .map(|s| s.chars().count() + 1)
+            .unwrap_or(0);
+
+    let available = MAX_CHARS.saturating_sub(prefix_chars);
+    let head_budget = available / 4;
+    let tail_budget = available - head_budget;
+
+    let head = if head_budget == 0 || rem.is_empty() {
+        ""
+    } else {
+        let head_cand_end = rem
+            .char_indices()
+            .nth(head_budget)
+            .map(|(i, _)| i)
+            .unwrap_or(rem.len());
+        let head_cand = &rem[..head_cand_end];
+        match head_cand.rfind('\n') {
+            Some(idx) => &head_cand[..idx],
+            None => head_cand,
+        }
+    };
+
+    let tail = if tail_budget == 0 {
+        ""
+    } else {
+        let tail_cand_start = output
+            .char_indices()
+            .nth(total_chars.saturating_sub(tail_budget))
+            .map(|(i, _)| i)
+            .unwrap_or(output.len());
+        let tail_cand = &output[tail_cand_start..];
+        match tail_cand.find('\n') {
+            Some(idx) => &tail_cand[idx + 1..],
+            None => tail_cand,
+        }
+    };
+
+    let dropped = total_chars.saturating_sub(head.chars().count() + tail.chars().count());
+
+    let mut pieces = Vec::new();
+    if let Some(h) = header {
+        pieces.push(h);
+    }
+    if let Some(sb) = &summary_block {
+        pieces.push(sb.as_str());
+    }
+    if !head.is_empty() {
+        pieces.push(head);
+    }
+    let marker = format!("… [{dropped} characters cut] …");
+    pieces.push(&marker);
+    if !tail.is_empty() {
+        pieces.push(tail);
+    }
+    pieces.join("\n")
 }
 
 /// Extracts a concise, human-readable target descriptor from a tool call's arguments.
