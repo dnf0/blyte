@@ -294,16 +294,277 @@ fn matches_task(task: &PlanTask, pt: &str) -> bool {
     false
 }
 
-fn is_ancestor(job: &Job, root: &Path) -> bool {
+fn first_backticked_plan_path(text: &str) -> Option<String> {
+    let mut in_code_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence {
+            continue;
+        }
+        let mut in_backtick = false;
+        let mut current = String::new();
+        for c in line.chars() {
+            if c == '`' {
+                if in_backtick {
+                    let s = current.trim();
+                    if s.ends_with(".md") && s.contains("plans/") {
+                        return Some(s.to_string());
+                    }
+                    current.clear();
+                    in_backtick = false;
+                } else {
+                    in_backtick = true;
+                }
+            } else if in_backtick {
+                current.push(c);
+            }
+        }
+    }
+    None
+}
+
+fn find_tag_plan_stem(job: &Job) -> Option<String> {
+    for tag in &job.file_tags {
+        if let Some(rest) = tag.strip_prefix("plan:") {
+            let stem = rest.trim();
+            if !stem.is_empty() {
+                return Some(stem.to_string());
+            }
+        }
+    }
+    let synth = job.plan.as_ref().and_then(|p| {
+        Path::new(p)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("plan: {s}"))
+    });
+    for tag in &job.tags {
+        if let Some(ref s) = synth {
+            if tag == s {
+                continue;
+            }
+        }
+        if let Some(rest) = tag.strip_prefix("plan:") {
+            let stem = rest.trim();
+            if !stem.is_empty() {
+                return Some(stem.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_bare_stem(
+    root: &Path,
+    stem: &str,
+    git_names_cache: &mut HashMap<PathBuf, Vec<String>>,
+) -> Option<PathBuf> {
+    let target = format!("{stem}.md");
+    let names = git_names_cache
+        .entry(root.to_path_buf())
+        .or_insert_with(|| {
+            let Ok(out) = std::process::Command::new("git")
+                .args(["log", "--all", "--format=", "--name-only"])
+                .current_dir(root)
+                .output()
+            else {
+                return Vec::new();
+            };
+            if !out.status.success() {
+                return Vec::new();
+            }
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        });
+
+    for name in names {
+        if Path::new(name).file_name().and_then(|n| n.to_str()) == Some(&target) {
+            return Some(PathBuf::from(name.as_str()));
+        }
+    }
+
+    if root.join(&target).is_file() {
+        return Some(PathBuf::from(&target));
+    }
+    for sub in &["docs/plans", "docs", "plans"] {
+        let candidate = Path::new(sub).join(&target);
+        if root.join(&candidate).is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn extract_relpath(root: &Path, plan_path: &Path, job_wt: Option<&str>) -> PathBuf {
+    if plan_path.is_relative() {
+        let p_str = plan_path.to_string_lossy();
+        if let Some(stripped) = p_str.strip_prefix("./") {
+            return PathBuf::from(stripped);
+        }
+        return plan_path.to_path_buf();
+    }
+
+    // 1. inside <root>/.wt/<id>/
+    let wt_base = root.join(".wt");
+    if let Ok(rest) = plan_path.strip_prefix(&wt_base) {
+        let mut comps = rest.components();
+        if comps.next().is_some() {
+            let after_id = comps.as_path();
+            if !after_id.as_os_str().is_empty() {
+                return after_id.to_path_buf();
+            }
+        }
+    }
+
+    // 2. inside <root>/.claude/worktrees/<x>/
+    let claude_base = root.join(".claude").join("worktrees");
+    if let Ok(rest) = plan_path.strip_prefix(&claude_base) {
+        let mut comps = rest.components();
+        if comps.next().is_some() {
+            let after_x = comps.as_path();
+            if !after_x.as_os_str().is_empty() {
+                return after_x.to_path_buf();
+            }
+        }
+    }
+
+    // 3. sibling <root>--<x>/
+    if let (Some(root_parent), Some(root_name)) =
+        (root.parent(), root.file_name().and_then(|n| n.to_str()))
+    {
+        if let Ok(rest) = plan_path.strip_prefix(root_parent) {
+            let mut comps = rest.components();
+            if let Some(first) = comps.next() {
+                if let Some(first_str) = first.as_os_str().to_str() {
+                    let prefix = format!("{root_name}--");
+                    if first_str.starts_with(&prefix) {
+                        let after_prefix = comps.as_path();
+                        if !after_prefix.as_os_str().is_empty() {
+                            return after_prefix.to_path_buf();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. inside root
+    if let Ok(rel) = plan_path.strip_prefix(root) {
+        if !rel.as_os_str().is_empty() {
+            return rel.to_path_buf();
+        }
+    }
+
+    // 5. inside job's worktree
+    if let Some(wt) = job_wt {
+        if let Ok(rel) = plan_path.strip_prefix(wt) {
+            if !rel.as_os_str().is_empty() {
+                return rel.to_path_buf();
+            }
+        }
+    }
+
+    if let Ok(rel) = plan_path.strip_prefix("/") {
+        return rel.to_path_buf();
+    }
+
+    plan_path.to_path_buf()
+}
+
+fn read_plan_content(
+    root: &Path,
+    relpath: &Path,
+    jobs: &[&Job],
+    cache: &mut HashMap<(PathBuf, PathBuf), Option<String>>,
+) -> Option<String> {
+    let key = (root.to_path_buf(), relpath.to_path_buf());
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+
+    let relpath_str = relpath.to_string_lossy().to_string();
+
+    // 1. <root>/<relpath> on disk
+    let disk_path = root.join(relpath);
+    if let Ok(content) = std::fs::read_to_string(&disk_path) {
+        cache.insert(key, Some(content.clone()));
+        return Some(content);
+    }
+
+    // 2. the job's own worktree + relpath
+    for job in jobs {
+        if let Some(ref wt) = job.worktree {
+            let wt_path = Path::new(wt).join(relpath);
+            if let Ok(content) = std::fs::read_to_string(&wt_path) {
+                cache.insert(key, Some(content.clone()));
+                return Some(content);
+            }
+        }
+    }
+
+    // 3. git: git -C <root> log --all -1 --format=%H -- <relpath> and git -C <root> show <sha>:<relpath>
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["log", "--all", "-1", "--format=%H", "--", &relpath_str])
+        .current_dir(root)
+        .output()
+    {
+        if out.status.success() {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sha.is_empty() {
+                if let Ok(show_out) = std::process::Command::new("git")
+                    .args(["show", &format!("{sha}:{relpath_str}")])
+                    .current_dir(root)
+                    .output()
+                {
+                    if show_out.status.success() {
+                        let content = String::from_utf8_lossy(&show_out.stdout).to_string();
+                        cache.insert(key, Some(content.clone()));
+                        return Some(content);
+                    }
+                }
+            }
+        }
+    }
+
+    cache.insert(key, None);
+    None
+}
+
+fn is_merged(job: &Job, root: &Path) -> bool {
     let Some(last_commit) = job.commits.last() else {
         return false;
     };
-    std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", &last_commit.sha, "HEAD"])
+    let Ok(output) = std::process::Command::new("git")
+        .args([
+            "branch",
+            "--contains",
+            &last_commit.sha,
+            "--format=%(refname:short)",
+        ])
         .current_dir(root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let b = line.trim();
+        if !b.is_empty() && !b.starts_with("wip/") && !b.starts_with('(') {
+            return true;
+        }
+    }
+    false
 }
 
 struct PlanItem {
@@ -324,36 +585,64 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
     plan_src.hours = plan_src.hours.max(7 * 24);
     let jobs = dashboard::collect_jobs(&plan_src, now);
 
-    let mut groups: HashMap<(PathBuf, PathBuf), (PathBuf, Vec<&Job>)> = HashMap::new();
+    let mut groups: HashMap<(PathBuf, PathBuf), Vec<&Job>> = HashMap::new();
+    let mut git_names_cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
     for job in &jobs {
-        let (Some(ref root), Some(ref plan_file)) = (&job.root, &job.plan_file) else {
+        let Some(ref root) = job.root else {
             continue;
         };
-        let resolved = if Path::new(plan_file).is_relative() {
-            root.join(plan_file)
+
+        let relpath = if let Some(ref p) = job.start_plan {
+            if !p.contains('/') && !p.ends_with(".md") {
+                if let Some(rp) = resolve_bare_stem(root, p, &mut git_names_cache) {
+                    rp
+                } else {
+                    extract_relpath(root, Path::new(p), job.worktree.as_deref())
+                }
+            } else {
+                extract_relpath(root, Path::new(p), job.worktree.as_deref())
+            }
+        } else if let Some(stem) = find_tag_plan_stem(job) {
+            if stem.contains('/') {
+                extract_relpath(root, Path::new(&stem), job.worktree.as_deref())
+            } else {
+                let stem_clean = stem.strip_suffix(".md").unwrap_or(&stem);
+                if let Some(rp) = resolve_bare_stem(root, stem_clean, &mut git_names_cache) {
+                    rp
+                } else {
+                    continue;
+                }
+            }
+        } else if let Some(ref p) = job.plan {
+            extract_relpath(root, Path::new(p), job.worktree.as_deref())
+        } else if let Some(p) = first_backticked_plan_path(&job.task) {
+            extract_relpath(root, Path::new(&p), job.worktree.as_deref())
         } else {
-            PathBuf::from(plan_file)
+            continue;
         };
-        let entry = groups
-            .entry((root.clone(), resolved))
-            .or_insert_with(|| (root.clone(), Vec::new()));
-        entry.1.push(job);
+
+        groups.entry((root.clone(), relpath)).or_default().push(job);
     }
 
+    let mut plan_content_cache: HashMap<(PathBuf, PathBuf), Option<String>> = HashMap::new();
     let mut plan_items = Vec::new();
 
-    for ((root, resolved_path), (_, jobs_in_group)) in groups {
-        let Ok(content) = std::fs::read_to_string(&resolved_path) else {
+    for ((root, relpath), jobs_in_group) in groups {
+        let Some(content) =
+            read_plan_content(&root, &relpath, &jobs_in_group, &mut plan_content_cache)
+        else {
             continue;
         };
         let doc = parse_plan(&content);
         let repo = dashboard::repo_name(&root);
-        let stem = resolved_path
+        let stem = relpath
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("plan");
         let key = format!("{repo}/{stem}");
-        let path_str = resolved_path.to_string_lossy().to_string();
+        let full_path = root.join(&relpath);
+        let path_str = full_path.to_string_lossy().to_string();
 
         let mut lanes = Vec::new();
         let mut seen_lanes = HashSet::new();
@@ -407,7 +696,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                     } else if latest.verdict.as_deref() == Some("redone") {
                         "redone".to_string()
                     } else if latest.status == "verified" {
-                        if is_ancestor(latest, &root) {
+                        if is_merged(latest, &root) {
                             "merged".to_string()
                         } else {
                             "verified".to_string()
