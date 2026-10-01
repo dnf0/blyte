@@ -487,6 +487,13 @@ impl<'a> Runner<'a> {
             }
             report.outcome_turns = turn;
 
+            if self.budget.max_turns >= 20 && turn == self.budget.max_turns - 9 {
+                history.push(Message::User(format!(
+                    "You have 10 turns left of {}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools.",
+                    self.budget.max_turns
+                )));
+            }
+
             let req = Request {
                 system: system.clone(),
                 messages: self.context.build(state, &history),

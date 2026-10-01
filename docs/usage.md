@@ -213,5 +213,5 @@ a worktree of the repository. The task prompt directs the model to read the code
 by absolute path and write findings to `report.md`. The gate is `test -s report.md`, verifying that a
 non-empty report was written. When finished, the report is copied to `.wt/<id>.report.md` (and to
 `--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to
-80 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
+120 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
 `--max-seconds` flags still win).
