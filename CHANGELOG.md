@@ -1,3 +1,9 @@
+## v0.16.0 (2026-10-02)
+
+### Feat
+
+- **cli**: warn when the gate misses CI checks; flag a superseded blyte-research skill; skill guidance from heavy use (#218)
+
 ## v0.15.0 (2026-10-02)
 
 ### Feat
