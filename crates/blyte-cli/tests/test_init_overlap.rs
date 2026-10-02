@@ -1,4 +1,4 @@
-//! Two pytest steps that test the same files are one step: provision's CI ran the suite twice, and
+//! Two pytest steps that test the same files are one step: One repository's CI ran the suite twice, and
 //! so did its gate (2026-10-01).
 
 use blyte_cli::init::drop_overlapping;

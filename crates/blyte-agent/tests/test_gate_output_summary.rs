@@ -9,8 +9,8 @@ fn failing_test_names_survive_the_cut() {
     for i in 0..200 {
         out.push_str(&format!("tests/test_mod_{i}.py ........ [ {i}%]\n"));
     }
-    out.push_str("FAILED tests/flows/stac_paths_test.py::test_process_tile - KeyError: 'x'\n");
-    out.push_str("FAILED tests/hazard/partition_test.py::test_cells_cover_the_world\n");
+    out.push_str("FAILED tests/flows/paths_test.py::test_process_tile - KeyError: 'x'\n");
+    out.push_str("FAILED tests/core/partition_test.py::test_cells_cover_the_world\n");
     out.push_str("= 2 failed, 3345 passed, 11 skipped in 199.65s =\n");
     for _ in 0..200 {
         out.push_str("12:46:35.607 | ERROR   | asyncio - Task was destroyed but it is pending!\n");
@@ -20,11 +20,11 @@ fn failing_test_names_survive_the_cut() {
     assert!(cut.starts_with("1 of 2 steps failed"), "{cut}");
     assert!(cut.contains("Failing, from the full output:"), "{cut}");
     assert!(
-        cut.contains("FAILED tests/flows/stac_paths_test.py::test_process_tile"),
+        cut.contains("FAILED tests/flows/paths_test.py::test_process_tile"),
         "{cut}"
     );
     assert!(
-        cut.contains("FAILED tests/hazard/partition_test.py::test_cells_cover_the_world"),
+        cut.contains("FAILED tests/core/partition_test.py::test_cells_cover_the_world"),
         "{cut}"
     );
     assert!(cut.contains("2 failed, 3345 passed"), "{cut}");

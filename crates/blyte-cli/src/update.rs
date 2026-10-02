@@ -1,6 +1,7 @@
 //! `blyte update`: replace this binary with the latest GitHub release (2026-09-30).
 //!
-//! Releases carry one static binary per platform (release-on-merge.yml). The repository is private,
+//! Releases carry one static binary per platform (release-on-merge.yml). The repository is the
+//! `repository` field of the workspace Cargo.toml. The repository is private,
 //! so the download goes through the GitHub CLI (`gh`), which already holds the user's access;
 //! blyte handles no token. The new binary must run before it replaces the old one, the old one is
 //! kept beside it as `blyte.prev` (`blyte update --rollback` swaps them back), and every installed
@@ -9,8 +10,95 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The repository whose releases are installed.
-pub const REPO: &str = "climate-x-org/blyte";
+/// The repository whose releases are installed. The repository is the `repository` field
+/// of the workspace Cargo.toml.
+pub const REPO: &str = match parse_repo(env!("CARGO_PKG_REPOSITORY")) {
+    Some(repo) => repo,
+    None => panic!(concat!(
+        "the build's repository field is not a GitHub URL: ",
+        env!("CARGO_PKG_REPOSITORY")
+    )),
+};
+
+/// The repository whose releases are installed (`owner/name`).
+pub const fn repo() -> &'static str {
+    REPO
+}
+
+/// Parse a GitHub repository URL into an `owner/name` pair, stripping a leading
+/// `https://github.com/` and any trailing `/` or `.git`. Returns `None` if the URL is not a
+/// valid GitHub repository URL.
+pub const fn parse_repo(url: &str) -> Option<&str> {
+    let bytes = url.as_bytes();
+    let prefix = b"https://github.com/";
+    if bytes.len() < prefix.len() {
+        return None;
+    }
+    let mut i = 0;
+    while i < prefix.len() {
+        if bytes[i] != prefix[i] {
+            return None;
+        }
+        i += 1;
+    }
+
+    let mut end = bytes.len();
+    while end > prefix.len() && bytes[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end >= prefix.len() + 4
+        && bytes[end - 4] == b'.'
+        && bytes[end - 3] == b'g'
+        && bytes[end - 2] == b'i'
+        && bytes[end - 1] == b't'
+    {
+        end -= 4;
+        while end > prefix.len() && bytes[end - 1] == b'/' {
+            end -= 1;
+        }
+    }
+
+    let start = prefix.len();
+    if end <= start {
+        return None;
+    }
+
+    let mut slash_count = 0;
+    let mut j = start;
+    let mut slash_idx = 0;
+    while j < end {
+        let b = bytes[j];
+        if b == b'/' {
+            slash_count += 1;
+            slash_idx = j;
+        } else if b.is_ascii_whitespace() {
+            return None;
+        }
+        j += 1;
+    }
+
+    if slash_count != 1 || slash_idx == start || slash_idx == end - 1 {
+        return None;
+    }
+
+    let (_, tail) = match bytes.split_at_checked(start) {
+        Some(pair) => pair,
+        None => return None,
+    };
+    let (target, _) = match tail.split_at_checked(end - start) {
+        Some(pair) => pair,
+        None => return None,
+    };
+    match std::str::from_utf8(target) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    }
+}
+
+/// Alias for [`parse_repo`].
+pub const fn parse_repo_url(url: &str) -> Option<&str> {
+    parse_repo(url)
+}
 
 /// The release asset for this machine, or `None` where no binary is built.
 pub fn asset_name() -> Option<&'static str> {
@@ -44,9 +132,10 @@ fn gh() -> String {
 }
 
 fn latest_tag() -> Result<String, String> {
+    let repo = repo();
     let out = Command::new(gh())
         .args([
-            "release", "view", "--repo", REPO, "--json", "tagName", "--jq", ".tagName",
+            "release", "view", "--repo", repo, "--json", "tagName", "--jq", ".tagName",
         ])
         .output()
         .map_err(|e| {
@@ -54,7 +143,7 @@ fn latest_tag() -> Result<String, String> {
         })?;
     if !out.status.success() {
         return Err(format!(
-            "gh could not read the latest release of {REPO}: {}",
+            "gh could not read the latest release of {repo}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
@@ -220,9 +309,10 @@ fn update(check: bool) -> Result<(), String> {
         println!("run `blyte update` to install it");
         return Ok(());
     }
+    let repo = repo();
     let asset = asset_name().ok_or_else(|| {
         format!(
-            "no release binary for {}-{}; build it with `cargo install --git https://github.com/{REPO} blyte`",
+            "no release binary for {}-{}; build it with `cargo install --git https://github.com/{repo} blyte`",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
@@ -235,7 +325,7 @@ fn update(check: bool) -> Result<(), String> {
             "download",
             &tag,
             "--repo",
-            REPO,
+            repo,
             "--pattern",
             asset,
             "--clobber",
@@ -295,5 +385,28 @@ pub fn run(check: bool, rollback_requested: bool) -> i32 {
             eprintln!("error: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_maps_github_urls_and_rejects_non_github() {
+        assert_eq!(
+            parse_repo("https://github.com/acme/blyte"),
+            Some("acme/blyte")
+        );
+        assert_eq!(
+            parse_repo("https://github.com/acme/blyte/"),
+            Some("acme/blyte")
+        );
+        assert_eq!(
+            parse_repo("https://github.com/acme/blyte.git"),
+            Some("acme/blyte")
+        );
+        assert_eq!(parse_repo("https://gitlab.com/acme/blyte"), None);
+        assert_eq!(repo(), parse_repo(env!("CARGO_PKG_REPOSITORY")).unwrap());
     }
 }

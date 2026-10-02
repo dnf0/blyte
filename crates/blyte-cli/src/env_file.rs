@@ -1,5 +1,5 @@
 //! Provider keys from a file, for sessions that did not export them: a Claude Code session started
-//! without `GEMINI_API_KEY` failed every `blyte dispatch` at turn 0 (spatial-service, 2026-09-29).
+//! without `GEMINI_API_KEY` failed every `blyte dispatch` at turn 0 (2026-09-29).
 //!
 //! The file is `$BLYTE_ENV_FILE` (empty turns it off), else `$XDG_CONFIG_HOME/blyte/env`, else
 //! `~/.config/blyte/env`: `NAME=value` lines, with an optional `export ` prefix, surrounding quotes,

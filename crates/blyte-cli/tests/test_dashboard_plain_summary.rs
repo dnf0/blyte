@@ -19,7 +19,7 @@ fn markdown_is_stripped_from_the_summary_line() {
             "M1",
             "### Done\n\n1. **Added brand test suite** in `tests/x.rs`:\n",
         ),
-        ("M2", "- **premise_lookup/rasters.py**: routing\n"),
+        ("M2", "- **app/lookup/rasters.py**: routing\n"),
     ] {
         write(&runs.join(format!("{id}.log")), "[Turn 1] \n");
         write(
@@ -51,5 +51,5 @@ fn markdown_is_stripped_from_the_summary_line() {
             .to_string()
     };
     assert_eq!(now_of("repo-f/M1"), "Added brand test suite in tests/x.rs:");
-    assert_eq!(now_of("repo-f/M2"), "premise_lookup/rasters.py: routing");
+    assert_eq!(now_of("repo-f/M2"), "app/lookup/rasters.py: routing");
 }

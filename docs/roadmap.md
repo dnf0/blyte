@@ -1,7 +1,7 @@
 # Roadmap
 
 What is planned next for blyte, what is waiting on something, and what is parked. Dated items are
-decisions; the evidence behind them is in `docs/evidence.md` and the plans in `docs/superpowers/plans/`.
+decisions; the evidence behind them is in `docs/evidence.md` and the design plans.
 
 ## In progress
 
@@ -136,21 +136,23 @@ Kept for about the last four weeks; older items are in the git history and the e
   blyte-eval #93; rerunning the Codex + blyte against Claude Code + blyte comparison is parked
   (2026-10-02): the failures were likely down to the Codex subscription level.
 
-- **Open-sourcing blyte** and the brief for Jack: on hold until the information gathering ends.
+- **Open-sourcing blyte** and a brief for the decision: on hold until the information gathering ends.
 - **Docs hosting:** GitHub Pages, deployed by a workflow on merge to `main` (MkDocs Material builds
   already run in CI), at `<user>.github.io/blyte`. A custom domain (about $10-50 a year; no reliable
   free one) keeps links stable if the repository moves; a free `*.github.io` address is fine to start.
-- **Scrub before publishing (2026-10-02 count):** 54 of 378 tracked files mention internal names
-  (work repositories, the AWS account, people, internal artifact links), 33 of them plans under
-  `docs/superpowers/`; also `README.md`, `SECURITY.md`, `LICENSE`, `CONTRIBUTING.md`, `Cargo.toml`,
-  `mkdocs.yml`, `docs/evidence.md`, two ADRs, two source files and six tests. Decide per file: publish,
-  rewrite with generic examples, or keep out. The git history carries the same names: publish a fresh
-  repository (one squashed initial commit) rather than this one, after a secrets scan.
+- **Publishing (prepared 2026-10-02):** internal names are out of the files that will be public, and
+  `test_public_names` keeps them out: it fails on any internal name outside its allow-list, which now
+  holds only the publish-day items (the repository URL and the author/copyright holder). Internal
+  working notes (`docs/superpowers/`, ADRs 0001-0002) stay out of the public copy. On the day:
+  decide the copyright holder; change `Cargo.toml`'s `repository` (which `blyte update` follows) and the
+  allow-listed URLs to the public home; empty the allow-list and run the check; run a secrets scan;
+  publish a fresh repository as one squashed commit; then make a last release here with the new
+  `repository`, so existing installs move to the public releases on their next `blyte update`.
 - **When open source is approved** (these need a public repository and a crates.io release):
   - `blyte update` updates the way blyte was installed: `cargo install blyte --locked` (or
     `cargo binstall blyte`) for a cargo install, detected from `~/.cargo/.crates2.json`, and the
     release binary over plain HTTPS otherwise, with no GitHub CLI needed. Today it always downloads
     the release binary through `gh`.
   - Publish the crates to crates.io (`cd.yml`, manual, dry run first).
-  - Contributions: a DCO sign-off or a CLA, decided with Jack and legal, before accepting outside
+  - Contributions: a DCO sign-off or a CLA, decided before accepting outside
     pull requests.

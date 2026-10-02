@@ -69,7 +69,7 @@ fn uv_projects_run_frozen_and_private_indexes_offline() {
     assert!(!env.contains_key("UV_OFFLINE"));
     write(
         &d.path().join("pyproject.toml"),
-        "[project]\nname = \"x\"\n[[tool.uv.index]]\nname = \"p\"\nurl = \"https://example.d.codeartifact.eu-west-2.amazonaws.com/pypi/p/simple/\"\n",
+        "[project]\nname = \"x\"\n[[tool.uv.index]]\nname = \"p\"\nurl = \"https://packages.example.com/simple/\"\n",
     );
     assert_eq!(
         detect_env(d.path()).get("UV_OFFLINE").map(String::as_str),

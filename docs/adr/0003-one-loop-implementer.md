@@ -2,9 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-09-27
-**Supersedes:** [ADR 0001](https://github.com/climate-x-org/blyte/blob/main/docs/adr/0001-progressive-staged-verification.md) (progressive staged
-verification) and [ADR 0002](https://github.com/climate-x-org/blyte/blob/main/docs/adr/0002-detached-handoff-and-native-rust-harness.md) (detached handoff
-and the native daemon harness)
+supersedes ADR 0001 (progressive staged verification) and ADR 0002 (detached hand-off), kept in the project's history.
 
 ## Context
 

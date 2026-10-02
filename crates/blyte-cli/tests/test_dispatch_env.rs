@@ -33,7 +33,7 @@ fn env_and_fold_budget_load_and_credentials_are_refused() {
 
     for bad in [
         "GITHUB_TOKEN = \"x\"",
-        "UV_INDEX_PIGEONHOLE_PASSWORD = \"x\"",
+        "UV_INDEX_PRIVATE_PASSWORD = \"x\"",
         "BLYTE_MODEL = \"x\"",
     ] {
         std::fs::write(
