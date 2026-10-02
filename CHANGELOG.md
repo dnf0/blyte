@@ -1,3 +1,9 @@
+## v0.15.0 (2026-10-02)
+
+### Feat
+
+- **clean**: work merged into the run's base branch counts as merged; report sessions' merged worktrees (#216)
+
 ## v0.14.0 (2026-10-02)
 
 ### Feat
