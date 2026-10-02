@@ -137,7 +137,15 @@ Kept for about the last four weeks; older items are in the git history and the e
   (2026-10-02): the failures were likely down to the Codex subscription level.
 
 - **Open-sourcing blyte** and the brief for Jack: on hold until the information gathering ends.
-- **Docs hosting:** parked until the decision to go public.
+- **Docs hosting:** GitHub Pages, deployed by a workflow on merge to `main` (MkDocs Material builds
+  already run in CI), at `<user>.github.io/blyte`. A custom domain (about $10-50 a year; no reliable
+  free one) keeps links stable if the repository moves; a free `*.github.io` address is fine to start.
+- **Scrub before publishing (2026-10-02 count):** 54 of 378 tracked files mention internal names
+  (work repositories, the AWS account, people, internal artifact links), 33 of them plans under
+  `docs/superpowers/`; also `README.md`, `SECURITY.md`, `LICENSE`, `CONTRIBUTING.md`, `Cargo.toml`,
+  `mkdocs.yml`, `docs/evidence.md`, two ADRs, two source files and six tests. Decide per file: publish,
+  rewrite with generic examples, or keep out. The git history carries the same names: publish a fresh
+  repository (one squashed initial commit) rather than this one, after a secrets scan.
 - **When open source is approved** (these need a public repository and a crates.io release):
   - `blyte update` updates the way blyte was installed: `cargo install blyte --locked` (or
     `cargo binstall blyte`) for a cargo install, detected from `~/.cargo/.crates2.json`, and the
