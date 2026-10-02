@@ -1414,7 +1414,7 @@
       if (!currentPlansData || !Array.isArray(currentPlansData.plans) || currentPlansData.plans.length === 0) {
         return null;
       }
-      const plans = currentPlansData.plans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
+      const plans = currentPlansData.plans.filter(hasRunningTask);
       if (plans.length === 0) {
         return null;
       }
@@ -1423,6 +1423,11 @@
         if (found) return found;
       }
       return plans[0];
+    }
+
+    // The Plans view lists only plans with a task running now.
+    function hasRunningTask(p) {
+      return (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running"));
     }
 
     function formatEventTime(at) {
@@ -1477,7 +1482,7 @@
       const container = document.getElementById("plan-picker");
       if (!container) return;
       const allPlans = (currentPlansData && currentPlansData.plans) || [];
-      const plans = allPlans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
+      const plans = allPlans.filter(hasRunningTask);
       if (plans.length === 0) {
         container.innerHTML = "";
         return;
@@ -1885,7 +1890,7 @@
       renderLiveIndicator();
       initLegend();
       const allPlans = (currentPlansData && currentPlansData.plans) || [];
-      const plans = allPlans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
+      const plans = allPlans.filter(hasRunningTask);
       const emptyEl = document.getElementById("plans-empty");
       const contentEl = document.getElementById("plans-content");
 
@@ -1911,7 +1916,7 @@
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
         const allPlans = data.plans || [];
-        const plans = allPlans.filter(p => (p.stats && p.stats.running > 0) || (p.tasks && p.tasks.some(t => t.state === "running")));
+        const plans = allPlans.filter(hasRunningTask);
         data.plans = plans;
         currentPlansData = data;
         lastSuccessfulUpdate = new Date();
