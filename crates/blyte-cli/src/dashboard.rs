@@ -142,6 +142,7 @@ pub struct Job {
     pub root: Option<PathBuf>,
     pub plan_file: Option<String>,
     pub plan_task: Option<String>,
+    pub task_file: Option<String>,
     #[serde(skip)]
     pub start_plan: Option<String>,
     #[serde(skip)]
@@ -506,6 +507,7 @@ struct RawJob {
     repo: String,
     root: Option<PathBuf>,
     task: String,
+    task_file: Option<String>,
     pid: Option<i64>,
     started_at: Option<u64>,
     start_plan: Option<String>,
@@ -625,8 +627,12 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         .and_then(|v| v["plan_task"].as_str())
                         .map(|s| s.to_string())
                         .filter(|s| !s.is_empty());
-                    let task_file = start_val.as_ref().and_then(|v| v["task_file"].as_str());
+                    let task_file = start_val
+                        .as_ref()
+                        .and_then(|v| v["task_file"].as_str())
+                        .map(|s| s.to_string());
                     let task = task_file
+                        .as_deref()
                         .and_then(|p| std::fs::read_to_string(p).ok())
                         .unwrap_or_default();
                     let mut file_tags = Vec::new();
@@ -677,6 +683,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         repo: repo.clone(),
                         root: wt_dir.parent().map(|p| p.to_path_buf()),
                         task,
+                        task_file,
                         pid,
                         started_at,
                         start_plan,
@@ -822,6 +829,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     repo: repo.clone(),
                                     root,
                                     task,
+                                    task_file: None,
                                     pid,
                                     started_at,
                                     start_plan: None,
@@ -1176,6 +1184,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             root: raw.root,
             plan_file,
             plan_task,
+            task_file: raw.task_file,
             start_plan: raw.start_plan,
             file_tags,
             verdict_notes,
