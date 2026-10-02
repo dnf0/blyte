@@ -182,3 +182,67 @@ fn ordinary_task_file_creates_no_plan() {
     let plans = v["plans"].as_array().unwrap();
     assert!(plans.is_empty(), "expected no plan, got: {plans:?}");
 }
+
+/// The sibling worktree is removed after merging (repos-05, 2026-10-02): the plan is read from git
+/// history, here a remote-tracking `origin/main` the main checkout has fetched but not merged.
+#[test]
+fn plan_survives_its_sibling_worktree_being_removed() {
+    let t = tempfile::tempdir().unwrap();
+    let repo = t.path().join("repos/app");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    write(&repo.join("README.md"), "# App\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "initial", "--no-gpg-sign"]);
+
+    // The plan is committed on a branch that becomes origin/main; the local checkout stays behind.
+    let rel = "docs/superpowers/plans/2026-10-01-x.md";
+    git(&repo, &["switch", "-q", "-c", "plan-branch"]);
+    write(
+        &repo.join(rel),
+        "# X\n\n### Task S1: first\n\n**Files:** `a.rs`\n\nDepends on: none\n",
+    );
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "plan", "--no-gpg-sign"]);
+    let sha = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["switch", "-q", "main"]);
+    git(&repo, &["branch", "-q", "-D", "plan-branch"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &sha]);
+    assert!(!repo.join(rel).exists());
+
+    // The run's task file was in a sibling worktree that no longer exists.
+    let gone = t.path().join("repos/app--side").join(rel);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let wt = repo.join(".wt");
+    write(
+        &wt.join("W1.start.json"),
+        &serde_json::json!({
+            "id": "W1",
+            "pid": 999999,
+            "started_at": now - 300,
+            "task_file": gone.to_str().unwrap(),
+            "gate": "true",
+            "plan_task": "Task S1"
+        })
+        .to_string(),
+    );
+    write(&wt.join("W1.log"), "[Turn 5] \n");
+    write(
+        &wt.join("W1.report.json"),
+        r#"{"outcome":"verified","cost_usd":0.3,"turns":5,"gate_attempts":1}"#,
+    );
+
+    let src = Sources {
+        roots: vec![t.path().join("repos")],
+        runs_dirs: vec![],
+        hours: 24,
+    };
+    let v = collect_plans(&src, now);
+    let plans = v["plans"].as_array().unwrap();
+    assert_eq!(plans.len(), 1, "{v}");
+    assert_eq!(plans[0]["key"], "app/2026-10-01-x");
+    assert_eq!(plans[0]["tasks"][0]["dispatch"], "app/W1");
+}
