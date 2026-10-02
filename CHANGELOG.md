@@ -1,3 +1,9 @@
+## v0.18.1 (2026-10-02)
+
+### Fix
+
+- **skill**: a task touching more than about 20 files names its script or is split (#226)
+
 ## v0.18.0 (2026-10-02)
 
 ### Feat
