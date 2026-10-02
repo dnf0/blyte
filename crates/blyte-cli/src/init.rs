@@ -389,7 +389,15 @@ fn join_continuation_lines(lines: &[&str]) -> Vec<String> {
 
 fn filter_and_clean_command(cmd: &str) -> Option<String> {
     let trimmed = cmd.trim();
-    let prefixes = ["uv run ", "poetry run ", "pdm run ", "npx ", "pipenv run "];
+    let prefixes = [
+        "uv run ",
+        "poetry run ",
+        "pdm run ",
+        "npx ",
+        "pipenv run ",
+        "pnpm exec ",
+        "bunx ",
+    ];
     let mut stripped = trimmed;
     for p in &prefixes {
         if stripped.starts_with(p) {
@@ -430,6 +438,10 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         "make test",
         "make typecheck",
         "make validate",
+        "eslint",
+        "vitest",
+        "jest",
+        "tsc",
     ];
 
     let is_check = check_cmds.iter().any(|&c| {

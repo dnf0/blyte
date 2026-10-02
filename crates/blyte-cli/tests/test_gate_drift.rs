@@ -39,6 +39,11 @@ fn repo_with_ci(ci_yml: &str) -> tempfile::TempDir {
     let wf_dir = r.path().join(".github").join("workflows");
     std::fs::create_dir_all(&wf_dir).unwrap();
     std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
+    std::fs::write(
+        r.path().join("Makefile"),
+        "lint:\n\t@echo lint\ntest:\n\t@echo test\ntypecheck:\n\t@echo typecheck\nvalidate:\n\t@echo validate\n",
+    )
+    .unwrap();
     git(r.path(), &["add", "."]);
     git(
         r.path(),
@@ -306,65 +311,466 @@ make test
 }
 
 #[test]
-fn is_ci_step_covered_handles_edge_cases() {
-    // Exact match in gate
-    assert!(is_ci_step_covered("make test", "make test", ""));
+fn pigeonhole_table_row_gate_covers_adapted_tool_run() {
+    let r = repo();
+    let wf_dir = r.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&wf_dir).unwrap();
+    let ci_yml = r#"name: CI
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv run pytest tests/
+"#;
+    std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
+    std::fs::write(
+        r.path().join("pyproject.toml"),
+        "[project]\nname = \"pigeonhole\"\n",
+    )
+    .unwrap();
+    git(r.path(), &["add", "."]);
+    git(
+        r.path(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "ci and pyproject",
+            "--no-gpg-sign",
+        ],
+    );
+
+    let toml = r#"[dispatch]
+gate = "uv run --frozen --offline --extra build pytest -q -p no:cacheprovider"
+"#;
+    std::fs::write(r.path().join("blyte.toml"), toml).unwrap();
+    std::fs::write(r.path().join("task.md"), "dummy task\n").unwrap();
+
+    let missing = missing_ci_steps(
+        r.path(),
+        "uv run --frozen --offline --extra build pytest -q -p no:cacheprovider",
+        toml,
+    );
+    assert!(
+        missing.is_empty(),
+        "expected no missing steps, got: {missing:?}"
+    );
+    assert_eq!(format_gate_drift_warning(&missing), None);
+
+    let out = blyte(
+        r.path(),
+        &["dispatch", "T_pigeonhole", "task.md", "--sandbox", "off"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("blyte: the gate is missing CI steps"),
+        "unexpected gate drift warning in stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn provision_table_row_gate_pipeline_covers_ci_step() {
+    let r = repo();
+    let wf_dir = r.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&wf_dir).unwrap();
+    let ci_yml = r#"name: CI
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pre-commit run --all-files
+"#;
+    std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
+    std::fs::write(r.path().join(".pre-commit-config.yaml"), "repos: []\n").unwrap();
+    git(r.path(), &["add", "."]);
+    git(
+        r.path(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "ci and pre-commit config",
+            "--no-gpg-sign",
+        ],
+    );
+
+    let gate_cmd = "git diff HEAD~1 | xargs -r pre-commit run --files";
+    let toml = format!(
+        r#"[dispatch]
+gate = "{gate_cmd}"
+"#
+    );
+    std::fs::write(r.path().join("blyte.toml"), &toml).unwrap();
+    std::fs::write(r.path().join("task.md"), "dummy task\n").unwrap();
+
+    let missing = missing_ci_steps(r.path(), gate_cmd, &toml);
+    assert!(
+        missing.is_empty(),
+        "expected no missing steps, got: {missing:?}"
+    );
+    assert_eq!(format_gate_drift_warning(&missing), None);
+
+    let out = blyte(
+        r.path(),
+        &["dispatch", "T_provision", "task.md", "--sandbox", "off"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("blyte: the gate is missing CI steps"),
+        "unexpected gate drift warning in stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn climate_x_services_table_row_gate_covers_adapted_tool_run() {
+    let r = repo();
+    let wf_dir = r.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&wf_dir).unwrap();
+    let ci_yml = r#"name: CI
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pytest tests -rx --random-order
+"#;
+    std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
+    std::fs::write(
+        r.path().join("pyproject.toml"),
+        "[project]\nname = \"cxs\"\n",
+    )
+    .unwrap();
+    git(r.path(), &["add", "."]);
+    git(
+        r.path(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "ci and pyproject",
+            "--no-gpg-sign",
+        ],
+    );
+
+    let gate_cmd = "uvx --from uv==0.12.3 uv run --no-sync pytest tests/api -q";
+    let toml = format!(
+        r#"[dispatch]
+gate = "{gate_cmd}"
+"#
+    );
+    std::fs::write(r.path().join("blyte.toml"), &toml).unwrap();
+    std::fs::write(r.path().join("task.md"), "dummy task\n").unwrap();
+
+    let missing = missing_ci_steps(r.path(), gate_cmd, &toml);
+    assert!(
+        missing.is_empty(),
+        "expected no missing steps, got: {missing:?}"
+    );
+    assert_eq!(format_gate_drift_warning(&missing), None);
+
+    let out = blyte(
+        r.path(),
+        &["dispatch", "T_cxs", "task.md", "--sandbox", "off"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("blyte: the gate is missing CI steps"),
+        "unexpected gate drift warning in stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn tile_service_table_row_comment_covers_ci_step() {
+    let r = repo();
+    let wf_dir = r.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&wf_dir).unwrap();
+    let ci_yml = r#"name: CI
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+"#;
+    std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
+    std::fs::write(r.path().join("Makefile"), "test:\n\t@echo test\n").unwrap();
+    git(r.path(), &["add", "."]);
+    git(
+        r.path(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "ci and makefile",
+            "--no-gpg-sign",
+        ],
+    );
+
+    let toml = r#"# `make test` has no recipe …, so the gate runs pytest directly
+[dispatch]
+gate = "pytest"
+"#;
+    std::fs::write(r.path().join("blyte.toml"), toml).unwrap();
+    std::fs::write(r.path().join("task.md"), "dummy task\n").unwrap();
+
+    let missing = missing_ci_steps(r.path(), "pytest", toml);
+    assert!(
+        missing.is_empty(),
+        "expected no missing steps, got: {missing:?}"
+    );
+    assert_eq!(format_gate_drift_warning(&missing), None);
+
+    let out = blyte(
+        r.path(),
+        &["dispatch", "T_tile", "task.md", "--sandbox", "off"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("blyte: the gate is missing CI steps"),
+        "unexpected gate drift warning in stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn geo_jobs_dashboard_table_row_missing_project_file_covers_ci_step() {
+    let r = repo();
+    let wf_dir = r.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&wf_dir).unwrap();
+    let ci_yml = r#"name: CI
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace --all-features
+"#;
+    std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
+    git(r.path(), &["add", "."]);
+    git(
+        r.path(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "ci without Cargo.toml",
+            "--no-gpg-sign",
+        ],
+    );
+
+    assert!(!r.path().join("Cargo.toml").exists());
+
+    let toml = r#"[dispatch]
+gate = "echo ok"
+"#;
+    std::fs::write(r.path().join("blyte.toml"), toml).unwrap();
+    std::fs::write(r.path().join("task.md"), "dummy task\n").unwrap();
+
+    let missing = missing_ci_steps(r.path(), "echo ok", toml);
+    assert!(
+        missing.is_empty(),
+        "expected no missing steps, got: {missing:?}"
+    );
+    assert_eq!(format_gate_drift_warning(&missing), None);
+
+    let out = blyte(
+        r.path(),
+        &["dispatch", "T_geo", "task.md", "--sandbox", "off"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("blyte: the gate is missing CI steps"),
+        "unexpected gate drift warning in stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn climate_x_data_platform_real_case_names_missing_typecheck_and_validate() {
+    let r = repo();
+    let wf_dir = r.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&wf_dir).unwrap();
+    let ci_yml = r#"name: CI
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make lint
+      - run: make test
+      - run: make typecheck
+      - run: make validate
+"#;
+    std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
+    std::fs::write(
+        r.path().join("Makefile"),
+        "lint:\n\t@echo lint\ntest:\n\t@echo test\ntypecheck:\n\t@echo typecheck\nvalidate:\n\t@echo validate\n",
+    )
+    .unwrap();
+    git(r.path(), &["add", "."]);
+    git(
+        r.path(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "ci and makefile with 4 targets",
+            "--no-gpg-sign",
+        ],
+    );
+
+    let toml = r#"[dispatch]
+gate = """
+make lint
+make test
+"""
+"#;
+    std::fs::write(r.path().join("blyte.toml"), toml).unwrap();
+    std::fs::write(r.path().join("task.md"), "dummy task\n").unwrap();
+
+    let missing = missing_ci_steps(r.path(), "make lint\nmake test", toml);
+    assert_eq!(missing, vec!["make typecheck", "make validate"]);
+    let warning = format_gate_drift_warning(&missing).unwrap();
+    assert_eq!(
+        warning,
+        "blyte: the gate is missing CI steps: make typecheck, make validate (run blyte init --force to refresh blyte.toml)"
+    );
+
+    let out = blyte(
+        r.path(),
+        &["dispatch", "T_cxdp", "task.md", "--sandbox", "off"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let expected = "blyte: the gate is missing CI steps: make typecheck, make validate (run blyte init --force to refresh blyte.toml)";
+    assert!(
+        stderr.contains(expected),
+        "expected missing make typecheck and make validate in stderr, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn is_ci_step_covered_handles_key_based_edge_cases() {
+    let d = tempfile::tempdir().unwrap();
+
+    // 1. Gate matches by key despite different wrappers/flags
     assert!(is_ci_step_covered(
+        d.path(),
+        "uv run pytest tests/",
+        "uv run --frozen --offline pytest -q",
+        ""
+    ));
+    assert!(is_ci_step_covered(
+        d.path(),
+        "pre-commit run --all-files",
+        "git diff | xargs -r pre-commit run --files",
+        ""
+    ));
+    assert!(is_ci_step_covered(
+        d.path(),
+        "pytest tests -rx",
+        "uvx --from uv==0.12.3 uv run --no-sync pytest tests/api -q",
+        ""
+    ));
+    assert!(is_ci_step_covered(
+        d.path(),
+        "cargo test --workspace --all-features",
+        "cargo test",
+        ""
+    ));
+    assert!(is_ci_step_covered(d.path(), "npm test", "npm run test", ""));
+    assert!(is_ci_step_covered(
+        d.path(),
+        "npm run lint",
+        "npm run lint --fix",
+        ""
+    ));
+    assert!(is_ci_step_covered(
+        d.path(),
+        "ruff check --select E,F",
+        "uv run ruff check",
+        ""
+    ));
+
+    // 2. Unrecognised steps are ignored (never warned about)
+    assert!(is_ci_step_covered(d.path(), "echo hello", "", ""));
+    assert!(is_ci_step_covered(d.path(), "mkdir -p out", "", ""));
+
+    // 3. Comments cover the step if they contain the key text
+    assert!(is_ci_step_covered(
+        d.path(),
         "make test",
-        "make lint\n  make test  \nmake check",
-        ""
-    ));
-
-    // Not in gate, no comments
-    assert!(!is_ci_step_covered(
-        "make typecheck",
-        "make lint\nmake test",
-        ""
-    ));
-
-    // Covered by left out comment formats
-    assert!(is_ci_step_covered(
-        "make typecheck",
         "",
-        "# make typecheck: from ci.yml, left out: pyright is missing\n"
+        "# `make test` has no recipe …, so the gate runs pytest directly\n"
     ));
     assert!(is_ci_step_covered(
+        d.path(),
+        "pytest tests/",
+        "",
+        "# pytest: left out: broken upstream\n"
+    ));
+    assert!(is_ci_step_covered(
+        d.path(),
         "npm test",
         "",
-        "# npm test: from detected, left out: jest failed to start\n"
-    ));
-    assert!(is_ci_step_covered(
-        "make typecheck",
-        "",
-        "#   make typecheck: left out: env issue\n"
-    ));
-    assert!(is_ci_step_covered(
-        "make typecheck",
-        "",
-        "# make typecheck: Left Out\n"
+        "# npm test: disabled for now\n"
     ));
 
-    // Non-left-out comments do NOT cover the step
+    // 4. Prefix collision in comments: "make test" should not match comment for "make testing"
+    std::fs::write(
+        d.path().join("Makefile"),
+        "test:\n\t@echo\ntesting:\n\t@echo\n",
+    )
+    .unwrap();
     assert!(!is_ci_step_covered(
-        "make typecheck",
-        "",
-        "# make typecheck: from ci.yml, passed\n"
-    ));
-    assert!(!is_ci_step_covered(
-        "make typecheck",
-        "",
-        "# make typecheck: from ci.yml, failed on HEAD: fix it\n"
-    ));
-    assert!(!is_ci_step_covered(
-        "make typecheck",
-        "",
-        "# make typecheck: not run\n"
-    ));
-
-    // Prefix collision: "make test" should not match comment for "make testing"
-    assert!(!is_ci_step_covered(
+        d.path(),
         "make test",
         "",
         "# make testing: from ci.yml, left out: foo\n"
     ));
+
+    // 5. Missing project file covers the step
+    let empty_dir = tempfile::tempdir().unwrap();
+    assert!(is_ci_step_covered(empty_dir.path(), "cargo test", "", ""));
+    assert!(is_ci_step_covered(empty_dir.path(), "go test", "", ""));
+    assert!(is_ci_step_covered(empty_dir.path(), "npm test", "", ""));
+    assert!(is_ci_step_covered(empty_dir.path(), "pytest", "", ""));
+    assert!(is_ci_step_covered(
+        empty_dir.path(),
+        "pre-commit run",
+        "",
+        ""
+    ));
+    assert!(is_ci_step_covered(empty_dir.path(), "make lint", "", ""));
+
+    // 6. When project file IS present, step is NOT covered without gate or comment
+    std::fs::write(
+        d.path().join("Cargo.toml"),
+        "[package]\nname=\"foo\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+    assert!(!is_ci_step_covered(d.path(), "cargo test", "", ""));
 }
