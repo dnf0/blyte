@@ -1,11 +1,13 @@
 //! Worktree cleanup for finished runs: `blyte clean`, on review, and at dispatch.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RemovalReason {
     Merged,
     MergedInto(String),
+    MergedThrough(String),
     Verdict(String),
     NoChanges,
     ResearchReport,
@@ -17,6 +19,7 @@ impl std::fmt::Display for RemovalReason {
         match self {
             Self::Merged => write!(f, "merged"),
             Self::MergedInto(base) => write!(f, "merged into {base}"),
+            Self::MergedThrough(child) => write!(f, "merged through {child}"),
             Self::Verdict(v) => {
                 if v.is_empty() {
                     write!(f, "verdict")
@@ -276,6 +279,9 @@ pub fn check_removable(
                     }
                 }
             }
+        }
+        if let Some(child) = find_merged_followup(root, id) {
+            return Ok(RemovalReason::MergedThrough(child));
         }
     }
 
@@ -614,6 +620,167 @@ fn merged_into(root: &Path, commit_sha: &str, default_branch: &str) -> bool {
     false
 }
 
+/// Lists all run IDs that have a corresponding `.wt/<id>.start.json`.
+pub fn list_all_run_ids(root: &Path) -> Vec<String> {
+    let wt_dir = root.join(".wt");
+    let mut ids = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&wt_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(id) = name.strip_suffix(".start.json") {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// Checks whether run `<child>` builds on run `<id>`.
+///
+/// Follow-up rule:
+/// - If `<child>`'s start file has a `base` field, `<child>` builds on `<id>` if `base`
+///   is `wip/<id>` or `refs/heads/wip/<id>`.
+/// - If `<child>`'s start file has no `base` field (absent or null), infer it only from git:
+///   `<child>` builds on `<id>` if `wip/<id>`'s tip is an ancestor of `wip/<child>`'s tip
+///   (both branches present).
+fn child_builds_on(root: &Path, id: &str, child: &str) -> bool {
+    if child == id {
+        return false;
+    }
+
+    let child_start_path = root.join(".wt").join(format!("{child}.start.json"));
+    let child_start_val: Option<serde_json::Value> = std::fs::read_to_string(&child_start_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+
+    let Some(child_start) = child_start_val else {
+        return false;
+    };
+
+    let base_field = child_start.get("base");
+    let base_is_present = !matches!(base_field, Some(serde_json::Value::Null) | None);
+
+    if base_is_present {
+        if let Some(base_str) = base_field.and_then(|v| v.as_str()) {
+            let base_str = base_str.trim().trim_end_matches('/');
+            let target1 = format!("wip/{id}");
+            let target2 = format!("refs/heads/wip/{id}");
+            base_str == target1 || base_str == target2
+        } else {
+            false
+        }
+    } else {
+        let tip_id = get_branch_tip(root, &format!("wip/{id}"));
+        let tip_child = get_branch_tip(root, &format!("wip/{child}"));
+        if let (Some(tip_id), Some(tip_child)) = (tip_id, tip_child) {
+            git_ok(root, &["merge-base", "--is-ancestor", &tip_id, &tip_child])
+        } else {
+            false
+        }
+    }
+}
+
+/// Checks whether a child run is considered merged:
+/// - Missing branch check (Requirement 2):
+///   A child run whose `wip/<child>` branch is already deleted counts as merged when:
+///   `.wt/<child>.verdict.json` is `accepted` or `fixed`, or its summary outcome is
+///   `verified` and its worktree is gone.
+/// - Existing rules:
+///   `is_branch_merged` or merged into its base branch targets.
+/// - Recursively through its own follow-up.
+fn is_child_run_merged(root: &Path, child: &str, visited: &mut HashSet<String>) -> bool {
+    if is_research(root, child) {
+        return false;
+    }
+
+    let branch_name = format!("wip/{child}");
+    let tip = get_branch_tip(root, &branch_name);
+
+    if tip.is_none() {
+        let verdict_path = root.join(".wt").join(format!("{child}.verdict.json"));
+        let (has_accepted_verdict, is_redone) = if verdict_path.is_file() {
+            let v = std::fs::read_to_string(&verdict_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("verdict")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            (v == "accepted" || v == "fixed", v == "redone")
+        } else {
+            (false, false)
+        };
+
+        if is_redone {
+            return false;
+        }
+
+        let summary_path = root.join(".wt").join(format!("{child}.json"));
+        let is_verified = std::fs::read_to_string(&summary_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| {
+                v.get("outcome")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "verified")
+            })
+            .unwrap_or(false);
+
+        let wt_gone = !root.join(".wt").join(child).is_dir();
+
+        return has_accepted_verdict || (is_verified && wt_gone);
+    }
+
+    // Branch exists: check existing rules
+    let base_opt = read_run_base(root, child);
+    let base_targets = base_opt
+        .as_deref()
+        .and_then(|b| resolve_base_targets(root, b));
+    let extra_refs: Vec<&str> = base_targets
+        .as_ref()
+        .map(|(_, targets)| targets.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    if is_branch_merged_with_targets(root, &branch_name, &extra_refs) {
+        return true;
+    }
+
+    // Recursively check if child is merged through its own follow-up
+    find_merged_followup_internal(root, child, visited).is_some()
+}
+
+fn find_merged_followup_internal(
+    root: &Path,
+    id: &str,
+    visited: &mut HashSet<String>,
+) -> Option<String> {
+    if !visited.insert(id.to_string()) {
+        return None;
+    }
+
+    let all_runs = list_all_run_ids(root);
+    for child in all_runs {
+        if child == id || visited.contains(&child) {
+            continue;
+        }
+        if child_builds_on(root, id, &child) && is_child_run_merged(root, &child, visited) {
+            visited.remove(id);
+            return Some(child);
+        }
+    }
+
+    visited.remove(id);
+    None
+}
+
+/// Finds a follow-up run that makes `<id>` merged.
+pub fn find_merged_followup(root: &Path, id: &str) -> Option<String> {
+    let mut visited = HashSet::new();
+    find_merged_followup_internal(root, id, &mut visited)
+}
+
 /// Lists all `.wt/<id>` directories that have a corresponding `.wt/<id>.start.json`.
 pub fn find_blyte_worktrees(root: &Path) -> Vec<String> {
     let wt_dir = root.join(".wt");
@@ -686,7 +853,15 @@ pub fn clean_repo(
                     .as_ref()
                     .map(|(_, targets)| targets.iter().map(|s| s.as_str()).collect())
                     .unwrap_or_default();
-                let is_merged = is_branch_merged_with_targets(root, &branch_name, &extra_refs);
+                let branch_exists = get_branch_tip(root, &branch_name).is_some();
+                let is_merged = branch_exists
+                    && (matches!(
+                        removal_reason,
+                        RemovalReason::Merged
+                            | RemovalReason::MergedInto(_)
+                            | RemovalReason::MergedThrough(_)
+                    ) || is_branch_merged_with_targets(root, &branch_name, &extra_refs)
+                        || find_merged_followup(root, &id).is_some());
 
                 if dry_run {
                     if !quiet {
@@ -1155,7 +1330,9 @@ pub fn clean_on_review(root: &Path, id: &str) {
             .as_ref()
             .map(|(_, targets)| targets.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default();
-        if is_branch_merged_with_targets(root, &branch_name, &extra_refs) {
+        let is_merged = is_branch_merged_with_targets(root, &branch_name, &extra_refs)
+            || find_merged_followup(root, id).is_some();
+        if is_merged {
             let del_out = std::process::Command::new("git")
                 .args(["branch", "-D", &branch_name])
                 .current_dir(root)
