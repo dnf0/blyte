@@ -59,7 +59,10 @@ tests pin down. Include:
   runs them. If a wrong implementation could pass them, the task is not finished.
 - **How**, when it matters: for a bulk mechanical change (a rename across many files), say to do it
   with one script (`git mv`, `sed`) and then fix the exceptions by hand; otherwise the implementer
-  may edit file by file and run out of turns.
+  may edit file by file and run out of turns. A task that would touch more than about 20 files must
+  either say which script makes the change or be split into several tasks: edited one by one, a
+  rename across 72 files and 72 logger call sites each used all 300 turns and failed (2026-09-28,
+  2026-10-02).
 - **Constraints**, e.g. "existing tests pass unmodified".
 - **Depends on**: `none`, or the tasks it needs, as in the plan.
 - **Siblings**: for a task running in parallel, name the other tasks and say they are **not** in
