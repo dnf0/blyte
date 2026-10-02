@@ -472,6 +472,27 @@ fn resolve_bare_stem(
     None
 }
 
+fn is_plan_task_file(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    if !s.ends_with(".md") {
+        return false;
+    }
+    let norm = s.replace('\\', "/");
+    let norm_path = Path::new(&norm);
+    let comps: Vec<&std::ffi::OsStr> = norm_path.components().map(|c| c.as_os_str()).collect();
+    for window in comps.windows(3) {
+        if window[0] == "docs" && window[1] == "superpowers" && window[2] == "plans" {
+            return true;
+        }
+    }
+    for window in comps.windows(2) {
+        if window[0] == "docs" && window[1] == "plans" {
+            return true;
+        }
+    }
+    false
+}
+
 fn extract_relpath(root: &Path, plan_path: &Path, job_wt: Option<&str>) -> PathBuf {
     if plan_path.is_relative() {
         let p_str = plan_path.to_string_lossy();
@@ -579,7 +600,36 @@ fn read_plan_content(
         }
     }
 
-    // 3. git: git -C <root> log --all -1 --format=%H -- <relpath> and git -C <root> show <sha>:<relpath>
+    // 3. each group job's absolute plan source path (the task_file, or an absolute start_plan) directly from disk
+    for job in jobs {
+        if let Some(ref tf) = job.task_file {
+            let p = Path::new(tf);
+            if p.is_absolute()
+                && is_plan_task_file(p)
+                && (p.ends_with(relpath)
+                    || extract_relpath(root, p, job.worktree.as_deref()) == relpath)
+            {
+                if let Ok(content) = std::fs::read_to_string(p) {
+                    cache.insert(key, Some(content.clone()));
+                    return Some(content);
+                }
+            }
+        }
+        if let Some(ref sp) = job.start_plan {
+            let p = Path::new(sp);
+            if p.is_absolute()
+                && (p.ends_with(relpath)
+                    || extract_relpath(root, p, job.worktree.as_deref()) == relpath)
+            {
+                if let Ok(content) = std::fs::read_to_string(p) {
+                    cache.insert(key, Some(content.clone()));
+                    return Some(content);
+                }
+            }
+        }
+    }
+
+    // 4. git: git -C <root> log --all -1 --format=%H -- <relpath> and git -C <root> show <sha>:<relpath>
     if let Ok(out) = std::process::Command::new("git")
         .args(["log", "--all", "-1", "--format=%H", "--", &relpath_str])
         .current_dir(root)
@@ -748,6 +798,12 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             }
         } else if let Some(ref p) = job.plan {
             extract_relpath(root, Path::new(p), job.worktree.as_deref())
+        } else if let Some(ref tf) = job
+            .task_file
+            .as_ref()
+            .filter(|tf| is_plan_task_file(Path::new(tf)))
+        {
+            extract_relpath(root, Path::new(tf), job.worktree.as_deref())
         } else if let Some(p) = first_backticked_plan_path(&job.task) {
             extract_relpath(root, Path::new(&p), job.worktree.as_deref())
         } else {
