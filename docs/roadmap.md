@@ -1,7 +1,7 @@
 # Roadmap
 
 What is planned next for blyte, what is waiting on something, and what is parked. Dated items are
-decisions; the evidence behind them is in `docs/evidence.md` and the plans in `docs/superpowers/plans/`.
+decisions; the evidence behind them is in `docs/evidence.md` and the design plans.
 
 ## In progress
 
@@ -136,7 +136,7 @@ Kept for about the last four weeks; older items are in the git history and the e
   blyte-eval #93; rerunning the Codex + blyte against Claude Code + blyte comparison is parked
   (2026-10-02): the failures were likely down to the Codex subscription level.
 
-- **Open-sourcing blyte** and the brief for Jack: on hold until the information gathering ends.
+- **Open-sourcing blyte** and a brief for the decision: on hold until the information gathering ends.
 - **Docs hosting:** GitHub Pages, deployed by a workflow on merge to `main` (MkDocs Material builds
   already run in CI), at `<user>.github.io/blyte`. A custom domain (about $10-50 a year; no reliable
   free one) keeps links stable if the repository moves; a free `*.github.io` address is fine to start.
@@ -152,5 +152,5 @@ Kept for about the last four weeks; older items are in the git history and the e
     release binary over plain HTTPS otherwise, with no GitHub CLI needed. Today it always downloads
     the release binary through `gh`.
   - Publish the crates to crates.io (`cd.yml`, manual, dry run first).
-  - Contributions: a DCO sign-off or a CLA, decided with Jack and legal, before accepting outside
+  - Contributions: a DCO sign-off or a CLA, decided before accepting outside
     pull requests.
