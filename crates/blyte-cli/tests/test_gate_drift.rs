@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use blyte_cli::dispatch::{format_gate_drift_warning, is_ci_step_covered, missing_ci_steps};
+use blyte_cli::gate_drift::{format_gate_drift_warning, is_ci_step_covered, missing_ci_steps};
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
