@@ -1,11 +1,13 @@
 //! Worktree cleanup for finished runs: `blyte clean`, on review, and at dispatch.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RemovalReason {
     Merged,
     MergedInto(String),
+    MergedThrough(String),
     Verdict(String),
     NoChanges,
     ResearchReport,
@@ -17,6 +19,7 @@ impl std::fmt::Display for RemovalReason {
         match self {
             Self::Merged => write!(f, "merged"),
             Self::MergedInto(base) => write!(f, "merged into {base}"),
+            Self::MergedThrough(child) => write!(f, "merged through {child}"),
             Self::Verdict(v) => {
                 if v.is_empty() {
                     write!(f, "verdict")
@@ -188,121 +191,890 @@ pub fn has_uncommitted_changes(wt_path: &Path) -> bool {
     }
 }
 
+fn git_tree_sha(root: &Path, ref_name: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", &format!("{ref_name}^{{tree}}")])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn is_cherry_merged_into_target(root: &Path, commit_sha: &str, target: &str) -> bool {
+    let cherry_out = std::process::Command::new("git")
+        .args(["cherry", target, commit_sha])
+        .current_dir(root)
+        .output();
+    if let Ok(o) = cherry_out {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let lines: Vec<&str> = s
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if !lines.is_empty() && lines.iter().all(|l| l.starts_with('-')) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_merge_tree_merged_into_target(
+    root: &Path,
+    commit_sha: &str,
+    target: &str,
+    target_tree: Option<&str>,
+) -> bool {
+    let target_tree_sha = match target_tree {
+        Some(t) => Some(t.to_string()),
+        None => git_tree_sha(root, target),
+    };
+    if let Some(target_tree_sha) = target_tree_sha {
+        let merge_tree_out = std::process::Command::new("git")
+            .args(["merge-tree", "--write-tree", target, commit_sha])
+            .current_dir(root)
+            .output();
+        if let Ok(mt_o) = merge_tree_out {
+            if mt_o.status.success() {
+                let mt_stdout = String::from_utf8_lossy(&mt_o.stdout);
+                if let Some(first_line) = mt_stdout.lines().next() {
+                    if first_line.trim() == target_tree_sha {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn parse_started_at(val: &serde_json::Value) -> Option<u64> {
+    let s = val.get("started_at")?;
+    if let Some(n) = s.as_u64() {
+        Some(n)
+    } else if let Some(n) = s.as_i64() {
+        if n >= 0 {
+            Some(n as u64)
+        } else {
+            None
+        }
+    } else if let Some(f) = s.as_f64() {
+        if f >= 0.0 {
+            Some(f as u64)
+        } else {
+            None
+        }
+    } else if let Some(st) = s.as_str() {
+        st.parse::<u64>().ok()
+    } else {
+        None
+    }
+}
+
+fn check_history_merged(
+    root: &Path,
+    tip_sha: &str,
+    target: &str,
+    started_at: Option<&serde_json::Value>,
+) -> bool {
+    let mb_out = std::process::Command::new("git")
+        .args(["merge-base", target, tip_sha])
+        .current_dir(root)
+        .output();
+    let Ok(mb_o) = mb_out else {
+        return false;
+    };
+    if !mb_o.status.success() {
+        return false;
+    }
+    let merge_base = String::from_utf8_lossy(&mb_o.stdout).trim().to_string();
+    if merge_base.is_empty() {
+        return false;
+    }
+
+    let diff_out = std::process::Command::new("git")
+        .args(["diff", "--name-only", &merge_base, tip_sha])
+        .current_dir(root)
+        .output();
+    let Ok(diff_o) = diff_out else {
+        return false;
+    };
+    if !diff_o.status.success() {
+        return false;
+    }
+    let files: Vec<String> = String::from_utf8_lossy(&diff_o.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if files.is_empty() {
+        return false;
+    }
+
+    let since_arg = started_at
+        .and_then(|v| {
+            if let Some(n) = v.as_i64() {
+                if n >= 100_000_000 {
+                    Some(format!("--since={n}"))
+                } else {
+                    Some("--since=1970-01-01T00:00:00Z".to_string())
+                }
+            } else if let Some(n) = v.as_u64() {
+                if n >= 100_000_000 {
+                    Some(format!("--since={n}"))
+                } else {
+                    Some("--since=1970-01-01T00:00:00Z".to_string())
+                }
+            } else {
+                v.as_str().map(|s| format!("--since={s}"))
+            }
+        })
+        .unwrap_or_else(|| "--since=1970-01-01T00:00:00Z".to_string());
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.args([
+        "rev-list",
+        "--first-parent",
+        &since_arg,
+        "-n",
+        "20",
+        target,
+        "--",
+    ]);
+    for f in &files {
+        cmd.arg(f);
+    }
+    cmd.current_dir(root);
+    let Ok(rev_o) = cmd.output() else {
+        return false;
+    };
+    if !rev_o.status.success() {
+        return false;
+    }
+
+    let commits: Vec<String> = String::from_utf8_lossy(&rev_o.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    for c in commits {
+        let mt_out = std::process::Command::new("git")
+            .args(["merge-tree", "--write-tree", &c, tip_sha])
+            .current_dir(root)
+            .output();
+        let Ok(mt_o) = mt_out else {
+            continue;
+        };
+        if !mt_o.status.success() {
+            continue;
+        }
+        let mt_stdout = String::from_utf8_lossy(&mt_o.stdout);
+        let Some(first_line) = mt_stdout.lines().next() else {
+            continue;
+        };
+        let mt_tree = first_line.trim();
+
+        if let Some(c_tree) = git_tree_sha(root, &c) {
+            if mt_tree == c_tree {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Context for cleaning a repository, caching metadata to avoid redundant git calls and disk reads.
+pub struct CleanContext<'a> {
+    pub root: &'a Path,
+    pub start_files: HashMap<String, serde_json::Value>,
+    pub all_run_ids: Vec<String>,
+    pub wip_branch_tips: HashMap<String, String>,
+    pub default_branch: String,
+    pub origin_default: Option<String>,
+    pub default_tree: Option<String>,
+    pub origin_default_tree: Option<String>,
+    pub wip_contains_cache: HashMap<String, Vec<String>>,
+    pub merged_cache: HashMap<String, Option<RemovalReason>>,
+    pub branch_contains_calls: usize,
+    pub quiet: bool,
+    pub cherry_pick_set: Option<HashSet<String>>,
+    pub rev_list_cache: HashMap<String, Vec<String>>,
+    pub ancestor_cache: HashMap<(String, String), bool>,
+}
+
+impl<'a> CleanContext<'a> {
+    pub fn new(root: &'a Path) -> Self {
+        let mut start_files = HashMap::new();
+        let mut all_run_ids = Vec::new();
+        let wt_dir = root.join(".wt");
+        if let Ok(entries) = std::fs::read_dir(&wt_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(id) = name.strip_suffix(".start.json") {
+                    all_run_ids.push(id.to_string());
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                            start_files.insert(id.to_string(), val);
+                        }
+                    }
+                }
+            }
+        }
+        all_run_ids.sort();
+
+        let mut wip_branch_tips = HashMap::new();
+        let ref_out = std::process::Command::new("git")
+            .args([
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads/wip/",
+            ])
+            .current_dir(root)
+            .output();
+        if let Ok(o) = ref_out {
+            if o.status.success() {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    let mut parts = line.split_whitespace();
+                    if let (Some(refname), Some(sha)) = (parts.next(), parts.next()) {
+                        wip_branch_tips.insert(refname.to_string(), sha.to_string());
+                    }
+                }
+            }
+        }
+
+        let default_branch = find_default_branch(root);
+        let name = default_branch
+            .strip_prefix("origin/")
+            .unwrap_or(&default_branch);
+        let remote = format!("origin/{name}");
+        let origin_default = if remote != default_branch
+            && git_ok(root, &["rev-parse", "--verify", "--quiet", &remote])
+        {
+            Some(remote)
+        } else {
+            None
+        };
+
+        let default_tree = git_tree_sha(root, &default_branch);
+        let origin_default_tree = origin_default
+            .as_deref()
+            .and_then(|r| git_tree_sha(root, r));
+
+        Self {
+            root,
+            start_files,
+            all_run_ids,
+            wip_branch_tips,
+            default_branch,
+            origin_default,
+            default_tree,
+            origin_default_tree,
+            wip_contains_cache: HashMap::new(),
+            merged_cache: HashMap::new(),
+            branch_contains_calls: 0,
+            quiet: false,
+            cherry_pick_set: None,
+            rev_list_cache: HashMap::new(),
+            ancestor_cache: HashMap::new(),
+        }
+    }
+
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    fn compute_cherry_pick_set(&self) -> HashSet<String> {
+        let unremoved_ids = find_blyte_worktrees(self.root);
+        let candidate_ids: &[String] = if unremoved_ids.is_empty() {
+            &self.all_run_ids
+        } else {
+            &unremoved_ids
+        };
+
+        let mut min_started_at: Option<u64> = None;
+        let mut all_valid = true;
+
+        for id in candidate_ids {
+            let start_val = self.start_files.get(id);
+            let parsed = start_val.and_then(parse_started_at);
+            match parsed {
+                Some(ts) => {
+                    min_started_at = Some(min_started_at.map_or(ts, |m| m.min(ts)));
+                }
+                None => {
+                    all_valid = false;
+                }
+            }
+        }
+
+        let since_arg = if let (true, Some(min_ts)) = (all_valid, min_started_at) {
+            if min_ts >= 86_400 + 100_000_000 {
+                format!("--since={}", min_ts - 86_400)
+            } else {
+                "--since=1970-01-01T00:00:00Z".to_string()
+            }
+        } else {
+            "--since=1970-01-01T00:00:00Z".to_string()
+        };
+
+        let mut targets = Vec::new();
+        let mut seen = HashSet::new();
+
+        if git_ok(
+            self.root,
+            &["rev-parse", "--verify", "--quiet", &self.default_branch],
+        ) && seen.insert(self.default_branch.clone())
+        {
+            targets.push(self.default_branch.clone());
+        }
+
+        if let Some(ref origin_def) = self.origin_default {
+            if git_ok(self.root, &["rev-parse", "--verify", "--quiet", origin_def])
+                && seen.insert(origin_def.clone())
+            {
+                targets.push(origin_def.clone());
+            }
+        }
+
+        for id in &self.all_run_ids {
+            if let Some(base_str) = self
+                .start_files
+                .get(id)
+                .and_then(|s| s.get("base"))
+                .and_then(|b| b.as_str())
+            {
+                if let Some((_, base_targets)) = resolve_base_targets(self.root, base_str) {
+                    for bt in base_targets {
+                        if seen.insert(bt.clone()) {
+                            targets.push(bt);
+                        }
+                    }
+                }
+            }
+        }
+
+        if targets.is_empty() {
+            return HashSet::new();
+        }
+
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["log", "--format=%B", &since_arg]);
+        for t in &targets {
+            cmd.arg(t);
+        }
+        cmd.current_dir(self.root);
+
+        let mut set = HashSet::new();
+        if let Ok(o) = cmd.output() {
+            if o.status.success() {
+                let text = String::from_utf8_lossy(&o.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("(cherry picked from commit ") {
+                        if let Some(sha) = rest.strip_suffix(')') {
+                            let sha = sha.trim();
+                            if is_commit_id(sha) {
+                                set.insert(sha.to_lowercase());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        set
+    }
+
+    pub fn get_cherry_pick_set(&mut self) -> &HashSet<String> {
+        if self.cherry_pick_set.is_none() {
+            let set = self.compute_cherry_pick_set();
+            self.cherry_pick_set = Some(set);
+        }
+        self.cherry_pick_set.as_ref().unwrap()
+    }
+
+    fn is_ancestor_of_target(&mut self, commit_sha: &str, target: &str) -> bool {
+        let key = (commit_sha.to_string(), target.to_string());
+        if let Some(&cached) = self.ancestor_cache.get(&key) {
+            return cached;
+        }
+        let is_anc = std::process::Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit_sha, target])
+            .current_dir(self.root)
+            .output()
+            .map(|c| c.status.success())
+            .unwrap_or(false);
+        self.ancestor_cache.insert(key, is_anc);
+        is_anc
+    }
+
+    fn is_ancestor_of_default(&mut self, commit_sha: &str) -> bool {
+        let def = self.default_branch.clone();
+        if self.is_ancestor_of_target(commit_sha, &def) {
+            return true;
+        }
+        if let Some(origin_def) = self.origin_default.clone() {
+            if self.is_ancestor_of_target(commit_sha, &origin_def) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn get_run_commits_against_default(&mut self, tip_sha: &str) -> Vec<String> {
+        if let Some(cached) = self.rev_list_cache.get(tip_sha) {
+            return cached.clone();
+        }
+        let out = std::process::Command::new("git")
+            .args(["rev-list", &format!("{}..{}", self.default_branch, tip_sha)])
+            .current_dir(self.root)
+            .output();
+        let commits: Vec<String> = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.rev_list_cache
+            .insert(tip_sha.to_string(), commits.clone());
+        commits
+    }
+
+    fn is_in_cherry_pick_record(&mut self, tip_sha: &str) -> bool {
+        let commits = self.get_run_commits_against_default(tip_sha);
+        if commits.is_empty() {
+            return false;
+        }
+        let cherry_set = self.get_cherry_pick_set();
+        commits.iter().all(|c| cherry_set.contains(c))
+    }
+
+    pub fn get_branch_tip(&self, branch_name: &str) -> Option<String> {
+        if let Some(sha) = self.wip_branch_tips.get(branch_name) {
+            return Some(sha.clone());
+        }
+        get_branch_tip(self.root, branch_name)
+    }
+
+    pub fn is_research_run(&self, id: &str) -> bool {
+        self.start_files
+            .get(id)
+            .and_then(|v| v.get("research"))
+            .and_then(|r| r.as_bool())
+            .unwrap_or_else(|| is_research(self.root, id))
+    }
+
+    pub fn get_wip_branches_containing(&mut self, tip_sha: &str) -> Vec<String> {
+        if let Some(cached) = self.wip_contains_cache.get(tip_sha) {
+            return cached.clone();
+        }
+
+        self.branch_contains_calls += 1;
+
+        let out = std::process::Command::new("git")
+            .args([
+                "branch",
+                "--list",
+                "--format=%(refname:short)",
+                "wip/*",
+                "--contains",
+                tip_sha,
+            ])
+            .current_dir(self.root)
+            .output();
+
+        let mut branches = Vec::new();
+        if let Ok(o) = out {
+            if o.status.success() {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    let trimmed = line.trim().trim_start_matches(['*', '+', ' ']).trim();
+                    if !trimmed.is_empty() {
+                        branches.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        self.wip_contains_cache
+            .insert(tip_sha.to_string(), branches.clone());
+        branches
+    }
+
+    pub fn get_children_of(&mut self, id: &str, tip_sha: &str) -> Vec<String> {
+        let mut children = Vec::new();
+        let mut seen = HashSet::new();
+
+        // 1. Edges from base fields directly
+        for (candidate_id, start_val) in &self.start_files {
+            if candidate_id == id {
+                continue;
+            }
+            if let Some(base_str) = start_val.get("base").and_then(|v| v.as_str()) {
+                let base_str = base_str.trim().trim_end_matches('/');
+                let target1 = format!("wip/{id}");
+                let target2 = format!("refs/heads/wip/{id}");
+                if (base_str == target1 || base_str == target2) && seen.insert(candidate_id.clone())
+                {
+                    children.push(candidate_id.clone());
+                }
+            }
+        }
+
+        // 2. Edges for runs without base:
+        if !tip_sha.is_empty() {
+            let tip_sha_owned = tip_sha.to_string();
+            let containing_branches = self.get_wip_branches_containing(&tip_sha_owned);
+            for b in containing_branches {
+                let clean_b = b.strip_prefix("refs/heads/").unwrap_or(&b);
+                if let Some(candidate_id) = clean_b.strip_prefix("wip/") {
+                    if candidate_id == id {
+                        continue;
+                    }
+                    if !self.start_files.contains_key(candidate_id) {
+                        continue;
+                    }
+                    let has_base = self
+                        .start_files
+                        .get(candidate_id)
+                        .and_then(|val| val.get("base"))
+                        .is_some_and(|b| !b.is_null());
+                    if !has_base && seen.insert(candidate_id.to_string()) {
+                        children.push(candidate_id.to_string());
+                    }
+                }
+            }
+        }
+
+        children.sort();
+        children
+    }
+
+    pub fn is_child_run_merged(&mut self, child: &str, visited: &mut HashSet<String>) -> bool {
+        if self.is_research_run(child) {
+            return false;
+        }
+
+        let branch_name = format!("wip/{child}");
+        let tip = self.get_branch_tip(&branch_name);
+
+        if tip.is_none() {
+            let verdict_path = self.root.join(".wt").join(format!("{child}.verdict.json"));
+            let (has_accepted_verdict, is_redone) = if verdict_path.is_file() {
+                let v = std::fs::read_to_string(&verdict_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| {
+                        v.get("verdict")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_default();
+                (v == "accepted" || v == "fixed", v == "redone")
+            } else {
+                (false, false)
+            };
+
+            if is_redone {
+                return false;
+            }
+
+            let summary_path = self.root.join(".wt").join(format!("{child}.json"));
+            let is_verified = std::fs::read_to_string(&summary_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("outcome")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "verified")
+                })
+                .unwrap_or(false);
+
+            let wt_gone = !self.root.join(".wt").join(child).is_dir();
+
+            return has_accepted_verdict || (is_verified && wt_gone);
+        }
+
+        self.check_run_merged_internal(child, visited).is_some()
+    }
+
+    pub fn check_run_merged(&mut self, id: &str) -> Option<RemovalReason> {
+        let mut visited = HashSet::new();
+        self.check_run_merged_internal(id, &mut visited)
+    }
+
+    fn check_run_merged_internal(
+        &mut self,
+        id: &str,
+        visited: &mut HashSet<String>,
+    ) -> Option<RemovalReason> {
+        if visited.contains(id) {
+            return None;
+        }
+
+        if let Some(cached) = self.merged_cache.get(id) {
+            return cached.clone();
+        }
+
+        visited.insert(id.to_string());
+
+        let branch_name = format!("wip/{id}");
+        let tip_sha = self.get_branch_tip(&branch_name);
+
+        let result = self.decide_run_merged(id, tip_sha.as_deref(), visited);
+
+        visited.remove(id);
+
+        self.merged_cache.insert(id.to_string(), result.clone());
+        result
+    }
+
+    fn decide_run_merged(
+        &mut self,
+        id: &str,
+        tip_sha: Option<&str>,
+        visited: &mut HashSet<String>,
+    ) -> Option<RemovalReason> {
+        let base_opt = self.start_files.get(id).and_then(|s| {
+            s.get("base")
+                .and_then(|b| b.as_str())
+                .map(|b| b.to_string())
+        });
+        let base_targets = base_opt
+            .as_deref()
+            .and_then(|b| resolve_base_targets(self.root, b));
+        let started_at = self
+            .start_files
+            .get(id)
+            .and_then(|s| s.get("started_at"))
+            .cloned();
+
+        if let Some(tip_sha) = tip_sha {
+            // 1. Ancestor (merge-base --is-ancestor)
+            if self.is_ancestor_of_default(tip_sha) {
+                return Some(RemovalReason::Merged);
+            }
+
+            // 2. The cherry-pick record
+            if self.is_in_cherry_pick_record(tip_sha) {
+                return Some(RemovalReason::Merged);
+            }
+
+            // 3. The base-branch checks
+            if let Some((ref display_name, ref targets)) = base_targets {
+                for target in targets {
+                    if self.is_ancestor_of_target(tip_sha, target) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                    }
+                    if !self.quiet {
+                        if is_cherry_merged_into_target(self.root, tip_sha, target) {
+                            return Some(RemovalReason::MergedInto(display_name.clone()));
+                        }
+                        if is_merge_tree_merged_into_target(self.root, tip_sha, target, None) {
+                            return Some(RemovalReason::MergedInto(display_name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. The follow-up rule
+        let children = self.get_children_of(id, tip_sha.unwrap_or(""));
+        for child in children {
+            if visited.contains(&child) {
+                continue;
+            }
+            if self.is_child_run_merged(&child, visited) {
+                return Some(RemovalReason::MergedThrough(child));
+            }
+        }
+
+        // clean_quiet uses only: ancestor, cherry-pick record, follow-ups through those,
+        // and the redone / no_changes / research / age rules.
+        // No merge-tree, no history walk, no other-worktrees report.
+        if self.quiet {
+            return None;
+        }
+
+        if let Some(tip_sha) = tip_sha {
+            // 5. git cherry
+            if is_cherry_merged_into_target(self.root, tip_sha, &self.default_branch) {
+                return Some(RemovalReason::Merged);
+            }
+            if let Some(ref origin_def) = self.origin_default {
+                if is_cherry_merged_into_target(self.root, tip_sha, origin_def) {
+                    return Some(RemovalReason::Merged);
+                }
+            }
+
+            // 6. merge-tree against current tips
+            if is_merge_tree_merged_into_target(
+                self.root,
+                tip_sha,
+                &self.default_branch,
+                self.default_tree.as_deref(),
+            ) {
+                return Some(RemovalReason::Merged);
+            }
+            if let Some(ref origin_def) = self.origin_default {
+                if is_merge_tree_merged_into_target(
+                    self.root,
+                    tip_sha,
+                    origin_def,
+                    self.origin_default_tree.as_deref(),
+                ) {
+                    return Some(RemovalReason::Merged);
+                }
+            }
+
+            // 7. history walk (explicit blyte clean only)
+            if check_history_merged(
+                self.root,
+                tip_sha,
+                &self.default_branch,
+                started_at.as_ref(),
+            ) {
+                return Some(RemovalReason::Merged);
+            }
+            if let Some(ref origin_def) = self.origin_default {
+                if check_history_merged(self.root, tip_sha, origin_def, started_at.as_ref()) {
+                    return Some(RemovalReason::Merged);
+                }
+            }
+            if let Some((ref display_name, ref targets)) = base_targets {
+                for target in targets {
+                    if check_history_merged(self.root, tip_sha, target, started_at.as_ref()) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn find_merged_followup(&mut self, id: &str) -> Option<String> {
+        let branch_name = format!("wip/{id}");
+        let tip_sha = self.get_branch_tip(&branch_name);
+        let mut visited = HashSet::new();
+        visited.insert(id.to_string());
+        let children = self.get_children_of(id, tip_sha.as_deref().unwrap_or(""));
+        children
+            .into_iter()
+            .find(|child| self.is_child_run_merged(child, &mut visited))
+    }
+
+    pub fn check_removable(
+        &mut self,
+        id: &str,
+        older_than_days: u64,
+    ) -> Result<RemovalReason, KeptReason> {
+        let wt_dir = self.root.join(".wt");
+        let summary_path = wt_dir.join(format!("{id}.json"));
+        let verdict_path = wt_dir.join(format!("{id}.verdict.json"));
+        let report_path = wt_dir.join(format!("{id}.report.md"));
+
+        let start_json = self.start_files.get(id);
+        let summary_exists = summary_path.is_file();
+
+        // Check if run is finished: no live process (pid not running) or summary exists.
+        if !summary_exists {
+            if let Some(start) = start_json {
+                if let Some(pid) = start.get("pid").and_then(|p| p.as_i64()) {
+                    if is_pid_alive(pid) {
+                        return Err(KeptReason::Running);
+                    }
+                }
+            }
+        }
+
+        let is_res = self.is_research_run(id);
+
+        // Rule 2: Discarded (the verdict is redone, or the outcome is no_changes)
+        let verdict_str = if verdict_path.is_file() {
+            std::fs::read_to_string(&verdict_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("verdict")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if verdict_str == "redone" {
+            return Ok(RemovalReason::Verdict("redone".to_string()));
+        }
+
+        if summary_exists {
+            if let Ok(summary_str) = std::fs::read_to_string(&summary_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&summary_str) {
+                    if val.get("outcome").and_then(|o| o.as_str()) == Some("no_changes") {
+                        return Ok(RemovalReason::NoChanges);
+                    }
+                }
+            }
+        }
+
+        // Rule 3: Research run and its report was copied out (.wt/<id>.report.md exists)
+        if is_res && report_path.is_file() {
+            return Ok(RemovalReason::ResearchReport);
+        }
+
+        // Rule 1: Merged (its work is on the default branch or base branch or follow-up)
+        if !is_res {
+            if let Some(reason) = self.check_run_merged(id) {
+                return Ok(reason);
+            }
+        }
+
+        // Rule 4: Finished more than older_than days ago, by the summary file's mtime
+        if summary_exists {
+            if let Ok(meta) = std::fs::metadata(&summary_path) {
+                if let Ok(mtime) = meta.modified() {
+                    let age = std::time::SystemTime::now()
+                        .duration_since(mtime)
+                        .unwrap_or(std::time::Duration::ZERO);
+                    if age >= std::time::Duration::from_secs(older_than_days * 86400) {
+                        return Ok(RemovalReason::OlderThan(older_than_days));
+                    }
+                }
+            }
+        }
+
+        // A verdict of accepted or fixed on its own no longer makes a worktree removable
+        if !verdict_str.is_empty() {
+            return Err(KeptReason::NotMergedYet);
+        }
+
+        if is_res {
+            Err(KeptReason::NoReport)
+        } else {
+            Err(KeptReason::NoVerdict)
+        }
+    }
+}
+
 /// Evaluates whether a worktree is removable according to the clean rules.
 pub fn check_removable(
     root: &Path,
     id: &str,
     older_than_days: u64,
 ) -> Result<RemovalReason, KeptReason> {
-    let wt_dir = root.join(".wt");
-    let start_path = wt_dir.join(format!("{id}.start.json"));
-    let summary_path = wt_dir.join(format!("{id}.json"));
-    let verdict_path = wt_dir.join(format!("{id}.verdict.json"));
-    let report_path = wt_dir.join(format!("{id}.report.md"));
-
-    let start_json: Option<serde_json::Value> = std::fs::read_to_string(&start_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
-
-    let summary_exists = summary_path.is_file();
-
-    // Check if run is finished: no live process (pid not running) or summary exists.
-    if !summary_exists {
-        if let Some(ref start) = start_json {
-            if let Some(pid) = start.get("pid").and_then(|p| p.as_i64()) {
-                if is_pid_alive(pid) {
-                    return Err(KeptReason::Running);
-                }
-            }
-        }
-    }
-
-    let is_res = start_json
-        .as_ref()
-        .and_then(|s| s.get("research").and_then(|r| r.as_bool()))
-        .unwrap_or(false);
-
-    // Rule 2: Discarded (the verdict is redone, or the outcome is no_changes)
-    let verdict_str = if verdict_path.is_file() {
-        std::fs::read_to_string(&verdict_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| {
-                v.get("verdict")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    if verdict_str == "redone" {
-        return Ok(RemovalReason::Verdict("redone".to_string()));
-    }
-
-    if summary_exists {
-        if let Ok(summary_str) = std::fs::read_to_string(&summary_path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&summary_str) {
-                if val.get("outcome").and_then(|o| o.as_str()) == Some("no_changes") {
-                    return Ok(RemovalReason::NoChanges);
-                }
-            }
-        }
-    }
-
-    // Rule 3: Research run and its report was copied out (.wt/<id>.report.md exists)
-    if is_res && report_path.is_file() {
-        return Ok(RemovalReason::ResearchReport);
-    }
-
-    // Rule 1: Merged (its work is on the default branch or base branch)
-    let branch_name = format!("wip/{id}");
-    if !is_res {
-        if is_branch_merged(root, &branch_name) {
-            return Ok(RemovalReason::Merged);
-        }
-        let base_opt = start_json
-            .as_ref()
-            .and_then(|s| s.get("base").and_then(|b| b.as_str()));
-        if let Some(base) = base_opt {
-            if let Some((display_name, targets)) = resolve_base_targets(root, base) {
-                if let Some(tip_sha) = get_branch_tip(root, &branch_name) {
-                    if targets
-                        .iter()
-                        .any(|target| merged_into(root, &tip_sha, target))
-                    {
-                        return Ok(RemovalReason::MergedInto(display_name));
-                    }
-                }
-            }
-        }
-    }
-
-    // Rule 4: Finished more than older_than days ago, by the summary file's mtime
-    if summary_exists {
-        if let Ok(meta) = std::fs::metadata(&summary_path) {
-            if let Ok(mtime) = meta.modified() {
-                let age = std::time::SystemTime::now()
-                    .duration_since(mtime)
-                    .unwrap_or(std::time::Duration::ZERO);
-                if age >= std::time::Duration::from_secs(older_than_days * 86400) {
-                    return Ok(RemovalReason::OlderThan(older_than_days));
-                }
-            }
-        }
-    }
-
-    // A verdict of accepted or fixed on its own no longer makes a worktree removable
-    if !verdict_str.is_empty() {
-        return Err(KeptReason::NotMergedYet);
-    }
-
-    if is_res {
-        Err(KeptReason::NoReport)
-    } else {
-        Err(KeptReason::NoVerdict)
-    }
+    let mut ctx = CleanContext::new(root);
+    ctx.check_removable(id, older_than_days)
 }
 
 /// Identifies the default branch (origin/HEAD's target, else main, else master).
@@ -485,7 +1257,12 @@ pub fn get_branch_tip(root: &Path, branch_name: &str) -> Option<String> {
 /// - merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0
 ///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`.
 pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
-    is_branch_merged_with_targets(root, branch_name, &[])
+    let mut ctx = CleanContext::new(root);
+    if let Some(id) = branch_name.strip_prefix("wip/") {
+        ctx.check_run_merged(id).is_some()
+    } else {
+        is_branch_merged_with_targets(root, branch_name, &[])
+    }
 }
 
 /// Checks whether a branch's work is on the default branch or any of the extra target refs.
@@ -614,6 +1391,28 @@ fn merged_into(root: &Path, commit_sha: &str, default_branch: &str) -> bool {
     false
 }
 
+/// Lists all run IDs that have a corresponding `.wt/<id>.start.json`.
+pub fn list_all_run_ids(root: &Path) -> Vec<String> {
+    let wt_dir = root.join(".wt");
+    let mut ids = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&wt_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(id) = name.strip_suffix(".start.json") {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// Finds a follow-up run that makes `<id>` merged.
+pub fn find_merged_followup(root: &Path, id: &str) -> Option<String> {
+    let mut ctx = CleanContext::new(root);
+    ctx.find_merged_followup(id)
+}
+
 /// Lists all `.wt/<id>` directories that have a corresponding `.wt/<id>.start.json`.
 pub fn find_blyte_worktrees(root: &Path) -> Vec<String> {
     let wt_dir = root.join(".wt");
@@ -654,21 +1453,27 @@ pub fn clean_repo(
     let mut removed_worktrees = 0;
     let mut freed_bytes = 0;
 
+    let mut ctx = CleanContext::new(root);
+    ctx.set_quiet(quiet);
+    let start_time = std::time::Instant::now();
     let ids = find_blyte_worktrees(root);
     for id in ids {
+        if quiet && start_time.elapsed() >= std::time::Duration::from_secs(1) {
+            break;
+        }
         if skip_id == Some(&id) {
             continue;
         }
 
         let wt_path = root.join(".wt").join(&id);
-        match check_removable(root, &id, older_than_days) {
+        match ctx.check_removable(&id, older_than_days) {
             Err(kept_reason) => {
                 if !quiet {
                     println!("kept .wt/{id} ({kept_reason})");
                 }
             }
             Ok(removal_reason) => {
-                let is_res = is_research(root, &id);
+                let is_res = ctx.is_research_run(&id);
                 if !is_res && has_uncommitted_changes(&wt_path) {
                     if !quiet {
                         println!("kept .wt/{id} (uncommitted changes)");
@@ -678,15 +1483,14 @@ pub fn clean_repo(
 
                 let size = dir_size(&wt_path);
                 let branch_name = format!("wip/{id}");
-                let base_opt = read_run_base(root, &id);
-                let base_targets = base_opt
-                    .as_deref()
-                    .and_then(|b| resolve_base_targets(root, b));
-                let extra_refs: Vec<&str> = base_targets
-                    .as_ref()
-                    .map(|(_, targets)| targets.iter().map(|s| s.as_str()).collect())
-                    .unwrap_or_default();
-                let is_merged = is_branch_merged_with_targets(root, &branch_name, &extra_refs);
+                let branch_exists = ctx.get_branch_tip(&branch_name).is_some();
+                let is_merged = branch_exists
+                    && (matches!(
+                        removal_reason,
+                        RemovalReason::Merged
+                            | RemovalReason::MergedInto(_)
+                            | RemovalReason::MergedThrough(_)
+                    ) || ctx.check_run_merged(&id).is_some());
 
                 if dry_run {
                     if !quiet {
@@ -726,8 +1530,11 @@ pub fn clean_repo(
                                 .args(["branch", "-D", &branch_name])
                                 .current_dir(root)
                                 .output();
-                            if del_out.map(|o| o.status.success()).unwrap_or(false) && !quiet {
-                                println!("deleted branch {branch_name} (merged)");
+                            if del_out.map(|o| o.status.success()).unwrap_or(false) {
+                                ctx.wip_branch_tips.remove(&branch_name);
+                                if !quiet {
+                                    println!("deleted branch {branch_name} (merged)");
+                                }
                             }
                         }
                     } else if !quiet {
@@ -1089,17 +1896,9 @@ pub fn clean_on_review(root: &Path, id: &str) {
         return;
     }
 
+    let mut ctx = CleanContext::new(root);
     let branch_name = format!("wip/{id}");
-    let branch_exists = std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            &format!("refs/heads/{branch_name}"),
-        ])
-        .current_dir(root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let branch_exists = ctx.get_branch_tip(&branch_name).is_some();
 
     let verdict_path = root.join(".wt").join(format!("{id}.verdict.json"));
     let verdict_str = std::fs::read_to_string(&verdict_path)
@@ -1112,8 +1911,8 @@ pub fn clean_on_review(root: &Path, id: &str) {
         })
         .unwrap_or_default();
 
-    let is_res = is_research(root, id);
-    let removable = match check_removable(root, id, 14) {
+    let is_res = ctx.is_research_run(id);
+    let removable = match ctx.check_removable(id, 14) {
         Ok(_) => is_res || !has_uncommitted_changes(&wt_path),
         Err(_) => false,
     };
@@ -1147,20 +1946,14 @@ pub fn clean_on_review(root: &Path, id: &str) {
     }
 
     if branch_exists {
-        let base_opt = read_run_base(root, id);
-        let base_targets = base_opt
-            .as_deref()
-            .and_then(|b| resolve_base_targets(root, b));
-        let extra_refs: Vec<&str> = base_targets
-            .as_ref()
-            .map(|(_, targets)| targets.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_default();
-        if is_branch_merged_with_targets(root, &branch_name, &extra_refs) {
+        let is_merged = ctx.check_run_merged(id).is_some();
+        if is_merged {
             let del_out = std::process::Command::new("git")
                 .args(["branch", "-D", &branch_name])
                 .current_dir(root)
                 .output();
             if del_out.map(|o| o.status.success()).unwrap_or(false) {
+                ctx.wip_branch_tips.remove(&branch_name);
                 println!("removed .wt/{id}; branch {branch_name} deleted");
             } else {
                 println!("removed .wt/{id}; branch {branch_name} kept");

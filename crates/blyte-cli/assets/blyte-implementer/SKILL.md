@@ -178,13 +178,14 @@ Merge verified tasks one at a time:
 
 ```bash
 git merge --ff-only wip/T1
-git worktree remove .wt/T1 && git branch -d wip/T1
 ```
 
 When an earlier merge has moved the branch, a parallel task no longer fast-forwards: rebase it
-first (`git -C .wt/T2 rebase <branch>`), re-run its gate in the worktree, then merge it. After the
-last merge, run the full check once more on the merged branch. Push or open a pull request only if
-the user asks.
+first (`git -C .wt/T2 rebase <branch>`), re-run its gate in the worktree, then merge it. To combine
+several runs on a new branch instead, use `git cherry-pick -x wip/T1 wip/T2`: the `-x` line survives
+a squash merge, so blyte can tell the runs were merged. After the last merge, run the full check once
+more on the merged branch. Push or open a pull request only if the user asks. Leave the worktrees and
+`wip/` branches: blyte removes them once their work is merged.
 
 ## Read-only research
 

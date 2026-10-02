@@ -879,3 +879,423 @@ fn test_clean_merged_on_origin_main_only() {
     );
     assert!(!wt_path.exists());
 }
+
+#[test]
+fn test_clean_squash_merged_run_lines_later_changed_on_main() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    write_file(&root.join(".gitignore"), ".wt/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-qm", "ignore .wt", "--no-gpg-sign"]);
+
+    let s1_path = root.join(".wt/S1");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/S1", s1_path.to_str().unwrap()],
+    );
+    write_file(
+        &s1_path.join("code.rs"),
+        "fn hello() {\n    println!(\"hello from S1\");\n}\n",
+    );
+    git(&s1_path, &["add", "."]);
+    git(&s1_path, &["commit", "-qm", "feat: s1", "--no-gpg-sign"]);
+
+    let wt_dir = root.join(".wt");
+    write_file(
+        &wt_dir.join("S1.start.json"),
+        &serde_json::json!({ "id": "S1", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("S1.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    // Squash-merge S1 into main
+    git(root, &["checkout", "main"]);
+    git(root, &["merge", "--squash", "wip/S1"]);
+    git(root, &["commit", "-qm", "squash merge S1", "--no-gpg-sign"]);
+
+    // Main changes the same lines again!
+    write_file(
+        &root.join("code.rs"),
+        "fn hello() {\n    println!(\"hello from main later\");\n}\n",
+    );
+    git(root, &["add", "."]);
+    git(
+        root,
+        &["commit", "-qm", "main: edit code again", "--no-gpg-sign"],
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        stdout.contains("removed .wt/S1 (merged,"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("deleted branch wip/S1 (merged)"),
+        "stdout was: {stdout}"
+    );
+    assert!(!s1_path.exists(), "worktree should be removed");
+    let b = Command::new("git")
+        .args(["rev-parse", "--verify", "refs/heads/wip/S1"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!b.status.success(), "wip/S1 branch should be deleted");
+}
+
+#[test]
+fn test_clean_unmerged_run_whose_files_main_later_changed_is_kept() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    write_file(&root.join(".gitignore"), ".wt/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-qm", "ignore .wt", "--no-gpg-sign"]);
+
+    write_file(
+        &root.join("code.rs"),
+        "fn hello() {\n    println!(\"hello\");\n}\n",
+    );
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "init code", "--no-gpg-sign"]);
+
+    let u1_path = root.join(".wt/U1");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/U1", u1_path.to_str().unwrap()],
+    );
+    write_file(
+        &u1_path.join("code.rs"),
+        "fn hello() {\n    println!(\"unmerged work\");\n}\n",
+    );
+    git(&u1_path, &["add", "."]);
+    git(&u1_path, &["commit", "-qm", "feat: u1", "--no-gpg-sign"]);
+
+    let wt_dir = root.join(".wt");
+    write_file(
+        &wt_dir.join("U1.start.json"),
+        &serde_json::json!({ "id": "U1", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("U1.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    // Main changes the file, but U1 was never merged
+    write_file(
+        &root.join("code.rs"),
+        "fn hello() {\n    println!(\"completely different on main\");\n}\n",
+    );
+    git(root, &["add", "."]);
+    git(
+        root,
+        &["commit", "-qm", "main: change code", "--no-gpg-sign"],
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        stdout.contains("kept .wt/U1 (not merged yet)"),
+        "stdout was: {stdout}"
+    );
+    assert!(u1_path.exists(), "worktree should be kept");
+    let b = Command::new("git")
+        .args(["rev-parse", "--verify", "refs/heads/wip/U1"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(b.status.success(), "wip/U1 branch should be kept");
+}
+
+#[test]
+fn test_clean_cherry_pick_record_squash_commit_blyte_clean_and_quiet() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    write_file(&root.join(".gitignore"), ".wt/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-qm", "ignore .wt", "--no-gpg-sign"]);
+
+    let content = "line 1: initial\nline 2: initial\nline 3: initial\n";
+    write_file(&root.join("file.txt"), content);
+    git(root, &["add", "file.txt"]);
+    git(root, &["commit", "-qm", "initial commit", "--no-gpg-sign"]);
+
+    let wt_dir = root.join(".wt");
+    std::fs::create_dir_all(&wt_dir).unwrap();
+
+    // T1 modifies line 1
+    let t1_path = wt_dir.join("T1");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/T1", t1_path.to_str().unwrap()],
+    );
+    let t1_content = "line 1: T1 changed\nline 2: initial\nline 3: initial\n";
+    write_file(&t1_path.join("file.txt"), t1_content);
+    git(&t1_path, &["commit", "-am", "T1 work", "--no-gpg-sign"]);
+    let t1_sha = git(&t1_path, &["rev-parse", "HEAD"]);
+
+    write_file(
+        &wt_dir.join("T1.start.json"),
+        &serde_json::json!({ "id": "T1", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    // T1b modifies line 2
+    let t1b_path = wt_dir.join("T1b");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "wip/T1b",
+            t1b_path.to_str().unwrap(),
+        ],
+    );
+    let t1b_content = "line 1: initial\nline 2: T1b changed\nline 3: initial\n";
+    write_file(&t1b_path.join("file.txt"), t1b_content);
+    git(&t1b_path, &["commit", "-am", "T1b work", "--no-gpg-sign"]);
+    let t1b_sha = git(&t1b_path, &["rev-parse", "HEAD"]);
+
+    write_file(
+        &wt_dir.join("T1b.start.json"),
+        &serde_json::json!({ "id": "T1b", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1b.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    // Main changes line 1 and line 2 in the squash commit (so merge-tree conflicts with both!)
+    let main_content =
+        "line 1: main squash conflict\nline 2: main squash conflict\nline 3: initial\n";
+    write_file(&root.join("file.txt"), main_content);
+    let commit_msg = format!(
+        "Squash merge PR\n\n* feat: T1\n  (cherry picked from commit {t1_sha})\n* feat: T1b\n  (cherry picked from commit {t1b_sha})\n"
+    );
+    git(root, &["commit", "-am", &commit_msg, "--no-gpg-sign"]);
+
+    // Verify merge-tree conflicts with main for both T1 and T1b
+    let mt1 = Command::new("git")
+        .args(["merge-tree", "--write-tree", "main", "wip/T1"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let main_tree = git(root, &["rev-parse", "main^{tree}"]);
+    assert!(
+        !mt1.status.success()
+            || String::from_utf8_lossy(&mt1.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                != main_tree
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        stdout.contains("removed .wt/T1 (merged,"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("deleted branch wip/T1 (merged)"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("removed .wt/T1b (merged,"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("deleted branch wip/T1b (merged)"),
+        "stdout was: {stdout}"
+    );
+    assert!(!t1_path.exists());
+    assert!(!t1b_path.exists());
+}
+
+#[test]
+fn test_clean_cherry_pick_record_squash_commit_quiet_clean() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    write_file(&root.join(".gitignore"), ".wt/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-qm", "ignore .wt", "--no-gpg-sign"]);
+
+    let content = "line 1: initial\nline 2: initial\nline 3: initial\n";
+    write_file(&root.join("file.txt"), content);
+    git(root, &["add", "file.txt"]);
+    git(root, &["commit", "-qm", "initial commit", "--no-gpg-sign"]);
+
+    let wt_dir = root.join(".wt");
+    std::fs::create_dir_all(&wt_dir).unwrap();
+
+    // T1 modifies line 1
+    let t1_path = wt_dir.join("T1");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/T1", t1_path.to_str().unwrap()],
+    );
+    let t1_content = "line 1: T1 changed\nline 2: initial\nline 3: initial\n";
+    write_file(&t1_path.join("file.txt"), t1_content);
+    git(&t1_path, &["commit", "-am", "T1 work", "--no-gpg-sign"]);
+    let t1_sha = git(&t1_path, &["rev-parse", "HEAD"]);
+
+    write_file(
+        &wt_dir.join("T1.start.json"),
+        &serde_json::json!({ "id": "T1", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    // T1b modifies line 2
+    let t1b_path = wt_dir.join("T1b");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "wip/T1b",
+            t1b_path.to_str().unwrap(),
+        ],
+    );
+    let t1b_content = "line 1: initial\nline 2: T1b changed\nline 3: initial\n";
+    write_file(&t1b_path.join("file.txt"), t1b_content);
+    git(&t1b_path, &["commit", "-am", "T1b work", "--no-gpg-sign"]);
+    let t1b_sha = git(&t1b_path, &["rev-parse", "HEAD"]);
+
+    write_file(
+        &wt_dir.join("T1b.start.json"),
+        &serde_json::json!({ "id": "T1b", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1b.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    // Main changes line 1 and line 2 in the squash commit (so merge-tree conflicts with both!)
+    let main_content =
+        "line 1: main squash conflict\nline 2: main squash conflict\nline 3: initial\n";
+    write_file(&root.join("file.txt"), main_content);
+    let commit_msg = format!(
+        "Squash merge PR\n\n* feat: T1\n  (cherry picked from commit {t1_sha})\n* feat: T1b\n  (cherry picked from commit {t1b_sha})\n"
+    );
+    git(root, &["commit", "-am", &commit_msg, "--no-gpg-sign"]);
+
+    blyte_cli::clean::clean_quiet(root, None);
+
+    assert!(!t1_path.exists());
+    assert!(!t1b_path.exists());
+    let b1 = Command::new("git")
+        .args(["rev-parse", "--verify", "refs/heads/wip/T1"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!b1.status.success(), "wip/T1 branch should be deleted");
+    let b2 = Command::new("git")
+        .args(["rev-parse", "--verify", "refs/heads/wip/T1b"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!b2.status.success(), "wip/T1b branch should be deleted");
+}
+
+#[test]
+fn test_clean_cherry_pick_record_partial_commits_not_merged() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    write_file(&root.join(".gitignore"), ".wt/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-qm", "ignore .wt", "--no-gpg-sign"]);
+
+    let wt_dir = root.join(".wt");
+    std::fs::create_dir_all(&wt_dir).unwrap();
+
+    let t2_path = wt_dir.join("T2");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/T2", t2_path.to_str().unwrap()],
+    );
+
+    // Commit 1 on wip/T2
+    write_file(&t2_path.join("file1.txt"), "commit 1\n");
+    git(&t2_path, &["add", "file1.txt"]);
+    git(
+        &t2_path,
+        &["commit", "-qm", "feat: commit 1", "--no-gpg-sign"],
+    );
+    let c1_sha = git(&t2_path, &["rev-parse", "HEAD"]);
+
+    // Commit 2 on wip/T2
+    write_file(&t2_path.join("file2.txt"), "commit 2\n");
+    git(&t2_path, &["add", "file2.txt"]);
+    git(
+        &t2_path,
+        &["commit", "-qm", "feat: commit 2", "--no-gpg-sign"],
+    );
+
+    write_file(
+        &wt_dir.join("T2.start.json"),
+        &serde_json::json!({ "id": "T2", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T2.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    // Main has only commit 1 in the cherry-pick record, NOT commit 2
+    let commit_msg =
+        format!("Squash PR with only first commit\n\n(cherry picked from commit {c1_sha})\n");
+    write_file(&root.join("other.txt"), "other work\n");
+    git(root, &["add", "other.txt"]);
+    git(root, &["commit", "-qm", &commit_msg, "--no-gpg-sign"]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        stdout.contains("kept .wt/T2 (not merged yet)"),
+        "stdout was: {stdout}"
+    );
+    assert!(t2_path.exists(), "worktree should be kept");
+    let b = Command::new("git")
+        .args(["rev-parse", "--verify", "refs/heads/wip/T2"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(b.status.success(), "wip/T2 branch should be kept");
+}
