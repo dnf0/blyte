@@ -314,3 +314,261 @@ fn test_clean_sibling_detached_head_merged_reported() {
     );
     assert!(detached_path.exists());
 }
+
+#[test]
+fn test_clean_linked_worktree_reports_nothing_about_other_worktrees() {
+    let (outer, root) = init_repo_with_parent();
+
+    // Create a linked worktree
+    git(
+        &root,
+        &["worktree", "add", "../my-repo--linked", "-b", "linked"],
+    );
+    let linked_path = outer.path().join("my-repo--linked");
+
+    // Create a sibling worktree that is merged and clean
+    git(
+        &root,
+        &["worktree", "add", "../my-repo--side", "-b", "side"],
+    );
+    let side_path = outer.path().join("my-repo--side");
+    write_file(&side_path.join("feat.txt"), "feat\n");
+    git(&side_path, &["add", "."]);
+    git(&side_path, &["commit", "-qm", "feat", "--no-gpg-sign"]);
+    let sha = git(&side_path, &["rev-parse", "HEAD"]);
+    git(&root, &["cherry-pick", &sha]);
+
+    // Clean from linked worktree root
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(&linked_path)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        !stdout.contains("merged worktree"),
+        "linked worktree clean should report nothing about other worktrees: {stdout}"
+    );
+    assert!(
+        !stdout.contains("other worktrees are merged and clean"),
+        "linked worktree clean should report nothing about other worktrees: {stdout}"
+    );
+
+    // Also verify with --dry-run
+    let out_dry = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["clean", "--dry-run"])
+        .current_dir(&linked_path)
+        .output()
+        .unwrap();
+
+    let stdout_dry = String::from_utf8_lossy(&out_dry.stdout);
+    assert!(
+        out_dry.status.success(),
+        "clean --dry-run failed: {stdout_dry}"
+    );
+    assert!(
+        !stdout_dry.contains("merged worktree"),
+        "linked worktree clean --dry-run should report nothing about other worktrees: {stdout_dry}"
+    );
+    assert!(
+        !stdout_dry.contains("other worktrees are merged and clean"),
+        "linked worktree clean --dry-run should report nothing about other worktrees: {stdout_dry}"
+    );
+}
+
+#[test]
+fn test_clean_never_lists_main_worktree_from_main_or_all() {
+    let (outer, root) = init_repo_with_parent();
+
+    // Create a linked worktree
+    git(
+        &root,
+        &["worktree", "add", "../my-repo--linked", "-b", "linked"],
+    );
+    let linked_path = outer.path().join("my-repo--linked");
+
+    // Create a sibling worktree that is merged and clean
+    git(
+        &root,
+        &["worktree", "add", "../my-repo--side", "-b", "side"],
+    );
+    let side_path = outer.path().join("my-repo--side");
+    write_file(&side_path.join("feat.txt"), "feat\n");
+    git(&side_path, &["add", "."]);
+    git(&side_path, &["commit", "-qm", "feat", "--no-gpg-sign"]);
+    let sha = git(&side_path, &["rev-parse", "HEAD"]);
+    git(&root, &["cherry-pick", &sha]);
+
+    // 1. Cleaning from the main checkout: main worktree must not be listed
+    let out_main = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout_main = String::from_utf8_lossy(&out_main.stdout);
+    assert!(out_main.status.success(), "clean failed: {stdout_main}");
+    assert!(
+        !stdout_main.contains("(main,"),
+        "main worktree must not be listed: {stdout_main}"
+    );
+    assert!(
+        !stdout_main.contains("merged worktree . ("),
+        "main worktree must not be listed: {stdout_main}"
+    );
+    assert!(
+        !stdout_main.contains("merged worktree my-repo ("),
+        "main worktree must not be listed: {stdout_main}"
+    );
+    assert!(
+        stdout_main.contains("merged worktree ../my-repo--side (side,"),
+        "side worktree should be reported: {stdout_main}"
+    );
+
+    // 2. Cleaning with --all with both root and linked registered
+    let state_dir = tempfile::tempdir().unwrap();
+    let root_canon = root.canonicalize().unwrap();
+    let linked_canon = linked_path.canonicalize().unwrap();
+    let repos_content = format!("{}\n{}\n", root_canon.display(), linked_canon.display());
+    std::fs::create_dir_all(state_dir.path()).unwrap();
+    std::fs::write(state_dir.path().join("repos"), repos_content).unwrap();
+
+    let out_all = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["clean", "--all"])
+        .env("BLYTE_STATE_DIR", state_dir.path())
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout_all = String::from_utf8_lossy(&out_all.stdout);
+    assert!(out_all.status.success(), "clean --all failed: {stdout_all}");
+    assert!(
+        !stdout_all.contains("(main,"),
+        "main worktree must not be listed in --all: {stdout_all}"
+    );
+    assert!(
+        !stdout_all.contains("merged worktree ../../.."),
+        "relative parent of linked worktree must not be listed: {stdout_all}"
+    );
+    // Sibling should be reported exactly once (no duplicate report from linked worktree)
+    let side_matches = stdout_all
+        .matches("merged worktree ../my-repo--side (side,")
+        .count();
+    assert_eq!(
+        side_matches, 1,
+        "side worktree must only be reported once in --all: {stdout_all}"
+    );
+}
+
+#[test]
+fn test_clean_outside_worktree_shows_absolute_path() {
+    let (_outer, root) = init_repo_with_parent();
+
+    // Create a separate tempdir (outside root's parent)
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside_path = outside_dir.path().join("outside-wt");
+
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            outside_path.to_str().unwrap(),
+            "-b",
+            "outside",
+        ],
+    );
+
+    write_file(&outside_path.join("file.txt"), "outside work\n");
+    git(&outside_path, &["add", "."]);
+    git(
+        &outside_path,
+        &["commit", "-qm", "feat: outside", "--no-gpg-sign"],
+    );
+    let commit_sha = git(&outside_path, &["rev-parse", "HEAD"]);
+
+    // Cherry pick onto main
+    git(&root, &["cherry-pick", &commit_sha]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+
+    let outside_canon = outside_path.canonicalize().unwrap();
+    let outside_canon_str = outside_canon.to_string_lossy().replace('\\', "/");
+
+    assert!(
+        stdout.contains(&format!("merged worktree {outside_canon_str} (outside,")),
+        "stdout was: {stdout}, expected merged worktree with absolute path {outside_canon_str}"
+    );
+    assert!(
+        stdout.contains(&format!(": git worktree remove {outside_canon_str}")),
+        "stdout was: {stdout}, expected git worktree remove with absolute path {outside_canon_str}"
+    );
+    assert!(
+        !stdout.contains("../../../"),
+        "stdout should not have long relative path: {stdout}"
+    );
+}
+
+#[test]
+fn test_clean_worktree_under_wt_directory_not_listed() {
+    let (outer, root) = init_repo_with_parent();
+
+    // Create a linked worktree
+    git(
+        &root,
+        &["worktree", "add", "../my-repo--linked", "-b", "linked"],
+    );
+    let linked_path = outer.path().join("my-repo--linked");
+
+    // Inside linked worktree, create a worktree in a .wt subdirectory (like blyte's own runs of a linked-worktree root)
+    let wt_sub = linked_path.join(".wt").join("SUB1");
+    std::fs::create_dir_all(linked_path.join(".wt")).unwrap();
+    git(
+        &linked_path,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "wip/SUB1",
+            wt_sub.to_str().unwrap(),
+        ],
+    );
+
+    write_file(&wt_sub.join("sub.txt"), "sub work\n");
+    git(&wt_sub, &["add", "."]);
+    git(
+        &wt_sub,
+        &["commit", "-qm", "feat: sub work", "--no-gpg-sign"],
+    );
+    let commit_sha = git(&wt_sub, &["rev-parse", "HEAD"]);
+    git(&root, &["cherry-pick", &commit_sha]);
+
+    // Clean from main root
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        !stdout.contains("SUB1"),
+        "worktree under .wt directory must not be listed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("wip/SUB1"),
+        "worktree branch wip/SUB1 must not be listed: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".wt"),
+        "stdout should not list any .wt worktree in other worktrees report: {stdout}"
+    );
+}

@@ -127,7 +127,7 @@ pub fn is_pid_alive(pid: i64) -> bool {
     }
 }
 
-/// Finds the root repository (resolving main checkout if in a worktree).
+/// Finds the root repository (resolving the owning repository if inside a `.wt` run).
 pub fn find_repo_root() -> Result<PathBuf, String> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -137,11 +137,21 @@ pub fn find_repo_root() -> Result<PathBuf, String> {
         return Err("not a git repository".to_string());
     }
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if let Some(main) = crate::config::main_checkout(&root) {
-        Ok(main)
-    } else {
-        Ok(root)
+    if has_wt_component(&root) {
+        if let Some(wt_parent) = root.parent().and_then(|p| p.parent()) {
+            if root
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == ".wt")
+            {
+                return Ok(wt_parent.to_path_buf());
+            }
+        }
+        if let Some(main) = crate::config::main_checkout(&root) {
+            return Ok(main);
+        }
     }
+    Ok(root)
 }
 
 /// Checks whether a run is a research run from its start file.
@@ -663,40 +673,78 @@ pub fn parse_worktree_list(root: &Path) -> Vec<GitWorktreeInfo> {
     list
 }
 
-/// Computes the path of `target` relative to `base`.
-pub fn relative_path(target: &Path, base: &Path) -> PathBuf {
+/// Formats a worktree path for display and for git CLI commands:
+/// relative to `root` if inside `root` or a sibling (same parent directory);
+/// otherwise absolute.
+pub fn display_worktree_path(target: &Path, root: &Path) -> String {
     let target_canon = target
         .canonicalize()
         .unwrap_or_else(|_| target.to_path_buf());
-    let base_canon = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
 
-    if let Ok(rel) = target_canon.strip_prefix(&base_canon) {
-        return rel.to_path_buf();
+    // Inside the repository root
+    if let Ok(rel) = target_canon.strip_prefix(&root_canon) {
+        if !rel.as_os_str().is_empty() {
+            return rel.to_string_lossy().replace('\\', "/");
+        }
     }
 
-    let target_comps: Vec<_> = target_canon.components().collect();
-    let base_comps: Vec<_> = base_canon.components().collect();
-
-    let mut common = 0;
-    while common < target_comps.len()
-        && common < base_comps.len()
-        && target_comps[common] == base_comps[common]
-    {
-        common += 1;
+    // Sibling (same parent directory, e.g. ../app--side)
+    if target_canon != root_canon {
+        if let (Some(root_parent), Some(target_parent)) =
+            (root_canon.parent(), target_canon.parent())
+        {
+            if root_parent == target_parent {
+                if let Some(file_name) = target_canon.file_name() {
+                    let rel = Path::new("..").join(file_name);
+                    return rel.to_string_lossy().replace('\\', "/");
+                }
+            }
+        }
     }
 
-    if common == 0 {
-        return target_canon;
-    }
+    // Otherwise show the absolute path
+    target_canon.to_string_lossy().replace('\\', "/")
+}
 
-    let mut rel = PathBuf::new();
-    for _ in common..base_comps.len() {
-        rel.push("..");
+/// Returns true if `root` is a linked worktree (its git-dir differs from its git-common-dir).
+pub fn is_linked_worktree(root: &Path) -> bool {
+    let git_dir_out = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(root)
+        .output();
+    let common_dir_out = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(root)
+        .output();
+    match (git_dir_out, common_dir_out) {
+        (Ok(gd), Ok(cd)) if gd.status.success() && cd.status.success() => {
+            let gd_str = String::from_utf8_lossy(&gd.stdout).trim().to_string();
+            let cd_str = String::from_utf8_lossy(&cd.stdout).trim().to_string();
+            if gd_str == cd_str {
+                return false;
+            }
+            let gd_path = if Path::new(&gd_str).is_absolute() {
+                PathBuf::from(&gd_str)
+            } else {
+                root.join(&gd_str)
+            };
+            let cd_path = if Path::new(&cd_str).is_absolute() {
+                PathBuf::from(&cd_str)
+            } else {
+                root.join(&cd_str)
+            };
+            let gd_canon = gd_path.canonicalize().unwrap_or(gd_path);
+            let cd_canon = cd_path.canonicalize().unwrap_or(cd_path);
+            gd_canon != cd_canon
+        }
+        _ => false,
     }
-    for comp in &target_comps[common..] {
-        rel.push(comp);
-    }
-    rel
+}
+
+/// Returns true if any path component is `.wt`.
+pub fn has_wt_component(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".wt")
 }
 
 /// Checks whether a worktree's working tree is clean:
@@ -736,17 +784,30 @@ pub fn is_worktree_clean(wt_path: &Path) -> bool {
     }
 }
 
-/// Inspects other worktrees (excluding main checkout and blyte's `.wt/<id>` runs),
-/// and reports any that are both merged and clean. Never deletes them.
+/// Inspects other worktrees (excluding main checkout, linked-worktree roots,
+/// and blyte's `.wt/<id>` runs), and reports any that are both merged and clean.
+/// Never deletes them.
 pub fn report_other_worktrees(root: &Path) {
+    // Only report from the main worktree. If the root being cleaned is a linked worktree,
+    // print nothing about other worktrees for it.
+    if is_linked_worktree(root) {
+        return;
+    }
+
     let worktrees = parse_worktree_list(root);
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let wt_dir = root_canon.join(".wt");
+    let main_canon = worktrees
+        .first()
+        .map(|wt| wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone()));
 
     let mut other_count = 0;
     let mut other_bytes = 0;
 
-    for wt in worktrees {
+    for (idx, wt) in worktrees.into_iter().enumerate() {
+        // Never list the main worktree (first entry of git worktree list --porcelain)
+        if idx == 0 {
+            continue;
+        }
         if wt.is_bare {
             continue;
         }
@@ -755,12 +816,15 @@ pub fn report_other_worktrees(root: &Path) {
         }
 
         let wt_canon = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
-        // Skip the main checkout
+        // Skip the main checkout as well as the root itself
         if wt_canon == root_canon || wt.path == root {
             continue;
         }
-        // Skip blyte's .wt/<id> worktrees
-        if wt_canon.starts_with(&wt_dir) || wt.path.starts_with(root.join(".wt")) {
+        if Some(&wt_canon) == main_canon.as_ref() {
+            continue;
+        }
+        // Never list blyte runs: exclude any worktree whose path has a .wt directory component anywhere
+        if has_wt_component(&wt.path) || has_wt_component(&wt_canon) {
             continue;
         }
 
@@ -783,8 +847,7 @@ pub fn report_other_worktrees(root: &Path) {
         }
 
         let size = dir_size(&wt.path);
-        let rel_path = relative_path(&wt.path, root);
-        let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+        let path_str = display_worktree_path(&wt.path, root);
         let branch_label = wt.branch.as_deref().unwrap_or_else(|| {
             wt.head_sha
                 .as_deref()
@@ -793,7 +856,7 @@ pub fn report_other_worktrees(root: &Path) {
         });
 
         println!(
-            "merged worktree {rel_str} ({branch_label}, {}): git worktree remove {rel_str}",
+            "merged worktree {path_str} ({branch_label}, {}): git worktree remove {path_str}",
             format_size(size)
         );
 
