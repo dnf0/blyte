@@ -1,3 +1,9 @@
+## v0.18.0 (2026-10-02)
+
+### Feat
+
+- tighter model timeouts and research report reminders (#223)
+
 ## v0.17.0 (2026-10-02)
 
 ### Feat
