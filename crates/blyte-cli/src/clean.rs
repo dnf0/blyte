@@ -204,20 +204,7 @@ fn git_tree_sha(root: &Path, ref_name: &str) -> Option<String> {
     }
 }
 
-fn is_commit_merged_into_target(
-    root: &Path,
-    commit_sha: &str,
-    target: &str,
-    target_tree: Option<&str>,
-) -> bool {
-    let ancestor_check = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", commit_sha, target])
-        .current_dir(root)
-        .output();
-    if ancestor_check.map(|c| c.status.success()).unwrap_or(false) {
-        return true;
-    }
-
+fn is_cherry_merged_into_target(root: &Path, commit_sha: &str, target: &str) -> bool {
     let cherry_out = std::process::Command::new("git")
         .args(["cherry", target, commit_sha])
         .current_dir(root)
@@ -235,7 +222,15 @@ fn is_commit_merged_into_target(
             }
         }
     }
+    false
+}
 
+fn is_merge_tree_merged_into_target(
+    root: &Path,
+    commit_sha: &str,
+    target: &str,
+    target_tree: Option<&str>,
+) -> bool {
     let target_tree_sha = match target_tree {
         Some(t) => Some(t.to_string()),
         None => git_tree_sha(root, target),
@@ -256,8 +251,30 @@ fn is_commit_merged_into_target(
             }
         }
     }
-
     false
+}
+
+fn parse_started_at(val: &serde_json::Value) -> Option<u64> {
+    let s = val.get("started_at")?;
+    if let Some(n) = s.as_u64() {
+        Some(n)
+    } else if let Some(n) = s.as_i64() {
+        if n >= 0 {
+            Some(n as u64)
+        } else {
+            None
+        }
+    } else if let Some(f) = s.as_f64() {
+        if f >= 0.0 {
+            Some(f as u64)
+        } else {
+            None
+        }
+    } else if let Some(st) = s.as_str() {
+        st.parse::<u64>().ok()
+    } else {
+        None
+    }
 }
 
 fn check_history_merged(
@@ -388,6 +405,10 @@ pub struct CleanContext<'a> {
     pub wip_contains_cache: HashMap<String, Vec<String>>,
     pub merged_cache: HashMap<String, Option<RemovalReason>>,
     pub branch_contains_calls: usize,
+    pub quiet: bool,
+    pub cherry_pick_set: Option<HashSet<String>>,
+    pub rev_list_cache: HashMap<String, Vec<String>>,
+    pub ancestor_cache: HashMap<(String, String), bool>,
 }
 
 impl<'a> CleanContext<'a> {
@@ -460,7 +481,183 @@ impl<'a> CleanContext<'a> {
             wip_contains_cache: HashMap::new(),
             merged_cache: HashMap::new(),
             branch_contains_calls: 0,
+            quiet: false,
+            cherry_pick_set: None,
+            rev_list_cache: HashMap::new(),
+            ancestor_cache: HashMap::new(),
         }
+    }
+
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    fn compute_cherry_pick_set(&self) -> HashSet<String> {
+        let unremoved_ids = find_blyte_worktrees(self.root);
+        let candidate_ids: &[String] = if unremoved_ids.is_empty() {
+            &self.all_run_ids
+        } else {
+            &unremoved_ids
+        };
+
+        let mut min_started_at: Option<u64> = None;
+        let mut all_valid = true;
+
+        for id in candidate_ids {
+            let start_val = self.start_files.get(id);
+            let parsed = start_val.and_then(parse_started_at);
+            match parsed {
+                Some(ts) => {
+                    min_started_at = Some(min_started_at.map_or(ts, |m| m.min(ts)));
+                }
+                None => {
+                    all_valid = false;
+                }
+            }
+        }
+
+        let since_arg = if let (true, Some(min_ts)) = (all_valid, min_started_at) {
+            if min_ts >= 86_400 + 100_000_000 {
+                format!("--since={}", min_ts - 86_400)
+            } else {
+                "--since=1970-01-01T00:00:00Z".to_string()
+            }
+        } else {
+            "--since=1970-01-01T00:00:00Z".to_string()
+        };
+
+        let mut targets = Vec::new();
+        let mut seen = HashSet::new();
+
+        if git_ok(
+            self.root,
+            &["rev-parse", "--verify", "--quiet", &self.default_branch],
+        ) && seen.insert(self.default_branch.clone())
+        {
+            targets.push(self.default_branch.clone());
+        }
+
+        if let Some(ref origin_def) = self.origin_default {
+            if git_ok(self.root, &["rev-parse", "--verify", "--quiet", origin_def])
+                && seen.insert(origin_def.clone())
+            {
+                targets.push(origin_def.clone());
+            }
+        }
+
+        for id in &self.all_run_ids {
+            if let Some(base_str) = self
+                .start_files
+                .get(id)
+                .and_then(|s| s.get("base"))
+                .and_then(|b| b.as_str())
+            {
+                if let Some((_, base_targets)) = resolve_base_targets(self.root, base_str) {
+                    for bt in base_targets {
+                        if seen.insert(bt.clone()) {
+                            targets.push(bt);
+                        }
+                    }
+                }
+            }
+        }
+
+        if targets.is_empty() {
+            return HashSet::new();
+        }
+
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["log", "--format=%B", &since_arg]);
+        for t in &targets {
+            cmd.arg(t);
+        }
+        cmd.current_dir(self.root);
+
+        let mut set = HashSet::new();
+        if let Ok(o) = cmd.output() {
+            if o.status.success() {
+                let text = String::from_utf8_lossy(&o.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("(cherry picked from commit ") {
+                        if let Some(sha) = rest.strip_suffix(')') {
+                            let sha = sha.trim();
+                            if is_commit_id(sha) {
+                                set.insert(sha.to_lowercase());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        set
+    }
+
+    pub fn get_cherry_pick_set(&mut self) -> &HashSet<String> {
+        if self.cherry_pick_set.is_none() {
+            let set = self.compute_cherry_pick_set();
+            self.cherry_pick_set = Some(set);
+        }
+        self.cherry_pick_set.as_ref().unwrap()
+    }
+
+    fn is_ancestor_of_target(&mut self, commit_sha: &str, target: &str) -> bool {
+        let key = (commit_sha.to_string(), target.to_string());
+        if let Some(&cached) = self.ancestor_cache.get(&key) {
+            return cached;
+        }
+        let is_anc = std::process::Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit_sha, target])
+            .current_dir(self.root)
+            .output()
+            .map(|c| c.status.success())
+            .unwrap_or(false);
+        self.ancestor_cache.insert(key, is_anc);
+        is_anc
+    }
+
+    fn is_ancestor_of_default(&mut self, commit_sha: &str) -> bool {
+        let def = self.default_branch.clone();
+        if self.is_ancestor_of_target(commit_sha, &def) {
+            return true;
+        }
+        if let Some(origin_def) = self.origin_default.clone() {
+            if self.is_ancestor_of_target(commit_sha, &origin_def) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn get_run_commits_against_default(&mut self, tip_sha: &str) -> Vec<String> {
+        if let Some(cached) = self.rev_list_cache.get(tip_sha) {
+            return cached.clone();
+        }
+        let out = std::process::Command::new("git")
+            .args(["rev-list", &format!("{}..{}", self.default_branch, tip_sha)])
+            .current_dir(self.root)
+            .output();
+        let commits: Vec<String> = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.rev_list_cache
+            .insert(tip_sha.to_string(), commits.clone());
+        commits
+    }
+
+    fn is_in_cherry_pick_record(&mut self, tip_sha: &str) -> bool {
+        let commits = self.get_run_commits_against_default(tip_sha);
+        if commits.is_empty() {
+            return false;
+        }
+        let cherry_set = self.get_cherry_pick_set();
+        commits.iter().all(|c| cherry_set.contains(c))
     }
 
     pub fn get_branch_tip(&self, branch_name: &str) -> Option<String> {
@@ -647,14 +844,80 @@ impl<'a> CleanContext<'a> {
         tip_sha: Option<&str>,
         visited: &mut HashSet<String>,
     ) -> Option<RemovalReason> {
-        let start_val = self.start_files.get(id);
-        let base_opt = start_val.and_then(|s| s.get("base").and_then(|b| b.as_str()));
-        let base_targets = base_opt.and_then(|b| resolve_base_targets(self.root, b));
-        let started_at = start_val.and_then(|s| s.get("started_at"));
+        let base_opt = self.start_files.get(id).and_then(|s| {
+            s.get("base")
+                .and_then(|b| b.as_str())
+                .map(|b| b.to_string())
+        });
+        let base_targets = base_opt
+            .as_deref()
+            .and_then(|b| resolve_base_targets(self.root, b));
+        let started_at = self
+            .start_files
+            .get(id)
+            .and_then(|s| s.get("started_at"))
+            .cloned();
 
         if let Some(tip_sha) = tip_sha {
-            // Step 1: Cheap checks on default branch & origin counterpart
-            if is_commit_merged_into_target(
+            // 1. Ancestor (merge-base --is-ancestor)
+            if self.is_ancestor_of_default(tip_sha) {
+                return Some(RemovalReason::Merged);
+            }
+
+            // 2. The cherry-pick record
+            if self.is_in_cherry_pick_record(tip_sha) {
+                return Some(RemovalReason::Merged);
+            }
+
+            // 3. The base-branch checks
+            if let Some((ref display_name, ref targets)) = base_targets {
+                for target in targets {
+                    if self.is_ancestor_of_target(tip_sha, target) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                    }
+                    if !self.quiet {
+                        if is_cherry_merged_into_target(self.root, tip_sha, target) {
+                            return Some(RemovalReason::MergedInto(display_name.clone()));
+                        }
+                        if is_merge_tree_merged_into_target(self.root, tip_sha, target, None) {
+                            return Some(RemovalReason::MergedInto(display_name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. The follow-up rule
+        let children = self.get_children_of(id, tip_sha.unwrap_or(""));
+        for child in children {
+            if visited.contains(&child) {
+                continue;
+            }
+            if self.is_child_run_merged(&child, visited) {
+                return Some(RemovalReason::MergedThrough(child));
+            }
+        }
+
+        // clean_quiet uses only: ancestor, cherry-pick record, follow-ups through those,
+        // and the redone / no_changes / research / age rules.
+        // No merge-tree, no history walk, no other-worktrees report.
+        if self.quiet {
+            return None;
+        }
+
+        if let Some(tip_sha) = tip_sha {
+            // 5. git cherry
+            if is_cherry_merged_into_target(self.root, tip_sha, &self.default_branch) {
+                return Some(RemovalReason::Merged);
+            }
+            if let Some(ref origin_def) = self.origin_default {
+                if is_cherry_merged_into_target(self.root, tip_sha, origin_def) {
+                    return Some(RemovalReason::Merged);
+                }
+            }
+
+            // 6. merge-tree against current tips
+            if is_merge_tree_merged_into_target(
                 self.root,
                 tip_sha,
                 &self.default_branch,
@@ -663,7 +926,7 @@ impl<'a> CleanContext<'a> {
                 return Some(RemovalReason::Merged);
             }
             if let Some(ref origin_def) = self.origin_default {
-                if is_commit_merged_into_target(
+                if is_merge_tree_merged_into_target(
                     self.root,
                     tip_sha,
                     origin_def,
@@ -673,43 +936,26 @@ impl<'a> CleanContext<'a> {
                 }
             }
 
-            // Step 2: Cheap checks on base branch targets
-            if let Some((ref display_name, ref targets)) = base_targets {
-                for target in targets {
-                    if is_commit_merged_into_target(self.root, tip_sha, target, None) {
-                        return Some(RemovalReason::MergedInto(display_name.clone()));
-                    }
-                }
-            }
-
-            // Step 3: History walk on default branch & origin counterpart
-            if check_history_merged(self.root, tip_sha, &self.default_branch, started_at) {
+            // 7. history walk (explicit blyte clean only)
+            if check_history_merged(
+                self.root,
+                tip_sha,
+                &self.default_branch,
+                started_at.as_ref(),
+            ) {
                 return Some(RemovalReason::Merged);
             }
             if let Some(ref origin_def) = self.origin_default {
-                if check_history_merged(self.root, tip_sha, origin_def, started_at) {
+                if check_history_merged(self.root, tip_sha, origin_def, started_at.as_ref()) {
                     return Some(RemovalReason::Merged);
                 }
             }
-
-            // Step 4: History walk on base branch targets
             if let Some((ref display_name, ref targets)) = base_targets {
                 for target in targets {
-                    if check_history_merged(self.root, tip_sha, target, started_at) {
+                    if check_history_merged(self.root, tip_sha, target, started_at.as_ref()) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
                 }
-            }
-        }
-
-        // Step 5: Follow-up search
-        let children = self.get_children_of(id, tip_sha.unwrap_or(""));
-        for child in children {
-            if visited.contains(&child) {
-                continue;
-            }
-            if self.is_child_run_merged(&child, visited) {
-                return Some(RemovalReason::MergedThrough(child));
             }
         }
 
@@ -1208,8 +1454,13 @@ pub fn clean_repo(
     let mut freed_bytes = 0;
 
     let mut ctx = CleanContext::new(root);
+    ctx.set_quiet(quiet);
+    let start_time = std::time::Instant::now();
     let ids = find_blyte_worktrees(root);
     for id in ids {
+        if quiet && start_time.elapsed() >= std::time::Duration::from_secs(1) {
+            break;
+        }
         if skip_id == Some(&id) {
             continue;
         }
