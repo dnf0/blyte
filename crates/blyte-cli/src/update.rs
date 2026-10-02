@@ -273,6 +273,9 @@ fn update(check: bool) -> Result<(), String> {
         for line in refresh_skills(&exe, &home) {
             println!("{line}");
         }
+        if !home.as_os_str().is_empty() {
+            crate::skill::warn_superseded(&home);
+        }
     }
     Ok(())
 }
