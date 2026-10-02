@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::InitArgs;
+pub use crate::dispatch::{format_gate_drift_warning, is_ci_step_covered, missing_ci_steps};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -428,6 +429,8 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         "make check",
         "make lint",
         "make test",
+        "make typecheck",
+        "make validate",
     ];
 
     let is_check = check_cmds.iter().any(|&c| {

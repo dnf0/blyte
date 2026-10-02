@@ -90,6 +90,17 @@ max_turns = 300
 | `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
 
+When `blyte dispatch` uses the gate from `blyte.toml` (not an explicit `--gate` or `--research`),
+it checks whether any check commands run by the repository's CI workflows (`.github/workflows/*.yml`
+and `*.yaml`) are missing from the gate. If any CI step is not covered (either in the gate or documented
+in `blyte.toml` comments as deliberately left out), it warns on stderr before the run starts:
+
+```
+blyte: the gate is missing CI steps: make typecheck, make validate (run blyte init --force to refresh blyte.toml)
+```
+
+and continues the dispatch normally without modifying `blyte.toml`.
+
 ## Dashboard
 
 `blyte dashboard` serves a local web page that monitors running and recent blyte jobs across repositories:

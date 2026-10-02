@@ -145,6 +145,18 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     } else if let Some(ref g) = args.gate {
         (g.clone(), "flag")
     } else if let Some(ref g) = dispatch_cfg.gate {
+        let toml_path = if from_main {
+            crate::config::main_checkout(&root)
+                .map(|m| m.join("blyte.toml"))
+                .unwrap_or_else(|| root.join("blyte.toml"))
+        } else {
+            root.join("blyte.toml")
+        };
+        let toml_content = std::fs::read_to_string(&toml_path).unwrap_or_default();
+        let missing = missing_ci_steps(&root, g, &toml_content);
+        if let Some(warning) = format_gate_drift_warning(&missing) {
+            eprintln!("{warning}");
+        }
         let source = if from_main {
             "blyte.toml (main checkout)"
         } else {
@@ -1331,6 +1343,53 @@ pub fn run_status(id: &str, json: bool) -> i32 {
     match state {
         "running" | "finished" => 0,
         _ => 1,
+    }
+}
+
+/// Check whether a CI step is covered by the gate commands or marked as left out in comments.
+pub fn is_ci_step_covered(step: &str, gate: &str, blyte_toml_content: &str) -> bool {
+    let step = step.trim();
+    if gate.lines().any(|line| line.trim() == step) {
+        return true;
+    }
+    blyte_toml_content.lines().any(|line| {
+        let trimmed = line.trim();
+        let Some(after_hash) = trimmed.strip_prefix('#') else {
+            return false;
+        };
+        let comment = after_hash.trim_start();
+        let Some(after_step) = comment.strip_prefix(step) else {
+            return false;
+        };
+        let after_step_trimmed = after_step.trim_start();
+        let Some(after_colon) = after_step_trimmed.strip_prefix(':') else {
+            return false;
+        };
+        after_colon.to_ascii_lowercase().contains("left out")
+    })
+}
+
+/// Compute CI steps from repository workflows that are not covered by the gate or comments.
+pub fn missing_ci_steps(root: &Path, gate: &str, blyte_toml_content: &str) -> Vec<String> {
+    let ci_steps = crate::init::drop_overlapping(crate::init::detect_ci(root));
+    if ci_steps.is_empty() {
+        return Vec::new();
+    }
+    ci_steps
+        .into_iter()
+        .filter(|step| !is_ci_step_covered(step, gate, blyte_toml_content))
+        .collect()
+}
+
+/// Format the single-line warning for missing CI steps.
+pub fn format_gate_drift_warning(missing: &[String]) -> Option<String> {
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "blyte: the gate is missing CI steps: {} (run blyte init --force to refresh blyte.toml)",
+            missing.join(", ")
+        ))
     }
 }
 
