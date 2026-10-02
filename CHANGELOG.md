@@ -1,3 +1,9 @@
+## v0.17.0 (2026-10-02)
+
+### Feat
+
+- **clean**: follow-up chains and squash-merged runs count as merged; a cheap dispatch-time clean (#220)
+
 ## v0.16.0 (2026-10-02)
 
 ### Feat
