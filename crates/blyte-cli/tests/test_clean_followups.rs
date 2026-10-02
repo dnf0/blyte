@@ -479,6 +479,220 @@ fn test_clean_followup_child_already_deleted_by_earlier_clean() {
 }
 
 #[test]
+fn test_clean_followup_wt1_wt2_squash_merged_lines_later_changed_both_removed() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    write_file(&root.join(".gitignore"), ".wt/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-qm", "ignore .wt", "--no-gpg-sign"]);
+
+    let t1_path = root.join(".wt/T1");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/T1", t1_path.to_str().unwrap()],
+    );
+    write_file(&t1_path.join("file.txt"), "work by T1\n");
+    git(&t1_path, &["add", "."]);
+    git(
+        &t1_path,
+        &["commit", "-qm", "feat: work by T1", "--no-gpg-sign"],
+    );
+
+    let t2_path = root.join(".wt/T2");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "wip/T2",
+            t2_path.to_str().unwrap(),
+            "wip/T1",
+        ],
+    );
+    write_file(&t2_path.join("file.txt"), "rewritten by T2\n");
+    git(&t2_path, &["add", "."]);
+    git(
+        &t2_path,
+        &["commit", "-qm", "feat: rewritten by T2", "--no-gpg-sign"],
+    );
+
+    // Squash merge wip/T2 into main
+    git(root, &["checkout", "main"]);
+    git(root, &["merge", "--squash", "wip/T2"]);
+    git(root, &["commit", "-qm", "squash merge T2", "--no-gpg-sign"]);
+
+    // Main changes those lines again!
+    write_file(
+        &root.join("file.txt"),
+        "rewritten by T2\nline added later on main\n",
+    );
+    git(root, &["add", "."]);
+    git(
+        root,
+        &["commit", "-qm", "main: edit lines again", "--no-gpg-sign"],
+    );
+
+    let wt_dir = root.join(".wt");
+    // Neither has a base field
+    write_file(
+        &wt_dir.join("T1.start.json"),
+        &serde_json::json!({ "id": "T1", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1.json"),
+        &serde_json::json!({ "outcome": "verified" }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    write_file(
+        &wt_dir.join("T2.start.json"),
+        &serde_json::json!({ "id": "T2", "pid": 999999, "started_at": 1000 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T2.json"),
+        &serde_json::json!({ "outcome": "verified" }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T2.verdict.json"),
+        &serde_json::json!({ "verdict": "accepted" }).to_string(),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("clean")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "clean failed: {stdout}");
+    assert!(
+        stdout.contains("removed .wt/T1 (merged through T2,"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("deleted branch wip/T1 (merged)"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("removed .wt/T2 (merged,"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("deleted branch wip/T2 (merged)"),
+        "stdout was: {stdout}"
+    );
+
+    assert!(!t1_path.exists());
+    assert!(!t2_path.exists());
+
+    let b1 = Command::new("git")
+        .args(["rev-parse", "--verify", "refs/heads/wip/T1"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!b1.status.success(), "wip/T1 branch should be deleted");
+
+    let b2 = Command::new("git")
+        .args(["rev-parse", "--verify", "refs/heads/wip/T2"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!b2.status.success(), "wip/T2 branch should be deleted");
+}
+
+#[test]
+fn test_clean_timing_guard_40_runs_under_3s() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    write_file(&root.join(".gitignore"), ".wt/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-qm", "ignore .wt", "--no-gpg-sign"]);
+
+    let wt_dir = root.join(".wt");
+    std::fs::create_dir_all(&wt_dir).unwrap();
+
+    // 40 finished runs: 5 merged, 35 not merged (cheap fake ones: start files and branches)
+    for i in 0..5 {
+        let rid = format!("M{i:02}");
+        git(
+            root,
+            &["checkout", "-q", "-b", &format!("wip/{rid}"), "main"],
+        );
+        write_file(&root.join(format!("{rid}.txt")), &format!("{rid}\n"));
+        git(root, &["add", &format!("{rid}.txt")]);
+        git(root, &["commit", "-qm", &rid, "--no-gpg-sign"]);
+        git(root, &["checkout", "-q", "main"]);
+        git(
+            root,
+            &["merge", "-q", &format!("wip/{rid}"), "--no-gpg-sign"],
+        );
+
+        write_file(
+            &wt_dir.join(format!("{rid}.start.json")),
+            &serde_json::json!({ "id": rid, "pid": 999999, "started_at": 1000 }).to_string(),
+        );
+        write_file(
+            &wt_dir.join(format!("{rid}.verdict.json")),
+            &serde_json::json!({ "verdict": "accepted" }).to_string(),
+        );
+    }
+
+    for i in 0..35 {
+        let rid = format!("U{i:02}");
+        git(
+            root,
+            &["checkout", "-q", "-b", &format!("wip/{rid}"), "main"],
+        );
+        write_file(&root.join(format!("{rid}.txt")), &format!("{rid}\n"));
+        git(root, &["add", &format!("{rid}.txt")]);
+        git(root, &["commit", "-qm", &rid, "--no-gpg-sign"]);
+
+        write_file(
+            &wt_dir.join(format!("{rid}.start.json")),
+            &serde_json::json!({ "id": rid, "pid": 999999, "started_at": 1000 }).to_string(),
+        );
+        write_file(
+            &wt_dir.join(format!("{rid}.verdict.json")),
+            &serde_json::json!({ "verdict": "accepted" }).to_string(),
+        );
+    }
+    git(root, &["checkout", "-q", "main"]);
+
+    // Verify CleanContext directly: at most 1 branch contains call per run
+    let mut ctx = blyte_cli::clean::CleanContext::new(root);
+    for id in &ctx.all_run_ids.clone() {
+        let _ = ctx.check_removable(id, 14);
+    }
+    assert!(
+        ctx.branch_contains_calls <= 40,
+        "branch_contains_calls was {}, expected <= 40",
+        ctx.branch_contains_calls
+    );
+
+    // Timing check on blyte clean --dry-run CLI
+    let start = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["clean", "--dry-run"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(out.status.success());
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "clean --dry-run took {:?}, expected < 3 s",
+        elapsed
+    );
+}
+
+#[test]
 fn test_clean_followup_child_already_deleted_verdict_accepted() {
     let repo = init_repo();
     let root = repo.path();
