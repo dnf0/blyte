@@ -96,6 +96,7 @@ fn main() {
         },
         rollback: true,
         on_event: Some(&log),
+        research: false,
     };
 
     let started = std::time::Instant::now();

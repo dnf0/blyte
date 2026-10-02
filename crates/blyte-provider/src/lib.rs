@@ -28,16 +28,51 @@ pub mod registry;
 
 pub use registry::{detect_provider_kind, discover_all_models, resolve_provider, ProviderKind};
 
+/// Computes whole-call and read timeouts from an optional string value or defaults (180 s, 150 s).
+pub fn model_timeouts_from(val: Option<&str>) -> (std::time::Duration, std::time::Duration) {
+    let whole = val
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(180);
+    let read = whole.saturating_sub(30).max(30);
+    (
+        std::time::Duration::from_secs(whole),
+        std::time::Duration::from_secs(read),
+    )
+}
+
+/// Timeouts (whole-call, read) derived from `BLYTE_MODEL_TIMEOUT_SECS` or default (180 s, 150 s), read once.
+pub fn model_timeouts() -> (std::time::Duration, std::time::Duration) {
+    static TIMEOUTS: std::sync::OnceLock<(std::time::Duration, std::time::Duration)> =
+        std::sync::OnceLock::new();
+    *TIMEOUTS.get_or_init(|| {
+        model_timeouts_from(std::env::var("BLYTE_MODEL_TIMEOUT_SECS").ok().as_deref())
+    })
+}
+
+/// Whole-call timeout in seconds, derived from `BLYTE_MODEL_TIMEOUT_SECS` or default 180 s.
+pub fn model_timeout_secs() -> u64 {
+    model_timeouts().0.as_secs()
+}
+
+/// Builds an HTTP client with the specified whole-call and read timeouts.
+pub fn build_http_client(
+    timeout: std::time::Duration,
+    timeout_read: std::time::Duration,
+) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(20))
+        .timeout_read(timeout_read)
+        .timeout(timeout)
+        .build()
+}
+
 /// The process's one HTTP client. `ureq::Agent` pools connections, so every model call after
 /// the first reuses one instead of paying a TCP and TLS handshake (15-45 ms) each time.
 pub fn http_client() -> &'static ureq::Agent {
     static CLIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(20))
-            .timeout_read(std::time::Duration::from_secs(300))
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
+        let (whole, read) = model_timeouts();
+        build_http_client(whole, read)
     })
 }
 
@@ -55,6 +90,19 @@ pub enum ProviderError {
     Api { status: u16, body: String },
     #[error("could not parse provider response: {0}")]
     Parse(String),
+}
+
+impl ProviderError {
+    /// Whether this error represents a transport timeout.
+    pub fn is_timeout(&self) -> bool {
+        match self {
+            ProviderError::Transport(s) => {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("timed out") || lower.contains("timeout")
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A tool the model may call. Provider-neutral; each adapter renders it into its own schema.

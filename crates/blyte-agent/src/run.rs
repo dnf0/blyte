@@ -230,6 +230,11 @@ pub fn is_transient(e: &ProviderError) -> bool {
 
 /// Wait before retry `attempt` (1-based): 2, 4, 8, 16, 32, then 60 seconds.
 pub fn retry_delay(attempt: u32) -> Duration {
+    if let Ok(ms) = std::env::var("BLYTE_RETRY_DELAY_MS") {
+        if let Ok(ms) = ms.trim().parse::<u64>() {
+            return Duration::from_millis(ms);
+        }
+    }
     let exp = attempt.saturating_sub(1).min(5);
     Duration::from_secs((2u64 << exp).min(60))
 }
@@ -264,6 +269,8 @@ pub struct Runner<'a> {
     pub rollback: bool,
     /// Called as the run proceeds. Default is silent.
     pub on_event: Option<&'a dyn Fn(Event<'_>)>,
+    /// Research run: periodically remind the model to keep report.md updated.
+    pub research: bool,
 }
 
 const CLAIM_PHRASES: &[&str] = &[
@@ -583,6 +590,11 @@ impl<'a> Runner<'a> {
         let mut last_sent: Option<Vec<Message>> = None;
         let mut last_failed: Vec<String> = Vec::new();
         let mut last_fingerprint: Option<String> = None;
+        let mut last_report = if self.research {
+            self.fs.read(&self.root.join("report.md")).ok()
+        } else {
+            None
+        };
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -603,6 +615,16 @@ impl<'a> Runner<'a> {
                     "You have 10 turns left of {}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools.",
                     self.budget.max_turns
                 )));
+            }
+
+            if self.research && turn % 30 == 0 {
+                let current_report = self.fs.read(&self.root.join("report.md")).ok();
+                if current_report == last_report {
+                    history.push(Message::User(
+                        "Update report.md now with what you have found so far, even if unfinished, then carry on.".to_string(),
+                    ));
+                }
+                last_report = current_report;
             }
 
             let req = Request {
@@ -630,19 +652,32 @@ impl<'a> Runner<'a> {
             let model_start = std::time::Instant::now();
             let mut attempt = 0;
             let resp = loop {
+                let call_start = std::time::Instant::now();
                 match self.provider.complete(&req) {
                     Ok(r) => break r,
                     Err(e) if is_transient(&e) && attempt < MAX_PROVIDER_RETRIES => {
+                        let elapsed = call_start.elapsed().as_secs_f64().round() as u64;
+                        let s = if elapsed > 0 {
+                            elapsed
+                        } else {
+                            blyte_provider::model_timeout_secs()
+                        };
                         attempt += 1;
                         let wait = retry_wait(&e, attempt);
                         if deadline.is_some_and(|d| std::time::Instant::now() + wait >= d) {
                             return (Outcome::Error(e.to_string()), report);
                         }
                         report.provider_retries += 1;
-                        eprintln!(
-                            "provider: {e}; retrying in {}s ({attempt}/{MAX_PROVIDER_RETRIES})",
-                            wait.as_secs()
-                        );
+                        if e.is_timeout() {
+                            eprintln!(
+                                "model call timed out after {s} s; retrying ({attempt} of {MAX_PROVIDER_RETRIES})"
+                            );
+                        } else {
+                            eprintln!(
+                                "provider: {e}; retrying in {}s ({attempt}/{MAX_PROVIDER_RETRIES})",
+                                wait.as_secs()
+                            );
+                        }
                         std::thread::sleep(wait);
                     }
                     Err(e) => {

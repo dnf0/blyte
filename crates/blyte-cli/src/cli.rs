@@ -378,4 +378,8 @@ pub struct Cli {
     /// Gates in this run do not take a machine-wide slot
     #[arg(long)]
     pub no_gate_slot: bool,
+
+    /// Whether this is a research run: periodically remind the model to keep report.md updated
+    #[arg(long)]
+    pub research: bool,
 }

@@ -71,6 +71,7 @@ fn runner<'a>(p: &'a Flaky, root: &std::path::Path, max: Option<Duration>) -> Ru
         },
         rollback: false,
         on_event: None,
+        research: false,
     }
 }
 

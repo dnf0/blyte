@@ -37,6 +37,7 @@ fn config() -> TaskConfig {
         network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
+        research: false,
     }
 }
 

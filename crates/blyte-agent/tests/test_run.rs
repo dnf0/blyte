@@ -103,6 +103,7 @@ fn runner<'a>(
         },
         rollback,
         on_event: None,
+        research: false,
     }
 }
 
@@ -291,6 +292,7 @@ fn a_provider_error_is_reported_as_an_error_not_as_failed_work() {
         },
         rollback: false,
         on_event: None,
+        research: false,
     };
     let (outcome, _) = r.run(&mut st);
     assert!(

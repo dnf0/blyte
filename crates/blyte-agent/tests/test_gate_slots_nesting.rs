@@ -70,6 +70,7 @@ fn the_library_takes_no_slot_and_gate_commands_are_marked() {
         },
         rollback: false,
         on_event: None,
+        research: false,
     };
     // The gate records whether it saw the marker.
     let mut st = State::new(

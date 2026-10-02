@@ -54,6 +54,8 @@ pub struct TaskConfig {
     pub allow_read: Vec<PathBuf>,
     /// Environment variables permitted to pass to commands despite looking like credentials (`--pass-env`).
     pub pass_env: Vec<String>,
+    /// Whether this is a research run: periodically remind the model to keep report.md updated.
+    pub research: bool,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -82,6 +84,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             network: cli.network.clone(),
             allow_read: cli.allow_read.clone(),
             pass_env: cli.pass_env.clone(),
+            research: cli.research,
         }
     }
 }
@@ -384,6 +387,7 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
         },
         rollback: config.rollback,
         on_event: Some(&on_event),
+        research: config.research,
     };
 
     let (outcome, report) = runner.run(state);

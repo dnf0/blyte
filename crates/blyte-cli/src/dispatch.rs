@@ -404,6 +404,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if args.research {
         cmd.arg("--read-root").arg(&root);
         cmd.arg("--no-gate-slot");
+        cmd.arg("--research");
     }
 
     cmd.arg("--");
