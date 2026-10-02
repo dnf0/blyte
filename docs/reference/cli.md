@@ -157,6 +157,8 @@ Options:
   -h, --help               Print help
 ```
 
+Other worktrees whose branch is merged and working directory is clean are reported with their `git worktree remove` commands, but never deleted automatically.
+
 ## blyte skill install
 
 ```text

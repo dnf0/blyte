@@ -233,6 +233,8 @@ The default branch is `origin/HEAD`'s target, else `main`, else `master`. Branch
 - `--older-than DAYS`: worktrees older than this many days are removable without a verdict (default 14).
 - `--all`: cleans every repository in the registry (`~/.local/state/blyte/repos`).
 
+`blyte clean` also reports other worktrees (such as sessions' sibling worktrees) whose work is merged and working tree is clean, listing the `git worktree remove` commands to delete them without removing them itself.
+
 Before creating a new worktree, `blyte dispatch` (except for `--research`) quietly cleans the repository, printing `blyte: removed N finished worktrees (X GB)` on stderr only if worktrees were removed.
 
 ## Research

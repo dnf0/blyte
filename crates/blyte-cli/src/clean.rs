@@ -355,6 +355,15 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
         _ => return false,
     };
 
+    is_commit_merged(root, &tip_sha)
+}
+
+/// Checks whether a commit's work is on the default branch when any of:
+/// - `git merge-base --is-ancestor <commit> <default>` succeeds;
+/// - every commit `git cherry <default> <commit>` lists is marked `-`;
+/// - merging it would change nothing: `git merge-tree --write-tree <default> <commit>` exits 0
+///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`.
+pub fn is_commit_merged(root: &Path, commit_sha: &str) -> bool {
     let default_branch = find_default_branch(root);
     // The local default branch can be far behind the remote one (1,292 commits in one repository,
     // 2026-10-01), so the remote-tracking branch, as of the last fetch, counts too.
@@ -368,7 +377,7 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
     }
     targets
         .iter()
-        .any(|target| merged_into(root, &tip_sha, branch_name, target))
+        .any(|target| merged_into(root, commit_sha, target))
 }
 
 fn git_ok(root: &Path, args: &[&str]) -> bool {
@@ -380,20 +389,20 @@ fn git_ok(root: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the branch's work is already on `default_branch`.
-fn merged_into(root: &Path, tip_sha: &str, branch_name: &str, default_branch: &str) -> bool {
+/// Whether the commit's work is already on `default_branch`.
+fn merged_into(root: &Path, commit_sha: &str, default_branch: &str) -> bool {
     // 1. `git merge-base --is-ancestor <tip> <default>` succeeds
     let ancestor_check = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", tip_sha, default_branch])
+        .args(["merge-base", "--is-ancestor", commit_sha, default_branch])
         .current_dir(root)
         .output();
     if ancestor_check.map(|c| c.status.success()).unwrap_or(false) {
         return true;
     }
 
-    // 2. every commit `git cherry <default> <branch>` lists is marked `-`
+    // 2. every commit `git cherry <default> <commit>` lists is marked `-`
     let cherry_out = std::process::Command::new("git")
-        .args(["cherry", default_branch, branch_name])
+        .args(["cherry", default_branch, commit_sha])
         .current_dir(root)
         .output();
     if let Ok(o) = cherry_out {
@@ -410,7 +419,7 @@ fn merged_into(root: &Path, tip_sha: &str, branch_name: &str, default_branch: &s
         }
     }
 
-    // 3. merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0
+    // 3. merging it would change nothing: `git merge-tree --write-tree <default> <commit>` exits 0
     // and the tree id it prints equals `git rev-parse <default>^{tree}`
     let default_tree_out = std::process::Command::new("git")
         .args(["rev-parse", &format!("{default_branch}^{{tree}}")])
@@ -420,7 +429,7 @@ fn merged_into(root: &Path, tip_sha: &str, branch_name: &str, default_branch: &s
         if tree_o.status.success() {
             let default_tree = String::from_utf8_lossy(&tree_o.stdout).trim().to_string();
             let merge_tree_out = std::process::Command::new("git")
-                .args(["merge-tree", "--write-tree", default_branch, branch_name])
+                .args(["merge-tree", "--write-tree", default_branch, commit_sha])
                 .current_dir(root)
                 .output();
             if let Ok(mt_o) = merge_tree_out {
@@ -555,9 +564,248 @@ pub fn clean_repo(
         }
     }
 
+    if !quiet {
+        report_other_worktrees(root);
+    }
+
     CleanRepoStats {
         removed_worktrees,
         freed_bytes,
+    }
+}
+
+#[derive(Debug)]
+pub struct GitWorktreeInfo {
+    pub path: PathBuf,
+    pub head_sha: Option<String>,
+    pub branch: Option<String>,
+    pub is_detached: bool,
+    pub is_bare: bool,
+}
+
+/// Parses git worktrees from `git worktree list --porcelain`.
+pub fn parse_worktree_list(root: &Path) -> Vec<GitWorktreeInfo> {
+    let out = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(root)
+        .output();
+    let Ok(o) = out else {
+        return Vec::new();
+    };
+    if !o.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&o.stdout);
+
+    let mut list = Vec::new();
+    let mut cur_path: Option<PathBuf> = None;
+    let mut cur_head: Option<String> = None;
+    let mut cur_branch: Option<String> = None;
+    let mut cur_detached = false;
+    let mut cur_bare = false;
+
+    let mut finish_entry = |path: &mut Option<PathBuf>,
+                            head: &mut Option<String>,
+                            branch: &mut Option<String>,
+                            detached: &mut bool,
+                            bare: &mut bool| {
+        if let Some(p) = path.take() {
+            list.push(GitWorktreeInfo {
+                path: p,
+                head_sha: head.take(),
+                branch: branch.take(),
+                is_detached: *detached,
+                is_bare: *bare,
+            });
+            *detached = false;
+            *bare = false;
+        }
+    };
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            finish_entry(
+                &mut cur_path,
+                &mut cur_head,
+                &mut cur_branch,
+                &mut cur_detached,
+                &mut cur_bare,
+            );
+        } else if let Some(p) = line.strip_prefix("worktree ") {
+            finish_entry(
+                &mut cur_path,
+                &mut cur_head,
+                &mut cur_branch,
+                &mut cur_detached,
+                &mut cur_bare,
+            );
+            cur_path = Some(PathBuf::from(p.trim()));
+        } else if let Some(h) = line.strip_prefix("HEAD ") {
+            cur_head = Some(h.trim().to_string());
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            let b_str = b.trim();
+            let b_name = b_str.strip_prefix("refs/heads/").unwrap_or(b_str);
+            cur_branch = Some(b_name.to_string());
+        } else if line == "detached" {
+            cur_detached = true;
+        } else if line == "bare" {
+            cur_bare = true;
+        }
+    }
+    finish_entry(
+        &mut cur_path,
+        &mut cur_head,
+        &mut cur_branch,
+        &mut cur_detached,
+        &mut cur_bare,
+    );
+    list
+}
+
+/// Computes the path of `target` relative to `base`.
+pub fn relative_path(target: &Path, base: &Path) -> PathBuf {
+    let target_canon = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    let base_canon = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+
+    if let Ok(rel) = target_canon.strip_prefix(&base_canon) {
+        return rel.to_path_buf();
+    }
+
+    let target_comps: Vec<_> = target_canon.components().collect();
+    let base_comps: Vec<_> = base_canon.components().collect();
+
+    let mut common = 0;
+    while common < target_comps.len()
+        && common < base_comps.len()
+        && target_comps[common] == base_comps[common]
+    {
+        common += 1;
+    }
+
+    if common == 0 {
+        return target_canon;
+    }
+
+    let mut rel = PathBuf::new();
+    for _ in common..base_comps.len() {
+        rel.push("..");
+    }
+    for comp in &target_comps[common..] {
+        rel.push(comp);
+    }
+    rel
+}
+
+/// Checks whether a worktree's working tree is clean:
+/// `git status --porcelain` lists nothing other than `.DS_Store` files, at any depth.
+pub fn is_worktree_clean(wt_path: &Path) -> bool {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(wt_path.as_os_str())
+        .args(["status", "--porcelain", "-u"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if line.len() < 3 {
+                    return false;
+                }
+                let mut path_part = line[3..].trim();
+                if let Some((_, new_path)) = path_part.split_once(" -> ") {
+                    path_part = new_path.trim();
+                }
+                let unquoted = path_part
+                    .strip_prefix('"')
+                    .and_then(|p| p.strip_suffix('"'))
+                    .unwrap_or(path_part);
+                if Path::new(unquoted).file_name() != Some(std::ffi::OsStr::new(".DS_Store")) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Inspects other worktrees (excluding main checkout and blyte's `.wt/<id>` runs),
+/// and reports any that are both merged and clean. Never deletes them.
+pub fn report_other_worktrees(root: &Path) {
+    let worktrees = parse_worktree_list(root);
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let wt_dir = root_canon.join(".wt");
+
+    let mut other_count = 0;
+    let mut other_bytes = 0;
+
+    for wt in worktrees {
+        if wt.is_bare {
+            continue;
+        }
+        if !wt.path.exists() {
+            continue;
+        }
+
+        let wt_canon = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+        // Skip the main checkout
+        if wt_canon == root_canon || wt.path == root {
+            continue;
+        }
+        // Skip blyte's .wt/<id> worktrees
+        if wt_canon.starts_with(&wt_dir) || wt.path.starts_with(root.join(".wt")) {
+            continue;
+        }
+
+        // Check if merged
+        let is_merged = if let Some(ref branch) = wt.branch {
+            is_branch_merged(root, branch)
+        } else if let Some(ref sha) = wt.head_sha {
+            is_commit_merged(root, sha)
+        } else {
+            false
+        };
+
+        if !is_merged {
+            continue;
+        }
+
+        // Check if clean (lists nothing other than .DS_Store files)
+        if !is_worktree_clean(&wt.path) {
+            continue;
+        }
+
+        let size = dir_size(&wt.path);
+        let rel_path = relative_path(&wt.path, root);
+        let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+        let branch_label = wt.branch.as_deref().unwrap_or_else(|| {
+            wt.head_sha
+                .as_deref()
+                .map(|s| &s[..s.len().min(7)])
+                .unwrap_or("detached")
+        });
+
+        println!(
+            "merged worktree {rel_str} ({branch_label}, {}): git worktree remove {rel_str}",
+            format_size(size)
+        );
+
+        other_count += 1;
+        other_bytes += size;
+    }
+
+    if other_count > 0 {
+        println!(
+            "{other_count} other worktrees are merged and clean ({}); remove them with the commands above",
+            format_size(other_bytes)
+        );
     }
 }
 
