@@ -850,7 +850,15 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
         for task in &doc.tasks {
             let mut matched = Vec::new();
             for job in &jobs_in_group {
-                if let Some(ref pt) = job.plan_task {
+                // A plan file dispatched as the task, with no --plan-task: the run id names the task
+                // (`blyte dispatch S1 <plan>.md`, 2026-10-02).
+                let pt = job.plan_task.as_deref().or_else(|| {
+                    job.task_file
+                        .as_deref()
+                        .filter(|tf| is_plan_task_file(Path::new(tf)))
+                        .map(|_| job.id.as_str())
+                });
+                if let Some(pt) = pt {
                     if matches_task(task, pt) {
                         matched.push(*job);
                         if !all_matched_jobs.iter().any(|j| j.id == job.id) {

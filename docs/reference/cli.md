@@ -157,6 +157,10 @@ Options:
   -h, --help               Print help
 ```
 
+A run's worktree is removed once its work is on the default branch, or on the branch the run was dispatched from (`--base`).
+
+Other worktrees whose branch is merged and working directory is clean are reported with their `git worktree remove` commands, but never deleted automatically.
+
 ## blyte skill install
 
 ```text
