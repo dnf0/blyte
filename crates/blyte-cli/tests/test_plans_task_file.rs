@@ -246,3 +246,57 @@ fn plan_survives_its_sibling_worktree_being_removed() {
     assert_eq!(plans[0]["key"], "app/2026-10-01-x");
     assert_eq!(plans[0]["tasks"][0]["dispatch"], "app/W1");
 }
+
+/// `blyte dispatch S1 <plan>.md` with no `--plan-task`: the run id names the plan task.
+#[test]
+fn run_id_names_the_task_when_the_plan_is_the_task_file() {
+    let t = tempfile::tempdir().unwrap();
+    let repo = t.path().join("repos/app");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    write(&repo.join("README.md"), "# App\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "initial", "--no-gpg-sign"]);
+
+    let plan_path = t
+        .path()
+        .join("repos/app--side/docs/superpowers/plans/2026-10-01-x.md");
+    write(
+        &plan_path,
+        "# X\n\n### Task S1: first\n\nDepends on: none\n\n### Task S2: second\n\nDepends on: Task S1\n",
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let wt = repo.join(".wt");
+    write(
+        &wt.join("S1.start.json"),
+        &serde_json::json!({
+            "id": "S1",
+            "pid": 999999,
+            "started_at": now - 300,
+            "task_file": plan_path.to_str().unwrap(),
+            "gate": "true",
+            "plan": null,
+            "plan_task": null
+        })
+        .to_string(),
+    );
+    write(&wt.join("S1.log"), "[Turn 5] \n");
+    write(
+        &wt.join("S1.report.json"),
+        r#"{"outcome":"verified","cost_usd":0.3,"turns":5,"gate_attempts":1}"#,
+    );
+
+    let src = Sources {
+        roots: vec![t.path().join("repos")],
+        runs_dirs: vec![],
+        hours: 24,
+    };
+    let v = collect_plans(&src, now);
+    let plans = v["plans"].as_array().unwrap();
+    assert_eq!(plans.len(), 1, "{v}");
+    assert_eq!(plans[0]["tasks"][0]["dispatch"], "app/S1");
+    assert!(plans[0]["tasks"][1]["dispatch"].is_null());
+}
