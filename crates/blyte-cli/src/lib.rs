@@ -4,6 +4,7 @@ pub mod config;
 pub mod dashboard;
 pub mod dispatch;
 pub mod env_file;
+pub mod gate_drift;
 pub mod init;
 pub mod plans;
 pub mod registry;

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const SKILL_MD: &str = include_str!("../assets/blyte-implementer/SKILL.md");
@@ -55,7 +55,7 @@ fn repo_root() -> Result<PathBuf, String> {
     Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
-fn home_dir() -> Result<PathBuf, String> {
+pub fn home_dir() -> Result<PathBuf, String> {
     let home = std::env::var("HOME")
         .map_err(|_| "HOME environment variable is unset or empty".to_string())?;
     if home.trim().is_empty() {
@@ -309,4 +309,34 @@ pub fn install(project: bool, force: bool, no_default: bool) -> Result<PathBuf, 
 
 pub fn uninstall(project: bool) -> Result<Vec<PathBuf>, String> {
     uninstall_for(Harness::Claude, project)
+}
+
+/// Directories that hold an older, separate `blyte-research` skill superseded by `blyte-implementer`.
+pub fn superseded_skills(home: &Path) -> Vec<PathBuf> {
+    let candidates = [
+        home.join(".claude/skills/blyte-research"),
+        home.join(".codex/skills/blyte-research"),
+        home.join(".agents/skills/blyte-research"),
+    ];
+    let mut found = Vec::new();
+    for p in candidates {
+        if p.exists() && !found.contains(&p) {
+            found.push(p);
+        }
+    }
+    found
+}
+
+pub fn superseded_warning(path: &Path) -> String {
+    format!(
+        "blyte: {} is superseded by the blyte-implementer skill's research section (default 300 turns); remove it: rm -r {}",
+        path.display(),
+        path.display()
+    )
+}
+
+pub fn warn_superseded(home: &Path) {
+    for path in superseded_skills(home) {
+        eprintln!("{}", superseded_warning(&path));
+    }
 }

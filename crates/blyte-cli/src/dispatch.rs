@@ -145,6 +145,18 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     } else if let Some(ref g) = args.gate {
         (g.clone(), "flag")
     } else if let Some(ref g) = dispatch_cfg.gate {
+        let toml_path = if from_main {
+            crate::config::main_checkout(&root)
+                .map(|m| m.join("blyte.toml"))
+                .unwrap_or_else(|| root.join("blyte.toml"))
+        } else {
+            root.join("blyte.toml")
+        };
+        let toml_content = std::fs::read_to_string(&toml_path).unwrap_or_default();
+        let missing = crate::gate_drift::missing_ci_steps(&root, g, &toml_content);
+        if let Some(warning) = crate::gate_drift::format_gate_drift_warning(&missing) {
+            eprintln!("{warning}");
+        }
         let source = if from_main {
             "blyte.toml (main checkout)"
         } else {

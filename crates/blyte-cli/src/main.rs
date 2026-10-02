@@ -112,6 +112,9 @@ fn main() {
                             }
                         }
                     }
+                    if let Ok(home) = blyte_cli::skill::home_dir() {
+                        blyte_cli::skill::warn_superseded(&home);
+                    }
                     std::process::exit(0);
                 }
                 blyte_cli::cli::SkillAction::Uninstall { project, harness } => {
