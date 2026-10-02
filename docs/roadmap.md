@@ -9,25 +9,22 @@ Nothing at the moment; see Next.
 
 ## Next
 
-- **Watch dispatch time after v0.7.6.** The rules now tell the model not to run the full suite
-  itself (8 of 9 runs did under v0.7.5, at 2-3 minutes each). The first runs on v0.7.6 spent 84 s
-  and 50 s on tools, against 198 s before; check the next few, including work repositories.
-- **A shared Cargo build directory for worktrees**, measured first: each `.wt/<id>` compiles the
-  workspace from scratch. Needs a sandbox allowance for that directory, and parallel dispatches
-  would queue on cargo's lock.
-- **Codex as the planner, step 2 (2026-09-30).** Step 1, the end-to-end smoke test, passed (#164).
-  Next: a Codex driver in the eval's offload arm, to compare Codex + blyte with Claude Code + blyte
-  on the same task. Uses the ChatGPT plan's Codex allowance; ask before running. The first katex
-  comparison (2026-09-30) was stopped: both Codex runs failed to hand off to blyte (one had no key,
-  one sat silent for 17 minutes); find out why before running it again.
-- **Commit `blyte.toml` in team repositories** once a second person uses blyte in one, so nobody has
-  to run `blyte init` (it is in the global git ignore on the user's machine for now).
+- **The Claude usage check (about 2026-10-06):** regenerate the usage report from the dispatch
+  ledger and compare Claude usage with and without blyte across repositories and sessions.
+- **The decider shadow trial (about 2026-10-20):** read its summary and keep it or remove it.
+- **The open-source decision (about 2026-10-27):** if yes, the items under Parked come next.
 
 ## Done
 
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
 - **2026-10-02**
+  - Decided: `blyte.toml` stays per user and untracked; each person runs `blyte init` in their
+    checkout. Gates differ by machine (offline uv caches, a pinned uv, local pre-commit
+    environments), and the gate-drift warning tells each person when theirs falls behind CI.
+  - Dispatch time checked after the v0.7.6 rule change: tools time stayed low, and the blyte-only
+    canary on v0.13.0 matched 27 September on tokens and cost (51.2M / $8.51 against 51.9M / $8.81),
+    with the pass rate the same or better; the extra wall time was Gemini's latency.
   - A run's work counts as merged once it is on the branch it was dispatched from (`--base`, now
     recorded in the start file), not only the default branch, so runs on a long-lived feature branch
     are cleaned up when merged into it. `blyte clean` reports other worktrees (sessions' sibling
@@ -124,12 +121,20 @@ Kept for about the last four weeks; older items are in the git history and the e
 
 ## Information gathering (2026-09-29 to about 2026-10-27)
 
-- blyte is the implementer in every local repository, with a sampled A/B against agy
-  (`dispatch-auto.sh`). Check usage across repositories and sessions around 2026-10-06.
+- blyte is the implementer in every local repository (the A/B against agy ended 2026-09-30).
+  Check usage across repositories and sessions around 2026-10-06.
 - The decider shadow trial (a local model classifying failed gates) runs alongside, testing only.
   Decide whether it earns a place around 2026-10-20 to 10-27.
 
 ## Parked
+
+- **A shared Cargo build directory for worktrees.** Measured 2026-10-01: a warm build is 15 s of a
+  gate of about two minutes, which the test run dominates (its two slowest tests were then cut from
+  32 s to 1 s each). Worth it only if builds come to dominate; it would need a sandbox allowance,
+  and parallel dispatches would queue on cargo's lock.
+- **Codex as the planner, step 2.** The blocker (Codex's 5-minute MCP tool timeout) is fixed in
+  blyte-eval #93; rerunning the Codex + blyte against Claude Code + blyte comparison is parked
+  (2026-10-02): the failures were likely down to the Codex subscription level.
 
 - **Open-sourcing blyte** and the brief for Jack: on hold until the information gathering ends.
 - **Docs hosting:** parked until the decision to go public.
