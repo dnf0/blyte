@@ -109,12 +109,15 @@ file and a gate and prints JSON, and `blyte skill print` prints the instructions
 blyte dashboard --open       # http://127.0.0.1:7171, this machine only
 ```
 
-One row per job across your repositories: what it is doing now, time, cost and turns, with the
-running ones first and the last 24 hours below. Click a row for the task, gate failures, worktree
-and log; click a tag (repo, plan, harness, A/B pair) to see the jobs that belong together. It reads
-the files `blyte dispatch` already writes, so there is nothing to set up: it shows every
-repository blyte has worked in on this machine. You can also list repository folders in
-`~/.config/blyte/dashboard.toml` ([Dashboard](docs/usage.md#dashboard)).
+The dashboard has two tabs. **Jobs** shows one row per job across your repositories: what it is
+doing now, time, cost and turns, with the running ones first, the last 24 hours below, and a
+**Needs attention** filter for failed runs nobody has dealt with yet. Click a row for the task,
+gate failures, worktree and log; click a tag (repo, plan, harness, A/B pair) to see the jobs that
+belong together. **Plans** shows each plan file with a task running now, drawn as a flow of its
+tasks: lanes by area of code, columns by dependency order, each task coloured by its state; click a
+task for its run. It reads the files `blyte dispatch` already writes, so there is nothing to set up:
+it shows every repository blyte has worked in on this machine. You can also list repository folders
+in `~/.config/blyte/dashboard.toml` ([Dashboard](docs/usage.md#dashboard)).
 
 ## Quick start: blyte on its own
 

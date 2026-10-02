@@ -131,6 +131,46 @@ clear the selection, so a path can be copied.
 | Finished | An agy run that ended without error; agy runs no gate of its own |
 | Stopped | No report, and the process is gone |
 
+### Needs attention
+
+The **Needs attention** filter in the Jobs tab shows failed runs nobody has dealt with yet. A run is shown if and only if all of the following hold:
+
+1. Its status is one of: `gate_failed`, `error`, `budget_exhausted`, `stopped`, or `blocked`.
+2. It has no recorded verdict (`verdict` is empty or missing).
+3. Its worktree still exists on disk (`worktree_exists` is not false).
+4. It started within the last 3 days.
+5. It is not superseded: no later run in the same repository has status `running` or `verified` with the same run id, the same `--plan` and `--plan-task`, or the same title.
+
+### Plans
+
+The **Plans** tab visualises each plan file that has at least one task running now. Only plans with a running task are listed.
+
+A plan comes from:
+- a run linked by `--plan <path>` and optional `--plan-task <text>`;
+- a `plan: <stem>` tag;
+- a plan path in the task prompt (such as a backticked path under `plans/`);
+- a task file located under `docs/superpowers/plans/` or `docs/plans/` in any worktree. When a plan file is dispatched as the task without `--plan-task`, the run id names the task.
+
+When a worktree containing the plan file has already been removed, the dashboard reads the plan file from git history. Follow-ups dispatched with the plan (via `--plan` or a `plan:` tag) that are not written in the plan file appear as "added during the work".
+
+Tasks are drawn in lanes by area of code and columns by dependency order. Each task is coloured by its state:
+
+| State | Meaning |
+|---|---|
+| Merged | The work is merged into the default branch, or its branch was deleted with an accepted or fixed verdict |
+| Verified · review | The gate passed, awaiting review or merge |
+| Running | A run for this task is currently executing |
+| Gate failed | The verification gate failed |
+| Redone | The run was reviewed with verdict `redone` |
+| Ready to dispatch | The task has not been dispatched yet, and all its dependencies are merged |
+| Waiting | The task has dependencies that are not yet merged |
+
+When multiple runs match the same task, the dashboard chooses which run to display by priority:
+1. running (the latest running run);
+2. then merged (the latest verified and merged run);
+3. then accepted or fixed (the latest run with an `accepted` or `fixed` verdict);
+4. then latest.
+
 ### Tags
 
 Every job is tagged `repo: <name>`, and `plan: <file stem>` when its prompt names a plan. Click a
@@ -226,19 +266,25 @@ blyte clean [--dry-run] [--older-than DAYS] [--all]
 ```
 
 `blyte clean` inspects `.wt/<id>` directories with a corresponding `.wt/<id>.start.json`. A worktree is removable when the run is finished (no live process, or a `.wt/<id>.json` summary exists) and one of:
-1. its work is on the default branch, or on the branch the run was dispatched from (`--base`) (`merged`, or `merged into <base>`);
+1. its work is on the default branch (`merged`), on the branch the run was dispatched from (`--base`) (`merged into <base>`), or merged through a follow-up run (`merged through <child>`);
 2. it was discarded: the verdict is `redone` (`verdict redone`), or the outcome in `.wt/<id>.json` is `no_changes` (`no changes`);
-3. it is a research run (`research: true`) and its report was copied out (`.wt/<id>.report.md` exists);
+3. it is a research run (`research: true`) and its report was copied out (`.wt/<id>.report.md` exists) (`research report`);
 4. it finished more than `--older-than` days ago (default 14), by the summary file's mtime (`finished over N days ago`).
 
 A verdict of `accepted` or `fixed` on its own no longer makes a worktree removable; the kept reason for such a run is `not merged yet`. A worktree with uncommitted changes (`git status --porcelain` not empty) is never removed, and is reported as kept (`kept .wt/<id> (uncommitted changes)`). Research scratch directories are removed directly; git worktrees are removed with `git worktree remove` (without `--force`) and `git worktree prune`. The run's record files (`.wt/<id>.log`, `.report.json`, `.json`, `.start.json`, `.verdict.json`, `.report.md`) are never removed.
 
-The branch's work is on the default branch, or on the branch the run was dispatched from (`--base`), when any of:
-- `git merge-base --is-ancestor <tip> <default>` succeeds;
-- every commit `git cherry <default> <branch>` lists is marked `-`;
-- merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0 and the tree id it prints equals `git rev-parse <default>^{tree}`.
+The default branch is `origin/HEAD`'s target, else `main`, else `master`. In all default branch checks, `origin/<default>` counts alongside the local default branch, so runs merged upstream are detected even if local main has not been pulled.
 
-The default branch is `origin/HEAD`'s target, else `main`, else `master`. Branches are deleted only when merged; `--older-than` never deletes a branch.
+`blyte clean` checks whether a run's work is merged in this order:
+1. **Ancestor check**: `git merge-base --is-ancestor <tip> <default>` or `<origin/<default>>` succeeds (`merged`).
+2. **Cherry-pick record**: every commit in `<default>..<tip>` has its SHA recorded in a `(cherry picked from commit <sha>)` trailer on the default branch, `origin/<default>`, or base branch (`merged`). This detects squash merges and cherry-picks where commit SHAs changed. When combining runs manually, use `git cherry-pick -x` so git appends these trailers.
+3. **Base branch**: if dispatched from `--base`, the run's tip is an ancestor of the base branch or its remote tracking branch (`merged into <base>`).
+4. **Merged through a follow-up**: a child run was dispatched with `base: wip/<id>` (or inferred from git when a `wip/*` branch contains this run's tip without an explicit `base:`), and that child run is merged (`merged through <child>`). A child run counts as merged if its tip is merged, or if its worktree is gone and it has an `accepted` or `fixed` verdict or verified status.
+5. **Git cherry** (explicit clean only): every commit `git cherry <default> <branch>` (and `origin/<default>`) lists is marked `-` (`merged`).
+6. **Merge tree** (explicit clean only): merging it would change nothing—`git merge-tree --write-tree <default> <branch>` exits 0 and the tree id matches the target tree (`merged`).
+7. **History walk** (explicit clean only): walks first-parent commits on the default branch, `origin/<default>`, and base branches (up to 20 commits touching the modified files since the run started), testing with `git merge-tree` whether the run's diff was merged into history (`merged` or `merged into <base>`).
+
+Branches are deleted only when merged; `--older-than` never deletes a branch.
 
 - `--dry-run`: shows what would be removed and deleted without making any changes.
 - `--older-than DAYS`: worktrees older than this many days are removable without a verdict (default 14).
@@ -246,7 +292,7 @@ The default branch is `origin/HEAD`'s target, else `main`, else `master`. Branch
 
 `blyte clean` also reports other worktrees (such as sessions' sibling worktrees) whose work is merged and working tree is clean, listing the `git worktree remove` commands to delete them without removing them itself.
 
-Before creating a new worktree, `blyte dispatch` (except for `--research`) quietly cleans the repository, printing `blyte: removed N finished worktrees (X GB)` on stderr only if worktrees were removed.
+Before creating a new worktree, `blyte dispatch` (except for `--research`) quietly cleans the repository. To avoid delaying dispatches, this clean uses only the cheap checks (ancestor check, cherry-pick record, follow-ups through those, and the redone, no changes, research report, and age rules; no `merge-tree` or history walk) and stops after 1 s. It prints `blyte: removed N finished worktrees (X GB)` on stderr only if worktrees were removed.
 
 ## Research
 

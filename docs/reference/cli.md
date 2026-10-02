@@ -126,6 +126,21 @@ Options:
   -h, --help                       Print help
 ```
 
+When `blyte dispatch` uses the gate from `blyte.toml` (not an explicit `--gate` or `--research`), it checks whether check commands run by the repository's CI workflows (`.github/workflows/*.yml` and `*.yaml`) are missing from the gate.
+
+Steps are matched by tool after stripping command wrappers (`env`, `xargs`, `uv run`, `uvx`, `poetry run`, `pipenv run`, `pdm run`, `npx`, `pnpm exec`, `bunx`, `python -m`). Commands are matched against check keys: `make <target>`, `cargo <subcmd>`, `go <subcmd>`, `npm run <script>` / `npm test`, `pnpm run <script>` / `pnpm test`, `yarn <script>`, `ruff <subcmd>`, or tool names (`pytest`, `pre-commit`, `pyright`, `mypy`, `eslint`, `vitest`, `jest`, `tsc`, `tox`, `nox`, `black`, `isort`). Equivalent npm, pnpm, and yarn scripts match one another.
+
+A CI step counts as covered when:
+1. A gate command has the same check key.
+2. Any comment line in `blyte.toml` contains the step's check key text.
+3. The tool's project file is missing at the repository root (`Cargo.toml`, `go.mod`, `package.json`, `Makefile`, `.pre-commit-config.yaml`, or Python project files).
+
+The gate-drift warning never fails a dispatch. When uncovered steps exist, it prints a single line to stderr and continues normally:
+
+```
+blyte: the gate is missing CI steps: make typecheck (run blyte init --force to refresh blyte.toml)
+```
+
 ## blyte review
 
 ```text
@@ -157,7 +172,22 @@ Options:
   -h, --help               Print help
 ```
 
-A run's worktree is removed once its work is on the default branch, or on the branch the run was dispatched from (`--base`).
+A run's worktree is removed once its work is merged or discarded. `blyte clean` reports each worktree with a reason text:
+
+Removable:
+- `merged`: work is on the default branch (or `origin/<default>`).
+- `merged into <base>`: work is on the branch the run was dispatched from.
+- `merged through <child>`: work is merged through a follow-up run.
+- `verdict redone`: the run was discarded with a `redone` verdict.
+- `no changes`: the run completed with outcome `no_changes`.
+- `research report`: a research run whose report was copied to `.wt/<id>.report.md`.
+- `finished over N days ago`: the run finished more than the allowed age in days (default 14).
+
+Kept:
+- `not merged yet`: has an `accepted` or `fixed` verdict, but its work is not yet merged.
+- `uncommitted changes`: the worktree has uncommitted modifications.
+- `running`: the run's process is still alive.
+- `no report`: a research run with no report file yet.
 
 Other worktrees whose branch is merged and working directory is clean are reported with their `git worktree remove` commands, but never deleted automatically.
 
@@ -220,6 +250,8 @@ Options:
   -V, --version
           Print version
 ```
+
+If an older, separate `blyte-research` skill directory exists (`~/.claude/skills/blyte-research`, `~/.codex/skills/blyte-research`, or `~/.agents/skills/blyte-research`), `blyte skill install` warns on stderr that it is superseded by the `blyte-implementer` skill's research section (default 300 turns) and should be removed (`rm -r <path>`).
 
 ## blyte skill uninstall
 
@@ -297,6 +329,8 @@ Options:
 It downloads this machine's binary from the latest GitHub release through the GitHub CLI (`gh`,
 signed in with access to the repository), checks that it runs, keeps the old binary beside it as
 `blyte.prev`, and refreshes every unedited copy of the skill it installed (for Claude Code and Codex).
+Like `blyte skill install`, it also checks for a superseded `blyte-research` skill directory and
+warns on stderr to remove it.
 
 ## Environment
 
