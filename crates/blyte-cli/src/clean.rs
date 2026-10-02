@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, PartialEq, Eq)]
 pub enum RemovalReason {
     Merged,
+    MergedInto(String),
     Verdict(String),
     NoChanges,
     ResearchReport,
@@ -15,6 +16,7 @@ impl std::fmt::Display for RemovalReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Merged => write!(f, "merged"),
+            Self::MergedInto(base) => write!(f, "merged into {base}"),
             Self::Verdict(v) => {
                 if v.is_empty() {
                     write!(f, "verdict")
@@ -254,10 +256,27 @@ pub fn check_removable(
         return Ok(RemovalReason::ResearchReport);
     }
 
-    // Rule 1: Merged (its work is on the default branch)
+    // Rule 1: Merged (its work is on the default branch or base branch)
     let branch_name = format!("wip/{id}");
-    if !is_res && is_branch_merged(root, &branch_name) {
-        return Ok(RemovalReason::Merged);
+    if !is_res {
+        if is_branch_merged(root, &branch_name) {
+            return Ok(RemovalReason::Merged);
+        }
+        let base_opt = start_json
+            .as_ref()
+            .and_then(|s| s.get("base").and_then(|b| b.as_str()));
+        if let Some(base) = base_opt {
+            if let Some((display_name, targets)) = resolve_base_targets(root, base) {
+                if let Some(tip_sha) = get_branch_tip(root, &branch_name) {
+                    if targets
+                        .iter()
+                        .any(|target| merged_into(root, &tip_sha, target))
+                    {
+                        return Ok(RemovalReason::MergedInto(display_name));
+                    }
+                }
+            }
+        }
     }
 
     // Rule 4: Finished more than older_than days ago, by the summary file's mtime
@@ -338,12 +357,103 @@ pub fn find_default_branch(root: &Path) -> String {
     "main".to_string()
 }
 
-/// Checks whether a branch's work is on the default branch when any of:
-/// - `git merge-base --is-ancestor <tip> <default>` succeeds;
-/// - every commit `git cherry <default> <branch>` lists is marked `-`;
-/// - merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0
-///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`.
-pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
+/// Determines if a string is a commit SHA (hex-only, length 7 to 64).
+fn is_commit_id(s: &str) -> bool {
+    (s.len() >= 7 && s.len() <= 64) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Resolves candidate git refs for a run's base branch.
+/// Returns (display_name, targets) if `base` is a branch name that resolves.
+/// Returns None if `base` is not a branch name (e.g. HEAD, commit id, wip/ branch)
+/// or if none of the candidate refs resolve in git.
+pub fn resolve_base_targets(root: &Path, base: &str) -> Option<(String, Vec<String>)> {
+    let base = base.trim();
+    if base.is_empty() {
+        return None;
+    }
+
+    if base == "HEAD"
+        || base.starts_with("HEAD~")
+        || base.starts_with("HEAD^")
+        || base.starts_with("HEAD@")
+        || base.starts_with("HEAD:")
+    {
+        return None;
+    }
+
+    if base == "FETCH_HEAD" || base == "ORIG_HEAD" || base == "MERGE_HEAD" {
+        return None;
+    }
+
+    if is_commit_id(base) {
+        return None;
+    }
+
+    let clean = if let Some(stripped) = base.strip_prefix("refs/heads/") {
+        stripped
+    } else if let Some(stripped) = base.strip_prefix("refs/remotes/") {
+        stripped
+    } else {
+        base
+    };
+
+    let is_wip = clean == "wip"
+        || clean.starts_with("wip/")
+        || clean == "origin/wip"
+        || clean.starts_with("origin/wip/");
+    if is_wip {
+        return None;
+    }
+
+    let (display_name, candidates) = if let Some(without_origin) = clean.strip_prefix("origin/") {
+        if without_origin.is_empty()
+            || without_origin == "wip"
+            || without_origin.starts_with("wip/")
+            || without_origin == "HEAD"
+            || without_origin.starts_with("HEAD~")
+            || without_origin.starts_with("HEAD^")
+            || is_commit_id(without_origin)
+        {
+            return None;
+        }
+        let cand1 = format!("refs/remotes/{clean}");
+        let cand2 = format!("refs/heads/{without_origin}");
+        (without_origin.to_string(), vec![cand1, cand2])
+    } else {
+        let cand1 = format!("refs/heads/{clean}");
+        let cand2 = format!("refs/remotes/origin/{clean}");
+        (clean.to_string(), vec![cand1, cand2])
+    };
+
+    let mut resolved = Vec::new();
+    for cand in candidates {
+        if git_ok(root, &["rev-parse", "--verify", "--quiet", &cand]) {
+            resolved.push(cand);
+        }
+    }
+
+    if resolved.is_empty() {
+        None
+    } else {
+        Some((display_name, resolved))
+    }
+}
+
+/// Reads `base` from `.wt/<id>.start.json` if present.
+pub fn read_run_base(root: &Path, id: &str) -> Option<String> {
+    let start_path = root.join(".wt").join(format!("{id}.start.json"));
+    std::fs::read_to_string(&start_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("base")
+                .and_then(|b| b.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+/// Returns the commit SHA at the tip of `branch_name` if it exists.
+pub fn get_branch_tip(root: &Path, branch_name: &str) -> Option<String> {
     let check = std::process::Command::new("git")
         .args([
             "rev-parse",
@@ -351,29 +461,70 @@ pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
             &format!("refs/heads/{branch_name}"),
         ])
         .current_dir(root)
-        .output();
-    if !check.map(|c| c.status.success()).unwrap_or(false) {
-        return false;
+        .output()
+        .ok()?;
+    if !check.status.success() {
+        return None;
     }
 
     let tip_out = std::process::Command::new("git")
         .args(["rev-parse", &format!("refs/heads/{branch_name}")])
         .current_dir(root)
-        .output();
-    let tip_sha = match tip_out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return false,
+        .output()
+        .ok()?;
+    if tip_out.status.success() {
+        Some(String::from_utf8_lossy(&tip_out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Checks whether a branch's work is on the default branch when any of:
+/// - `git merge-base --is-ancestor <tip> <default>` succeeds;
+/// - every commit `git cherry <default> <branch>` lists is marked `-`;
+/// - merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0
+///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`.
+pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
+    is_branch_merged_with_targets(root, branch_name, &[])
+}
+
+/// Checks whether a branch's work is on the default branch or any of the extra target refs.
+pub fn is_branch_merged_with_targets(
+    root: &Path,
+    branch_name: &str,
+    extra_targets: &[&str],
+) -> bool {
+    let Some(tip_sha) = get_branch_tip(root, branch_name) else {
+        return false;
     };
 
-    is_commit_merged(root, &tip_sha)
+    is_commit_merged_with_targets(root, &tip_sha, extra_targets)
+}
+
+/// Checks whether a branch's work is on the default branch or any of the extra target refs.
+pub fn is_branch_merged_with_extra_targets(
+    root: &Path,
+    branch_name: &str,
+    extra_targets: &[&str],
+) -> bool {
+    is_branch_merged_with_targets(root, branch_name, extra_targets)
 }
 
 /// Checks whether a commit's work is on the default branch when any of:
 /// - `git merge-base --is-ancestor <commit> <default>` succeeds;
 /// - every commit `git cherry <default> <commit>` lists is marked `-`;
 /// - merging it would change nothing: `git merge-tree --write-tree <default> <commit>` exits 0
-///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`.
+///   and the tree id it prints equals `git rev-parse <default>^{tree}`.
 pub fn is_commit_merged(root: &Path, commit_sha: &str) -> bool {
+    is_commit_merged_with_targets(root, commit_sha, &[])
+}
+
+/// Checks whether a commit's work is on the default branch or any of the extra target refs.
+pub fn is_commit_merged_with_targets(
+    root: &Path,
+    commit_sha: &str,
+    extra_targets: &[&str],
+) -> bool {
     let default_branch = find_default_branch(root);
     // The local default branch can be far behind the remote one (1,292 commits in one repository,
     // 2026-10-01), so the remote-tracking branch, as of the last fetch, counts too.
@@ -384,6 +535,11 @@ pub fn is_commit_merged(root: &Path, commit_sha: &str) -> bool {
     let mut targets = vec![default_branch.clone()];
     if remote != default_branch && git_ok(root, &["rev-parse", "--verify", "--quiet", &remote]) {
         targets.push(remote);
+    }
+    for extra in extra_targets {
+        if git_ok(root, &["rev-parse", "--verify", "--quiet", extra]) {
+            targets.push(extra.to_string());
+        }
     }
     targets
         .iter()
@@ -522,7 +678,15 @@ pub fn clean_repo(
 
                 let size = dir_size(&wt_path);
                 let branch_name = format!("wip/{id}");
-                let is_merged = is_branch_merged(root, &branch_name);
+                let base_opt = read_run_base(root, &id);
+                let base_targets = base_opt
+                    .as_deref()
+                    .and_then(|b| resolve_base_targets(root, b));
+                let extra_refs: Vec<&str> = base_targets
+                    .as_ref()
+                    .map(|(_, targets)| targets.iter().map(|s| s.as_str()).collect())
+                    .unwrap_or_default();
+                let is_merged = is_branch_merged_with_targets(root, &branch_name, &extra_refs);
 
                 if dry_run {
                     if !quiet {
@@ -983,7 +1147,15 @@ pub fn clean_on_review(root: &Path, id: &str) {
     }
 
     if branch_exists {
-        if is_branch_merged(root, &branch_name) {
+        let base_opt = read_run_base(root, id);
+        let base_targets = base_opt
+            .as_deref()
+            .and_then(|b| resolve_base_targets(root, b));
+        let extra_refs: Vec<&str> = base_targets
+            .as_ref()
+            .map(|(_, targets)| targets.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+        if is_branch_merged_with_targets(root, &branch_name, &extra_refs) {
             let del_out = std::process::Command::new("git")
                 .args(["branch", "-D", &branch_name])
                 .current_dir(root)

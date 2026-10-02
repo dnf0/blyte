@@ -215,14 +215,14 @@ blyte clean [--dry-run] [--older-than DAYS] [--all]
 ```
 
 `blyte clean` inspects `.wt/<id>` directories with a corresponding `.wt/<id>.start.json`. A worktree is removable when the run is finished (no live process, or a `.wt/<id>.json` summary exists) and one of:
-1. its work is on the default branch (`merged`);
+1. its work is on the default branch, or on the branch the run was dispatched from (`--base`) (`merged`, or `merged into <base>`);
 2. it was discarded: the verdict is `redone` (`verdict redone`), or the outcome in `.wt/<id>.json` is `no_changes` (`no changes`);
 3. it is a research run (`research: true`) and its report was copied out (`.wt/<id>.report.md` exists);
 4. it finished more than `--older-than` days ago (default 14), by the summary file's mtime (`finished over N days ago`).
 
 A verdict of `accepted` or `fixed` on its own no longer makes a worktree removable; the kept reason for such a run is `not merged yet`. A worktree with uncommitted changes (`git status --porcelain` not empty) is never removed, and is reported as kept (`kept .wt/<id> (uncommitted changes)`). Research scratch directories are removed directly; git worktrees are removed with `git worktree remove` (without `--force`) and `git worktree prune`. The run's record files (`.wt/<id>.log`, `.report.json`, `.json`, `.start.json`, `.verdict.json`, `.report.md`) are never removed.
 
-The branch's work is on the default branch when any of:
+The branch's work is on the default branch, or on the branch the run was dispatched from (`--base`), when any of:
 - `git merge-base --is-ancestor <tip> <default>` succeeds;
 - every commit `git cherry <default> <branch>` lists is marked `-`;
 - merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0 and the tree id it prints equals `git rev-parse <default>^{tree}`.
