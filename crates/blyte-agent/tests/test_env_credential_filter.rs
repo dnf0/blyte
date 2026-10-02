@@ -84,7 +84,7 @@ fn withheld_variables_are_removed_from_commands_and_passed_ones_are_kept() {
 #[test]
 fn aws_profile_names_are_credential_like() {
     // A profile selects credentials in ~/.aws, which the sandbox denies: passing the name makes
-    // boto fail on a profile it cannot read (premise-lookup GS1-GS3, 2026-09-29).
+    // boto fail on a profile it cannot read (a repository whose tests set an AWS profile, 2026-09-29).
     for name in ["AWS_PROFILE", "AWS_DEFAULT_PROFILE", "aws_profile"] {
         assert!(credential_like(name, "dev"), "{name}");
     }

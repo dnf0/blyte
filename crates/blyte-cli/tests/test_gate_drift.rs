@@ -311,7 +311,7 @@ make test
 }
 
 #[test]
-fn pigeonhole_table_row_gate_covers_adapted_tool_run() {
+fn service_a_table_row_gate_covers_adapted_tool_run() {
     let r = repo();
     let wf_dir = r.path().join(".github").join("workflows");
     std::fs::create_dir_all(&wf_dir).unwrap();
@@ -327,7 +327,7 @@ jobs:
     std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
     std::fs::write(
         r.path().join("pyproject.toml"),
-        "[project]\nname = \"pigeonhole\"\n",
+        "[project]\nname = \"service_a\"\n",
     )
     .unwrap();
     git(r.path(), &["add", "."]);
@@ -364,7 +364,7 @@ gate = "uv run --frozen --offline --extra build pytest -q -p no:cacheprovider"
 
     let out = blyte(
         r.path(),
-        &["dispatch", "T_pigeonhole", "task.md", "--sandbox", "off"],
+        &["dispatch", "T_service_a", "task.md", "--sandbox", "off"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -374,7 +374,7 @@ gate = "uv run --frozen --offline --extra build pytest -q -p no:cacheprovider"
 }
 
 #[test]
-fn provision_table_row_gate_pipeline_covers_ci_step() {
+fn pipeline_app_table_row_gate_pipeline_covers_ci_step() {
     let r = repo();
     let wf_dir = r.path().join(".github").join("workflows");
     std::fs::create_dir_all(&wf_dir).unwrap();
@@ -422,7 +422,7 @@ gate = "{gate_cmd}"
 
     let out = blyte(
         r.path(),
-        &["dispatch", "T_provision", "task.md", "--sandbox", "off"],
+        &["dispatch", "T_pipeline_app", "task.md", "--sandbox", "off"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -432,7 +432,7 @@ gate = "{gate_cmd}"
 }
 
 #[test]
-fn climate_x_services_table_row_gate_covers_adapted_tool_run() {
+fn core_services_table_row_gate_covers_adapted_tool_run() {
     let r = repo();
     let wf_dir = r.path().join(".github").join("workflows");
     std::fs::create_dir_all(&wf_dir).unwrap();
@@ -448,7 +448,7 @@ jobs:
     std::fs::write(wf_dir.join("ci.yml"), ci_yml).unwrap();
     std::fs::write(
         r.path().join("pyproject.toml"),
-        "[project]\nname = \"cxs\"\n",
+        "[project]\nname = \"core_services\"\n",
     )
     .unwrap();
     git(r.path(), &["add", "."]);
@@ -484,7 +484,7 @@ gate = "{gate_cmd}"
 
     let out = blyte(
         r.path(),
-        &["dispatch", "T_cxs", "task.md", "--sandbox", "off"],
+        &["dispatch", "T_core_services", "task.md", "--sandbox", "off"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -494,7 +494,7 @@ gate = "{gate_cmd}"
 }
 
 #[test]
-fn tile_service_table_row_comment_covers_ci_step() {
+fn tile_server_table_row_comment_covers_ci_step() {
     let r = repo();
     let wf_dir = r.path().join(".github").join("workflows");
     std::fs::create_dir_all(&wf_dir).unwrap();
@@ -540,7 +540,7 @@ gate = "pytest"
 
     let out = blyte(
         r.path(),
-        &["dispatch", "T_tile", "task.md", "--sandbox", "off"],
+        &["dispatch", "T_tile_server", "task.md", "--sandbox", "off"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -550,7 +550,7 @@ gate = "pytest"
 }
 
 #[test]
-fn geo_jobs_dashboard_table_row_missing_project_file_covers_ci_step() {
+fn jobs_dashboard_table_row_missing_project_file_covers_ci_step() {
     let r = repo();
     let wf_dir = r.path().join(".github").join("workflows");
     std::fs::create_dir_all(&wf_dir).unwrap();
@@ -596,7 +596,13 @@ gate = "echo ok"
 
     let out = blyte(
         r.path(),
-        &["dispatch", "T_geo", "task.md", "--sandbox", "off"],
+        &[
+            "dispatch",
+            "T_jobs_dashboard",
+            "task.md",
+            "--sandbox",
+            "off",
+        ],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -606,7 +612,7 @@ gate = "echo ok"
 }
 
 #[test]
-fn climate_x_data_platform_real_case_names_missing_typecheck_and_validate() {
+fn data_platform_real_case_names_missing_typecheck_and_validate() {
     let r = repo();
     let wf_dir = r.path().join(".github").join("workflows");
     std::fs::create_dir_all(&wf_dir).unwrap();
@@ -662,7 +668,7 @@ make test
 
     let out = blyte(
         r.path(),
-        &["dispatch", "T_cxdp", "task.md", "--sandbox", "off"],
+        &["dispatch", "T_data_platform", "task.md", "--sandbox", "off"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     let expected = "blyte: the gate is missing CI steps: make typecheck, make validate (run blyte init --force to refresh blyte.toml)";
