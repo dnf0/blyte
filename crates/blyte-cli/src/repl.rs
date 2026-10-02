@@ -500,6 +500,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     network: "on".into(),
                     allow_read: Vec::new(),
                     pass_env: Vec::new(),
+                    research: false,
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer

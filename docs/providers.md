@@ -59,6 +59,7 @@ when it resets.
 
 Burst rate limits (HTTP 429 with a short retry delay), server errors and dropped connections are
 retried with backoff (2, 4, 8, 16, 32, then 60 seconds, six times), never past `--max-seconds`.
+Set `BLYTE_MODEL_TIMEOUT_SECS` to override the per-call timeout (default 180 s, with a read timeout 30 s shorter, at least 30 s) for slow providers such as a local Ollama instance.
 An exhausted **quota** (a daily limit, `insufficient_quota`, or a reset more than five minutes
 away) is not retried: the run ends with a message saying when it resets.
 

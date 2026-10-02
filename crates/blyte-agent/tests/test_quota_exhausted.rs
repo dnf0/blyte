@@ -93,6 +93,7 @@ fn a_run_stops_on_the_first_quota_error_without_retrying() {
         },
         rollback: false,
         on_event: None,
+        research: false,
     };
     let mut st = State::new("g", "true");
     let (outcome, report) = runner.run(&mut st);

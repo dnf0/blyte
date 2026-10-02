@@ -43,6 +43,7 @@ fn system_prompt(gate: &str) -> String {
         },
         rollback: false,
         on_event: None,
+        research: false,
     };
     r.run(&mut State::new("g", gate));
     let sys = p.seen.lock().unwrap()[0].system.clone();

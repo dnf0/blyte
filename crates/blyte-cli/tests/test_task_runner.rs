@@ -93,6 +93,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
+        research: false,
     };
 
     let result = run_task(config);
@@ -131,6 +132,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
+        research: false,
     };
 
     let err = run_task(anthropic_config).unwrap_err();
@@ -158,6 +160,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
+        research: false,
     };
 
     let err = run_task(ollama_config).unwrap_err();
@@ -196,6 +199,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         network: "on".into(),
         allow_read: Vec::new(),
         pass_env: Vec::new(),
+        research: false,
     };
 
     let mut state = blyte_agent::state::State::new("custom goal", "echo 1");
