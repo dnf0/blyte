@@ -27,6 +27,15 @@ Nothing at the moment; see Next.
 
 Kept for about the last four weeks; older items are in the git history and the evidence page.
 
+- **2026-10-02**
+  - A run's work counts as merged once it is on the branch it was dispatched from (`--base`, now
+    recorded in the start file), not only the default branch, so runs on a long-lived feature branch
+    are cleaned up when merged into it. `blyte clean` reports other worktrees (sessions' sibling
+    `repo--x` worktrees) whose work is merged and that are clean, with the `git worktree remove`
+    command; it never removes them.
+  - Plans view: a plan file dispatched as the task is the run's plan, wherever it lives (sibling
+    worktrees included), read from git history once that worktree is gone, and matched by the run id
+    when there is no `--plan-task` (v0.14.0 and after).
 - **2026-10-01**
   - `blyte clean` (also run quietly by every `blyte dispatch`): a run's worktree goes once its
     work is on the default branch (local or `origin/`, including squash merges of several runs),
