@@ -148,6 +148,16 @@ Kept for about the last four weeks; older items are in the git history and the e
   allow-listed URLs to the public home; empty the allow-list and run the check; run a secrets scan;
   publish a fresh repository as one squashed commit; then make a last release here with the new
   `repository`, so existing installs move to the public releases on their next `blyte update`.
+- **Transfer to the author's personal GitHub account (end of October 2026; agreed verbally, the
+  transfer done by the person who agreed it).** Before: get the agreement in writing, including who
+  holds the copyright; decide how CI runs while the repository is private on a personal account (free
+  accounts get 2,000 Actions minutes a month for private repositories and macOS minutes count ten
+  times; drop the macOS job, upgrade, or publish soon). After: add collaborators (access through the
+  organisation ends); check repository secrets and branch protection came across; change
+  `Cargo.toml`'s `repository` and the allow-listed URLs to the new home (GitHub redirects the old URLs
+  meanwhile, including the API calls `blyte update` makes, until a repository is created at the old
+  address); cut a release so installs pick up the new home. The transferred repository keeps its full
+  history, so it stays private; the public release is still a fresh, squashed repository (above).
 - **When open source is approved** (these need a public repository and a crates.io release):
   - `blyte update` updates the way blyte was installed: `cargo install blyte --locked` (or
     `cargo binstall blyte`) for a cargo install, detected from `~/.cargo/.crates2.json`, and the
