@@ -30,7 +30,9 @@ one commit each, arranged so that as many as possible touch disjoint files, then
 - **Coupled tasks** (task 2 cannot pass its checks without task 1) are one task.
 
 Give every task a **Depends on:** line: `none`, or the tasks whose result it needs. Tasks that
-change the same file depend on each other. Then:
+change the same file depend on each other. When parallel tasks would each register something in one
+shared file (a registry, `definitions.py`, a route table), have each create its own module and leave
+the shared-file wiring to a small follow-up task or to you at merge; otherwise they conflict. Then:
 
 - Dispatch every independent task at once. That means every task whose dependencies are merged.
 - When a merge unblocks a task, dispatch it straight away, before you review the next result, so
@@ -43,8 +45,10 @@ it in parallel.
 
 ## 2. Write each task
 
-One task per Markdown file. blyte sees only this file and the repository, nothing from your
-conversation. This is the step to spend your effort on: the gate can only check what the task's
+One task per Markdown file. A plan file can be the task file only when it holds a single task;
+for a plan with several, give each task its own file (quoting its section of the plan) and name the
+plan with `--plan`/`--plan-task`, so blyte does not start on the other tasks. blyte sees only this
+file and the repository, nothing from your conversation. This is the step to spend your effort on: the gate can only check what the task's
 tests pin down. Include:
 
 - **Goal**, in one or two sentences, and **why**.
@@ -141,6 +145,11 @@ blyte review T1 --diff
    appear, check what they did and tell the user.
 
 You do not need to re-run the gate: it ran the repository's checks and they passed.
+
+The gate cannot see the outside world. When the change reads or writes external systems (cloud
+storage, APIs, regions, real data volumes), run a read-only check against real data before merging:
+a passing test suite has missed a client defaulting to the wrong region, a listing that would take
+hours on a real prefix, and a missed input folder.
 
 **Review in depth** (read the whole diff, re-run the gate in `.wt/T1`, check verbatim code landed
 verbatim) when the gate failed or the budget ran out, when the change is risky (security, data
