@@ -1,3 +1,9 @@
+## v0.14.0 (2026-10-02)
+
+### Feat
+
+- **plans**: a dispatched plan file is its own plan, wherever it lives (#214)
+
 ## v0.13.0 (2026-10-01)
 
 ### Feat
