@@ -36,6 +36,12 @@ Kept for about the last four weeks; older items are in the git history and the e
   - Plans view: a plan file dispatched as the task is the run's plan, wherever it lives (sibling
     worktrees included), read from git history once that worktree is gone, and matched by the run id
     when there is no `--plan-task` (v0.14.0 and after).
+  - v0.16.0: `blyte dispatch` warns when the gate is missing checks the repository's CI runs,
+    matched by tool; `blyte init` also recognises `make typecheck`/`validate`, eslint, vitest, jest,
+    tsc; `skill install`/`update` warn about a superseded `blyte-research` skill; skill guidance on
+    real-data checks, shared registration files and plan files as task files.
+  - v0.17.0: follow-up chains and squash-merged runs count as merged (cherry-pick record), and the
+    dispatch-time clean is cheap; the first `blyte clean --all` on the author's machine freed 21 GB.
 - **2026-10-01**
   - `blyte clean` (also run quietly by every `blyte dispatch`): a run's worktree goes once its
     work is on the default branch (local or `origin/`, including squash merges of several runs),
