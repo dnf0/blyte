@@ -1,3 +1,9 @@
+## v0.19.0 (2026-10-06)
+
+### Feat
+
+- **review**: a checks section flags files and commits the task does not name (#231)
+
 ## v0.18.1 (2026-10-02)
 
 ### Fix
