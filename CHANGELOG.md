@@ -1,3 +1,9 @@
+## v0.21.0 (2026-10-06)
+
+### Feat
+
+- **review**: --model-review asks the implementer model for a first review (trial) (#235)
+
 ## v0.20.0 (2026-10-06)
 
 ### Feat
