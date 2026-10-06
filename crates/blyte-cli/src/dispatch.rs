@@ -789,7 +789,87 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         String::new()
     };
 
+    let task_text: Option<String> = (|| {
+        let start_file = root.join(".wt").join(format!("{}.start.json", args.id));
+        let content = std::fs::read_to_string(&start_file).ok()?;
+        let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let task_file = val.get("task_file")?.as_str()?;
+        let p = Path::new(task_file);
+        if let Ok(s) = std::fs::read_to_string(p) {
+            return Some(s);
+        }
+        std::fs::read_to_string(root.join(p)).ok()
+    })();
+
+    let changed_files: Vec<String> = Command::new("git")
+        .args(["diff", "--name-only", &format!("{base}..HEAD")])
+        .current_dir(&wt)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let subjects: Vec<String> = Command::new("git")
+        .args(["log", "--format=%s", &format!("{base}..HEAD")])
+        .current_dir(&wt)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let log_file = root.join(".wt").join(format!("{}.log", args.id));
+    let (hcmds, reads) = if let Ok(log_content) = std::fs::read_to_string(&log_file) {
+        let hcmds = host_commands(&log_content);
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let allowed = [root.clone(), wt.clone()];
+        let reads = outside_reads(&log_content, &allowed, &home);
+        (hcmds, reads)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     let report_file = root.join(".wt").join(format!("{}.report.json", args.id));
+    let report_val = std::fs::read_to_string(&report_file)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+    let outcome = report_val
+        .as_ref()
+        .and_then(|v| v.get("outcome"))
+        .and_then(|x| x.as_str());
+
+    let checks = crate::review_checks::build(
+        task_text.as_deref(),
+        &changed_files,
+        &subjects,
+        hcmds.len(),
+        reads.len(),
+        outcome,
+    );
+
+    println!("== checks");
+    if checks.flags.is_empty() {
+        println!("nothing flagged");
+    } else {
+        for flag in &checks.flags {
+            println!("! {flag}");
+        }
+    }
 
     println!("== commits");
     if !commits_out.is_empty() {
@@ -806,20 +886,18 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         println!("{tree_out}");
     }
     println!("== report");
-    if let Ok(content) = std::fs::read_to_string(&report_file) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(outcome) = v.get("outcome").and_then(|x| x.as_str()) {
-                println!("outcome: {outcome}");
-            }
-            if let Some(turns) = v.get("turns").and_then(|x| x.as_u64()) {
-                println!("turns: {turns}");
-            }
-            if let Some(cost) = v.get("cost_usd").and_then(|x| x.as_f64()) {
-                println!("cost_usd: {cost}");
-            }
-            if let Some(msg) = v.get("final_message").and_then(|x| x.as_str()) {
-                println!("final_message: {msg}");
-            }
+    if let Some(ref v) = report_val {
+        if let Some(outcome) = v.get("outcome").and_then(|x| x.as_str()) {
+            println!("outcome: {outcome}");
+        }
+        if let Some(turns) = v.get("turns").and_then(|x| x.as_u64()) {
+            println!("turns: {turns}");
+        }
+        if let Some(cost) = v.get("cost_usd").and_then(|x| x.as_f64()) {
+            println!("cost_usd: {cost}");
+        }
+        if let Some(msg) = v.get("final_message").and_then(|x| x.as_str()) {
+            println!("final_message: {msg}");
         }
     }
 
@@ -834,25 +912,16 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         }
     }
 
-    let log_file = root.join(".wt").join(format!("{}.log", args.id));
-    if let Ok(log_content) = std::fs::read_to_string(&log_file) {
-        let hcmds = host_commands(&log_content);
-        if !hcmds.is_empty() {
-            println!("== host commands (may have changed things outside the worktree)");
-            for cmd in hcmds {
-                println!("{cmd}");
-            }
+    if !hcmds.is_empty() {
+        println!("== host commands (may have changed things outside the worktree)");
+        for cmd in hcmds {
+            println!("{cmd}");
         }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let allowed = [root.clone(), wt.clone()];
-        let reads = outside_reads(&log_content, &allowed, &home);
-        if !reads.is_empty() {
-            println!("== reads outside the repository");
-            for cmd in reads {
-                println!("{cmd}");
-            }
+    }
+    if !reads.is_empty() {
+        println!("== reads outside the repository");
+        for cmd in reads {
+            println!("{cmd}");
         }
     }
 
