@@ -6,6 +6,7 @@ pub mod dispatch;
 pub mod env_file;
 pub mod gate_drift;
 pub mod init;
+pub mod plan_section;
 pub mod plans;
 pub mod registry;
 pub mod repl;

@@ -89,8 +89,8 @@ pub struct DispatchArgs {
     /// Identifier for this dispatch (used for worktree and branch wip/<id>)
     pub id: String,
 
-    /// Path to the task description markdown file
-    pub task_file: PathBuf,
+    /// Path to the task description markdown file; optional with --plan and --plan-task, which take the task from the plan
+    pub task_file: Option<PathBuf>,
 
     /// The check command; several lines are several steps, all of which must pass
     #[arg(short, long)]
