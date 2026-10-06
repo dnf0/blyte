@@ -1,3 +1,9 @@
+## v0.20.0 (2026-10-06)
+
+### Feat
+
+- **dispatch**: take the task from --plan and --plan-task when no task file is given (#233)
+
 ## v0.19.0 (2026-10-06)
 
 ### Feat
