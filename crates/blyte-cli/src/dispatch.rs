@@ -968,6 +968,10 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         }
     }
 
+    if args.model_review {
+        crate::model_review::run(&root, &args.id, &base, &wt);
+    }
+
     0
 }
 

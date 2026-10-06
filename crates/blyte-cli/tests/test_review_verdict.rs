@@ -126,3 +126,66 @@ fn review_lists_host_commands_from_the_log() {
     let text = String::from_utf8_lossy(&blyte(r.path(), &["review", "T2"]).stdout).to_string();
     assert!(!text.contains("== host commands"), "{text}");
 }
+
+#[test]
+fn model_review_conflicts_with_verdict() {
+    let r = repo();
+    let out = blyte(
+        r.path(),
+        &["review", "T1", "--model-review", "--verdict", "accepted"],
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "expected clap to reject conflicting --model-review and --verdict flags"
+    );
+}
+
+#[test]
+fn model_review_skipped_when_task_file_not_found() {
+    let r = repo();
+    git(
+        r.path(),
+        &["worktree", "add", "-q", "-b", "wip/T3", ".wt/T3"],
+    );
+    let out = blyte(r.path(), &["review", "T3", "--model-review"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("== model review"), "{text}");
+    assert!(text.contains("skipped: task file not found"), "{text}");
+}
+
+#[test]
+fn model_review_skipped_when_no_api_key() {
+    let r = repo();
+    git(
+        r.path(),
+        &["worktree", "add", "-q", "-b", "wip/T4", ".wt/T4"],
+    );
+    std::fs::write(r.path().join("task.md"), "# Task\nDo something\n").unwrap();
+    std::fs::write(
+        r.path().join(".wt/T4.start.json"),
+        serde_json::json!({
+            "task_file": "task.md"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["review", "T4", "--model-review"])
+        .current_dir(r.path())
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
+        .env_remove("BLYTE_ENV_FILE")
+        .env("HOME", r.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("== model review"), "{text}");
+    assert!(text.contains("skipped: no API key (set "), "{text}");
+}

@@ -201,6 +201,10 @@ pub struct ReviewArgs {
 
     #[arg(long, value_name = "TEXT", requires = "verdict")]
     pub notes: Option<String>,
+
+    /// Ask the implementer model for a first review of the diff against the task (trial)
+    #[arg(long, conflicts_with = "verdict")]
+    pub model_review: bool,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
