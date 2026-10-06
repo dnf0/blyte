@@ -252,6 +252,10 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) {
     let dispatch_cfg = repo_config.map(|c| c.dispatch).unwrap_or_default();
     let model = dispatch_cfg.model.as_deref();
 
+    // One call over a whole diff at high effort can take minutes; allow 10 unless the user set a limit.
+    if std::env::var_os("BLYTE_MODEL_TIMEOUT_SECS").is_none() {
+        std::env::set_var("BLYTE_MODEL_TIMEOUT_SECS", "600");
+    }
     let provider = match blyte_provider::resolve_provider(model) {
         Ok(p) => p,
         Err(blyte_provider::ProviderError::MissingKey(key)) => {
