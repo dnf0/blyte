@@ -190,9 +190,48 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         .or(dispatch_cfg.network.as_deref())
         .unwrap_or("on");
 
+    let (task_content, recorded_task_file) = if let Some(ref tf) = args.task_file {
+        let content = match std::fs::read_to_string(tf) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error reading task file {}: {e}", tf.display());
+                return 2;
+            }
+        };
+        (content, Some(tf.display().to_string()))
+    } else {
+        match (&args.plan, &args.plan_task) {
+            (Some(plan_path), Some(plan_task)) => {
+                let plan_str = match std::fs::read_to_string(plan_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("error reading plan {plan_path}: {e}");
+                        return 2;
+                    }
+                };
+                let section = match crate::plan_section::extract(&plan_str, plan_task) {
+                    Some(sec) => sec,
+                    None => {
+                        eprintln!("error: no heading \"{plan_task}\" in {plan_path}");
+                        return 2;
+                    }
+                };
+                let content = format!("From the plan {plan_path}:\n\n{section}");
+                (content, None)
+            }
+            _ => {
+                eprintln!("error: give a task file, or --plan with --plan-task");
+                return 2;
+            }
+        }
+    };
+
     let wt_parent = root.join(".wt");
     let worktree_dir = wt_parent.join(&args.id);
     let branch = format!("wip/{}", args.id);
+    let task_md_path = wt_parent.join(format!("{}.task.md", args.id));
+    let task_file_recorded =
+        recorded_task_file.unwrap_or_else(|| task_md_path.display().to_string());
 
     if !args.research {
         crate::clean::clean_quiet(&root, Some(&args.id));
@@ -326,16 +365,13 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     };
 
-    // 4. Read task file and spawn child process
-    let task_content = match std::fs::read_to_string(&args.task_file) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error reading task file {}: {e}", args.task_file.display());
-            return 2;
-        }
-    };
-
+    // 4. Write task file and spawn child process
     let _ = std::fs::create_dir_all(&wt_parent);
+    if let Err(e) = std::fs::write(&task_md_path, &task_content) {
+        eprintln!("error writing task file {}: {e}", task_md_path.display());
+        return 2;
+    }
+
     let log_path = wt_parent.join(format!("{}.log", args.id));
     let report_path = wt_parent.join(format!("{}.report.json", args.id));
     if report_path.exists() {
@@ -442,7 +478,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "id": args.id,
         "pid": child.id(),
         "started_at": started_at,
-        "task_file": args.task_file.display().to_string(),
+        "task_file": task_file_recorded,
         "gate": gate,
         "tags": tags,
         "env": env_names,

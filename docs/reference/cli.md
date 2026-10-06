@@ -100,11 +100,11 @@ A job with no report counts as running only when its PID is alive and that proce
 ```text
 Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
 
-Usage: blyte dispatch [OPTIONS] <ID> <TASK_FILE>
+Usage: blyte dispatch [OPTIONS] <ID> [TASK_FILE]
 
 Arguments:
   <ID>         Identifier for this dispatch (used for worktree and branch wip/<id>)
-  <TASK_FILE>  Path to the task description markdown file
+  [TASK_FILE]  Path to the task description markdown file; optional with --plan and --plan-task, which take the task from the plan
 
 Options:
   -g, --gate <GATE>                The check command; several lines are several steps, all of which must pass
@@ -125,6 +125,8 @@ Options:
       --pass-env <PASS_ENV>        Pass this environment variable to commands (repeatable)
   -h, --help                       Print help
 ```
+
+The task file is optional when `--plan` and `--plan-task` are provided, which take the task directly from the plan.
 
 When `blyte dispatch` uses the gate from `blyte.toml` (not an explicit `--gate` or `--research`), it checks whether check commands run by the repository's CI workflows (`.github/workflows/*.yml` and `*.yaml`) are missing from the gate.
 
