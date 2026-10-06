@@ -45,10 +45,11 @@ it in parallel.
 
 ## 2. Write each task
 
-One task per Markdown file. A plan file can be the task file only when it holds a single task;
-for a plan with several, give each task its own file (quoting its section of the plan) and name the
-plan with `--plan`/`--plan-task`, so blyte does not start on the other tasks. blyte sees only this
-file and the repository, nothing from your conversation. This is the step to spend your effort on: the gate can only check what the task's
+One task per dispatch. When the task is a `### Task <ID>` section of a plan file, write it there and
+dispatch with `--plan <plan.md> --plan-task "Task <ID>"` and no task file: blyte takes that section
+alone, so it does not start on the other tasks. Otherwise write the task to its own Markdown file.
+Either way blyte sees only the task and the repository, nothing from your conversation (it keeps the
+text it was given at `.wt/<id>.task.md`). This is the step to spend your effort on: the gate can only check what the task's
 tests pin down. Include:
 
 - **Goal**, in one or two sentences, and **why**.
@@ -136,12 +137,17 @@ Each dispatch prints one JSON object: `outcome` (`verified`, `no_changes`, `gate
 ## 4. Check each result: trust the gate, not the summary
 
 ```bash
-blyte review T1 --diff
+blyte review T1
 ```
+
+It starts with `== checks`: files the task does not name, commit messages not in the task, a run that
+did not pass, host commands and reads outside the repository. Add `--diff` for the full diff when
+something is flagged or surprising; otherwise the summary is usually enough, and it keeps your context small.
 
 **When the gate passed (`verified`)**, a light check is enough:
 
-1. **Scope**: only the files the task names changed, in the commit(s) you asked for, with the exact message.
+1. **Scope**: only the files the task names changed, in the commit(s) you asked for, with the exact message
+   (`== checks` says "nothing flagged" when this holds).
 2. **Deviations**: every deviation in `final_message` is justified, and the diff shows none it did not mention.
 3. **Out-of-scope effects**: `blyte review` lists, under `== host commands`, logged commands that
    may have changed things outside the worktree (deleted a cache, wrote to `~/`, pushed). If any
