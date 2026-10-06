@@ -68,7 +68,7 @@ pub fn build_request(task: &str, stat: &str, diff: &str) -> blyte_provider::Requ
         system: SYSTEM_PROMPT.to_string(),
         messages: vec![blyte_provider::Message::User(user_msg)],
         tools: Vec::new(),
-        max_output_tokens: Some(4000),
+        max_output_tokens: Some(32_000),
     }
 }
 
@@ -76,8 +76,12 @@ pub fn build_request(task: &str, stat: &str, diff: &str) -> blyte_provider::Requ
 /// {"file","line","severity","text"} with severity one of "high","medium","low",
 /// and `[]` when there is nothing to raise. Accept the array bare or inside a ```json fence,
 /// with surrounding prose. Unknown severities become "low"; entries without "text" are dropped.
+/// Empty or whitespace-only text → Err("empty response").
 /// Unparseable text → Err(String) with the first 200 characters of the text.
 pub fn parse(text: &str) -> Result<Vec<Concern>, String> {
+    if text.trim().is_empty() {
+        return Err("empty response".to_string());
+    }
     let candidate = extract_json_candidate(text);
     let value: serde_json::Value = match candidate {
         Some(s) => match serde_json::from_str(s) {
@@ -188,6 +192,13 @@ fn severity_rank(sev: &str) -> u8 {
     }
 }
 
+pub fn parse_error_message(err: &str, finish: Option<&str>) -> String {
+    match finish {
+        Some(reason) if !reason.is_empty() => format!("{err} (finish reason: {reason})"),
+        _ => err.to_string(),
+    }
+}
+
 pub fn sort_concerns(concerns: &mut [Concern]) {
     concerns.sort_by_key(|c| severity_rank(&c.severity));
 }
@@ -275,9 +286,10 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) {
             c
         }
         Err(e) => {
+            let err_msg = parse_error_message(&e, resp.finish_reason.as_deref());
             println!("== model review");
-            println!("error: {e}");
-            save_review(root, id, &model_id, cost_usd, Vec::new(), Some(e));
+            println!("error: {err_msg}");
+            save_review(root, id, &model_id, cost_usd, Vec::new(), Some(err_msg));
             return;
         }
     };
@@ -347,6 +359,24 @@ mod tests {
     fn test_parse_empty() {
         let res = parse("[]").expect("parse should succeed");
         assert!(res.is_empty());
+    }
+
+    #[test]
+    fn test_parse_empty_or_whitespace() {
+        assert_eq!(parse(""), Err("empty response".to_string()));
+        assert_eq!(parse("  \n"), Err("empty response".to_string()));
+    }
+
+    #[test]
+    fn test_parse_error_message() {
+        assert_eq!(
+            parse_error_message("empty response", Some("MAX_TOKENS")),
+            "empty response (finish reason: MAX_TOKENS)"
+        );
+        assert_eq!(
+            parse_error_message("empty response", None),
+            "empty response"
+        );
     }
 
     #[test]
@@ -428,6 +458,7 @@ Overall looks okay otherwise.
         let diff = "a".repeat(300_000);
 
         let req = build_request(task, stat, &diff);
+        assert_eq!(req.max_output_tokens, Some(32_000));
         assert!(req.tools.is_empty(), "tools should be empty");
         assert_eq!(req.messages.len(), 1);
 
@@ -444,6 +475,12 @@ Overall looks okay otherwise.
         let task_pos = msg.find(task).expect("task text missing");
         let diff_pos = msg.find("## Diff").expect("diff header missing");
         assert!(task_pos < diff_pos, "task text must appear before diff");
+    }
+
+    #[test]
+    fn test_build_request_max_output_tokens() {
+        let req = build_request("task", "stat", "diff");
+        assert_eq!(req.max_output_tokens, Some(32_000));
     }
 
     #[test]
