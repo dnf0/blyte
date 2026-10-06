@@ -131,16 +131,13 @@ Depends on: Task S1
 
     let v2 = collect_plans(&src, now);
     let plans2 = v2["plans"].as_array().unwrap();
-    assert_eq!(
-        plans2.len(),
-        1,
-        "ordinary task file must not create a new plan"
-    );
-    assert_eq!(plans2[0]["key"], "app/2026-10-01-x");
+    assert_eq!(plans2.len(), 2, "ordinary task file creates its own plan");
+    assert!(plans2.iter().any(|p| p["key"] == "app/2026-10-01-x"));
+    assert!(plans2.iter().any(|p| p["key"] == "app/W2"));
 }
 
 #[test]
-fn ordinary_task_file_creates_no_plan() {
+fn ordinary_task_file_creates_one_task_plan() {
     let t = tempfile::tempdir().unwrap();
     let repo = t.path().join("repos/app");
     std::fs::create_dir_all(&repo).unwrap();
@@ -180,7 +177,9 @@ fn ordinary_task_file_creates_no_plan() {
 
     let v = collect_plans(&src, now);
     let plans = v["plans"].as_array().unwrap();
-    assert!(plans.is_empty(), "expected no plan, got: {plans:?}");
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0]["key"], "app/W1");
+    assert_eq!(plans[0]["title"], "Ordinary task");
 }
 
 /// The sibling worktree is removed after merging (repos-05, 2026-10-02): the plan is read from git

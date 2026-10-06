@@ -144,6 +144,8 @@ pub struct Job {
     pub plan_task: Option<String>,
     pub task_file: Option<String>,
     #[serde(skip)]
+    pub research: bool,
+    #[serde(skip)]
     pub start_plan: Option<String>,
     #[serde(skip)]
     pub file_tags: Vec<String>,
@@ -510,6 +512,7 @@ struct RawJob {
     task_file: Option<String>,
     pid: Option<i64>,
     started_at: Option<u64>,
+    research: bool,
     start_plan: Option<String>,
     start_plan_task: Option<String>,
     file_tags: Vec<String>,
@@ -617,6 +620,11 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
                     let pid = start_val.as_ref().and_then(|v| v["pid"].as_i64());
                     let started_at = start_val.as_ref().and_then(|v| v["started_at"].as_u64());
+                    let research = start_val
+                        .as_ref()
+                        .and_then(|v| v.get("research"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let start_plan = start_val
                         .as_ref()
                         .and_then(|v| v["plan"].as_str())
@@ -686,6 +694,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         task_file,
                         pid,
                         started_at,
+                        research,
                         start_plan,
                         start_plan_task,
                         file_tags,
@@ -832,6 +841,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     task_file: None,
                                     pid,
                                     started_at,
+                                    research: false,
                                     start_plan: None,
                                     start_plan_task: None,
                                     file_tags: Vec::new(),
@@ -1190,6 +1200,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             verdict_notes,
             verdict_ts,
             log_mtime: log_info.mtime,
+            research: raw.research,
         });
     }
 

@@ -562,40 +562,87 @@ fn extract_relpath(root: &Path, plan_path: &Path, job_wt: Option<&str>) -> PathB
         }
     }
 
-    if let Ok(rel) = plan_path.strip_prefix("/") {
-        return rel.to_path_buf();
-    }
-
     plan_path.to_path_buf()
 }
 
+fn first_heading(text: &str) -> Option<String> {
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence && trimmed.starts_with('#') {
+            let without_hashes = trimmed.trim_start_matches('#').trim();
+            let without_suffix = without_hashes
+                .strip_suffix(" — Plan")
+                .or_else(|| without_hashes.strip_suffix(" – Plan"))
+                .or_else(|| without_hashes.strip_suffix(" - Plan"))
+                .unwrap_or(without_hashes);
+            let cleaned = without_suffix.trim().replace('`', "");
+            if !cleaned.is_empty() {
+                return Some(cleaned);
+            }
+        }
+    }
+    None
+}
+
+fn find_home_repo(plan_file_abs: &Path, jobs: &[&Job]) -> String {
+    // 1. For a plan inside a repository root, that root
+    for job in jobs {
+        if let Some(ref root) = job.root {
+            if plan_file_abs.starts_with(root) {
+                return dashboard::repo_name(root);
+            }
+        }
+    }
+
+    // 2. For an absolute plan path, the nearest ancestor directory containing .git
+    let mut curr = plan_file_abs.parent();
+    while let Some(dir) = curr {
+        if dir.join(".git").exists() {
+            return dashboard::repo_name(dir);
+        }
+        curr = dir.parent();
+    }
+
+    // 3. If none is found, the first job's repository
+    if let Some(first) = jobs.first() {
+        return first.repo.clone();
+    }
+
+    String::new()
+}
+
 fn read_plan_content(
-    root: &Path,
-    relpath: &Path,
+    plan_file_abs: &Path,
     jobs: &[&Job],
-    cache: &mut HashMap<(PathBuf, PathBuf), Option<String>>,
+    cache: &mut HashMap<PathBuf, Option<String>>,
 ) -> Option<String> {
-    let key = (root.to_path_buf(), relpath.to_path_buf());
-    if let Some(cached) = cache.get(&key) {
+    if let Some(cached) = cache.get(plan_file_abs) {
         return cached.clone();
     }
 
-    let relpath_str = relpath.to_string_lossy().to_string();
-
-    // 1. <root>/<relpath> on disk
-    let disk_path = root.join(relpath);
-    if let Ok(content) = std::fs::read_to_string(&disk_path) {
-        cache.insert(key, Some(content.clone()));
+    // 1. <plan_file_abs> on disk
+    if let Ok(content) = std::fs::read_to_string(plan_file_abs) {
+        cache.insert(plan_file_abs.to_path_buf(), Some(content.clone()));
         return Some(content);
     }
 
     // 2. the job's own worktree + relpath
     for job in jobs {
         if let Some(ref wt) = job.worktree {
-            let wt_path = Path::new(wt).join(relpath);
-            if let Ok(content) = std::fs::read_to_string(&wt_path) {
-                cache.insert(key, Some(content.clone()));
-                return Some(content);
+            let wt_base = Path::new(wt);
+            if let Some(ref r) = job.root {
+                if let Ok(rel) = plan_file_abs.strip_prefix(r) {
+                    let wt_path = wt_base.join(rel);
+                    if let Ok(content) = std::fs::read_to_string(&wt_path) {
+                        cache.insert(plan_file_abs.to_path_buf(), Some(content.clone()));
+                        return Some(content);
+                    }
+                }
             }
         }
     }
@@ -604,25 +651,26 @@ fn read_plan_content(
     for job in jobs {
         if let Some(ref tf) = job.task_file {
             let p = Path::new(tf);
-            if p.is_absolute()
-                && is_plan_task_file(p)
-                && (p.ends_with(relpath)
-                    || extract_relpath(root, p, job.worktree.as_deref()) == relpath)
-            {
+            let matches_plan = p == plan_file_abs
+                || job.root.as_ref().is_some_and(|r| {
+                    r.join(extract_relpath(r, p, job.worktree.as_deref())) == *plan_file_abs
+                });
+            if matches_plan && p.is_file() {
                 if let Ok(content) = std::fs::read_to_string(p) {
-                    cache.insert(key, Some(content.clone()));
+                    cache.insert(plan_file_abs.to_path_buf(), Some(content.clone()));
                     return Some(content);
                 }
             }
         }
         if let Some(ref sp) = job.start_plan {
             let p = Path::new(sp);
-            if p.is_absolute()
-                && (p.ends_with(relpath)
-                    || extract_relpath(root, p, job.worktree.as_deref()) == relpath)
-            {
+            let matches_plan = p == plan_file_abs
+                || job.root.as_ref().is_some_and(|r| {
+                    r.join(extract_relpath(r, p, job.worktree.as_deref())) == *plan_file_abs
+                });
+            if matches_plan && p.is_file() {
                 if let Ok(content) = std::fs::read_to_string(p) {
-                    cache.insert(key, Some(content.clone()));
+                    cache.insert(plan_file_abs.to_path_buf(), Some(content.clone()));
                     return Some(content);
                 }
             }
@@ -630,34 +678,62 @@ fn read_plan_content(
     }
 
     // 4. git: git -C <root> log --all -1 --format=%H -- <relpath> and git -C <root> show <sha>:<relpath>
-    if let Ok(out) = std::process::Command::new("git")
-        .args(["log", "--all", "-1", "--format=%H", "--", &relpath_str])
-        .current_dir(root)
-        .output()
-    {
-        if out.status.success() {
-            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !sha.is_empty() {
-                if let Ok(show_out) = std::process::Command::new("git")
-                    .args(["show", &format!("{sha}:{relpath_str}")])
-                    .current_dir(root)
-                    .output()
-                {
-                    if show_out.status.success() {
-                        let content = String::from_utf8_lossy(&show_out.stdout).to_string();
-                        cache.insert(key, Some(content.clone()));
-                        return Some(content);
+    let mut git_roots = Vec::new();
+    for job in jobs {
+        if let Some(ref r) = job.root {
+            if !git_roots.contains(r) {
+                git_roots.push(r.clone());
+            }
+        }
+    }
+    let mut curr = plan_file_abs.parent();
+    while let Some(dir) = curr {
+        if dir.join(".git").exists() {
+            let d_buf = dir.to_path_buf();
+            if !git_roots.contains(&d_buf) {
+                git_roots.push(d_buf);
+            }
+            break;
+        }
+        curr = dir.parent();
+    }
+
+    for git_root in &git_roots {
+        if let Ok(rel) = plan_file_abs.strip_prefix(git_root) {
+            let rel_str = rel.to_string_lossy().to_string();
+            if let Ok(out) = std::process::Command::new("git")
+                .args(["log", "--all", "-1", "--format=%H", "--", &rel_str])
+                .current_dir(git_root)
+                .output()
+            {
+                if out.status.success() {
+                    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !sha.is_empty() {
+                        if let Ok(show_out) = std::process::Command::new("git")
+                            .args(["show", &format!("{sha}:{rel_str}")])
+                            .current_dir(git_root)
+                            .output()
+                        {
+                            if show_out.status.success() {
+                                let content = String::from_utf8_lossy(&show_out.stdout).to_string();
+                                cache.insert(plan_file_abs.to_path_buf(), Some(content.clone()));
+                                return Some(content);
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    cache.insert(key, None);
+    cache.insert(plan_file_abs.to_path_buf(), None);
     None
 }
 
-fn is_merged(job: &Job, root: &Path) -> bool {
+fn is_merged(job: &Job) -> bool {
+    let Some(ref root) = job.root else {
+        return false;
+    };
     let mut merged_by_branch = false;
     if let Some(last_commit) = job.commits.last() {
         if let Ok(output) = std::process::Command::new("git")
@@ -708,7 +784,7 @@ fn is_merged(job: &Job, root: &Path) -> bool {
     false
 }
 
-fn choose_task_job<'a>(jobs: &[&'a Job], root: &Path) -> Option<&'a Job> {
+fn choose_task_job<'a>(jobs: &[&'a Job]) -> Option<&'a Job> {
     // 1. a job that is running (the latest running one);
     if let Some(j) = jobs
         .iter()
@@ -719,11 +795,11 @@ fn choose_task_job<'a>(jobs: &[&'a Job], root: &Path) -> Option<&'a Job> {
         return Some(j);
     }
 
-    // 2. else a verified job for which is_merged(job, &root) is true (the latest such one);
+    // 2. else a verified job for which is_merged(job) is true (the latest such one);
     if let Some(j) = jobs
         .iter()
         .copied()
-        .filter(|j| j.status == "verified" && is_merged(j, root))
+        .filter(|j| j.status == "verified" && is_merged(j))
         .max_by_key(|j| j.started_at.unwrap_or(0))
     {
         return Some(j);
@@ -767,10 +843,15 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
     plan_src.hours = plan_src.hours.max(7 * 24);
     let jobs = dashboard::collect_jobs(&plan_src, now);
 
-    let mut groups: HashMap<(PathBuf, PathBuf), Vec<&Job>> = HashMap::new();
+    let mut groups: HashMap<PathBuf, Vec<&Job>> = HashMap::new();
     let mut git_names_cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut standalone_plans: Vec<PlanItem> = Vec::new();
+    let mut plan_content_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
 
     for job in &jobs {
+        if job.research {
+            continue;
+        }
         let Some(ref root) = job.root else {
             continue;
         };
@@ -778,71 +859,246 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
         let relpath = if let Some(ref p) = job.start_plan {
             if !p.contains('/') && !p.ends_with(".md") {
                 if let Some(rp) = resolve_bare_stem(root, p, &mut git_names_cache) {
-                    rp
+                    Some(rp)
                 } else {
-                    extract_relpath(root, Path::new(p), job.worktree.as_deref())
+                    Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
                 }
             } else {
-                extract_relpath(root, Path::new(p), job.worktree.as_deref())
+                Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
             }
         } else if let Some(stem) = find_tag_plan_stem(job) {
             if stem.contains('/') {
-                extract_relpath(root, Path::new(&stem), job.worktree.as_deref())
+                Some(extract_relpath(
+                    root,
+                    Path::new(&stem),
+                    job.worktree.as_deref(),
+                ))
             } else {
                 let stem_clean = stem.strip_suffix(".md").unwrap_or(&stem);
-                if let Some(rp) = resolve_bare_stem(root, stem_clean, &mut git_names_cache) {
-                    rp
-                } else {
-                    continue;
-                }
+                resolve_bare_stem(root, stem_clean, &mut git_names_cache)
             }
         } else if let Some(ref p) = job.plan {
-            extract_relpath(root, Path::new(p), job.worktree.as_deref())
+            Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
         } else if let Some(ref tf) = job
             .task_file
             .as_ref()
             .filter(|tf| is_plan_task_file(Path::new(tf)))
         {
-            extract_relpath(root, Path::new(tf), job.worktree.as_deref())
-        } else if let Some(p) = first_backticked_plan_path(&job.task) {
-            extract_relpath(root, Path::new(&p), job.worktree.as_deref())
+            Some(extract_relpath(
+                root,
+                Path::new(tf),
+                job.worktree.as_deref(),
+            ))
         } else {
-            continue;
+            first_backticked_plan_path(&job.task)
+                .map(|p| extract_relpath(root, Path::new(&p), job.worktree.as_deref()))
         };
 
-        groups.entry((root.clone(), relpath)).or_default().push(job);
+        if let Some(relpath) = relpath {
+            let plan_file_abs = root.join(&relpath);
+            groups.entry(plan_file_abs).or_default().push(job);
+        } else {
+            let Some(ref tf) = job.task_file else {
+                continue;
+            };
+            let tf_path = Path::new(tf);
+            let relpath = extract_relpath(root, tf_path, job.worktree.as_deref());
+            let plan_file_abs = root.join(&relpath);
+            let Some(content) = read_plan_content(&plan_file_abs, &[job], &mut plan_content_cache)
+            else {
+                continue;
+            };
+            let doc = parse_plan(&content);
+            let pt = job.plan_task.as_deref().unwrap_or(&job.id);
+            let has_matching_task = doc.tasks.iter().any(|t| matches_task(t, pt));
+            if has_matching_task {
+                groups.entry(plan_file_abs).or_default().push(job);
+                continue;
+            }
+
+            let seven_days = 7 * 24 * 3600;
+            let is_active = job.status == "running"
+                || job
+                    .started_at
+                    .is_some_and(|st| st >= now.saturating_sub(seven_days));
+            if !is_active {
+                continue;
+            }
+
+            let heading_title = first_heading(&content);
+            let title = heading_title.unwrap_or_else(|| job.id.clone());
+            let task_title = title.clone();
+            let task_heading = title.clone();
+
+            let state = if job.status == "running" {
+                "running".to_string()
+            } else if job.verdict.as_deref() == Some("redone") {
+                "redone".to_string()
+            } else if job.status == "verified" {
+                if is_merged(job) {
+                    "merged".to_string()
+                } else {
+                    "verified".to_string()
+                }
+            } else {
+                "failed".to_string()
+            };
+
+            let files = if !job.changed_files.is_empty() {
+                job.changed_files.clone()
+            } else {
+                Vec::new()
+            };
+
+            let task_val = serde_json::json!({
+                "id": job.id,
+                "title": task_title,
+                "heading": task_heading,
+                "lane": "tasks",
+                "deps": [],
+                "state": state,
+                "dispatch": job.key,
+                "now": job.now,
+                "gate_running": job.gate_running,
+                "gate_attempts": job.gate_attempts,
+                "elapsed_s": job.elapsed_s,
+                "cost_usd": job.cost_usd,
+                "turns": job.turns,
+                "files": files,
+                "commits": job.commits,
+                "verdict": job.verdict,
+                "notes": job.verdict_notes,
+                "added": false,
+            });
+
+            let mut events = Vec::new();
+            if let Some(st) = job.started_at {
+                events.push(PlanEvent {
+                    at: st,
+                    task: job.id.clone(),
+                    text: "dispatched".to_string(),
+                });
+            }
+            if job.status != "running" {
+                if let Some(fin) = job.finished_at.or(job.log_mtime) {
+                    events.push(PlanEvent {
+                        at: fin,
+                        task: job.id.clone(),
+                        text: job.status.clone(),
+                    });
+                }
+            }
+            if let Some(ref v) = job.verdict {
+                if let Some(ts) = job.verdict_ts {
+                    events.push(PlanEvent {
+                        at: ts,
+                        task: job.id.clone(),
+                        text: format!("verdict {v}"),
+                    });
+                }
+            }
+            events.sort_by_key(|e| std::cmp::Reverse(e.at));
+            let events_json: Vec<serde_json::Value> = events
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "at": e.at,
+                        "task": e.task,
+                        "text": e.text,
+                    })
+                })
+                .collect();
+
+            let mut decisions_json = Vec::new();
+            for d in &doc.decisions {
+                decisions_json.push(serde_json::json!({
+                    "text": d,
+                    "source": "plan",
+                }));
+            }
+            if let Some(ref notes) = job.verdict_notes {
+                if !notes.trim().is_empty() {
+                    decisions_json.push(serde_json::json!({
+                        "text": notes,
+                        "source": format!("{} verdict note", job.id),
+                    }));
+                }
+            }
+
+            let (merged, verified, running, not_started) = match state.as_str() {
+                "merged" => (1, 0, 0, 0),
+                "verified" => (0, 1, 0, 0),
+                "running" => (0, 0, 1, 0),
+                "ready" | "waiting" => (0, 0, 0, 1),
+                _ => (0, 0, 0, 0),
+            };
+            let cost_usd = job.cost_usd.unwrap_or(0.0);
+            let cost_usd = (cost_usd * 100.0).round() / 100.0;
+            let stats_json = serde_json::json!({
+                "tasks": 1,
+                "merged": merged,
+                "verified": verified,
+                "running": running,
+                "not_started": not_started,
+                "cost_usd": cost_usd,
+                "first_dispatch_at": job.started_at,
+                "max_parallel": if running > 0 { 1 } else { 0 },
+            });
+
+            let key = format!("{}/{}", job.repo, job.id);
+            let repo = job.repo.clone();
+            let repos = vec![job.repo.clone()];
+            let lanes = vec![serde_json::json!({
+                "id": "tasks",
+                "label": "Tasks",
+            })];
+            let path_str = plan_file_abs.to_string_lossy().to_string();
+
+            let has_running = running > 0;
+            let latest_activity = events_json
+                .first()
+                .and_then(|e| e["at"].as_u64())
+                .or(job.started_at)
+                .unwrap_or(0);
+
+            let plan_val = serde_json::json!({
+                "key": key,
+                "repo": repo,
+                "repos": repos,
+                "path": path_str,
+                "title": title,
+                "lanes": lanes,
+                "tasks": [task_val],
+                "events": events_json,
+                "decisions": decisions_json,
+                "stats": stats_json,
+            });
+
+            standalone_plans.push(PlanItem {
+                key,
+                has_running,
+                latest_activity,
+                val: plan_val,
+            });
+        }
     }
 
-    let mut plan_content_cache: HashMap<(PathBuf, PathBuf), Option<String>> = HashMap::new();
-    let mut plan_items = Vec::new();
+    let mut plan_items = standalone_plans;
 
-    for ((root, relpath), jobs_in_group) in groups {
+    for (plan_file_abs, jobs_in_group) in groups {
         let Some(content) =
-            read_plan_content(&root, &relpath, &jobs_in_group, &mut plan_content_cache)
+            read_plan_content(&plan_file_abs, &jobs_in_group, &mut plan_content_cache)
         else {
             continue;
         };
         let doc = parse_plan(&content);
-        let repo = dashboard::repo_name(&root);
-        let stem = relpath
+        let repo = find_home_repo(&plan_file_abs, &jobs_in_group);
+        let stem = plan_file_abs
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("plan");
         let key = format!("{repo}/{stem}");
-        let full_path = root.join(&relpath);
-        let path_str = full_path.to_string_lossy().to_string();
-
-        let mut lanes = Vec::new();
-        let mut seen_lanes = HashSet::new();
-        for t in &doc.tasks {
-            if seen_lanes.insert(t.lane.clone()) {
-                let id = t.lane.to_lowercase().replace(' ', "-");
-                lanes.push(serde_json::json!({
-                    "id": id,
-                    "label": t.lane,
-                }));
-            }
-        }
+        let path_str = plan_file_abs.to_string_lossy().to_string();
 
         let mut task_jobs: HashMap<String, Vec<&Job>> = HashMap::new();
         let mut all_matched_jobs: Vec<&Job> = Vec::new();
@@ -852,12 +1108,25 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             for job in &jobs_in_group {
                 // A plan file dispatched as the task, with no --plan-task: the run id names the task
                 // (`blyte dispatch S1 <plan>.md`, 2026-10-02).
-                let pt = job.plan_task.as_deref().or_else(|| {
-                    job.task_file
-                        .as_deref()
-                        .filter(|tf| is_plan_task_file(Path::new(tf)))
-                        .map(|_| job.id.as_str())
-                });
+                let pt = job
+                    .plan_task
+                    .as_deref()
+                    .or_else(|| {
+                        job.task_file
+                            .as_deref()
+                            .filter(|tf| {
+                                is_plan_task_file(Path::new(tf))
+                                    || job.root.as_ref().is_some_and(|r| {
+                                        r.join(extract_relpath(
+                                            r,
+                                            Path::new(tf),
+                                            job.worktree.as_deref(),
+                                        )) == plan_file_abs
+                                    })
+                            })
+                            .map(|_| job.id.as_str())
+                    })
+                    .or(Some(job.id.as_str()));
                 if let Some(pt) = pt {
                     if matches_task(task, pt) {
                         matched.push(*job);
@@ -905,7 +1174,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
 
         let mut added_tasks: Vec<AddedTaskInfo> = Vec::new();
         for (name, group_jobs) in added_groups {
-            let Some(chosen) = choose_task_job(&group_jobs, &root) else {
+            let Some(chosen) = choose_task_job(&group_jobs) else {
                 continue;
             };
             let (id, title) = parse_added_task_id_and_title(&name, &chosen.id, &chosen.title);
@@ -914,7 +1183,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             } else if chosen.verdict.as_deref() == Some("redone") {
                 "redone".to_string()
             } else if chosen.status == "verified" {
-                if is_merged(chosen, &root) {
+                if is_merged(chosen) {
                     "merged".to_string()
                 } else {
                     "verified".to_string()
@@ -954,14 +1223,14 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
 
         for task in &doc.tasks {
             if let Some(m_jobs) = task_jobs.get(&task.id) {
-                if let Some(chosen) = choose_task_job(m_jobs, &root) {
+                if let Some(chosen) = choose_task_job(m_jobs) {
                     chosen_jobs.insert(task.id.clone(), chosen);
                     let state = if chosen.status == "running" {
                         "running".to_string()
                     } else if chosen.verdict.as_deref() == Some("redone") {
                         "redone".to_string()
                     } else if chosen.status == "verified" {
-                        if is_merged(chosen, &root) {
+                        if is_merged(chosen) {
                             "merged".to_string()
                         } else {
                             "verified".to_string()
@@ -991,17 +1260,58 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             chosen_jobs.insert(added.id.clone(), added.chosen);
         }
 
-        if !added_tasks.is_empty() {
-            lanes.push(serde_json::json!({
-                "id": "added",
-                "label": "Added during the work",
-            }));
+        let mut repos: Vec<String> = all_matched_jobs.iter().map(|j| j.repo.clone()).collect();
+        repos.sort();
+        repos.dedup();
+
+        let is_multi_repo = repos.len() > 1;
+        let mut lanes = Vec::new();
+
+        if is_multi_repo {
+            for r in &repos {
+                lanes.push(serde_json::json!({
+                    "id": r.to_lowercase().replace(' ', "-"),
+                    "label": r,
+                }));
+            }
+            let any_unrun = doc.tasks.iter().any(|t| !chosen_jobs.contains_key(&t.id));
+            if any_unrun {
+                lanes.push(serde_json::json!({
+                    "id": "not-dispatched",
+                    "label": "Not dispatched",
+                }));
+            }
+        } else {
+            let mut seen_lanes = HashSet::new();
+            for t in &doc.tasks {
+                if seen_lanes.insert(t.lane.clone()) {
+                    let id = t.lane.to_lowercase().replace(' ', "-");
+                    lanes.push(serde_json::json!({
+                        "id": id,
+                        "label": t.lane,
+                    }));
+                }
+            }
+            if !added_tasks.is_empty() {
+                lanes.push(serde_json::json!({
+                    "id": "added",
+                    "label": "Added during the work",
+                }));
+            }
         }
 
         let mut tasks_json = Vec::new();
         for task in &doc.tasks {
             let state = task_states.get(&task.id).unwrap().clone();
-            let lane_id = task.lane.to_lowercase().replace(' ', "-");
+            let lane_id = if is_multi_repo {
+                if let Some(chosen) = chosen_jobs.get(&task.id) {
+                    chosen.repo.to_lowercase().replace(' ', "-")
+                } else {
+                    "not-dispatched".to_string()
+                }
+            } else {
+                task.lane.to_lowercase().replace(' ', "-")
+            };
             let task_val = if let Some(job) = chosen_jobs.get(&task.id) {
                 let files = if !job.changed_files.is_empty() {
                     job.changed_files.clone()
@@ -1056,6 +1366,11 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
         for added in &added_tasks {
             let state = task_states.get(&added.id).unwrap().clone();
             let job = added.chosen;
+            let lane_id = if is_multi_repo {
+                job.repo.to_lowercase().replace(' ', "-")
+            } else {
+                "added".to_string()
+            };
             let files = if !job.changed_files.is_empty() {
                 job.changed_files.clone()
             } else {
@@ -1065,7 +1380,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                 "id": added.id,
                 "title": added.title,
                 "heading": added.heading,
-                "lane": "added",
+                "lane": lane_id,
                 "deps": serde_json::json!([]),
                 "state": state,
                 "dispatch": job.key,
@@ -1216,6 +1531,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
         let plan_val = serde_json::json!({
             "key": key,
             "repo": repo,
+            "repos": repos,
             "path": path_str,
             "title": doc.title,
             "lanes": lanes,
