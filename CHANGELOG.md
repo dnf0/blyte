@@ -1,3 +1,9 @@
+## v0.21.1 (2026-10-06)
+
+### Fix
+
+- **skill**: dispatch plan tasks without a task file; review starts from the checks section (#237)
+
 ## v0.21.0 (2026-10-06)
 
 ### Feat
