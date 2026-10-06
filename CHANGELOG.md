@@ -1,3 +1,9 @@
+## v0.22.0 (2026-10-06)
+
+### Feat
+
+- **dashboard**: every run belongs to a plan; a multi-repository plan is one plan with a lane per repository (#239)
+
 ## v0.21.1 (2026-10-06)
 
 ### Fix
