@@ -546,6 +546,15 @@ pub fn detect_env(root: &Path) -> BTreeMap<String, String> {
     map
 }
 
+/// Propose a worktree setup command when the repository uses a supported package manager.
+pub fn detect_setup(root: &Path) -> Option<String> {
+    if root.join("uv.lock").exists() {
+        Some("uv sync".to_string())
+    } else {
+        None
+    }
+}
+
 /// Classify step output into Passed, Environment problem, or Failed.
 pub fn classify(output: &str, exit_code: i32) -> Verdict {
     if exit_code == 0 {
@@ -597,7 +606,12 @@ pub fn classify(output: &str, exit_code: i32) -> Verdict {
 }
 
 /// Render the verified blyte.toml content.
-pub fn render_verified(steps: &[InitStep], env: &BTreeMap<String, String>) -> String {
+pub fn render_verified(
+    steps: &[InitStep],
+    env: &BTreeMap<String, String>,
+    setup: Option<&str>,
+    setup_passed: bool,
+) -> String {
     let mut out = String::new();
     out.push_str("# blyte.toml: how this repository's work is checked, for `blyte dispatch`.\n");
 
@@ -626,6 +640,16 @@ pub fn render_verified(steps: &[InitStep], env: &BTreeMap<String, String>) -> St
     }
 
     out.push_str("[dispatch]\n");
+    if let Some(s) = setup {
+        if setup_passed {
+            out.push_str("# prepares each new worktree before the implementer starts\n");
+            out.push_str(&format!("setup = \"{s}\"\n"));
+        } else {
+            out.push_str(&format!(
+                "# setup = \"{s}\"   # left out: failed in a fresh worktree\n"
+            ));
+        }
+    }
     out.push_str("gate = \"\"\"\n");
     out.push_str(&gate_str);
     out.push_str("\"\"\"\n");
@@ -707,7 +731,8 @@ fn verify_steps(
     env: &BTreeMap<String, String>,
     sandbox_on: bool,
     timeout: Duration,
-) -> Vec<InitStep> {
+    setup: Option<&str>,
+) -> (Vec<InitStep>, bool) {
     let common_dir_raw = Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(root)
@@ -754,11 +779,11 @@ fn verify_steps(
                 "warning: git worktree add failed: {}; skipping verification",
                 String::from_utf8_lossy(&o.stderr)
             );
-            return steps;
+            return (steps, false);
         }
     } else {
         eprintln!("warning: failed to run git worktree add; skipping verification");
-        return steps;
+        return (steps, false);
     }
 
     struct Guard<'a> {
@@ -781,6 +806,29 @@ fn verify_steps(
 
     for (k, v) in env {
         std::env::set_var(k, v);
+    }
+
+    let mut setup_passed = false;
+    if let Some(cmd) = setup {
+        let log_path = wt_dir
+            .parent()
+            .unwrap_or(root)
+            .join(format!("init-{pid}.setup.log"));
+        match crate::setup::run_setup(
+            cmd,
+            &wt_dir,
+            root,
+            env,
+            &log_path,
+            crate::setup::SETUP_TIMEOUT,
+        ) {
+            Ok(()) => {
+                setup_passed = true;
+            }
+            Err(msg) => {
+                eprintln!("warning: setup failed; left out of blyte.toml:\n{msg}");
+            }
+        }
     }
 
     use blyte_agent::shell::Shell;
@@ -817,7 +865,7 @@ fn verify_steps(
         step.verdict = Some(verdict);
     }
 
-    steps
+    (steps, setup_passed)
 }
 
 pub fn run(args: &InitArgs) -> i32 {
@@ -884,17 +932,19 @@ pub fn run(args: &InitArgs) -> i32 {
     }
 
     let env = detect_env(&root);
+    let setup = detect_setup(&root);
 
-    let mut verified_steps = if !args.no_verify {
+    let (mut verified_steps, mut setup_passed) = if !args.no_verify {
         verify_steps(
             &root,
             steps,
             &env,
             args.sandbox == "on",
             Duration::from_secs(args.step_timeout),
+            setup.as_deref(),
         )
     } else {
-        steps
+        (steps, setup.is_some())
     };
 
     if from_ci && !args.no_verify {
@@ -919,18 +969,20 @@ pub fn run(args: &InitArgs) -> i32 {
                         verdict: None,
                     })
                     .collect();
-                let verified_detected = verify_steps(
+                let (verified_detected, detected_setup_passed) = verify_steps(
                     &root,
                     detected_steps,
                     &env,
                     args.sandbox == "on",
                     Duration::from_secs(args.step_timeout),
+                    setup.as_deref(),
                 );
                 if verified_detected
                     .iter()
                     .any(|s| matches!(s.verdict, Some(Verdict::Passed)))
                 {
                     verified_steps = verified_detected;
+                    setup_passed = detected_setup_passed;
                 }
             }
         }
@@ -951,7 +1003,7 @@ pub fn run(args: &InitArgs) -> i32 {
         return 1;
     }
 
-    let rendered = render_verified(&verified_steps, &env);
+    let rendered = render_verified(&verified_steps, &env, setup.as_deref(), setup_passed);
 
     if args.print {
         print!("{rendered}");

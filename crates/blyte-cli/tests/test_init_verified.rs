@@ -6,7 +6,9 @@ use std::path::Path;
 use std::process::Command;
 
 use blyte_cli::config::load;
-use blyte_cli::init::{classify, detect_ci, detect_env, Verdict};
+use blyte_cli::init::{
+    classify, detect_ci, detect_env, detect_setup, render_verified, InitStep, Verdict,
+};
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
@@ -150,4 +152,95 @@ fn init_proves_each_step_and_leaves_out_the_ones_the_environment_breaks() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&wts.stdout).lines().count(), 1);
+}
+
+#[test]
+fn detect_setup_proposes_uv_sync_when_locked() {
+    let d = tempfile::tempdir().unwrap();
+    assert_eq!(detect_setup(d.path()), None);
+    write(&d.path().join("uv.lock"), "");
+    assert_eq!(detect_setup(d.path()), Some("uv sync".to_string()));
+}
+
+#[test]
+fn render_verified_handles_setup_states() {
+    let steps = vec![InitStep {
+        command: "cargo test".to_string(),
+        source: "ci.yml".to_string(),
+        verdict: Some(Verdict::Passed),
+    }];
+    let env = std::collections::BTreeMap::new();
+
+    // Case 1: passed renders setup = "uv sync" before gate with comment
+    let passed_text = render_verified(&steps, &env, Some("uv sync"), true);
+    assert!(
+        passed_text.contains(
+            "[dispatch]\n# prepares each new worktree before the implementer starts\nsetup = \"uv sync\"\ngate = \"\"\""
+        ),
+        "{passed_text}"
+    );
+    let d1 = tempfile::tempdir().unwrap();
+    write(&d1.path().join("blyte.toml"), &passed_text);
+    let cfg1 = load(d1.path()).unwrap().unwrap();
+    assert_eq!(cfg1.dispatch.setup, Some("uv sync".to_string()));
+
+    // Case 2: failed renders setup commented out with reason
+    let failed_text = render_verified(&steps, &env, Some("uv sync"), false);
+    assert!(
+        failed_text.contains(
+            "[dispatch]\n# setup = \"uv sync\"   # left out: failed in a fresh worktree\ngate = \"\"\""
+        ),
+        "{failed_text}"
+    );
+    let d2 = tempfile::tempdir().unwrap();
+    write(&d2.path().join("blyte.toml"), &failed_text);
+    let cfg2 = load(d2.path()).unwrap().unwrap();
+    assert_eq!(cfg2.dispatch.setup, None);
+
+    // Case 3: None renders neither
+    let none_text = render_verified(&steps, &env, None, false);
+    assert!(
+        none_text.contains("[dispatch]\ngate = \"\"\""),
+        "{none_text}"
+    );
+    assert!(!none_text.contains("setup"));
+    let d3 = tempfile::tempdir().unwrap();
+    write(&d3.path().join("blyte.toml"), &none_text);
+    let cfg3 = load(d3.path()).unwrap().unwrap();
+    assert_eq!(cfg3.dispatch.setup, None);
+}
+
+#[test]
+fn init_leaves_out_failed_setup_with_warning() {
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path();
+    git(r, &["init", "-q"]);
+    write(
+        &r.join(".github/workflows/ci.yml"),
+        "jobs:\n  t:\n    steps:\n      - run: make check\n",
+    );
+    write(&r.join("Makefile"), "check:\n\t@true\n");
+    // Empty uv.lock causes `uv sync` to fail because there is no pyproject.toml
+    write(&r.join("uv.lock"), "");
+    git(r, &["add", "."]);
+    git(r, &["commit", "-qm", "i", "--no-gpg-sign"]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["init", "--sandbox", "off"])
+        .current_dir(r)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning: setup failed; left out of blyte.toml:"),
+        "{stderr}"
+    );
+    let text = std::fs::read_to_string(r.join("blyte.toml")).unwrap();
+    assert!(
+        text.contains("# setup = \"uv sync\"   # left out: failed in a fresh worktree"),
+        "{text}"
+    );
+    let cfg = load(r).unwrap().unwrap();
+    assert_eq!(cfg.dispatch.setup, None);
+    assert_eq!(cfg.dispatch.gate.as_deref(), Some("make check\n"));
 }
