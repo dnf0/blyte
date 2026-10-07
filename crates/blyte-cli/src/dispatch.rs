@@ -213,6 +213,11 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     Some(sec) => sec,
                     None => {
                         eprintln!("error: no heading \"{plan_task}\" in {plan_path}");
+                        if let Some(hint) =
+                            crate::plan_section::explain_missing(&plan_str, plan_task)
+                        {
+                            eprintln!("  {hint}");
+                        }
                         return 2;
                     }
                 };
