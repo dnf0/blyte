@@ -827,3 +827,39 @@ Run: `cargo test -p blyte --test test_init_verified`.
 **Depends on:** S1 (uses `setup::run_setup` and the `setup` field).
 
 **Commit message:** `feat(init): propose uv sync as the worktree setup for uv repositories`
+
+## A typed subcommand never starts an agent (2026-10-07)
+
+On 2026-10-07 `blyte cost` was run with an installed binary older than the `cost` command; it took
+`cost` as a one-shot prompt and started an agent in the blyte checkout. A new subcommand typed into an
+older build must fail, not run a model.
+
+### Task G1: refuse a one-word prompt
+
+**Goal:** `blyte <word>` where `<word>` is a single token with no whitespace is an error, not a
+one-shot prompt, so a subcommand the running build does not have (or a typo) never starts an agent.
+
+**Files:** `crates/blyte-cli/src/main.rs`, new `crates/blyte-cli/tests/test_one_word_prompt.rs`.
+
+**What to build:** in `main.rs`, where `cli.prompt` is `Some(prompt)` (before any provider, config or
+model is resolved), if `prompt.trim()` contains no whitespace, print to stderr
+`error: \`<word>\` is not a blyte command in this build (blyte <version>); a prompt needs more than one word`
+using the same version string `blyte --version` prints, and exit 2. Prompts of two or more words are
+unchanged.
+
+**Tests** (through the binary, `env!("CARGO_BIN_EXE_blyte")`, in a temp dir, with `BLYTE_USAGE_LOG=off`
+and no provider keys in the environment):
+1. `blyte nosuchcommand` exits 2, stderr contains `` `nosuchcommand` is not a blyte command `` and the
+   version, and finishes in under 5 seconds (no model call).
+2. `blyte "  cost  "` behaves the same (trimmed).
+3. A real subcommand still works: `blyte cost` exits 0.
+4. `blyte "fix the bug"` is not refused by this check: its stderr does not contain `is not a blyte command`
+   (it may fail later for a missing key; that is fine).
+
+Run: `cargo test -p blyte --test test_one_word_prompt`.
+
+**Constraints:** existing tests pass unmodified.
+
+**Depends on:** none. **Siblings:** S2 changes `init.rs`; not here.
+
+**Commit message:** `fix(cli): a one-word prompt is an error, so an unknown subcommand never starts an agent`
