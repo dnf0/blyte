@@ -590,3 +590,124 @@ Run: `cargo test -p blyte-provider --test test_gemini_wire`.
 **Depends on:** none. **Siblings:** OC9 (plan_section.rs, dispatch.rs) runs separately; do not touch it.
 
 **Commit message:** `fix(gemini): send a reply's text and tool calls back as one model turn`
+
+## Usage log and combined costs (2026-10-07)
+
+Every blyte model session (dispatch, research, one-shot, each interactive prompt, the orchestrator)
+appends one line to a machine-wide log, so costs survive worktree cleanup and the orchestrator's own
+spend is counted. An interactive session sets `BLYTE_SESSION`, which every dispatch it starts inherits,
+so a session's orchestrator and implementer costs can be added up exactly.
+
+### Task U1: the usage log
+
+**Goal:** a durable record of every run's tokens and cost, independent of `.wt/`.
+
+**Files:** new `crates/blyte-cli/src/usage_log.rs`; `crates/blyte-cli/src/lib.rs` (`pub mod usage_log;`);
+`crates/blyte-cli/src/task_runner.rs` (the end of the function that calls `runner.run(state)`, around
+line 393, where the `--report` record is written).
+
+**What to build** in `usage_log.rs`:
+- `pub fn default_path() -> Option<PathBuf>`: `$BLYTE_USAGE_LOG` if set and not empty (the value `off`
+  means no log: return `None`); else `$XDG_STATE_HOME/blyte/usage.jsonl` when `XDG_STATE_HOME` is set and
+  not empty; else `$HOME/.local/state/blyte/usage.jsonl`; `None` when none of these is available. Put
+  the logic in `fn path_from(log: Option<&OsStr>, xdg: Option<&OsStr>, home: Option<&OsStr>)` for tests.
+- `#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)] pub struct Entry { ts: u64 (Unix seconds),
+  repo: String, session: Option<String>, dispatch: Option<String>, research: bool, model: String,
+  outcome: String, turns: u32, input: u64, cached: u64, output: u64, thinking: u64, cost_usd: Option<f64> }`
+  (all fields `pub`; `session` and `dispatch` skipped when `None`).
+- `pub fn repo_of(root: &Path) -> String`: `root` as a string, except that when it has a path component
+  `.wt`, everything before that component (so `/r/.wt/T1` gives `/r`).
+- `pub fn append(path: &Path, entry: &Entry) -> std::io::Result<()>`: creates the parent directory, opens
+  with create + append, and writes the JSON plus `\n` in a single `write_all` (one line is far below the
+  size at which appends could interleave).
+- `pub fn read(path: &Path) -> Vec<Entry>`: every line that parses; skips the rest; empty when the file
+  is missing.
+
+In `task_runner.rs`, after `runner.run(state)` and whether or not `--report` is set: build an `Entry`
+(`ts` now; `repo` = `repo_of(&config.root)`; `session` = env `BLYTE_SESSION`; `dispatch` = env
+`BLYTE_DISPATCH_ID`; `research` = `config.research`; `model` = the provider's `model_id`; `outcome` =
+`format!("{outcome:?}").to_lowercase()`; `turns` = `report.outcome_turns`; tokens from `report.usage`;
+`cost_usd` = `blyte_provider::pricing(&model_id).map(|p| p.cost(&report.usage))`) and `append` it to
+`default_path()`. A failed append prints one line `warning: usage log: <error>` to stderr and never
+changes the run's result.
+
+**Tests** (in `usage_log.rs`):
+1. `path_from`: `BLYTE_USAGE_LOG=/x/u.jsonl` wins; `off` gives `None`; XDG gives `<xdg>/blyte/usage.jsonl`;
+   HOME gives `<home>/.local/state/blyte/usage.jsonl`; empty strings are treated as unset; none gives `None`;
+2. `repo_of`: `/r/.wt/T1` gives `/r`; `/r` gives `/r`; `/r/.wtx/a` gives `/r/.wtx/a`;
+3. `append` twice into a temp dir whose parent does not exist yet, then `read` returns both entries equal
+   to what was written, in order; a line of garbage between them is skipped;
+4. an entry with `session: None` serialises without a `session` key.
+And one integration test in `crates/blyte-cli/tests/` (new file `test_usage_log.rs`), if the existing
+tests there run `task_runner` against a scripted provider: with `BLYTE_USAGE_LOG` pointing at a temp
+file and `BLYTE_SESSION=s1`, one run appends exactly one entry with `session == Some("s1")`. If there is
+no such harness, say so in the report and skip this test.
+Run: `cargo test -p blyte usage_log`.
+
+**Constraints:** no new dependencies (`serde`/`serde_json` are already used). Existing tests pass
+unmodified; tests that run tasks must not write to the real `~/.local/state`: set `BLYTE_USAGE_LOG=off`
+wherever the test suite already isolates `HOME` or the environment, if a test would otherwise write there.
+
+**Depends on:** none. **Siblings:** U2 (dispatch.rs, repl.rs) runs in parallel in another worktree and
+sets the two environment variables; do not set them here.
+
+**Commit message:** `feat(usage): log every run's tokens and cost to a machine-wide usage file`
+
+### Task U2: session and dispatch ids in the environment
+
+**Goal:** let the usage log attribute runs: an interactive session gets an id that its shell commands,
+and so the dispatches it starts, inherit; a dispatch tells its agent child its id.
+
+**Files:** `crates/blyte-cli/src/repl.rs`, `crates/blyte-cli/src/dispatch.rs`.
+
+**What to build:**
+- `repl.rs`: when an interactive session starts, if `BLYTE_SESSION` is unset or empty, set it in the
+  process environment (`std::env::set_var`, at startup before any thread is spawned) to
+  `format!("{}-{}", unix_seconds, std::process::id())`. Keep the value on the session; `/state` prints a
+  line `session: <id>`. Put the id format in `pub fn new_session_id(now_secs: u64, pid: u32) -> String`.
+- `dispatch.rs`: where the child `Command` is built (after the `[dispatch.env]` loop, around line 414),
+  add `cmd.env("BLYTE_DISPATCH_ID", &args.id)`. `BLYTE_SESSION` passes through by inheritance; do not
+  clear it.
+- Check that the shell blyte runs commands in (`crates/blyte-agent/src/shell.rs`, the environment scrub)
+  does not remove `BLYTE_SESSION`; if it does, say so in the report and do not change shell.rs.
+
+**Tests:** `new_session_id(1700000000, 42) == "1700000000-42"`; in `repl.rs` tests, `/state` output
+contains `session: `. For dispatch, a unit test of whatever function builds the child command, if one
+exists, asserting `BLYTE_DISPATCH_ID` is set; otherwise say in the report how you checked it.
+Run: `cargo test -p blyte repl` and `cargo test -p blyte dispatch`.
+
+**Depends on:** OC9 (also edits dispatch.rs; dispatched with `--base wip/OC9` or after it is merged).
+**Siblings:** U1 (usage_log.rs, task_runner.rs) runs separately; do not touch those files.
+
+**Commit message:** `feat(usage): give interactive sessions and dispatches ids the usage log can attribute`
+
+### Task U3: `blyte cost` and the combined line in the REPL
+
+**Goal:** show orchestrator and implementer costs together.
+
+**Files:** new `crates/blyte-cli/src/cost.rs`; `lib.rs`; `cli.rs` and `main.rs` (a `Cost` subcommand);
+`repl.rs` (usage line and `/cost`).
+
+**What to build:**
+- `cost.rs`: `pub struct Totals { pub orchestrator_usd: f64, pub implementers_usd: f64, pub runs: usize }`
+  and `pub fn totals(entries: &[Entry], session: Option<&str>, since: Option<u64>, repo: Option<&str>)
+  -> Totals`: keep entries matching every given filter (`session` equal; `ts >= since`; `repo` equal);
+  an entry with `dispatch: Some(_)` counts to `implementers_usd` and to `runs`, otherwise to
+  `orchestrator_usd`; a `None` cost counts 0.
+- `blyte cost [--session ID] [--since UNIX_SECS] [--repo PATH] [--json]` reads
+  `usage_log::read(default_path())` and prints `blyte $<o+i> (orchestrator $<o>, implementers $<i> in
+  <runs> runs)` with two decimals, or the `Totals` as JSON with `--json`. Exit 0 even when the log is
+  missing (totals are zero).
+- REPL: after each reply the usage line gains ` · session $<o+i> (implementers $<i>, <runs> runs)`
+  computed with `totals(..., Some(session_id), None, None)`; `/cost` prints the same totals line as
+  `blyte cost --session <id>`.
+
+**Tests:** `totals` with a mix of entries (two sessions, dispatch and not, one with `cost_usd: None`,
+timestamps either side of `since`, two repos), checking each filter alone and combined; the printed
+line's format for a known `Totals`; `/cost` output in a REPL test with `BLYTE_USAGE_LOG` pointing at a
+temp file holding two entries.
+Run: `cargo test -p blyte cost` and `cargo test -p blyte repl`.
+
+**Depends on:** U1, U2.
+
+**Commit message:** `feat(usage): blyte cost and the session's combined cost in the REPL`
