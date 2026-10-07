@@ -1,3 +1,23 @@
+## v0.25.0 (2026-10-07)
+
+### Feat
+
+- **dashboard**: tag jobs with the session that dispatched them
+- **plan**: blyte plan lists a plan's tasks, their state and dispatch commands
+- **orchestrate**: start a plan from blyte plan, not from blyte's source
+- **skill**: installing for Claude Code sets the status line to blyte statusline
+- **statusline**: blyte statusline, Claude Code's line with blyte's costs
+- **config**: allow_read in blyte.toml for paths every dispatch may read
+- **usage**: log a Claude Code session's dispatches under its session id
+
+### Fix
+
+- **dashboard**: a job's title is its task heading
+- **agent**: an empty gate is skipped instead of run
+- **statusline**: an --after command that does not read its input no longer kills blyte
+- **plans**: dependencies are the plan's task ids in the Depends on clause
+- **repl**: /state shows the instructions' length, not the whole prompt
+
 ## v0.24.0 (2026-10-07)
 
 ### Feat
