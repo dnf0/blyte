@@ -1337,3 +1337,80 @@ say which in your report instead of changing it.
 **Depends on:** none.
 
 **Commit message:** `fix(agent): an empty gate is skipped instead of run`
+
+## Dashboard: task titles and session tags (2026-10-07)
+
+Every job dispatched from a plan has the title "From the plan docs/…:", because `dashboard.rs`
+`extract_title` takes the first non-empty line of the task text, and a plan dispatch's task text starts
+with that line (then a blank line, then the `### Task <ID>: …` heading). So the cards cannot be told apart.
+Since C1 each run's usage entry carries the dispatching session, but the dashboard cannot show which
+session started a job.
+
+### Task D1: a job's title is its task heading
+
+**Goal:** a job's title is the task's own heading, without a `Task <ID>:` prefix that repeats the job id
+(the card already shows the id). Why: the cards all read "From the plan …" today.
+
+**Files:** `crates/blyte-cli/src/dashboard.rs` only.
+
+**What to build:** change `extract_title(task)` so that, after the existing `Task: "…"` rule, it returns
+the text of the **first Markdown heading line** (a line whose trimmed form starts with `#`), with the `#`s
+and surrounding spaces removed; only when there is no heading does it fall back to the first non-empty
+line, as now. Then, where the title is used for a job (around `let title = extract_title(&raw.task);`),
+strip a leading `Task <id>:` or `Task <id> ` (case-sensitive `Task`, the job's own id, then `:` or a
+space, then trim) when what remains is not empty. Keep the 120-character cap.
+
+**Tests** (in `dashboard.rs`'s tests module):
+1. `extract_title("From the plan docs/p.md:\n\n### Task G2: an empty gate is skipped\n\nbody")` is
+   `"Task G2: an empty gate is skipped"`.
+2. A task with no heading (`"fix the bug\nmore"`) still gives `"fix the bug"`.
+3. The `Task: "…"` rule still wins when present (pin the existing behaviour with one case).
+4. The job-title helper (factor the stripping into `fn job_title(task: &str, id: &str) -> String` and
+   use it) gives `"an empty gate is skipped"` for id `G2` and the text of test 1, keeps
+   `"Task G3: x"` unchanged for id `G2`, and keeps `"Task G2:"` (nothing after the prefix) as it is.
+
+Run `cargo test -q -p blyte --lib dashboard`, then the full gate.
+
+**Constraints:** existing tests pass unmodified; if one pins the old "first line" title for a task text
+that has a heading, stop and say which in the report.
+
+**Depends on:** none.
+
+**Commit message:** `fix(dashboard): a job's title is its task heading`
+
+### Task D2: jobs are tagged with the session that dispatched them
+
+**Goal:** each dispatch records its session in `.wt/<id>.start.json`, and the dashboard shows it as a tag
+`session:<first 8 characters>`, so the existing tag chips and tag filter can separate one session's jobs
+from another's. Why: several sessions (Claude Code, the EC2 agent, `blyte --orchestrate`) dispatch on the
+same machine.
+
+**Files:** `crates/blyte-cli/src/dispatch.rs` (the `start_json` object); `crates/blyte-cli/src/dashboard.rs`
+(where `file_tags` is filled from the start file).
+
+**What to build:**
+- In `dispatch.rs`, add `"session"` to `start_json` when
+  `crate::usage_log::session_from(std::env::var("BLYTE_SESSION").ok(), std::env::var("CLAUDE_CODE_SESSION_ID").ok())`
+  is `Some` (the same rule the usage log uses); leave the key out otherwise.
+- In `dashboard.rs`, after the start file's `tags` are read into `file_tags`, if the start file has a
+  non-empty string `session`, push `session:<s>` where `<s>` is its first 8 characters (all of it if
+  shorter), unless that tag is already there. Older start files without the key are unchanged.
+
+**Tests:**
+1. `dashboard.rs`: a job whose start file has `"session": "4f83bf80-a445-4090"` and `"tags": ["x"]` gets
+   tags containing `"x"` and `"session:4f83bf80"`; one with `"session": "abc"` gets `"session:abc"`; one
+   without the key gets no `session:` tag. Build these the way the existing dashboard tests build jobs
+   from a temp `.wt/` directory.
+2. `dispatch.rs` (or an integration test beside the existing dispatch tests): with `BLYTE_SESSION=s-1`
+   the start file has `"session": "s-1"`; with neither variable set it has no `session` key. If setting
+   environment variables in a test would race with other tests, factor the start-file construction into a
+   function that takes the session as an argument and test that instead.
+
+Run `cargo test -q -p blyte`, then the full gate.
+
+**Constraints:** existing tests pass unmodified. No change to `index.html` (the tag chips and filter
+already handle any tag).
+
+**Depends on:** D1 (both edit `dashboard.rs`; dispatch with `--base wip/D1`, or after D1 is merged).
+
+**Commit message:** `feat(dashboard): tag jobs with the session that dispatched them`
