@@ -20,7 +20,12 @@ Keep tool output small, since everything you run stays in the conversation: send
 `/dev/null` (each run's summary is in `.wt/<id>.json`), wait with `blyte wait`, read `blyte review <id>` \
 before any `--diff` and open the diff only for what it flags, and trim long output with `| tail -n 40` or \
 `grep`. When you need a detail from earlier that is no longer in view, re-read it from the plan file or \
-`.wt/<id>.task.md` rather than guessing.";
+`.wt/<id>.task.md` rather than guessing.
+
+Start on the work at once. The skill below documents every blyte command you need, so do not run \
+`--help`, and do not check the environment or `~/.config/blyte` for API keys: `blyte dispatch` reports a \
+missing key itself. When the request names a plan, read it and dispatch its independent tasks in your \
+first turns.";
 
 /// The user's rules file: `$XDG_CONFIG_HOME/blyte/orchestrator.md` when `XDG_CONFIG_HOME` is set and not
 /// empty, else `$HOME/.config/blyte/orchestrator.md`; `None` when neither variable is set.
