@@ -49,7 +49,8 @@ impl ReplSession {
         let gate = config.gate.clone();
         let verification_cmd = gate.clone().unwrap_or_default();
         let goal = "Interactive REPL session".to_string();
-        let state = blyte_agent::state::State::new(goal, verification_cmd);
+        let mut state = blyte_agent::state::State::new(goal, verification_cmd);
+        state.runtime.conversation = Some(Vec::new());
         Self {
             repo_root: config.repo_root.clone(),
             gate,
@@ -376,8 +377,25 @@ pub fn handle_repl_command<W: Write>(
                 writeln!(writer, "Orchestrator:\n{}", orch).map_err(|e| e.to_string())?;
 
                 // Render runtime state including attempt counts, rollback metrics, and action ledger
-                let rt = serde_json::to_string_pretty(&session.state.runtime)
-                    .map_err(|e| e.to_string())?;
+                let mut rt_without_conv = session.state.runtime.clone();
+                let conv = rt_without_conv.conversation.take();
+                let rt_json =
+                    serde_json::to_string_pretty(&rt_without_conv).map_err(|e| e.to_string())?;
+                let rt = if let Some(msgs) = conv {
+                    let conv_line = format!("  conversation: {} messages", msgs.len());
+                    let lines: Vec<&str> = rt_json.lines().collect();
+                    if lines.len() >= 2 {
+                        let mut out_lines = Vec::new();
+                        out_lines.push(lines[0]);
+                        out_lines.push(&conv_line);
+                        out_lines.extend_from_slice(&lines[1..]);
+                        out_lines.join("\n")
+                    } else {
+                        conv_line
+                    }
+                } else {
+                    rt_json
+                };
                 writeln!(writer, "Runtime:\n{}", rt).map_err(|e| e.to_string())?;
 
                 Ok(ReplControl::Handled)
@@ -423,8 +441,12 @@ pub fn handle_repl_command<W: Write>(
             }
             "/clear" => {
                 session.state.runtime = blyte_agent::state::Runtime::default();
-                writeln!(writer, "Session history cleared and working state reset.")
-                    .map_err(|e| e.to_string())?;
+                session.state.runtime.conversation = Some(Vec::new());
+                writeln!(
+                    writer,
+                    "Conversation cleared; the next prompt starts a new one."
+                )
+                .map_err(|e| e.to_string())?;
                 Ok(ReplControl::Handled)
             }
             "/exit" | "/quit" => Ok(ReplControl::Exit),

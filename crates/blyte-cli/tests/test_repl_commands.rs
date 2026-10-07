@@ -2,6 +2,7 @@ use blyte_agent::run::Event;
 use blyte_cli::repl::{
     format_event, handle_repl_command, run_repl_stream, ReplConfig, ReplControl, ReplSession,
 };
+use blyte_provider::Message;
 
 #[test]
 fn test_slash_help() {
@@ -236,4 +237,52 @@ fn test_prompt_submission() {
 fn a_gate_start_renders_as_gate_running() {
     let e = Event::GateStart { attempt: 2 };
     assert_eq!(format_event(&e), "⏳ Gate running (attempt 2)");
+}
+
+#[test]
+fn test_clear_starts_new_conversation() {
+    let config = ReplConfig {
+        repo_root: std::path::PathBuf::from("."),
+        model: None,
+        gate: None,
+        context_strategy: "state-only".to_string(),
+        container: None,
+        max_turns: 60,
+        max_gates: 5,
+        rollback: true,
+    };
+    let mut session = ReplSession::new(&config);
+    session.state.runtime.conversation = Some(vec![Message::User("hi".into())]);
+    let mut out = Vec::new();
+    let res = handle_repl_command(&mut session, "/clear", &mut out).unwrap();
+    assert_eq!(res, ReplControl::Handled);
+    assert_eq!(session.state.runtime.conversation, Some(Vec::new()));
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("Conversation cleared"));
+}
+
+#[test]
+fn test_state_counts_conversation_messages() {
+    let config = ReplConfig {
+        repo_root: std::path::PathBuf::from("."),
+        model: None,
+        gate: None,
+        context_strategy: "state-only".to_string(),
+        container: None,
+        max_turns: 60,
+        max_gates: 5,
+        rollback: true,
+    };
+    let mut session = ReplSession::new(&config);
+    session.state.runtime.conversation = Some(vec![
+        Message::User("secret question".into()),
+        Message::Assistant("secret answer".into()),
+    ]);
+    let mut out = Vec::new();
+    let res = handle_repl_command(&mut session, "/state", &mut out).unwrap();
+    assert_eq!(res, ReplControl::Handled);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("conversation: 2 messages"));
+    assert!(!text.contains("secret question"));
+    assert!(!text.contains("secret answer"));
 }
