@@ -425,3 +425,94 @@ or `orchestrator.rs`.
 **Depends on:** OC2, OC2b, OC3, OC4 (all on `main` before this is dispatched).
 
 **Commit message:** `feat(repl): blyte --orchestrate runs interactive blyte as the orchestrator that dispatches implementers`
+
+## Follow-ups from the real check (2026-10-07)
+
+### Task OC6: show a tool's whole command on its event line
+
+**Goal:** the `● bash <input> -> ...` line cuts the command at 70 characters (`run.rs`, the `input` built
+just before `self.emit(Event::Tool {`), so the user cannot see what the orchestrator ran (a failed
+`blyte dispatch A1 --plan docs/plan.md --plan-task "Task A1: mathx.clam` was unreadable). Show it in full.
+
+**Files:** `crates/blyte-agent/src/run.rs`; new test `crates/blyte-agent/tests/test_tool_event_input.rs`.
+
+**What to build:** in the non-`read` branch, the input is the value of `command`, else `pattern`, else
+`path` (as a string), else `call.arguments.to_string()`, with these changes only:
+- every `\n` is replaced by ` ↵ ` (space, U+21B5, space), and trailing whitespace is trimmed first;
+- the result is cut at 2000 characters (counted with `chars()`), and when cut, `…` is appended.
+Leave the `read` branch (100 characters) and the summary (90 characters) as they are.
+
+**Tests** (model the file on `crates/blyte-agent/tests/test_read_event_range.rs`: a scripted provider, a
+`Runner` with `Conversational`, collecting `Event::Tool` inputs):
+1. a bash call whose `command` is a 150-character single line: the event input equals it exactly;
+2. a bash call with `command` `"echo one\necho two\n"`: input is `echo one ↵ echo two`;
+3. a bash call with a 2500-character `command`: input has 2001 chars and ends with `…`, and its first
+   2000 chars equal the command's first 2000.
+Run: `cargo test -p blyte-agent --test test_tool_event_input`.
+
+**Constraints:** existing tests pass unmodified.
+
+**Depends on:** none. **Siblings:** OC7 (orchestrator.rs) and OC8 (wait.rs) run in parallel in other
+worktrees; do not touch those files.
+
+**Commit message:** `fix(agent): show a tool's whole command on its event line instead of the first 70 characters`
+
+### Task OC7: the orchestrator starts work straight away
+
+**Goal:** in the real check the orchestrator spent 13 turns running `blyte dispatch --help`,
+`blyte review --help`, grepping the environment for API keys and listing `~/.config/blyte` before its
+first dispatch. The skill already documents the commands, and dispatch reports a missing key itself.
+
+**Files:** `crates/blyte-agent/src/orchestrator.rs`; `crates/blyte-agent/tests/test_orchestrator_prompt.rs`.
+
+**What to build:** append this paragraph to `PREAMBLE`, after the existing last paragraph and separated
+from it by one blank line (`\n\n`), wrapped with `\` line continuations like the rest:
+
+"Start on the work at once. The skill below documents every blyte command you need, so do not run
+`--help`, and do not check the environment or `~/.config/blyte` for API keys: `blyte dispatch` reports a
+missing key itself. When the request names a plan, read it and dispatch its independent tasks in your
+first turns."
+
+**Tests:** add to `test_orchestrator_prompt.rs`: `PREAMBLE` contains `do not run \`--help\`` and
+`reports a missing key itself`, and `prompt_sections(...)` output contains that paragraph. Existing
+tests in the file pass unmodified.
+Run: `cargo test -p blyte-agent --test test_orchestrator_prompt`.
+
+**Depends on:** none. **Siblings:** OC6 (run.rs), OC8 (wait.rs) in other worktrees; do not touch them.
+
+**Commit message:** `fix(agent): tell the orchestrator to start on the plan instead of reading --help`
+
+### Task OC8: `blyte wait` gives a just-started dispatch time to appear
+
+**Goal:** the orchestrator ran `blyte dispatch A1 ... > /dev/null 2>&1 & blyte dispatch A2 ... & ...`
+followed at once by a blyte command on those ids, and it exited 1 though both runs started. `blyte
+dispatch` writes `.wt/<id>.start.json` only after it has created the worktree and spawned the agent
+(`dispatch.rs`, around line 494), so `blyte wait A1 A2` straight after `&` finds neither file and
+prints `no dispatch A1 here`, exit 1 (`wait.rs`, the "unknown" check before the loop).
+
+**Files:** `crates/blyte-cli/src/wait.rs` only.
+
+**What to build:** in `wait_in`, replace the one-off unknown check: an id that is not yet known
+(`is_known` false) is treated as pending, polled every `poll` like the others, for up to `grace` from
+the start of the call. If any id is still unknown once `grace` has passed, write `no dispatch <id> here`
+to `err` (one line per such id, in argument order) and return 1, printing nothing to `out` for the
+unknown ids. Ids that become known are handled exactly as today (including their own dead-run grace,
+counted from when they were first seen as looking dead, as today). The overall `timeout` still applies:
+if it passes first, behave as today's timeout (exit 2, `still running: ...` listing the ids not
+finished, unknown ones included). `run` keeps passing its 15 s grace.
+
+**Tests** (in `wait.rs`'s test module, using the existing helpers there):
+1. update the existing unknown-id test to pass a small `grace` (e.g. 50 ms) and assert exit 1 and
+   `no dispatch T9 here`, and that it returned in under 1 s;
+2. a start file and then a summary written by a thread 100 ms after `wait_in` starts (grace 2 s, poll
+   10 ms): exits 0 and prints that run's summary line;
+3. two ids, one with a summary, one never appearing (grace 50 ms): exit 1, `no dispatch` names only the
+   missing one.
+Every other existing test passes; adjust only arguments, not assertions, where a test passed
+`Duration::ZERO` for grace and relies on an unknown id.
+Run: `cargo test -p blyte --lib wait`.
+
+**Depends on:** none. **Siblings:** OC6 (run.rs), OC7 (orchestrator.rs) in other worktrees; do not
+touch them.
+
+**Commit message:** `fix(wait): give a dispatch started just before blyte wait time to write its start file`
