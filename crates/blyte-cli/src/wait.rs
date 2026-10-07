@@ -22,6 +22,7 @@ pub fn run(ids: &[String], any: bool, timeout_secs: u64) -> i32 {
         any,
         Duration::from_secs(timeout_secs),
         Duration::from_secs(2),
+        Duration::from_secs(15),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
@@ -75,8 +76,8 @@ fn format_summary_line(id: &str, summary: &serde_json::Value) -> String {
 
 enum IdStatus {
     Finished(String),
-    Dead(String),
     Running,
+    LooksDead,
 }
 
 fn check_id_status(wt: &Path, id: &str) -> IdStatus {
@@ -96,11 +97,11 @@ fn check_id_status(wt: &Path, id: &str) -> IdStatus {
 
         // 3. dead: otherwise, if wt/<id>.start.json exists. Before declaring a run dead, check
         // wt/<id>.json once more (the run may have written its summary and exited between the two checks);
-        // if it now exists the run is finished. The line is <id> dead - -.
+        // if it now exists the run is finished.
         if let Some(summary) = try_read_summary(wt, id) {
             return IdStatus::Finished(format_summary_line(id, &summary));
         }
-        return IdStatus::Dead(format!("{id} dead - -"));
+        return IdStatus::LooksDead;
     }
 
     IdStatus::Running
@@ -112,12 +113,14 @@ fn is_known(wt: &Path, id: &str) -> bool {
     has_summary || has_start
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn wait_in(
     wt: &Path,
     ids: &[String],
     any: bool,
     timeout: Duration,
     poll: Duration,
+    grace: Duration,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> i32 {
@@ -145,6 +148,7 @@ pub fn wait_in(
 
     let start_time = Instant::now();
     let mut printed = vec![false; unique_ids.len()];
+    let mut first_dead = vec![None; unique_ids.len()];
     let mut printed_count = 0;
 
     loop {
@@ -154,14 +158,28 @@ pub fn wait_in(
                 continue;
             }
             match check_id_status(wt, id) {
-                IdStatus::Finished(line) | IdStatus::Dead(line) => {
+                IdStatus::Finished(line) => {
                     let _ = writeln!(out, "{line}");
                     let _ = out.flush();
                     printed[i] = true;
+                    first_dead[i] = None;
                     printed_count += 1;
                     printed_this_poll = true;
                 }
-                IdStatus::Running => {}
+                IdStatus::Running => {
+                    first_dead[i] = None;
+                }
+                IdStatus::LooksDead => {
+                    let first_seen = *first_dead[i].get_or_insert_with(Instant::now);
+                    if grace.is_zero() || first_seen.elapsed() >= grace {
+                        let _ = writeln!(out, "{id} dead - -");
+                        let _ = out.flush();
+                        printed[i] = true;
+                        first_dead[i] = None;
+                        printed_count += 1;
+                        printed_this_poll = true;
+                    }
+                }
             }
         }
 
@@ -212,6 +230,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -237,6 +256,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -261,6 +281,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -282,6 +303,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -303,6 +325,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -328,6 +351,7 @@ mod tests {
             false,
             Duration::from_millis(50),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -365,6 +389,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -393,6 +418,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -423,6 +449,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -447,6 +474,7 @@ mod tests {
             true,
             Duration::from_millis(50),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -477,6 +505,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -500,6 +529,7 @@ mod tests {
             false,
             Duration::from_millis(50),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
@@ -526,12 +556,101 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
+            Duration::ZERO,
             &mut out,
             &mut err,
         );
         assert_eq!(code, 0);
         assert_eq!(String::from_utf8(out).unwrap(), "T1 verified 41 $0.37\n");
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn finishing_run_within_grace_reports_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        std::fs::write(wt.join("T1.start.json"), format!(r#"{{"pid": {pid}}}"#)).unwrap();
+        let wt_clone = wt.to_path_buf();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::write(
+                wt_clone.join("T1.json"),
+                r#"{"outcome":"verified","turns":3,"cost_usd":0.1}"#,
+            )
+            .unwrap();
+        });
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["T1".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::from_secs(2),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8(out).unwrap(), "T1 verified 3 $0.10\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn dead_run_reported_after_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        std::fs::write(wt.join("T1.start.json"), format!(r#"{{"pid": {pid}}}"#)).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let start = Instant::now();
+        let code = wait_in(
+            wt,
+            &["T1".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::from_millis(150),
+            &mut out,
+            &mut err,
+        );
+        let elapsed = start.elapsed();
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8(out).unwrap(), "T1 dead - -\n");
+        assert!(elapsed >= Duration::from_millis(150));
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn timeout_inside_grace_is_still_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        std::fs::write(wt.join("T1.start.json"), format!(r#"{{"pid": {pid}}}"#)).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["T1".to_string()],
+            false,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 2);
+        assert!(out.is_empty());
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("still running: T1"));
     }
 
     #[test]
