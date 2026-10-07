@@ -8,6 +8,7 @@ pub mod env_file;
 pub mod gate_drift;
 pub mod init;
 pub mod model_review;
+pub mod plan_cmd;
 pub mod plan_section;
 pub mod plans;
 pub mod registry;

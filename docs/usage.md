@@ -263,6 +263,14 @@ dashboard can show plans.
 
 Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. Recording the verdict removes the worktree only when the clean rules allow it (in practice: `redone`, or the work is already merged); otherwise it prints `worktree .wt/<id> kept until wip/<id> is merged` (for `accepted`/`fixed`). A worktree with uncommitted changes is kept. It works even after the worktree has been removed. Without `--verdict`, `blyte review` flags commands that may have changed things outside the worktree under `== host commands`, and reads of other terminals or files outside the repository under `== reads outside the repository`.
 
+### Listing plan tasks (`blyte plan`)
+
+```bash
+blyte plan <path/to/plan.md> [--json]
+```
+
+`blyte plan` lists each task in a plan file with its current state (`merged`, `review`, `running`, `dead`, `ready`, or `waiting`) worked out from `.wt/` and git. For every ready task whose dependencies are merged, it prints the exact `blyte dispatch` command to implement it, checked against the plan headings. Pass `--json` to output the task statuses as JSON.
+
 ## Cleaning finished worktrees (`blyte clean`)
 
 Finished dispatches leave their worktree at `.wt/<id>` and branch `wip/<id>`. Worktrees are cleaned up automatically on review and at the start of new dispatches, or on demand with `blyte clean`:
