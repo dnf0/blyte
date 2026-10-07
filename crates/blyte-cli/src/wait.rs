@@ -78,6 +78,7 @@ enum IdStatus {
     Finished(String),
     Running,
     LooksDead,
+    Unknown,
 }
 
 fn check_id_status(wt: &Path, id: &str) -> IdStatus {
@@ -104,7 +105,7 @@ fn check_id_status(wt: &Path, id: &str) -> IdStatus {
         return IdStatus::LooksDead;
     }
 
-    IdStatus::Running
+    IdStatus::Unknown
 }
 
 fn is_known(wt: &Path, id: &str) -> bool {
@@ -134,16 +135,6 @@ pub fn wait_in(
 
     if unique_ids.is_empty() {
         return 0;
-    }
-
-    // 4. unknown: neither wt/<id>.json nor wt/<id>.start.json exists. Checked once, before waiting:
-    // write no dispatch <id> here to err and return 1 without waiting.
-    for id in &unique_ids {
-        if !is_known(wt, id) {
-            let _ = writeln!(err, "no dispatch {id} here");
-            let _ = err.flush();
-            return 1;
-        }
     }
 
     let start_time = Instant::now();
@@ -180,6 +171,9 @@ pub fn wait_in(
                         printed_this_poll = true;
                     }
                 }
+                IdStatus::Unknown => {
+                    first_dead[i] = None;
+                }
             }
         }
 
@@ -191,7 +185,37 @@ pub fn wait_in(
             return 0;
         }
 
-        if start_time.elapsed() >= timeout {
+        let elapsed = start_time.elapsed();
+
+        if elapsed >= timeout && timeout < grace {
+            let unprinted: Vec<&str> = unique_ids
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !printed[*i])
+                .map(|(_, id)| *id)
+                .collect();
+            let _ = writeln!(err, "still running: {}", unprinted.join(" "));
+            let _ = err.flush();
+            return 2;
+        }
+
+        if elapsed >= grace {
+            let unknown_ids: Vec<&str> = unique_ids
+                .iter()
+                .enumerate()
+                .filter(|(i, id)| !printed[*i] && !is_known(wt, id))
+                .map(|(_, id)| *id)
+                .collect();
+            if !unknown_ids.is_empty() {
+                for id in unknown_ids {
+                    let _ = writeln!(err, "no dispatch {id} here");
+                }
+                let _ = err.flush();
+                return 1;
+            }
+        }
+
+        if elapsed >= timeout {
             let unprinted: Vec<&str> = unique_ids
                 .iter()
                 .enumerate()
@@ -325,7 +349,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             Duration::from_millis(10),
-            Duration::ZERO,
+            Duration::from_millis(50),
             &mut out,
             &mut err,
         );
@@ -651,6 +675,108 @@ mod tests {
         assert!(out.is_empty());
         let err_str = String::from_utf8(err).unwrap();
         assert!(err_str.contains("still running: T1"));
+    }
+
+    #[test]
+    fn summary_without_start_file_written_after_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let wt_clone = wt.to_path_buf();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::write(
+                wt_clone.join("T1.json"),
+                r#"{"outcome":"verified","turns":15,"cost_usd":0.25}"#,
+            )
+            .unwrap();
+        });
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["T1".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::from_secs(2),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8(out).unwrap(), "T1 verified 15 $0.25\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn one_summary_one_never_appearing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        std::fs::write(
+            wt.join("T1.json"),
+            r#"{"outcome":"verified","turns":10,"cost_usd":0.10}"#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["T1".to_string(), "T2".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 1);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("no dispatch T2 here"));
+        assert!(!err_str.contains("no dispatch T1 here"));
+        assert_eq!(String::from_utf8(out).unwrap(), "T1 verified 10 $0.10\n");
+    }
+
+    #[test]
+    fn timeout_before_grace_with_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["T9".to_string()],
+            false,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 2);
+        assert!(out.is_empty());
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("still running: T9"));
+    }
+
+    #[test]
+    fn multiple_unknown_ids_reported_in_argument_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["B".to_string(), "A".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 1);
+        assert!(out.is_empty());
+        let err_str = String::from_utf8(err).unwrap();
+        assert_eq!(err_str, "no dispatch B here\nno dispatch A here\n");
     }
 
     #[test]
