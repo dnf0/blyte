@@ -1,3 +1,9 @@
+## v0.23.0 (2026-10-07)
+
+### Feat
+
+- **provider**: vertex/<model> reaches Gemini through Vertex AI with application-default credentials (#241)
+
 ## v0.22.0 (2026-10-06)
 
 ### Feat
