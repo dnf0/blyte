@@ -333,3 +333,162 @@ fn interleaved_calls_still_encode_one_per_turn() {
     });
     assert_eq!(b["contents"].as_array().unwrap().len(), 5, "{b}");
 }
+
+fn assert_no_consecutive_same_role(contents: &[serde_json::Value]) {
+    for window in contents.windows(2) {
+        assert_ne!(
+            window[0]["role"], window[1]["role"],
+            "consecutive contents must not share a role: {} followed by {}",
+            window[0]["role"], window[1]["role"]
+        );
+    }
+}
+
+#[test]
+fn reply_with_text_and_tool_call_is_one_model_turn() {
+    let msgs = vec![
+        Message::User("go".into()),
+        Message::Assistant("I'll look".into()),
+        Message::ToolCall {
+            id: "call_0".into(),
+            name: "read_file".into(),
+            arguments: json!({"path": "a.rs"}),
+            signature: Some("sig".into()),
+        },
+        Message::ToolResult {
+            id: "call_0".into(),
+            name: "read_file".into(),
+            content: "fn main(){}".into(),
+            is_error: false,
+        },
+    ];
+    let b = gemini().body(&Request {
+        messages: msgs,
+        tools: vec![tool()],
+        ..Default::default()
+    });
+    let contents = b["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3, "{b}");
+    assert_eq!(contents[0]["role"], "user");
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(contents[2]["role"], "user");
+
+    let parts = contents[1]["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0], json!({"text": "I'll look"}));
+    assert_eq!(
+        parts[1],
+        json!({
+            "functionCall": {
+                "name": "read_file",
+                "args": {"path": "a.rs"}
+            },
+            "thoughtSignature": "sig"
+        })
+    );
+
+    assert_no_consecutive_same_role(contents);
+}
+
+#[test]
+fn reply_with_text_and_multiple_tool_calls_joins_into_single_model_turn() {
+    let msgs = vec![
+        Message::User("go".into()),
+        Message::Assistant("a".into()),
+        Message::ToolCall {
+            id: "1".into(),
+            name: "c1".into(),
+            arguments: json!({"path": "a"}),
+            signature: Some("sig1".into()),
+        },
+        Message::ToolCall {
+            id: "2".into(),
+            name: "c2".into(),
+            arguments: json!({"path": "b"}),
+            signature: None,
+        },
+        Message::ToolResult {
+            id: "1".into(),
+            name: "c1".into(),
+            content: "res1".into(),
+            is_error: false,
+        },
+        Message::ToolResult {
+            id: "2".into(),
+            name: "c2".into(),
+            content: "res2".into(),
+            is_error: false,
+        },
+    ];
+    let b = gemini().body(&Request {
+        messages: msgs,
+        ..Default::default()
+    });
+    let contents = b["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3, "{b}");
+    assert_eq!(contents[0]["role"], "user");
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(contents[2]["role"], "user");
+
+    let model_parts = contents[1]["parts"].as_array().unwrap();
+    assert_eq!(model_parts.len(), 3);
+    assert_eq!(model_parts[0], json!({"text": "a"}));
+    assert_eq!(
+        model_parts[1],
+        json!({
+            "functionCall": {"name": "c1", "args": {"path": "a"}},
+            "thoughtSignature": "sig1"
+        })
+    );
+    assert_eq!(
+        model_parts[2],
+        json!({"functionCall": {"name": "c2", "args": {"path": "b"}}})
+    );
+
+    let user_parts = contents[2]["parts"].as_array().unwrap();
+    assert_eq!(user_parts.len(), 2);
+    assert_eq!(
+        user_parts[0],
+        json!({
+            "functionResponse": {
+                "name": "c1",
+                "response": {"output": "res1", "error": false}
+            }
+        })
+    );
+    assert_eq!(
+        user_parts[1],
+        json!({
+            "functionResponse": {
+                "name": "c2",
+                "response": {"output": "res2", "error": false}
+            }
+        })
+    );
+
+    assert_no_consecutive_same_role(contents);
+}
+
+#[test]
+fn assistant_text_with_no_tool_calls_remains_unchanged() {
+    let msgs = vec![
+        Message::User("q".into()),
+        Message::Assistant("answer".into()),
+        Message::User("next".into()),
+    ];
+    let b = gemini().body(&Request {
+        messages: msgs,
+        ..Default::default()
+    });
+    let contents = b["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3, "{b}");
+    assert_eq!(contents[0]["role"], "user");
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(contents[2]["role"], "user");
+
+    assert_eq!(contents[0]["parts"][0], json!({"text": "q"}));
+    assert_eq!(contents[1]["parts"][0], json!({"text": "answer"}));
+    assert_eq!(contents[2]["parts"][0], json!({"text": "next"}));
+
+    assert_no_consecutive_same_role(contents);
+}

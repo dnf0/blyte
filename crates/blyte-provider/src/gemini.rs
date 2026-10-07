@@ -347,9 +347,11 @@ impl Gemini {
                     if let Some(sig) = signature {
                         part["thoughtSignature"] = json!(sig);
                     }
-                    // Calls from one turn are one model content: Gemini signs only the first call
-                    // of a parallel batch, so a batch split into separate turns would be rejected.
-                    if matches!(prev, Some(Message::ToolCall { .. })) {
+                    // Calls from one turn are one model content: either following text in an
+                    // assistant response or a preceding tool call in a parallel batch. Gemini
+                    // signs only the first call of a parallel batch, so a batch split into
+                    // separate turns would be rejected, as would consecutive model turns.
+                    if matches!(prev, Some(Message::ToolCall { .. } | Message::Assistant(_))) {
                         push_part(&mut contents, part);
                     } else {
                         contents.push(json!({"role": "model", "parts": [part]}));
