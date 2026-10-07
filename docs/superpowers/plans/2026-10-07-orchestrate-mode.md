@@ -366,7 +366,7 @@ and literal updates in `crates/blyte-cli/tests/test_repl_commands.rs` / `test_re
    - `/gate <cmd>` when `session.orchestrate`: print `No gate in orchestrate mode.` and change nothing.
    - The banner or `/help` mentions orchestrate mode when it is on (one line).
 6. **SKILL.md**, section "Starting parallel tasks" (around lines 104-117): after the `wait` code block, add:
-   ```markdown
+   ````markdown
    **Under `blyte --orchestrate`** (your commands run in a shell that keeps background jobs alive, but you
    are not told when they exit, and each command times out after 300 s): start each dispatch in the
    background with both outputs redirected, or the command waits for it, then wait with `blyte wait`:
@@ -380,7 +380,7 @@ and literal updates in `crates/blyte-cli/tests/test_repl_commands.rs` / `test_re
    `blyte wait` prints `<id> <outcome> <turns> <cost>` for each run that has finished. Review those, drop them
    from the list and call it again for the rest. Exit 2 means none finished within its timeout (280 s): call
    it again.
-   ```
+   ````
    (Use a four-backtick fence or indentation in the real file so the inner fence nests correctly.)
 7. **`docs/orchestration.md`:** a section `## blyte as the orchestrator` (about 15 lines): starting it
    (`blyte --orchestrate -m vertex/gemini-4-argon`), what it does, that its own shell is not sandboxed while
