@@ -8,6 +8,7 @@ use std::process::Command;
 #[serde(deny_unknown_fields)]
 pub struct DispatchConfig {
     pub gate: Option<String>,
+    pub setup: Option<String>,
     pub model: Option<String>,
     pub max_seconds: Option<u64>,
     pub max_turns: Option<u32>,
@@ -181,6 +182,7 @@ max_turns = 300
 # max_cost = 2.0
 # network = "on"
 # fold_budget = 60000
+# setup = "uv sync"   # prepares each new worktree before the implementer starts
 
 # [dispatch.env]
 # UV_FROZEN = "1"   # settings for every command and the gate; never credentials

@@ -74,6 +74,7 @@ max_turns = 300
 # max_cost = 2.0
 # network = "on"
 # fold_budget = 60000
+# setup = "uv sync"   # prepares each new worktree before the implementer starts
 
 # [dispatch.env]
 # UV_FROZEN = "1"   # settings for every command and the gate; never credentials
@@ -82,6 +83,7 @@ max_turns = 300
 | key | type | meaning |
 |---|---|---|
 | `gate` | string | the check command; several lines are several steps |
+| `setup` | string | a command run once in each new dispatch worktree before the implementer starts, outside the sandbox, with `[dispatch.env]` and `BLYTE_MAIN_CHECKOUT` set; a failure ends the run as `blocked` |
 | `model` | string | model identifier or provider selection |
 | `max_seconds` | integer | wall-clock budget in seconds (default 3600) |
 | `max_turns` | integer | maximum turn budget (default 300) |
@@ -89,6 +91,8 @@ max_turns = 300
 | `fold_budget` | integer | approximate token budget for verbatim tail before folding |
 | `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
+
+The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other).
 
 When `blyte dispatch` uses the gate from `blyte.toml` (not an explicit `--gate` or `--research`),
 it checks whether any check commands run by the repository's CI workflows (`.github/workflows/*.yml`

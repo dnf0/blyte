@@ -114,6 +114,15 @@ pub struct DispatchSummary {
     pub research_report: Option<String>,
 }
 
+fn finish_summary(summary: &DispatchSummary, wt_parent: &Path) -> i32 {
+    let _ = std::fs::create_dir_all(wt_parent);
+    let json_str = serde_json::to_string_pretty(summary).unwrap();
+    let summary_path = wt_parent.join(format!("{}.json", summary.id));
+    let _ = std::fs::write(&summary_path, format!("{json_str}\n"));
+    println!("{json_str}");
+    summary.exit
+}
+
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     // 1. Root repository discovery and worktree preparation
     let out = Command::new("git")
@@ -369,6 +378,49 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             return 2;
         }
     };
+
+    if !args.research {
+        if let Some(ref setup_cmd) = dispatch_cfg.setup {
+            let first_line = setup_cmd.lines().next().unwrap_or("");
+            eprintln!("setup: {first_line}");
+            let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
+            let setup_log_path = wt_parent.join(format!("{}.setup.log", args.id));
+            if let Err(msg) = crate::setup::run_setup(
+                setup_cmd,
+                &worktree_dir,
+                &main_checkout,
+                &dispatch_cfg.env,
+                &setup_log_path,
+                crate::setup::SETUP_TIMEOUT,
+            ) {
+                let outcome = "blocked";
+                let exit = exit_code(outcome);
+                let first_line_err = msg.lines().next().unwrap_or("").to_string();
+                let summary = DispatchSummary {
+                    id: args.id.clone(),
+                    worktree: worktree_dir.display().to_string(),
+                    branch: branch.clone(),
+                    outcome,
+                    exit,
+                    error: Some(first_line_err),
+                    commits: Vec::new(),
+                    changed_files: Vec::new(),
+                    final_message: Some(msg),
+                    turns: 0,
+                    gate_attempts: 0,
+                    gate_failures: Vec::new(),
+                    cost_usd: None,
+                    seconds: 0,
+                    sandbox: args.sandbox.clone(),
+                    log: setup_log_path.display().to_string(),
+                    report: "".to_string(),
+                    gate_source,
+                    research_report: None,
+                };
+                return finish_summary(&summary, &wt_parent);
+            }
+        }
+    }
 
     // 4. Write task file and spawn child process
     let _ = std::fs::create_dir_all(&wt_parent);
@@ -687,11 +739,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         research_report,
     };
 
-    let json_str = serde_json::to_string_pretty(&summary).unwrap();
-    let summary_path = wt_parent.join(format!("{}.json", args.id));
-    let _ = std::fs::write(&summary_path, format!("{json_str}\n"));
-    println!("{json_str}");
-    exit
+    finish_summary(&summary, &wt_parent)
 }
 
 pub fn run_review(args: &ReviewArgs) -> i32 {
