@@ -863,3 +863,59 @@ Run: `cargo test -p blyte --test test_one_word_prompt`.
 **Depends on:** none. **Siblings:** S2 changes `init.rs`; not here.
 
 **Commit message:** `fix(cli): a one-word prompt is an error, so an unknown subcommand never starts an agent`
+
+## Costs on the Claude Code status line (2026-10-07)
+
+Dispatches started from Claude Code are logged with no session, so the status line cannot show what a
+Claude session spent on implementers. Claude Code sets `CLAUDE_CODE_SESSION_ID` in its commands'
+environment, and the same id reaches the status line script as `session_id`; the dispatch child
+inherits it. The usage log falls back to it when `BLYTE_SESSION` is unset.
+
+### Task C1: a usage entry's session falls back to Claude Code's session id
+
+**Goal:** `blyte cost --session <claude session id>` totals the dispatches a Claude Code session started.
+
+**Files:** `crates/blyte-cli/src/usage_log.rs`, `crates/blyte-cli/src/task_runner.rs`, new
+`crates/blyte-cli/tests/test_usage_session.rs`.
+
+**What to build:** in `usage_log.rs`,
+`pub fn session_from(blyte: Option<String>, claude: Option<String>) -> Option<String>`: the first of the
+two that is `Some` and non-empty after trimming, `blyte` first; otherwise `None`. `task_runner.rs` sets
+the entry's `session` to
+`session_from(std::env::var("BLYTE_SESSION").ok(), std::env::var("CLAUDE_CODE_SESSION_ID").ok())`.
+Nothing else changes.
+
+**Tests** (`test_usage_session.rs`): `session_from(Some("b"), Some("c")) == Some("b")`;
+`session_from(None, Some("c")) == Some("c")`; `session_from(Some(""), Some("c")) == Some("c")`;
+`session_from(Some("  "), None) == None`; `session_from(None, None) == None`.
+Run: `cargo test -p blyte --test test_usage_session`.
+
+**Constraints:** existing tests pass unmodified.
+
+**Depends on:** none. **Siblings:** ST1 changes `repl.rs`; not here.
+
+**Commit message:** `feat(usage): log a Claude Code session's dispatches under its session id`
+
+### Task ST1: `/state` summarises the orchestrator instructions
+
+**Goal:** `/state` in the REPL printed the whole system prompt (about 12k characters under
+`--orchestrate`), burying the useful fields.
+
+**Files:** `crates/blyte-cli/src/repl.rs`.
+
+**What to build:** in the `"/state"` arm, before printing `session.state.orchestrator` as JSON, convert
+it to a `serde_json::Value` and, if it is an object with a string field `instructions`, replace that
+field's value with the string `"<N characters>"` where N is the original length in characters. Every
+other field prints as today.
+
+**Tests:** extend the existing `/state` test in `repl.rs` (the one calling
+`handle_repl_command(&mut session, "/state", ...)`): set `session.state.orchestrator.instructions` to a
+600-character string first, then assert the output contains `"<600 characters>"` and does not contain
+the 600-character string.
+Run: `cargo test -p blyte repl`.
+
+**Constraints:** existing tests pass unmodified.
+
+**Depends on:** none. **Siblings:** C1 changes `usage_log.rs` and `task_runner.rs`; not here.
+
+**Commit message:** `fix(repl): /state shows the instructions' length, not the whole prompt`
