@@ -75,6 +75,7 @@ max_turns = 300
 # network = "on"
 # fold_budget = 60000
 # setup = "uv sync"   # prepares each new worktree before the implementer starts
+# allow_read = ["~/.cache/some-tool"]   # extra paths the sandbox may read
 
 # [dispatch.env]
 # UV_FROZEN = "1"   # settings for every command and the gate; never credentials
@@ -84,6 +85,7 @@ max_turns = 300
 |---|---|---|
 | `gate` | string | the check command; several lines are several steps |
 | `setup` | string | a command run once in each new dispatch worktree before the implementer starts, outside the sandbox, with `[dispatch.env]` and `BLYTE_MAIN_CHECKOUT` set; a failure ends the run as `blocked` |
+| `allow_read` | array of strings | extra paths the sandbox may read, for every dispatch; `~/` and `$BLYTE_MAIN_CHECKOUT/` are expanded, otherwise absolute |
 | `model` | string | model identifier or provider selection |
 | `max_seconds` | integer | wall-clock budget in seconds (default 3600) |
 | `max_turns` | integer | maximum turn budget (default 300) |
@@ -92,7 +94,7 @@ max_turns = 300
 | `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
 
-The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other).
+The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other). The sandbox must then be allowed to read the shared virtualenv: `allow_read = ["$BLYTE_MAIN_CHECKOUT/.venv"]`.
 
 When `blyte dispatch` uses the gate from `blyte.toml` (not an explicit `--gate` or `--research`),
 it checks whether any check commands run by the repository's CI workflows (`.github/workflows/*.yml`

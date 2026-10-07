@@ -17,6 +17,8 @@ pub struct DispatchConfig {
     pub network: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allow_read: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
@@ -48,7 +50,42 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
             ));
         }
     }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let main = main_checkout(root).unwrap_or_else(|| root.to_path_buf());
+    expand_allow_read(&config.dispatch.allow_read, home.as_deref(), &main)?;
     Ok(Some(config))
+}
+
+pub fn expand_allow_read(
+    entries: &[String],
+    home: Option<&Path>,
+    main_checkout: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let mut expanded = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry == "~" {
+            let h = home
+                .filter(|p| !p.as_os_str().is_empty())
+                .ok_or_else(|| format!("blyte.toml: cannot expand `{entry}`: HOME is not set"))?;
+            expanded.push(h.to_path_buf());
+        } else if let Some(suffix) = entry.strip_prefix("~/") {
+            let h = home
+                .filter(|p| !p.as_os_str().is_empty())
+                .ok_or_else(|| format!("blyte.toml: cannot expand `{entry}`: HOME is not set"))?;
+            expanded.push(h.join(suffix));
+        } else if entry == "$BLYTE_MAIN_CHECKOUT" {
+            expanded.push(main_checkout.to_path_buf());
+        } else if let Some(suffix) = entry.strip_prefix("$BLYTE_MAIN_CHECKOUT/") {
+            expanded.push(main_checkout.join(suffix));
+        } else if Path::new(entry).is_absolute() {
+            expanded.push(PathBuf::from(entry));
+        } else {
+            return Err(format!(
+                "blyte.toml: allow_read entry `{entry}` is a relative path; paths must be absolute, or start with ~/ or $BLYTE_MAIN_CHECKOUT"
+            ));
+        }
+    }
+    Ok(expanded)
 }
 
 pub fn main_checkout(root: &Path) -> Option<PathBuf> {
@@ -183,6 +220,7 @@ max_turns = 300
 # network = "on"
 # fold_budget = 60000
 # setup = "uv sync"   # prepares each new worktree before the implementer starts
+# allow_read = ["~/.cache/some-tool"]   # extra paths the sandbox may read
 
 # [dispatch.env]
 # UV_FROZEN = "1"   # settings for every command and the gate; never credentials

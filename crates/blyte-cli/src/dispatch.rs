@@ -489,6 +489,22 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
     cmd.arg("--sandbox").arg(&args.sandbox);
     cmd.arg("--network").arg(network);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
+    let config_allow_read = match crate::config::expand_allow_read(
+        &dispatch_cfg.allow_read,
+        home.as_deref(),
+        &main_checkout,
+    ) {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    for r in &config_allow_read {
+        cmd.arg("--allow-read").arg(r);
+    }
     for r in &args.allow_read {
         cmd.arg("--allow-read").arg(r);
     }
