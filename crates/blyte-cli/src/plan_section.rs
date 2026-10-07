@@ -1,5 +1,40 @@
 //! Extract a task section from a plan file.
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Fence {
+    None,
+    Backticks(usize),
+    Tildes(usize),
+}
+
+impl Fence {
+    fn from_opening(trimmed_start: &str) -> Option<Fence> {
+        let bt = trimmed_start.chars().take_while(|&c| c == '`').count();
+        if bt >= 3 && !trimmed_start[bt..].contains('`') {
+            return Some(Fence::Backticks(bt));
+        }
+        let tl = trimmed_start.chars().take_while(|&c| c == '~').count();
+        if tl >= 3 {
+            return Some(Fence::Tildes(tl));
+        }
+        None
+    }
+
+    fn is_closing(&self, trimmed_start: &str) -> bool {
+        match *self {
+            Fence::None => false,
+            Fence::Backticks(min) => {
+                let bt = trimmed_start.chars().take_while(|&c| c == '`').count();
+                bt >= min && trimmed_start[bt..].trim().is_empty()
+            }
+            Fence::Tildes(min) => {
+                let tl = trimmed_start.chars().take_while(|&c| c == '~').count();
+                tl >= min && trimmed_start[tl..].trim().is_empty()
+            }
+        }
+    }
+}
+
 /// The section of `plan` whose heading matches `task`, including the heading line, up to (not
 /// including) the next heading of the same or a higher level (fewer or equal `#`), or the end.
 /// A heading matches when its text after the `#`s, trimmed, equals `task` trimmed, or starts with
@@ -11,13 +46,6 @@ pub fn extract(plan: &str, task: &str) -> Option<String> {
     let task_trimmed = task.trim();
     if task_trimmed.is_empty() {
         return None;
-    }
-
-    #[derive(Copy, Clone, PartialEq, Eq)]
-    enum Fence {
-        None,
-        Backticks(usize),
-        Tildes(usize),
     }
 
     let mut fence = Fence::None;
@@ -33,63 +61,25 @@ pub fn extract(plan: &str, task: &str) -> Option<String> {
         let line_content = line.trim_end_matches(['\r', '\n']);
         let trimmed_start = line_content.trim_start();
 
-        match fence {
-            Fence::None => {
-                let bt = trimmed_start.chars().take_while(|&c| c == '`').count();
-                if bt >= 3 && !trimmed_start[bt..].contains('`') {
-                    fence = Fence::Backticks(bt);
-                    continue;
-                }
-                let tl = trimmed_start.chars().take_while(|&c| c == '~').count();
-                if tl >= 3 {
-                    fence = Fence::Tildes(tl);
-                    continue;
-                }
+        if fence == Fence::None {
+            if let Some(opened) = Fence::from_opening(trimmed_start) {
+                fence = opened;
+                continue;
+            }
 
-                // Check if this line is an ATX heading
-                let hashes = trimmed_start.chars().take_while(|&c| c == '#').count();
-                if hashes > 0 {
-                    let after = &trimmed_start[hashes..];
-                    if after.starts_with(' ') || after.starts_with('\t') || after.is_empty() {
-                        let heading_raw = after.trim();
-                        let heading_text = if let Some(stripped) = heading_raw.strip_suffix('#') {
-                            let stripped_all = stripped.trim_end_matches('#');
-                            if stripped_all.ends_with(' ')
-                                || stripped_all.ends_with('\t')
-                                || stripped_all.is_empty()
-                            {
-                                stripped_all.trim()
-                            } else {
-                                heading_raw
-                            }
-                        } else {
-                            heading_raw
-                        };
-
-                        if matched_start.is_none() {
-                            if heading_matches(heading_text, task_trimmed) {
-                                matched_start = Some(line_offset);
-                                matched_level = hashes;
-                            }
-                        } else if hashes <= matched_level {
-                            matched_end = Some(line_offset);
-                            break;
-                        }
+            if let Some((hashes, heading_text)) = parse_atx_heading(trimmed_start) {
+                if matched_start.is_none() {
+                    if heading_matches(heading_text, task_trimmed) {
+                        matched_start = Some(line_offset);
+                        matched_level = hashes;
                     }
+                } else if hashes <= matched_level {
+                    matched_end = Some(line_offset);
+                    break;
                 }
             }
-            Fence::Backticks(min) => {
-                let bt = trimmed_start.chars().take_while(|&c| c == '`').count();
-                if bt >= min && trimmed_start[bt..].trim().is_empty() {
-                    fence = Fence::None;
-                }
-            }
-            Fence::Tildes(min) => {
-                let tl = trimmed_start.chars().take_while(|&c| c == '~').count();
-                if tl >= min && trimmed_start[tl..].trim().is_empty() {
-                    fence = Fence::None;
-                }
-            }
+        } else if fence.is_closing(trimmed_start) {
+            fence = Fence::None;
         }
     }
 
@@ -97,6 +87,73 @@ pub fn extract(plan: &str, task: &str) -> Option<String> {
         let end = matched_end.unwrap_or(plan.len());
         plan[start..end].to_string()
     })
+}
+
+/// Explain why a task section was not found in `plan`, if due to code block fence issues.
+/// Used only after `extract` returned `None`.
+pub fn explain_missing(plan: &str, task: &str) -> Option<String> {
+    let task_trimmed = task.trim();
+    if task_trimmed.is_empty() {
+        return None;
+    }
+
+    let mut fence = Fence::None;
+    let mut fence_open_line: usize = 0;
+
+    for (idx, line) in plan.split_inclusive('\n').enumerate() {
+        let line_num = idx + 1;
+        let line_content = line.trim_end_matches(['\r', '\n']);
+        let trimmed_start = line_content.trim_start();
+
+        if fence == Fence::None {
+            if let Some(opened) = Fence::from_opening(trimmed_start) {
+                fence = opened;
+                fence_open_line = line_num;
+                continue;
+            }
+        } else if fence.is_closing(trimmed_start) {
+            fence = Fence::None;
+        } else if let Some((_, heading_text)) = parse_atx_heading(trimmed_start) {
+            if heading_matches(heading_text, task_trimmed) {
+                return Some(format!(
+                    "the heading at line {line_num} is inside a code block that opens at line {fence_open_line}; an inner fence may have closed an outer one early (nest with a longer fence such as ```` around ```)"
+                ));
+            }
+        }
+    }
+
+    if fence != Fence::None {
+        Some(format!(
+            "the code block that opens at line {fence_open_line} is never closed, so headings after it are not read"
+        ))
+    } else {
+        None
+    }
+}
+
+fn parse_atx_heading(trimmed_start: &str) -> Option<(usize, &str)> {
+    let hashes = trimmed_start.chars().take_while(|&c| c == '#').count();
+    if hashes > 0 {
+        let after = &trimmed_start[hashes..];
+        if after.starts_with(' ') || after.starts_with('\t') || after.is_empty() {
+            let heading_raw = after.trim();
+            let heading_text = if let Some(stripped) = heading_raw.strip_suffix('#') {
+                let stripped_all = stripped.trim_end_matches('#');
+                if stripped_all.ends_with(' ')
+                    || stripped_all.ends_with('\t')
+                    || stripped_all.is_empty()
+                {
+                    stripped_all.trim()
+                } else {
+                    heading_raw
+                }
+            } else {
+                heading_raw
+            };
+            return Some((hashes, heading_text));
+        }
+    }
+    None
 }
 
 fn heading_matches(heading_text: &str, task_trimmed: &str) -> bool {
@@ -323,6 +380,95 @@ Second implementation.
         assert_eq!(
             extracted,
             Some("### Task B2: first\nFirst implementation.\n\n".to_string())
+        );
+    }
+
+    #[test]
+    fn explain_missing_oc5_shape_unclosed_fence() {
+        let plan = "\
+# Intro
+Some text.
+```markdown
+Line 4
+```bash
+Line 6
+```
+Line 8
+```
+Line 10
+### Task X: y
+Line 12
+";
+        assert_eq!(extract(plan, "Task X"), None);
+        assert_eq!(
+            explain_missing(plan, "Task X"),
+            Some(
+                "the heading at line 11 is inside a code block that opens at line 9; an inner fence may have closed an outer one early (nest with a longer fence such as ```` around ```)".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn explain_missing_heading_inside_closed_fence() {
+        let plan = "\
+# Intro
+```
+### Task X
+```
+Other text.
+";
+        assert_eq!(extract(plan, "Task X"), None);
+        assert_eq!(
+            explain_missing(plan, "Task X"),
+            Some(
+                "the heading at line 3 is inside a code block that opens at line 2; an inner fence may have closed an outer one early (nest with a longer fence such as ```` around ```)".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn explain_missing_unclosed_fence_without_matching_heading() {
+        let plan = "\
+# Intro
+```
+Some code that never closes.
+";
+        assert_eq!(extract(plan, "Task X"), None);
+        assert_eq!(
+            explain_missing(plan, "Task X"),
+            Some(
+                "the code block that opens at line 2 is never closed, so headings after it are not read".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn explain_missing_no_fences_and_no_matching_heading() {
+        let plan = "\
+# Intro
+Some text.
+### Other Task
+More text.
+";
+        assert_eq!(extract(plan, "Task X"), None);
+        assert_eq!(explain_missing(plan, "Task X"), None);
+    }
+
+    #[test]
+    fn explain_missing_heading_inside_tilde_fence() {
+        let plan = "\
+# Intro
+~~~
+### Task X
+~~~
+Other text.
+";
+        assert_eq!(extract(plan, "Task X"), None);
+        assert_eq!(
+            explain_missing(plan, "Task X"),
+            Some(
+                "the heading at line 3 is inside a code block that opens at line 2; an inner fence may have closed an outer one early (nest with a longer fence such as ```` around ```)".to_string()
+            )
         );
     }
 }
