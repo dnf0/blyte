@@ -16,9 +16,12 @@ fn credentials_and_blyte_configuration_do_not_reach_commands() {
     std::env::set_var("BLYTE_MODEL", "gemini-3.8-flash-high");
     std::env::set_var("BLYTE_ANYTHING_ELSE", "x");
     std::env::set_var("UNRELATED_USER_VAR", "kept");
+    // A session id is not configuration: dispatches started from the session must inherit it.
+    std::env::set_var("BLYTE_SESSION", "s-1");
     let probe = "echo ${GEMINI_API_KEY:-unset} ${ANTHROPIC_API_KEY:-unset} \
-                 ${BLYTE_MODEL:-unset} ${BLYTE_ANYTHING_ELSE:-unset} ${UNRELATED_USER_VAR:-unset}";
-    let expected = "unset unset unset unset kept\n";
+                 ${BLYTE_MODEL:-unset} ${BLYTE_ANYTHING_ELSE:-unset} ${UNRELATED_USER_VAR:-unset} \
+                 ${BLYTE_SESSION:-unset}";
+    let expected = "unset unset unset unset kept s-1\n";
 
     let d = tempfile::tempdir().unwrap();
     let root = d.path().canonicalize().unwrap();

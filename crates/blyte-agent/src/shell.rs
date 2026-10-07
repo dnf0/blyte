@@ -31,7 +31,9 @@ use crate::sandbox::Profile;
 /// Variables the harness itself uses, never passed to the commands it runs: provider credentials
 /// (the model could otherwise read them with `env`) and blyte's own configuration (a
 /// `BLYTE_MODEL` in the environment broke the repository's provider tests). Every variable named
-/// `BLYTE_*` is removed as well. Container commands never inherit the host environment.
+/// `BLYTE_*` is removed as well, except `BLYTE_SESSION`: an interactive session's id, which the
+/// dispatches it starts must inherit so the usage log can attribute them. Container commands never
+/// inherit the host environment.
 pub const HARNESS_ENV: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -140,7 +142,8 @@ fn scrub(cmd: &mut Command) {
         cmd.env_remove(name);
     }
     for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("BLYTE_") {
+        let n = name.to_string_lossy();
+        if n.starts_with("BLYTE_") && n != "BLYTE_SESSION" {
             cmd.env_remove(&name);
         }
     }
