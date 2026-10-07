@@ -48,6 +48,8 @@ pub enum Command {
     Cost(CostArgs),
     /// Print Claude Code's status line with blyte costs
     Statusline(StatuslineArgs),
+    /// List a plan's tasks with their state and the command to dispatch each ready one
+    Plan(PlanArgs),
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
@@ -262,6 +264,16 @@ pub struct StatuslineArgs {
     /// Command to generate the base line before appending blyte costs
     #[arg(long, value_name = "COMMAND")]
     pub after: Option<String>,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct PlanArgs {
+    /// Path to the plan markdown file
+    pub plan: PathBuf,
+
+    /// Output task statuses as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]

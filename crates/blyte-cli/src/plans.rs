@@ -75,7 +75,37 @@ fn parse_task_deps(lines: &[&str]) -> Vec<String> {
         return Vec::new();
     }
 
-    extract_task_ids_from_line(&plain)
+    let ids = extract_task_ids_from_line(&plain);
+    if !ids.is_empty() {
+        return ids;
+    }
+
+    if let Some(pos) = lower.find("depends on:") {
+        let after = &plain[pos + "depends on:".len()..];
+        let mut fallback = Vec::new();
+        for token in after.split([',', ';', ' ']) {
+            let t = token
+                .trim()
+                .trim_matches(['.', '*', '`', '_', ':', '(', ')', '[', ']'])
+                .trim();
+            if t.is_empty() || t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("and") {
+                continue;
+            }
+            let id = if t.chars().all(|c| c.is_ascii_digit()) {
+                format!("T{t}")
+            } else {
+                t.to_string()
+            };
+            if !fallback.contains(&id) {
+                fallback.push(id);
+            }
+        }
+        if !fallback.is_empty() {
+            return fallback;
+        }
+    }
+
+    ids
 }
 
 fn extract_task_ids_from_line(line: &str) -> Vec<String> {

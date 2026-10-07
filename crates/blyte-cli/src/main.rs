@@ -62,6 +62,9 @@ fn main() {
             blyte_cli::cli::Command::Statusline(args) => {
                 std::process::exit(blyte_cli::statusline::run(&args));
             }
+            blyte_cli::cli::Command::Plan(args) => {
+                std::process::exit(blyte_cli::plan_cmd::run(&args.plan, args.json));
+            }
             blyte_cli::cli::Command::Skill(args) => match args.action {
                 blyte_cli::cli::SkillAction::Install {
                     project,
