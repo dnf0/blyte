@@ -1244,3 +1244,53 @@ change moves, update it).
 worktree. SL2 edits `skill.rs` but not SKILL.md.
 
 **Commit message:** `feat(orchestrate): start a plan from blyte plan, not from blyte's source`
+
+### Task P1b: dependencies are the plan's own task ids in the "Depends on" clause
+
+**Goal:** `plans::parse_plan` reads `**Depends on:** OC2b, OC3` correctly, and never takes the words of
+the rest of the line as dependencies. Why: before P1 only ids written as `Task X` were read, so most of
+our plans had no dependencies (the dashboard showed no edges, `blyte plan` would call a task ready
+early). P1 added a fallback that takes every word after "Depends on:", which turns
+`**Depends on:** none. **Siblings:** SL2 changes skill.rs` or `C1 (uses x.rs)` into dependencies like
+`Siblings`, `changes`, `x.rs`. Run on `docs/superpowers/plans/2026-10-07-orchestrate-mode.md`, it gives
+OC6 the dependencies `Siblings, OC7, orchestrator.rs, …`.
+
+**Files:** `crates/blyte-cli/src/plans.rs` only (it is based on `wip/P1`, which has P1's
+`plan_cmd.rs`).
+
+**What to build:**
+- Remove P1's fallback block in `parse_task_deps` (the `if let Some(pos) = lower.find("depends on:") {
+  … fallback … }` after `extract_task_ids_from_line`).
+- The **clause** is the text after `depends on:` (on the line with `**`/`__` removed, as now), cut at the
+  first of: `(`, `;`, `. ` or a final `.`, `Siblings:` (any case), and the end of the line.
+- `parse_task_deps` returns, in order of appearance and without repeats: the ids from
+  `extract_task_ids_from_line(clause)` (`Task 3`, `task T2`), then the tokens of the clause (split on
+  commas, spaces and the word `and`, each trimmed of `` ` ``, `*`, `_`, `.`, `:`, `[`, `]`) that are the id
+  of a task in the same plan (exact match, case-sensitive). A clause that is `none` (or starts with
+  `none`) gives no dependencies, as now. The `needs task` line form keeps its current behaviour.
+- `parse_plan` therefore needs the set of task ids before it parses dependencies: collect the ids first
+  (one pass over the headings), then parse each task's dependencies against that set. Keep the public
+  `PlanDoc`/`PlanTask` types unchanged.
+- A dependency on a task that is not in the plan is only kept when written as `Task X`.
+
+**Tests** (in `plans.rs`'s tests module):
+1. `**Depends on:** OC2b, OC3, OC4 (all on main before this is dispatched).` with tasks OC2b, OC3, OC4
+   in the plan: `["OC2b", "OC3", "OC4"]`.
+2. `**Depends on:** none. **Siblings:** SL2 changes skill.rs`: empty.
+3. `**Depends on:** C1. **Siblings:** ST1 changes repl.rs` with C1 and ST1 in the plan: `["C1"]`.
+4. `**Depends on:** S1 (uses setup::run_setup).`: `["S1"]`.
+5. `**Depends on:** U1 and U2`: `["U1", "U2"]`.
+6. `**Depends on:** T1` with tasks T1, T2 (single and short ids): `["T1"]`; and with tasks `A` and `B`,
+   `**Depends on:** A`: `["A"]`.
+7. `Depends on: Task 2` where the plan's task ids are `T1`, `T2` (numeric form): `["T2"]`, as before.
+8. An id that is not a task in the plan (`**Depends on:** X9`) is dropped; `Depends on: Task X9` is kept.
+9. The real plan: `parse_plan(include_str!("../../../docs/superpowers/plans/2026-10-07-orchestrate-mode.md"))`
+   gives OC5 `["OC2", "OC2b", "OC3", "OC4"]`, OC6 empty, U2 `["OC9"]`, S2 `["S1"]`, U3 `["U1", "U2"]`, and no task has a dependency that is
+   not a task id in the plan.
+
+Existing tests in `plans.rs` and `plan_cmd.rs` must pass unmodified. Run `cargo test -q -p blyte --lib
+plans plan_cmd`, then the full gate.
+
+**Depends on:** P1 (dispatch with `--base wip/P1`).
+
+**Commit message:** `fix(plans): dependencies are the plan's task ids in the Depends on clause`
