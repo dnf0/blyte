@@ -184,6 +184,34 @@ fn test_format_event() {
 }
 
 #[test]
+fn test_format_event_turn_full_text() {
+    let text = "x".repeat(299) + "Z";
+    let event = Event::Turn { n: 3, text: &text };
+    let formatted = format_event(&event);
+    assert_eq!(formatted, format!("[Turn 3] {text}"));
+    assert!(formatted.contains('Z'));
+    assert!(!formatted.ends_with("..."));
+}
+
+#[test]
+fn test_format_event_turn_multiline() {
+    let text = "Plan:\n1. a\n2. b\nShall I go ahead?";
+    let event = Event::Turn { n: 1, text };
+    assert_eq!(
+        format_event(&event),
+        "[Turn 1] Plan:\n1. a\n2. b\nShall I go ahead?"
+    );
+}
+
+#[test]
+fn test_format_event_turn_multibyte() {
+    let text = "é".repeat(100);
+    let event = Event::Turn { n: 1, text: &text };
+    let formatted = format_event(&event);
+    assert_eq!(formatted.chars().count(), "[Turn 1] ".len() + 100);
+}
+
+#[test]
 fn test_prompt_submission() {
     let config = ReplConfig {
         repo_root: std::path::PathBuf::from("."),

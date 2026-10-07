@@ -80,13 +80,7 @@ pub enum ReplControl {
 pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
     match event {
         blyte_agent::run::Event::Turn { n, text } => {
-            let preview = if text.chars().count() > 80 {
-                let s: String = text.chars().take(80).collect();
-                format!("{s}...")
-            } else {
-                text.to_string()
-            };
-            format!("[Turn {}] {}", n, preview)
+            format!("[Turn {}] {}", n, text)
         }
         blyte_agent::run::Event::Tool {
             name,
