@@ -399,9 +399,10 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
             .map(|d| d.as_secs())
             .unwrap_or(0),
         repo: crate::usage_log::repo_of(&config.root),
-        session: std::env::var("BLYTE_SESSION")
-            .ok()
-            .filter(|s| !s.is_empty()),
+        session: crate::usage_log::session_from(
+            std::env::var("BLYTE_SESSION").ok(),
+            std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+        ),
         dispatch: std::env::var("BLYTE_DISPATCH_ID")
             .ok()
             .filter(|s| !s.is_empty()),
