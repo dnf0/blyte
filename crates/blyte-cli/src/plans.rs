@@ -45,11 +45,23 @@ pub struct PlanTask {
     pub files: Vec<String>,
 }
 
-fn parse_task_deps(lines: &[&str]) -> Vec<String> {
-    let dep_line = lines.iter().find(|l| {
-        let plain = l.replace("**", "").replace("__", "");
-        plain.to_lowercase().contains("depends on:")
-    });
+fn parse_task_deps(lines: &[&str], plan_task_ids: &HashSet<String>) -> Vec<String> {
+    let dep_line = lines
+        .iter()
+        .find(|l| {
+            let plain = l.replace("**", "").replace("__", "");
+            let trimmed = plain
+                .trim_start()
+                .trim_start_matches(['-', '*', '>'])
+                .trim_start();
+            trimmed.to_lowercase().starts_with("depends on:")
+        })
+        .or_else(|| {
+            lines.iter().find(|l| {
+                let plain = l.replace("**", "").replace("__", "");
+                plain.to_lowercase().contains("depends on:")
+            })
+        });
 
     let target_line = if let Some(l) = dep_line {
         *l
@@ -65,47 +77,66 @@ fn parse_task_deps(lines: &[&str]) -> Vec<String> {
     let plain = target_line.replace("**", "").replace("__", "");
     let lower = plain.to_lowercase();
 
-    if let Some(pos) = lower.find("depends on:") {
-        let after = &lower[pos + "depends on:".len()..];
-        let trimmed = after.trim().trim_matches(['.', '*', '`', '_', ';']).trim();
-        if trimmed == "none" || trimmed.starts_with("none ") || trimmed.starts_with("none,") {
+    let Some(pos) = lower.find("depends on:") else {
+        if lower.contains("none") {
             return Vec::new();
         }
-    } else if lower.contains("none") {
+        return extract_task_ids_from_line(&plain);
+    };
+
+    let after = &plain[pos + "depends on:".len()..];
+
+    let mut cut_end = after.len();
+    if let Some(p) = after.find('(') {
+        cut_end = cut_end.min(p);
+    }
+    if let Some(p) = after.find(';') {
+        cut_end = cut_end.min(p);
+    }
+    if let Some(p) = after.find(". ") {
+        cut_end = cut_end.min(p);
+    }
+    for (i, _) in after.char_indices() {
+        if let Some(sub) = after[i..].get(..9) {
+            if sub.eq_ignore_ascii_case("siblings:") {
+                cut_end = cut_end.min(i);
+                break;
+            }
+        }
+    }
+    let trimmed_end = after.trim_end();
+    if trimmed_end.ends_with('.') {
+        let dot_pos = trimmed_end.len() - 1;
+        cut_end = cut_end.min(dot_pos);
+    }
+
+    let clause = &after[..cut_end];
+
+    let lower_clause = clause.to_lowercase();
+    let trimmed = lower_clause
+        .trim()
+        .trim_matches(['.', '*', '`', '_', ';'])
+        .trim();
+    if trimmed == "none" || trimmed.starts_with("none ") || trimmed.starts_with("none,") {
         return Vec::new();
     }
 
-    let ids = extract_task_ids_from_line(&plain);
-    if !ids.is_empty() {
-        return ids;
-    }
+    let mut result = extract_task_ids_from_line(clause);
 
-    if let Some(pos) = lower.find("depends on:") {
-        let after = &plain[pos + "depends on:".len()..];
-        let mut fallback = Vec::new();
-        for token in after.split([',', ';', ' ']) {
-            let t = token
-                .trim()
-                .trim_matches(['.', '*', '`', '_', ':', '(', ')', '[', ']'])
-                .trim();
-            if t.is_empty() || t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("and") {
-                continue;
-            }
-            let id = if t.chars().all(|c| c.is_ascii_digit()) {
-                format!("T{t}")
-            } else {
-                t.to_string()
-            };
-            if !fallback.contains(&id) {
-                fallback.push(id);
-            }
+    for token in clause.split([',', ' ', '\t', '\r', '\n']) {
+        let t = token
+            .trim()
+            .trim_matches(['`', '*', '_', '.', ':', '[', ']'])
+            .trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("and") {
+            continue;
         }
-        if !fallback.is_empty() {
-            return fallback;
+        if plan_task_ids.contains(t) && !result.contains(&t.to_string()) {
+            result.push(t.to_string());
         }
     }
 
-    ids
+    result
 }
 
 fn extract_task_ids_from_line(line: &str) -> Vec<String> {
@@ -209,6 +240,39 @@ fn parse_task_lane(lines: &[&str], files: &[String]) -> String {
     }
 }
 
+fn parse_task_heading_id_title(h_text: &str) -> Option<(String, String)> {
+    let after_task = h_text.strip_prefix("Task ")?;
+    let (n_part, title_part) = after_task.split_once(':')?;
+    let n = n_part.trim();
+    let (first_word, rest_of_n) = match n.split_once(char::is_whitespace) {
+        Some((w, r)) => (w, r.trim()),
+        None => (n, ""),
+    };
+    if first_word.is_empty() {
+        return None;
+    }
+    let id = if first_word.chars().all(|c| c.is_ascii_digit()) {
+        format!("T{first_word}")
+    } else {
+        first_word.to_string()
+    };
+
+    let raw_title = if rest_of_n.is_empty() {
+        title_part.trim().to_string()
+    } else if title_part.trim().is_empty() {
+        rest_of_n.to_string()
+    } else {
+        format!("{rest_of_n} {}", title_part.trim())
+    };
+
+    let task_title = raw_title.replace('`', "").trim().to_string();
+    if task_title.is_empty() {
+        return None;
+    }
+
+    Some((id, task_title))
+}
+
 pub fn parse_plan(text: &str) -> PlanDoc {
     let mut lines = Vec::new();
     let mut in_fence = false;
@@ -261,6 +325,15 @@ pub fn parse_plan(text: &str) -> PlanDoc {
         }
     }
 
+    let mut plan_task_ids = HashSet::new();
+    for h in &headings {
+        if (2..=4).contains(&h.level) {
+            if let Some((id, _)) = parse_task_heading_id_title(&h.text) {
+                plan_task_ids.insert(id);
+            }
+        }
+    }
+
     let mut tasks = Vec::new();
     let mut decisions = Vec::new();
 
@@ -275,47 +348,20 @@ pub fn parse_plan(text: &str) -> PlanDoc {
         let section_lines = &lines[h.line_idx + 1..end_line];
 
         if (2..=4).contains(&h.level) {
-            if let Some(after_task) = h.text.strip_prefix("Task ") {
-                if let Some((n_part, title_part)) = after_task.split_once(':') {
-                    let n = n_part.trim();
-                    let (first_word, rest_of_n) = match n.split_once(char::is_whitespace) {
-                        Some((w, r)) => (w, r.trim()),
-                        None => (n, ""),
-                    };
-                    if !first_word.is_empty() {
-                        let id = if first_word.chars().all(|c| c.is_ascii_digit()) {
-                            format!("T{first_word}")
-                        } else {
-                            first_word.to_string()
-                        };
+            if let Some((id, task_title)) = parse_task_heading_id_title(&h.text) {
+                let heading = h.text.clone();
+                let deps = parse_task_deps(section_lines, &plan_task_ids);
+                let files = parse_task_files(section_lines);
+                let lane = parse_task_lane(section_lines, &files);
 
-                        let raw_title = if rest_of_n.is_empty() {
-                            title_part.trim().to_string()
-                        } else if title_part.trim().is_empty() {
-                            rest_of_n.to_string()
-                        } else {
-                            format!("{rest_of_n} {}", title_part.trim())
-                        };
-
-                        let task_title = raw_title.replace('`', "").trim().to_string();
-
-                        if !task_title.is_empty() {
-                            let heading = h.text.clone();
-                            let deps = parse_task_deps(section_lines);
-                            let files = parse_task_files(section_lines);
-                            let lane = parse_task_lane(section_lines, &files);
-
-                            tasks.push(PlanTask {
-                                id,
-                                title: task_title,
-                                heading,
-                                deps,
-                                lane,
-                                files,
-                            });
-                        }
-                    }
-                }
+                tasks.push(PlanTask {
+                    id,
+                    title: task_title,
+                    heading,
+                    deps,
+                    lane,
+                    files,
+                });
             }
         }
 
@@ -1775,4 +1821,147 @@ pub fn collect_plans_with_options(
         "generated_at": now,
         "plans": plan_items.into_iter().map(|p| p.val).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_1_depends_on_clause_with_trailing_parens() {
+        let plan = r#"# Test Plan
+### Task OC2b: b
+### Task OC3: c
+### Task OC4: d
+### Task OC5: e
+**Depends on:** OC2b, OC3, OC4 (all on main before this is dispatched).
+"#;
+        let doc = parse_plan(plan);
+        assert_eq!(doc.tasks[3].deps, ["OC2b", "OC3", "OC4"]);
+    }
+
+    #[test]
+    fn test_2_depends_on_none_with_siblings() {
+        let plan = r#"# Test Plan
+### Task SL2: skill
+### Task OC6: repl
+**Depends on:** none. **Siblings:** SL2 changes skill.rs
+"#;
+        let doc = parse_plan(plan);
+        assert!(doc.tasks[1].deps.is_empty());
+    }
+
+    #[test]
+    fn test_3_depends_on_task_with_siblings() {
+        let plan = r#"# Test Plan
+### Task C1: cost
+### Task ST1: state
+### Task X: test
+**Depends on:** C1. **Siblings:** ST1 changes repl.rs
+"#;
+        let doc = parse_plan(plan);
+        assert_eq!(doc.tasks[2].deps, ["C1"]);
+    }
+
+    #[test]
+    fn test_4_depends_on_with_paren_explanation() {
+        let plan = r#"# Test Plan
+### Task S1: setup
+### Task S2: init
+**Depends on:** S1 (uses setup::run_setup).
+"#;
+        let doc = parse_plan(plan);
+        assert_eq!(doc.tasks[1].deps, ["S1"]);
+    }
+
+    #[test]
+    fn test_5_depends_on_u1_and_u2() {
+        let plan = r#"# Test Plan
+### Task U1: usage
+### Task U2: ids
+### Task U3: cost
+**Depends on:** U1 and U2
+"#;
+        let doc = parse_plan(plan);
+        assert_eq!(doc.tasks[2].deps, ["U1", "U2"]);
+    }
+
+    #[test]
+    fn test_6_single_and_short_task_ids() {
+        let plan_t = r#"# Test Plan
+### Task T1: first
+### Task T2: second
+### Task T3: third
+**Depends on:** T1
+"#;
+        let doc_t = parse_plan(plan_t);
+        assert_eq!(doc_t.tasks[2].deps, ["T1"]);
+
+        let plan_ab = r#"# Test Plan
+### Task A: first
+### Task B: second
+**Depends on:** A
+"#;
+        let doc_ab = parse_plan(plan_ab);
+        assert_eq!(doc_ab.tasks[1].deps, ["A"]);
+    }
+
+    #[test]
+    fn test_7_depends_on_numeric_form() {
+        let plan = r#"# Test Plan
+### Task 1: first
+### Task 2: second
+### Task 3: third
+Depends on: Task 2
+"#;
+        let doc = parse_plan(plan);
+        assert_eq!(doc.tasks[0].id, "T1");
+        assert_eq!(doc.tasks[1].id, "T2");
+        assert_eq!(doc.tasks[2].deps, ["T2"]);
+    }
+
+    #[test]
+    fn test_8_non_plan_task_dropped_unless_written_as_task_x() {
+        let plan = r#"# Test Plan
+### Task A: first
+**Depends on:** X9
+### Task B: second
+Depends on: Task X9
+"#;
+        let doc = parse_plan(plan);
+        assert!(doc.tasks[0].deps.is_empty());
+        assert_eq!(doc.tasks[1].deps, ["X9"]);
+    }
+
+    #[test]
+    fn test_9_real_plan() {
+        let doc = parse_plan(include_str!(
+            "../../../docs/superpowers/plans/2026-10-07-orchestrate-mode.md"
+        ));
+        let find = |id: &str| {
+            doc.tasks
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap_or_else(|| panic!("task {id} not found in plan"))
+                .deps
+                .clone()
+        };
+        assert_eq!(find("OC5"), ["OC2", "OC3", "OC4"]);
+        assert!(find("OC6").is_empty());
+        assert_eq!(find("U2"), ["OC9"]);
+        assert_eq!(find("S2"), ["S1"]);
+        assert_eq!(find("U3"), ["U1", "U2"]);
+
+        let plan_ids: HashSet<&str> = doc.tasks.iter().map(|t| t.id.as_str()).collect();
+        for task in &doc.tasks {
+            for dep in &task.deps {
+                assert!(
+                    plan_ids.contains(dep.as_str()),
+                    "task {} has dependency {} which is not a task id in the plan",
+                    task.id,
+                    dep
+                );
+            }
+        }
+    }
 }
