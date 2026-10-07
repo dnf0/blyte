@@ -516,3 +516,44 @@ Run: `cargo test -p blyte --lib wait`.
 touch them.
 
 **Commit message:** `fix(wait): give a dispatch started just before blyte wait time to write its start file`
+
+### Task OC9: say why a plan heading was not found
+
+**Goal:** `blyte dispatch --plan p.md --plan-task "Task X"` printed only `error: no heading "Task X" in
+p.md` when the heading existed but sat after a code block that an inner fence had closed early, so a
+later fence line opened a block that never closed and every heading after it was skipped (2026-10-07,
+this plan's OC5 section). Say so, with line numbers, so the user can fix the plan.
+
+**Files:** `crates/blyte-cli/src/plan_section.rs`, `crates/blyte-cli/src/dispatch.rs` (the
+`None =>` arm after `crate::plan_section::extract`, around line 214).
+
+**What to build:**
+- In `plan_section.rs`, `pub fn explain_missing(plan: &str, task: &str) -> Option<String>`, used only
+  after `extract` returned `None`. It scans the plan with the same fence rules as `extract` (move the
+  heading-text parsing into a shared private helper rather than copying it). Line numbers are 1-based.
+  - If a line inside a fenced block would be a heading matching `task` (same `heading_matches` rule),
+    return `the heading at line {H} is inside a code block that opens at line {F}; an inner fence may
+    have closed an outer one early (nest with a longer fence such as ```` around ```)`, for the first
+    such heading. `F` is the line of the fence that opened the block containing line `H`.
+  - Else, if the plan ends inside an open fenced block, return `the code block that opens at line {F}
+    is never closed, so headings after it are not read`.
+  - Else `None`.
+- In `dispatch.rs`, after the existing error line, when `explain_missing` returns `Some(hint)`, print a
+  second line `  {hint}` to stderr. Exit code stays 2.
+
+**Tests** (in `plan_section.rs`'s test module):
+1. a plan with "```markdown" at line 3, "```bash" at 5, "```" at 7, "```" at 9 (the OC5 shape) and
+   `### Task X: y` at line 11, with no fence after: `extract(plan, "Task X")` is `None` and
+   `explain_missing` returns the "inside a code block that opens at line 9" message naming line 11;
+2. a plan whose only heading `### Task X` is inside a properly closed fenced block (```...```) and no
+   other: the message names that heading's line and the block's opening line;
+3. a plan with an unclosed fence at line 2 and no matching heading anywhere: the "never closed" message
+   naming line 2;
+4. a plan with no fences and no matching heading: `None`;
+5. a heading inside a `~~~` block is reported the same way as test 2.
+Existing tests pass unmodified.
+Run: `cargo test -p blyte --lib plan_section`.
+
+**Depends on:** none.
+
+**Commit message:** `fix(dispatch): say when a plan heading is hidden inside an unclosed code block`
