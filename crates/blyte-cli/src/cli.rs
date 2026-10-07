@@ -284,6 +284,10 @@ pub enum SkillAction {
         #[arg(long)]
         no_default: bool,
 
+        /// Do not set Claude Code's status line
+        #[arg(long)]
+        no_statusline: bool,
+
         /// Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all
         #[arg(
             long,

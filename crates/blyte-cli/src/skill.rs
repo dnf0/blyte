@@ -165,11 +165,99 @@ pub fn remove_default_block(text: &str) -> String {
     format!("{prefix_clean}{suffix}")
 }
 
+pub fn set_status_line(settings: &str) -> Result<Option<String>, String> {
+    let mut val: serde_json::Value = if settings.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(settings).map_err(|e| e.to_string())?
+    };
+
+    let Some(obj) = val.as_object_mut() else {
+        return Err("settings must be a JSON object".to_string());
+    };
+
+    if let Some(sl) = obj.get("statusLine") {
+        if let Some(cmd) = sl.get("command").and_then(|c| c.as_str()) {
+            if cmd.starts_with("blyte statusline") {
+                return Ok(None);
+            }
+        }
+    }
+
+    let command_str = match obj
+        .get("statusLine")
+        .and_then(|sl| sl.get("command"))
+        .and_then(|c| c.as_str())
+    {
+        Some(old) => format!("blyte statusline --after '{}'", old.replace('\'', r"'\''")),
+        None => "blyte statusline".to_string(),
+    };
+
+    let mut sl_map = serde_json::Map::new();
+    sl_map.insert(
+        "type".to_string(),
+        serde_json::Value::String("command".to_string()),
+    );
+    sl_map.insert(
+        "command".to_string(),
+        serde_json::Value::String(command_str),
+    );
+
+    obj.insert("statusLine".to_string(), serde_json::Value::Object(sl_map));
+
+    let mut out = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
+    out.push('\n');
+    Ok(Some(out))
+}
+
+pub fn remove_status_line(settings: &str) -> Result<Option<String>, String> {
+    let mut val: serde_json::Value = if settings.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(settings).map_err(|e| e.to_string())?
+    };
+
+    let Some(obj) = val.as_object_mut() else {
+        return Err("settings must be a JSON object".to_string());
+    };
+
+    let Some(sl) = obj.get("statusLine") else {
+        return Ok(None);
+    };
+
+    let Some(cmd) = sl.get("command").and_then(|c| c.as_str()) else {
+        return Ok(None);
+    };
+
+    const PREFIX: &str = "blyte statusline --after '";
+    if cmd == "blyte statusline" {
+        obj.remove("statusLine");
+    } else if let Some(rest) = cmd.strip_prefix(PREFIX) {
+        if let Some(inside) = rest.strip_suffix('\'') {
+            let old = inside.replace(r"'\''", "'");
+            if let Some(sl_obj) = obj.get_mut("statusLine").and_then(|v| v.as_object_mut()) {
+                sl_obj.insert("command".to_string(), serde_json::Value::String(old));
+            } else {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+    } else {
+        return Ok(None);
+    }
+
+    let mut out = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
+    out.push('\n');
+    Ok(Some(out))
+}
+
 pub fn install_for(
     harness: Harness,
     project: bool,
     force: bool,
     no_default: bool,
+    no_statusline: bool,
 ) -> Result<Vec<PathBuf>, String> {
     let dirs = skill_dirs(harness, project)?;
     let skill_paths: Vec<PathBuf> = dirs.iter().map(|d| d.join("SKILL.md")).collect();
@@ -239,6 +327,51 @@ pub fn install_for(
         written.push(rules_path);
     }
 
+    if harness == Harness::Claude && !project && !no_statusline {
+        let home = home_dir()?;
+        let claude_dir = home.join(".claude");
+        let settings_path = claude_dir.join("settings.json");
+        let backup_path = claude_dir.join("settings.json.blyte-backup");
+
+        let existing = if settings_path.exists() {
+            match std::fs::read_to_string(&settings_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(format!("failed to read {}: {e}", settings_path.display()));
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        match set_status_line(&existing) {
+            Ok(Some(updated)) => {
+                if settings_path.exists() && !backup_path.exists() {
+                    std::fs::copy(&settings_path, &backup_path).map_err(|e| {
+                        format!("failed to create backup {}: {e}", backup_path.display())
+                    })?;
+                }
+                if let Some(parent) = settings_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!("failed to create directory {}: {e}", parent.display())
+                    })?;
+                }
+                std::fs::write(&settings_path, &updated)
+                    .map_err(|e| format!("failed to write {}: {e}", settings_path.display()))?;
+
+                if updated.contains("blyte statusline --after") {
+                    println!("status line: wrapped your status line command");
+                } else {
+                    println!("status line: set to blyte statusline");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("warning: could not update {}: {e}", settings_path.display());
+            }
+        }
+    }
+
     Ok(written)
 }
 
@@ -299,11 +432,36 @@ pub fn uninstall_for(harness: Harness, project: bool) -> Result<Vec<PathBuf>, St
         }
     }
 
+    if harness == Harness::Claude && !project {
+        let home = home_dir()?;
+        let settings_path = home.join(".claude/settings.json");
+        if settings_path.exists() {
+            if let Ok(existing) = std::fs::read_to_string(&settings_path) {
+                match remove_status_line(&existing) {
+                    Ok(Some(updated)) => {
+                        std::fs::write(&settings_path, updated).map_err(|e| {
+                            format!("failed to write {}: {e}", settings_path.display())
+                        })?;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("warning: could not update {}: {e}", settings_path.display());
+                    }
+                }
+            }
+        }
+    }
+
     Ok(changed)
 }
 
-pub fn install(project: bool, force: bool, no_default: bool) -> Result<PathBuf, String> {
-    let written = install_for(Harness::Claude, project, force, no_default)?;
+pub fn install(
+    project: bool,
+    force: bool,
+    no_default: bool,
+    no_statusline: bool,
+) -> Result<PathBuf, String> {
+    let written = install_for(Harness::Claude, project, force, no_default, no_statusline)?;
     Ok(written.into_iter().next().unwrap())
 }
 
