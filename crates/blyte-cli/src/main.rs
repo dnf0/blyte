@@ -48,6 +48,9 @@ fn main() {
             blyte_cli::cli::Command::Status { id, json } => {
                 std::process::exit(blyte_cli::dispatch::run_status(&id, json));
             }
+            blyte_cli::cli::Command::Wait { ids, any, timeout } => {
+                std::process::exit(blyte_cli::wait::run(&ids, any, timeout));
+            }
             blyte_cli::cli::Command::Update { check, rollback } => {
                 std::process::exit(blyte_cli::update::run(check, rollback));
             }

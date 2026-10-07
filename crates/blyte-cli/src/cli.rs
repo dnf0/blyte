@@ -21,6 +21,18 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Wait until dispatched runs finish (all of them, or the first with --any) and print one line per finished run
+    Wait {
+        /// Run ids, as given to `blyte dispatch`
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+        /// Return as soon as at least one run has finished
+        #[arg(long)]
+        any: bool,
+        /// Give up after this many seconds (exit 2); stays under the 300 s shell-command limit
+        #[arg(long, default_value_t = 280)]
+        timeout: u64,
+    },
     /// Install or print the Claude Code skill for the plan, delegate, review workflow
     Skill(SkillArgs),
     /// Replace this binary with the latest release (the old one is kept as blyte.prev)
