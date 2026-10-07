@@ -1294,3 +1294,46 @@ plans plan_cmd`, then the full gate.
 **Depends on:** P1 (dispatch with `--base wip/P1`).
 
 **Commit message:** `fix(plans): dependencies are the plan's task ids in the Depends on clause`
+
+## No gate means no gate step (2026-10-07)
+
+Every orchestrate run ends with "⏳ Gate running (attempt 1) / ✓ Gate passed (attempt 1)", although orchestrate
+mode has no gate (spec decision 6). With no `--gate`, the REPL's `verification_cmd` is `""`
+(`repl.rs` `Session::new`), and the agent loop (`blyte-agent/src/run.rs`, the block that increments
+`report.gate_attempts` and calls `self.run_gate`) still runs that empty command: an instant no-op that
+takes a gate slot, emits `GateStart`/`Gate` events and counts an attempt. The same happens for any
+interactive or one-shot run without a gate.
+
+### Task G2: an empty gate is skipped, not run
+
+**Goal:** when the verification command is empty (after `trim()`), the loop finishes as it does after a
+passing gate (`Outcome::Verified`) without running anything: no `run_gate` call, no shell command, no gate
+slot, no `GateStart` or `Gate` event, and `report.gate_attempts`, `gate_turns`, `gate_ms`, `gate_wait_ms`
+stay empty. Why: the misleading "Gate running/passed" lines after every orchestrator reply, and a wasted
+gate slot.
+
+**Files:** `crates/blyte-agent/src/run.rs`; a new test file `crates/blyte-agent/tests/test_empty_gate.rs`.
+
+**What to build:** at the point where the loop would start a gate attempt (just before
+`report.gate_attempts += 1`), if `state.orchestrator.verification_cmd.trim().is_empty()`, return
+`(Outcome::Verified, report)`. Leave the earlier blocked-at-base check alone (it only applies after a
+failed gate, which cannot happen without one). A non-empty gate behaves exactly as now.
+
+**Tests** (`test_empty_gate.rs`; build the loop the way the existing gate tests in `crates/blyte-agent/tests/`
+do, such as `test_gate_failures.rs` or `test_gate_wait_report.rs`, with a scripted model that replies with
+a final answer and no tool calls):
+1. Empty gate `""`: outcome `Verified`, `report.gate_attempts == 0`, no `GateStart` and no `Gate` event in the
+   collected events.
+2. Whitespace gate `"  \n"`: same as 1.
+3. Gate `"true"`: outcome `Verified`, `gate_attempts == 1`, one `GateStart` event (the existing behaviour,
+   pinned).
+4. Gate `"false"` with `max_gates` 1: not `Verified` (pinned as now).
+
+Run `cargo test -q -p blyte-agent --test test_empty_gate`, then the full gate.
+
+**Constraints:** existing tests pass unmodified; if one asserts a gate attempt with an empty gate, stop and
+say which in your report instead of changing it.
+
+**Depends on:** none.
+
+**Commit message:** `fix(agent): an empty gate is skipped instead of run`
