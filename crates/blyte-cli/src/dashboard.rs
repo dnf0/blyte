@@ -1310,7 +1310,11 @@ pub fn route(path: &str, src: &Sources) -> (u16, &'static str, Vec<u8>) {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let val = crate::plans::collect_plans(src, now);
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let running_only = query
+                .split('&')
+                .any(|p| p == "running=1" || p == "running=true");
+            let val = crate::plans::collect_plans_filtered(src, now, running_only);
             let body = serde_json::to_vec(&val).unwrap_or_default();
             (200, "application/json", body)
         }

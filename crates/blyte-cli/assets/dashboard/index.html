@@ -1354,6 +1354,8 @@
       renderTable();
     }
 
+    let jobsPollTimeout = null;
+
     async function fetchJobs() {
       try {
         const res = await fetch("/api/jobs");
@@ -1366,6 +1368,8 @@
       } catch (err) {
         isOnline = false;
         render(true);
+      } finally {
+        jobsPollTimeout = setTimeout(fetchJobs, 5000);
       }
     }
 
@@ -1386,7 +1390,8 @@
     let currentPlansData = null;
     let selectedPlanKey = null;
     let selectedTaskId = null;
-    let plansPollInterval = null;
+    let plansPollTimeout = null;
+    let plansPollingActive = false;
 
     try {
       selectedPlanKey = localStorage.getItem("blyte_selected_plan");
@@ -1912,7 +1917,7 @@
 
     async function fetchPlans() {
       try {
-        const res = await fetch("/api/plans");
+        const res = await fetch("/api/plans?running=1");
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
         const allPlans = data.plans || [];
@@ -1948,19 +1953,24 @@
       } catch (err) {
         isOnline = false;
         renderPlans();
+      } finally {
+        if (plansPollingActive) {
+          plansPollTimeout = setTimeout(fetchPlans, 5000);
+        }
       }
     }
 
     function startPlansPolling() {
-      if (plansPollInterval) return;
+      if (plansPollingActive) return;
+      plansPollingActive = true;
       fetchPlans();
-      plansPollInterval = setInterval(fetchPlans, 5000);
     }
 
     function stopPlansPolling() {
-      if (plansPollInterval) {
-        clearInterval(plansPollInterval);
-        plansPollInterval = null;
+      plansPollingActive = false;
+      if (plansPollTimeout) {
+        clearTimeout(plansPollTimeout);
+        plansPollTimeout = null;
       }
     }
 
@@ -2050,9 +2060,8 @@
     window.addEventListener("hashchange", syncViewFromHash);
     syncViewFromHash();
 
-    // Initial fetch of jobs and poll every 5 seconds
+    // Initial fetch of jobs (subsequent fetches scheduled via setTimeout)
     fetchJobs();
-    setInterval(fetchJobs, 5000);
   </script>
 </body>
 </html>
