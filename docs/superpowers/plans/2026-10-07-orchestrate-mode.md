@@ -919,3 +919,53 @@ Run: `cargo test -p blyte repl`.
 **Depends on:** none. **Siblings:** C1 changes `usage_log.rs` and `task_runner.rs`; not here.
 
 **Commit message:** `fix(repl): /state shows the instructions' length, not the whole prompt`
+
+## Read access from blyte.toml (2026-10-07)
+
+On `provision-deployment` the setup `ln -sfn /home/ubuntu/repos/provision/.venv .venv` works, but the
+sandboxed implementer and gate then read the main checkout's `.venv`, which needs
+`--allow-read /home/ubuntu/repos/provision/.venv` on every dispatch. `blyte.toml` has no key for it,
+and an unknown key fails to parse (`deny_unknown_fields`), so it cannot be set there.
+
+### Task A1: `[dispatch].allow_read` in blyte.toml
+
+**Goal:** a repository can give its dispatches extra read access (such as a shared virtualenv) in
+`blyte.toml`, not only with `--allow-read` on each dispatch.
+
+**Files:** `crates/blyte-cli/src/config.rs`, `crates/blyte-cli/src/dispatch.rs`, `docs/usage.md`, new
+`crates/blyte-cli/tests/test_config_allow_read.rs`.
+
+**What to build:**
+- `DispatchConfig` gains `#[serde(default)] pub allow_read: Vec<String>`. The commented template in
+  `config.rs` gains `# allow_read = ["~/.cache/some-tool"]   # extra paths the sandbox may read`.
+- `pub fn expand_allow_read(entries: &[String], home: Option<&Path>, main_checkout: &Path) -> Result<Vec<PathBuf>, String>`
+  in `config.rs`: `~` or a leading `~/` is the home directory, a leading `$BLYTE_MAIN_CHECKOUT` (alone
+  or followed by `/`) is the main checkout; any other entry must be an absolute path. A relative path,
+  or `~` with no home, is an `Err` naming the entry and `blyte.toml`.
+- `load` calls `expand_allow_read` with `dirs`/`HOME` (whatever `config.rs` or the crate already uses
+  for the home directory; `std::env::var_os("HOME")` if nothing) and `main_checkout(root)` falling back
+  to `root`, and returns its error, so a bad entry fails the load with a clear message.
+- `dispatch.rs`: the child gets `--allow-read <path>` for every expanded `allow_read` entry from
+  `blyte.toml` followed by every `--allow-read` given on the command line (both apply; no
+  de-duplication needed).
+- `docs/usage.md`: an `allow_read` row in the key table (`array of strings`, "extra paths the sandbox may
+  read, for every dispatch; `~/` and `$BLYTE_MAIN_CHECKOUT/` are expanded, otherwise absolute"), and in
+  the `setup` paragraph, after the `ln -s` form, add: "The sandbox must then be allowed to read the
+  shared virtualenv: `allow_read = [\"$BLYTE_MAIN_CHECKOUT/.venv\"]`."
+
+**Tests** (`test_config_allow_read.rs`):
+1. `expand_allow_read(["~/x", "~", "$BLYTE_MAIN_CHECKOUT/.venv", "$BLYTE_MAIN_CHECKOUT", "/abs/p"], Some("/h"), "/m")`
+   gives `/h/x`, `/h`, `/m/.venv`, `/m`, `/abs/p` in order.
+2. `"rel/p"` is an `Err` containing `rel/p`; `"~/x"` with `home: None` is an `Err`.
+3. `load` of a temp `blyte.toml` with `allow_read = ["/abs/p"]` succeeds and `dispatch.allow_read`
+   holds it; with `allow_read = ["rel"]` it fails with a message containing `rel` and `blyte.toml`;
+   a file without the key gives an empty list.
+
+Run: `cargo test -p blyte --test test_config_allow_read`.
+
+**Constraints:** existing tests pass unmodified.
+
+**Depends on:** none. **Siblings:** C1 (`usage_log.rs`, `task_runner.rs`) and ST1 (`repl.rs`) run
+separately; not here.
+
+**Commit message:** `feat(config): allow_read in blyte.toml for paths every dispatch may read`
