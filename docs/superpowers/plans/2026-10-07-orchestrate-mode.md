@@ -1085,3 +1085,162 @@ and touches `cli.rs`/`main.rs` too; keep your `cli.rs`/`main.rs` edits to the on
 small. A1, C1 and ST1 are separate as well.
 
 **Commit message:** `feat(skill): installing for Claude Code sets the status line to blyte statusline`
+
+## A faster start for the orchestrator (2026-10-07)
+
+In the C1/ST1 dogfood, the orchestrator spent 14 of its 32 turns before its first dispatch. It grepped the
+plan's headings, read `plan_section.rs` to learn how `--plan-task` matches, listed `.wt`, read old task
+files and summaries to see what had run, and ran `which blyte` and `blyte --version`. One command that
+answers "what is in this plan, what has run, what can I dispatch now, and with what exact command"
+replaces all of that (P1). The orchestrator's instructions then tell it to start there (P2).
+
+### Task P1: `blyte plan <file>` lists a plan's tasks, their state and the dispatch commands
+
+**Goal:** `blyte plan docs/x.md` prints one line per `### Task` in the plan, with its state worked out from
+`.wt/` and git, and for each task that can start, the exact `blyte dispatch` command, already checked
+against the plan with `plan_section::extract`. Why: an orchestrator (blyte or Claude Code) gets everything
+it needs to start from one command instead of reading the plan, `.wt/` and blyte's source.
+
+**Files:** new `crates/blyte-cli/src/plan_cmd.rs`; `crates/blyte-cli/src/lib.rs` (`pub mod plan_cmd;`);
+`crates/blyte-cli/src/cli.rs` (the subcommand); `crates/blyte-cli/src/main.rs` (calls it);
+`docs/usage.md` (a short section).
+
+**CLI:** `blyte plan <PLAN> [--json]`, help text "List a plan's tasks with their state and the command to
+dispatch each ready one". Exit 0 on success; exit 2 with `error: <message>` on stderr when the file
+cannot be read or has no `### Task` sections, or the directory is not in a git repository.
+
+**What to build** in `plan_cmd.rs`:
+
+```rust
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct TaskStatus {
+    pub id: String,
+    pub heading: String,          // PlanTask.heading
+    pub deps: Vec<String>,
+    pub state: String,            // "merged" | "review" | "running" | "dead" | "ready" | "waiting"
+    pub run: Option<String>,      // the run id it was matched to
+    pub outcome: Option<String>,  // the summary's outcome, when there is one
+    pub verdict: Option<String>,
+    pub waiting_on: Vec<String>,  // deps not merged, only for "waiting"
+    pub command: Option<String>,  // only for "ready"
+    pub problem: Option<String>,  // only when the plan-task text does not resolve
+}
+
+/// `root` is the main checkout (holds `.wt/`), `plan_rel` the plan path relative to it, as dispatch takes it.
+pub fn statuses(root: &Path, plan_rel: &str, text: &str) -> Vec<TaskStatus>;
+pub fn render(plan_rel: &str, rows: &[TaskStatus]) -> String;
+pub fn run(plan: &Path, json: bool) -> i32;
+```
+
+- **Tasks:** `crate::plans::parse_plan(text).tasks`, in plan order.
+- **Plan-task text** for a task: `Task <ID>` when the heading starts with `Task <ID>` followed by `:`, space
+  or the end; otherwise the whole heading. It must resolve: `crate::plan_section::extract(text, &t)` is
+  `Some`. If it is `None`, set `problem` to `plan_section::explain_missing(text, &t)` (or
+  `"heading not found"` when that is `None`) and leave `command` empty, whatever the state.
+- **Matching runs:** read every `<root>/.wt/*.start.json`. A start file belongs to a task when its `plan`
+  field names the same file as `plan_rel` (compare `root.join(plan)` and `root.join(plan_rel)` after
+  `canonicalize`, falling back to the joined paths when canonicalize fails) **and** its `plan_task` field
+  is the task's plan-task text, `Task <ID>`, or the full heading. If several match, take the largest
+  `started_at`. The run id is the file name before `.start.json`. Files that do not parse are skipped.
+- **State**, first rule that applies:
+  1. `merged`: a run matched, and either `git merge-base --is-ancestor wip/<run> HEAD` succeeds in
+     `root`, or the branch `wip/<run>` does not exist and `.wt/<run>.verdict.json` has `verdict` `accepted`
+     or `fixed`.
+  2. `review`: a run matched and `.wt/<run>.json` exists (`outcome` from it, `verdict` from
+     `.wt/<run>.verdict.json` if present). A run with verdict `redone` is not `review`: treat the task as
+     if no run matched (go on to rule 5).
+  3. `running`: a run matched, no summary, and the start file's `pid` is alive (`libc::kill(pid, 0) == 0`,
+     pid > 0; copy the small helper from `wait.rs` rather than making that one public).
+  4. `dead`: a run matched, no summary, and the pid is not alive.
+  5. `ready` when every dep is `merged` (deps that are not tasks in this plan count as merged), else
+     `waiting` with `waiting_on` = the deps not merged, in plan order.
+- **Command** for `ready` (and only when `problem` is empty):
+  `blyte dispatch <ID> --plan <plan_rel> --plan-task "<plan-task text>"`.
+- **render** prints a first line `<plan_rel>: N tasks (a merged, b review, c running, d dead, e ready,
+  f waiting)`, leaving out zero counts, then one line per task: id padded to the longest id, state padded
+  to 7, then
+  - merged / waiting: the heading; waiting adds `  (waiting on P1, P2)`;
+  - review: `<outcome>, run <run>: blyte review <run>`;
+  - running / dead: `run <run>: blyte status <run>`;
+  - ready: the command;
+  - and when `problem` is set: `PROBLEM: <problem>` instead of the command.
+- **run:** the root is `crate::config::main_checkout` of the current directory; `plan_rel` is the plan path
+  made relative to the root when it is under it (absolute or `./`-prefixed input both work), else as
+  given. `--json` prints `serde_json::to_string_pretty(&rows)`.
+
+**Tests** (in `plan_cmd.rs`, using a temp git repository with one commit on `main` and a `.wt/` dir;
+helpers to write start/summary/verdict files):
+1. A plan with `### Task A: one` (Depends on: none) and `### Task B: two` (**Depends on:** A), no runs:
+   A is `ready` with command `blyte dispatch A --plan docs/p.md --plan-task "Task A"`; B is `waiting`,
+   `waiting_on == ["A"]`, no command.
+2. A start file for A (`plan` `docs/p.md`, `plan_task` `Task A`, pid of the test process) and no summary:
+   A is `running`, run `A`.
+3. Same with pid `999999` (not alive): `dead`.
+4. A start file plus `.wt/A.json` with `"outcome":"verified"`: `review`, outcome `verified`.
+5. A run whose branch `wip/A1` is an ancestor of HEAD (create the branch at HEAD), run id `A1` different
+   from the task id, `plan_task` `Task A`: A is `merged` with run `A1`, and B is `ready`.
+6. No branch, verdict `accepted`: `merged`. Verdict `redone` with a summary: A is `ready` again.
+7. A start file for the same task in a different plan file: ignored (A stays `ready`).
+8. Two matching start files: the later `started_at` wins.
+9. A heading `### Setup step` that `parse_plan` returns as a task (check what `parse_plan` does with it;
+   if it does not, use a heading shape it does return that does not start with `Task <ID>`): the command
+   uses the whole heading as `--plan-task`.
+10. `problem` set when extract fails: build a `TaskStatus` path where the plan-task text does not
+    resolve (for example a task heading inside an unclosed fence that `parse_plan` still lists, or test the
+    helper that picks the plan-task text plus `extract` directly) and check `command` is `None` and
+    `problem` is `Some`.
+11. `render` on test 1's rows: the first line is `docs/p.md: 2 tasks (1 ready, 1 waiting)` and B's line
+    ends with `(waiting on A)`.
+12. `run` with a missing file returns 2.
+
+Run: `cargo test -q -p blyte plan_cmd`, then the full gate.
+
+**Constraints:** read-only: it never writes to `.wt/` or git. No new dependencies. Existing tests pass
+unmodified.
+
+**Depends on:** none. **Siblings:** SL1 (`blyte statusline`) and SL2 (`skill install` flag) also edit
+`cli.rs`/`main.rs`/`lib.rs`; they are not in this worktree. Keep your edits there to the new subcommand
+so the merge is small. P2 changes the orchestrator wording separately; do not touch `orchestrator.rs` or
+`SKILL.md`.
+
+**Commit message:** `feat(plan): blyte plan lists a plan's tasks, their state and dispatch commands`
+
+### Task P2: the orchestrator starts from `blyte plan`
+
+**Goal:** the orchestrator preamble and the skill tell the orchestrator to start a plan with `blyte plan`,
+and not to investigate blyte itself. Why: 14 of 32 turns went on that in the dogfood run.
+
+**Files:** `crates/blyte-agent/src/orchestrator.rs` (the preamble text and its tests);
+`crates/blyte-cli/assets/blyte-implementer/SKILL.md`.
+
+**What to change:**
+- In the preamble, add this paragraph after the one about planning and reviewing (adjust only the
+  surrounding line breaks):
+
+  > When the request names a plan, run `blyte plan <file>` first. It lists every task with its state
+  > (merged, review, running, dead, ready, waiting) and, for each ready task, the exact `blyte dispatch`
+  > command, already checked against the plan. Dispatch the ready tasks with those commands as given and
+  > review the ones in `review`. Do not read blyte's source, `.wt/` files or old runs, and do not run
+  > `blyte --version` or `which blyte` to find out how dispatch works: `--plan-task "Task <ID>"` selects the
+  > section headed `### Task <ID>: …`, and dispatch refuses a heading it cannot find. Run `blyte plan`
+  > again after each merge to see what became ready.
+
+- In SKILL.md, section "3. Dispatch", after the `--plan` bullet's first paragraph, add:
+
+  > `blyte plan <plan.md>` lists the plan's tasks, what has run, and the exact dispatch command for each
+  > task that is ready: start there instead of working it out from the plan and `.wt/`.
+
+- Add a test in `orchestrator.rs` that the preamble contains `blyte plan <file>` and
+  `Do not read blyte's source`. If an existing test pins the preamble's exact text or length, update it to
+  the new text.
+
+**Tests:** `cargo test -q -p blyte-agent orchestrator`; then the full gate (the skill text is
+`include_str!`'d, so its tests in `skill.rs` must still pass; if one pins SKILL.md content that this
+change moves, update it).
+
+**Constraints:** no other wording changes. Existing tests pass, apart from text pins updated as above.
+
+**Depends on:** none (it names the command only). **Siblings:** P1 builds `blyte plan`; it is not in this
+worktree. SL2 edits `skill.rs` but not SKILL.md.
+
+**Commit message:** `feat(orchestrate): start a plan from blyte plan, not from blyte's source`
