@@ -46,6 +46,8 @@ pub enum Command {
     },
     /// Show orchestrator and implementer costs
     Cost(CostArgs),
+    /// Print Claude Code's status line with blyte costs
+    Statusline(StatuslineArgs),
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
@@ -253,6 +255,13 @@ pub struct CostArgs {
     /// Output totals as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct StatuslineArgs {
+    /// Command to generate the base line before appending blyte costs
+    #[arg(long, value_name = "COMMAND")]
+    pub after: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
