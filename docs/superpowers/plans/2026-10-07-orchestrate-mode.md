@@ -135,3 +135,162 @@ are already there). Do not change `dispatch.rs`; copying the small liveness chec
 **Siblings.** OC1 changes `format_event` in `repl.rs` in a separate worktree; do not touch `repl.rs`.
 
 **Commit message:** `feat(wait): blyte wait blocks until dispatched runs finish and prints one line per run`
+
+### Task OC3: the conversation continues across prompts in interactive sessions
+
+**Goal.** In interactive `blyte`, every prompt starts a fresh model conversation: `Runner::run_until`
+(`crates/blyte-agent/src/run.rs:586`) builds `history = vec![Message::User(format!("Begin. {goal}"))]` each
+time, and `State` keeps no messages. So when the model asks the user a question and the user answers, the
+answer arrives without the question. Keep the conversation in the session's `State` and continue it on
+the next prompt. One-shot runs and `blyte dispatch` must behave exactly as today.
+
+**Files.** `crates/blyte-agent/src/state.rs`, `crates/blyte-agent/src/run.rs`, `crates/blyte-cli/src/repl.rs`,
+a new test file `crates/blyte-agent/tests/test_conversation.rs`, and `crates/blyte-cli/tests/test_repl_commands.rs`.
+
+**What to build.**
+- `state.rs`, `Runtime` gains two fields (drop `Eq` from `Runtime`'s derives if `Message` is not `Eq`; keep
+  `PartialEq`):
+  ```rust
+  /// The conversation so far, kept across prompts in an interactive session. `None`: each run starts
+  /// fresh (one-shot runs and dispatches). `Some`: the run continues it and stores it back.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub conversation: Option<Vec<blyte_provider::Message>>,
+  /// The goal of the conversation's first prompt; the system prompt is built from it for the whole
+  /// conversation, so it stays identical and its cache holds.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub conversation_goal: Option<String>,
+  ```
+  `Runtime::default()` has both `None`. (Check `blyte-agent` already depends on `blyte-provider`; `run.rs`
+  imports `blyte_provider::Message`.)
+- `run.rs`, `Runner::run_until`:
+  - If `state.runtime.conversation` is `None`: exactly today's behaviour.
+  - If it is `Some(prev)` and `prev` is empty: start as today (`"Begin. {goal}"`), and set
+    `conversation_goal = Some(goal)`.
+  - If it is `Some(prev)` and `prev` is not empty: `history = prev.clone()` followed by
+    `Message::User(goal)` (the new prompt, verbatim, without "Begin.").
+  - The system prompt is built with `conversation_goal` as the goal when it is `Some`, otherwise with
+    `state.orchestrator.goal` (today). Change `system_prompt` to take the goal as a parameter if that is
+    simplest.
+  - On **every** return from `run_until` (verified, gate failed, budget exhausted, errors, interrupted;
+    there are about seven `return`s), when `conversation` is `Some`, store the final `history` back into it.
+    Do this structurally: move the loop body into an inner function that takes `&mut Vec<Message>` and
+    returns `(Outcome, Report)`, and have `run_until` build the history, call it, and store the result.
+  - The turn budget, turn numbering (`Event::Turn { n }` from 1) and the late-budget reminder are per
+    prompt, as today.
+  - The context strategy (`self.context.build(...)`) gets the whole continued history, so `folded` folds
+    across prompts with its first message (the first prompt) kept as the opening.
+- `repl.rs`:
+  - When the session is created (`ReplSession::new`, around line 49-52), set
+    `state.runtime.conversation = Some(Vec::new())`.
+  - `/clear` (line ~424) resets `runtime` to default and then sets `conversation = Some(Vec::new())` again,
+    so the next prompt starts a new conversation. Its message becomes
+    `"Conversation cleared; the next prompt starts a new one."`.
+  - `/state` (line ~371) must not print the messages: print the runtime with `conversation` replaced by a
+    line `conversation: N messages` (and `conversation_goal` as is).
+
+**Tests.**
+- `crates/blyte-agent/tests/test_conversation.rs`, using a scripted provider that records each `Request`
+  (copy the pattern from `crates/blyte-agent/tests/test_parallel_calls.rs` or `test_folded.rs`), the
+  `Conversational` context and no gate (ungated runs stop when the model replies without tool calls):
+  - `second_prompt_continues_the_conversation`: `State` with `conversation = Some(vec![])`; run with goal
+    "first", the model replies text "Which file?"; set `state.orchestrator.goal = "src/a.rs"` and run again;
+    the second run's first request contains, in order, `User("Begin. first")`, an assistant message with
+    "Which file?", and `User("src/a.rs")`.
+  - `system_prompt_is_stable_across_prompts`: in the same setup, the system prompt of the second run's first
+    request equals the first run's, and contains "first", not "src/a.rs".
+  - `without_conversation_each_run_is_fresh`: `conversation = None`; two runs; the second run's first request
+    has exactly one message, `User("Begin. src/a.rs")`; `state.runtime.conversation` is still `None` after.
+  - `conversation_is_stored_after_budget_exhausted`: `max_turns: 1`, the model calls a tool every turn; after
+    the run `conversation` is `Some` and holds the first prompt, the tool call and its result.
+  - `serialized_runtime_without_conversation_is_unchanged`: `serde_json::to_value(Runtime::default())` has
+    no `conversation` key (dispatch reports stay the same).
+- `crates/blyte-cli/tests/test_repl_commands.rs`:
+  - `test_clear_starts_new_conversation`: a session whose `state.runtime.conversation` holds one message;
+    `/clear` leaves it `Some(vec![])` and prints "Conversation cleared".
+  - `test_state_counts_conversation_messages`: with two messages, `/state` output contains
+    `conversation: 2 messages` and not the messages' text.
+
+Run: `cargo test -p blyte-agent --test test_conversation` and `cargo test -p blyte-cli --test test_repl_commands`.
+
+**Constraints.** Existing tests pass unmodified (add the new fields wherever a `Runtime { .. }` literal needs
+them, nothing else). No new dependencies. No change to `task_runner.rs`, `dispatch.rs` or `cli.rs`.
+
+**Depends on:** OC1 (merged).
+
+**Siblings.** OC4 adds `crates/blyte-agent/src/orchestrator.rs` and a line in `crates/blyte-agent/src/lib.rs`
+in a separate worktree; do not create them. OC2/OC2b add `blyte wait`; not here.
+
+**Commit message:** `feat(repl): keep the conversation across prompts so a reply to the model's question has its context`
+
+### Task OC4: the orchestrator's instructions
+
+**Goal.** `blyte --orchestrate` (OC5) needs its system-prompt text: a short orchestrator preamble, the
+blyte-implementer skill, and the user's own rules from `~/.config/blyte/orchestrator.md`. Build that text in
+one new module so OC5 only wires it in.
+
+**Files.** Create `crates/blyte-agent/src/orchestrator.rs`; add `pub mod orchestrator;` to
+`crates/blyte-agent/src/lib.rs` (keep the list's order). Nothing else.
+
+**What to build** (in `orchestrator.rs`):
+```rust
+//! The instructions for `blyte --orchestrate`: blyte as the planner and reviewer that dispatches
+//! implementers, as Claude Code does with the blyte-implementer skill.
+
+/// What the orchestrator is. Stands in for the implementer's opening line.
+pub const PREAMBLE: &str = "\
+You are the orchestrator in a repository. You plan the work, dispatch implementers with \
+`blyte dispatch`, review what they did with `blyte review`, record a verdict, and merge. You do not \
+write the implementation yourself, except for a one-line fix; every other change goes to a dispatch.
+
+You work with a person. When you need a decision that is theirs to make, or you have a plan for them \
+to approve, end your reply with the question and stop: their answer arrives as the next message. Do not \
+ask about choices with a conventional default; pick it, say so, and carry on.
+
+Keep tool output small, since everything you run stays in the conversation: send dispatch output to \
+`/dev/null` (each run's summary is in `.wt/<id>.json`), wait with `blyte wait`, read `blyte review <id>` \
+before any `--diff` and open the diff only for what it flags, and trim long output with `| tail -n 40` or \
+`grep`. When you need a detail from earlier that is no longer in view, re-read it from the plan file or \
+`.wt/<id>.task.md` rather than guessing.";
+
+/// The user's rules file: `$XDG_CONFIG_HOME/blyte/orchestrator.md` when `XDG_CONFIG_HOME` is set and not
+/// empty, else `$HOME/.config/blyte/orchestrator.md`; `None` when neither variable is set.
+pub fn user_rules_path() -> Option<std::path::PathBuf>
+
+/// The file's text, trimmed; `None` if it is missing, unreadable or empty. Longer than
+/// `crate::rules::MAX_RULES_CHARS` characters: cut there, followed by
+/// `"\n\n[cut at {MAX_RULES_CHARS} characters; the rest is in {path}]"` (path displayed in full).
+pub fn load_user_rules(path: &std::path::Path) -> Option<String>
+
+/// The orchestrator sections of the system prompt, in this order:
+/// "## How you work\n{PREAMBLE}\n\n## The blyte-implementer skill\n{skill}\n\n", then, if `user_rules`
+/// is `Some((path, text))`, "## Your rules (from {path})\n{text}\n\n". `skill` is inserted trimmed.
+pub fn prompt_sections(skill: &str, user_rules: Option<(&std::path::Path, &str)>) -> String
+```
+Copy `PREAMBLE` verbatim. `MAX_RULES_CHARS` is the existing public constant in `crates/blyte-agent/src/rules.rs`.
+
+**Tests** (unit tests in `orchestrator.rs`, `tempfile` for files):
+- `user_rules_path_prefers_xdg`, `user_rules_path_falls_back_to_home`, `user_rules_path_ignores_empty_xdg`,
+  `user_rules_path_none_without_home`: test a private helper
+  `fn user_rules_path_from(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf>` that
+  `user_rules_path` calls with the real variables, so the tests do not set environment variables.
+- `load_missing_is_none`, `load_blank_is_none` (a file of spaces and newlines), `load_trims`
+  (`"\n  be brief \n"` → `"be brief"`).
+- `load_caps_long_file`: `MAX_RULES_CHARS + 10` copies of `"é"` → the result starts with exactly
+  `MAX_RULES_CHARS` `"é"`s followed by `"\n\n[cut at "` and ends with the path and `"]"`.
+- `sections_in_order`: `prompt_sections("  SKILL BODY \n", Some((path, "RULES BODY")))` contains
+  `"## How you work"`, `"## The blyte-implementer skill\nSKILL BODY\n"` and `"## Your rules (from "`, in that
+  order, and contains `PREAMBLE`.
+- `sections_without_rules`: `prompt_sections("S", None)` has no `"## Your rules"`.
+- `preamble_names_the_commands`: `PREAMBLE` contains `blyte dispatch`, `blyte review`, `blyte wait` and
+  `/dev/null`.
+
+Run: `cargo test -p blyte-agent orchestrator`.
+
+**Constraints.** No new dependencies. No other file changes; nothing calls the module yet (OC5 does). If clippy
+flags the module as unused, it will not: the items are `pub`.
+
+**Depends on:** none.
+
+**Siblings.** OC3 changes `state.rs`, `run.rs` and `repl.rs` in a separate worktree; do not touch them.
+
+**Commit message:** `feat(agent): orchestrator instructions: preamble, skill and the user's orchestrator.md`

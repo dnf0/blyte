@@ -48,24 +48,38 @@ exported only in the terminal would not reach it; documented, not changed).
    300 s command limit). The orchestrator starts dispatches with `&` and calls `blyte wait --any` in a loop:
    about one turn per five minutes, not per poll. The skill's "Starting parallel tasks" section gains a
    paragraph for this harness. The command timeout itself is unchanged.
-5. **Limits:** 1000 turns; context `verbatim` (Argon has a 1M window; folding loses task text). No wall-clock
-   limit (as today).
+5. **Limits:** 1000 turns per prompt; context `folded` with a 100k-token budget (`--fold-budget 100000`),
+   changed from `verbatim` on 2026-10-07 to bound the size of a long session. Short sessions never fold; the
+   task details that a fold drops are on disk (the plan, `.wt/<id>.task.md`, `.wt/<id>.json`) and the
+   orchestrator re-reads them. No wall-clock limit (as today).
 6. **No gate in orchestrate mode**; `--gate` with `--orchestrate` is an error. The "Task verified in N
    turns" line is replaced by the usage line only.
 7. **Full replies everywhere**: the 80-character cut is removed for all interactive use, not only
    orchestration (it is a bug).
+8. **The conversation continues across prompts, in every interactive session** (user decision, 2026-10-07).
+   Today each prompt starts a fresh history (`run.rs:586`), so an answer to the orchestrator's question
+   arrives without the question. The session keeps its message history and appends each new prompt;
+   the system prompt stays the same for the session so its cache holds. `/clear` drops the history.
+   One-shot runs and dispatches are unchanged.
+9. **Bloat**, since history now grows: the folded budget (5); a usage line after each reply (turns, input,
+   cached and output tokens) so growth is visible; `/clear`; and the orchestrator preamble tells it to keep
+   tool output small (dispatch output to `/dev/null`, `blyte wait`, `blyte review` without `--diff` unless
+   something is flagged, `| tail` on long commands).
 
 ## Not in this change
 
 Token streaming, Ctrl+C cancelling a turn, multi-line input, saving and resuming a session. Each degrades
 the experience; none blocks the setup. Multi-line input is the first follow-up (pasting a plan is common).
 
-## Tasks (plan to follow once agreed)
+## Tasks (plan: `docs/superpowers/plans/2026-10-07-orchestrate-mode.md`)
 
-- **OC1** full replies (`repl.rs` `format_event`). Depends on: none.
-- **OC2** `blyte wait` (new `wait.rs`, its registration in `cli.rs`/`main.rs`, tests). Depends on: none.
-- **OC3** `--orchestrate` (`cli.rs`, `repl.rs`, `run.rs` prompt, `rules.rs` user file, skill paragraph,
-  `docs/cli.md`). Depends on: OC1 (same file), OC2 (same `cli.rs`, and its prompt names `blyte wait`).
+- **OC1** full replies (`repl.rs` `format_event`). Depends on: none. Merged.
+- **OC2** `blyte wait` (new `wait.rs`, `cli.rs`/`main.rs`/`lib.rs`), with follow-up **OC2b** (a grace period
+  before a run counts as dead: the summary is written after the agent child exits). Depends on: none.
+- **OC3** conversation kept across prompts (`state.rs`, `run.rs`, `repl.rs` `/clear` and `/state`). Depends on: OC1.
+- **OC4** orchestrator prompt text and user rules file (new `blyte-agent/src/orchestrator.rs`). Depends on: none.
+- **OC5** `--orchestrate` wiring (`cli.rs`, `main.rs`, `repl.rs`, `run.rs` prompt switch, skill paragraph,
+  `docs/orchestration.md`). Depends on: OC2b, OC3, OC4.
 
 ## Check before merging
 
