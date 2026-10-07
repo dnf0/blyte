@@ -1,3 +1,29 @@
+## v0.24.0 (2026-10-07)
+
+### Feat
+
+- **init**: propose uv sync as the worktree setup for uv repositories
+- **dispatch**: run blyte.toml's setup in each new worktree before the implementer
+- **usage**: blyte cost and the session's combined cost in the REPL
+- **usage**: give interactive sessions and dispatches ids the usage log can attribute
+- **usage**: log every run's tokens and cost to a machine-wide usage file
+- **repl**: blyte --orchestrate runs interactive blyte as the orchestrator that dispatches implementers
+- **repl**: keep the conversation across prompts so a reply to the model's question has its context
+- **agent**: orchestrator instructions: preamble, skill and the user's orchestrator.md
+- **wait**: blyte wait blocks until dispatched runs finish and prints one line per run
+
+### Fix
+
+- **cli**: a one-word prompt is an error, so an unknown subcommand never starts an agent
+- **shell**: let BLYTE_SESSION reach commands so dispatches inherit the session id
+- **dispatch**: say when a plan heading is hidden inside an unclosed code block
+- **gemini**: send a reply's text and tool calls back as one model turn
+- **wait**: give a dispatch started just before blyte wait time to write its start file
+- **agent**: show a tool's whole command on its event line instead of the first 70 characters
+- **agent**: tell the orchestrator to start on the plan instead of reading --help
+- **wait**: wait a grace period before calling a run dead, so a run that is writing its summary is not misreported
+- **repl**: show the model's whole reply instead of cutting it at 80 characters
+
 ## v0.23.1 (2026-10-07)
 
 ### Perf
