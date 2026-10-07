@@ -91,6 +91,9 @@ cargo test'
   `--plan` with its own `--plan-task` name, such as `--plan-task "H2: pin signature is data only"`;
   do not edit the plan file for it. The Plans view shows it as added during the work.
 
+  `blyte plan <plan.md>` lists the plan's tasks, what has run, and the exact dispatch command for each
+  task that is ready: start there instead of working it out from the plan and `.wt/`.
+
 - **The gate:** if the repository has a `blyte.toml`, leave `--gate` out: blyte uses the
   repository's own checks. If it has none, run `blyte init` first. It takes the checks from the
   repository's CI, sets what the environment needs (`[dispatch.env]`, such as `UV_FROZEN`), runs

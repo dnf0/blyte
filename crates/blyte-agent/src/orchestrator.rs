@@ -12,6 +12,14 @@ You are the orchestrator in a repository. You plan the work, dispatch implemente
 `blyte dispatch`, review what they did with `blyte review`, record a verdict, and merge. You do not \
 write the implementation yourself, except for a one-line fix; every other change goes to a dispatch.
 
+When the request names a plan, run `blyte plan <file>` first. It lists every task with its state \
+(merged, review, running, dead, ready, waiting) and, for each ready task, the exact `blyte dispatch` \
+command, already checked against the plan. Dispatch the ready tasks with those commands as given and \
+review the ones in `review`. Do not read blyte's source, `.wt/` files or old runs, and do not run \
+`blyte --version` or `which blyte` to find out how dispatch works: `--plan-task \"Task <ID>\"` selects the \
+section headed `### Task <ID>: …`, and dispatch refuses a heading it cannot find. Run `blyte plan` \
+again after each merge to see what became ready.
+
 You work with a person. When you need a decision that is theirs to make, or you have a plan for them \
 to approve, end your reply with the question and stop: their answer arrives as the next message. Do not \
 ask about choices with a conventional default; pick it, say so, and carry on.
@@ -186,5 +194,11 @@ mod tests {
         assert!(PREAMBLE.contains("blyte review"));
         assert!(PREAMBLE.contains("blyte wait"));
         assert!(PREAMBLE.contains("/dev/null"));
+    }
+
+    #[test]
+    fn preamble_starts_from_blyte_plan() {
+        assert!(PREAMBLE.contains("blyte plan <file>"));
+        assert!(PREAMBLE.contains("Do not read blyte's source"));
     }
 }
