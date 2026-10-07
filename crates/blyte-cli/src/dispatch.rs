@@ -562,6 +562,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "plan_task": args.plan_task,
         "base": args.base,
     });
+    if let Some(session) = crate::usage_log::session_from(
+        std::env::var("BLYTE_SESSION").ok(),
+        std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+    ) {
+        start_json["session"] = serde_json::json!(session);
+    }
     if args.research {
         start_json["research"] = serde_json::json!(true);
     }
