@@ -340,4 +340,7 @@ warns on stderr to remove it.
 |---|---|
 | `BLYTE_MODEL` | default for `--model` |
 | `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENROUTER_API_KEY`, `OLLAMA_HOST`, `OLLAMA_API_KEY` | provider credentials and endpoints; never passed to commands |
+| `GOOGLE_CLOUD_PROJECT`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_CLOUD_LOCATION` | project and location for Vertex AI models (`vertex/<model>`); never passed to commands |
 | `CODEX_HOME` | where the ChatGPT provider looks for `auth.json` (default `~/.codex`) |
+
+Models prefixed with `vertex/` (such as `vertex/gemini-4-argon`) reach Gemini through Vertex AI using Google Cloud Application Default Credentials instead of an API key. Authenticate by running `gcloud auth application-default login`. The cloud project is read from `GOOGLE_CLOUD_PROJECT` (or `CLOUDSDK_CORE_PROJECT`), and the location from `GOOGLE_CLOUD_LOCATION` (default `global`).

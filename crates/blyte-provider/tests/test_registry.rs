@@ -22,12 +22,26 @@ fn clear_provider_env() {
     std::env::remove_var("OPENROUTER_API_KEY");
     std::env::remove_var("BLYTE_MODEL");
     std::env::remove_var("CODEX_HOME");
+    std::env::remove_var("GOOGLE_CLOUD_PROJECT");
+    std::env::remove_var("CLOUDSDK_CORE_PROJECT");
+    std::env::remove_var("GOOGLE_CLOUD_LOCATION");
 }
 
 #[test]
 fn test_detect_provider_kind_by_model_prefix_and_syntax() {
     let _guard = ENV_LOCK.lock().unwrap();
     clear_provider_env();
+
+    // Vertex routing: vertex/ namespace or bare vertex
+    assert_eq!(
+        detect_provider_kind(Some("vertex/gemini-4-argon")),
+        ProviderKind::Gemini
+    );
+    assert_eq!(
+        detect_provider_kind(Some("vertex/gemini-3.8-flash")),
+        ProviderKind::Gemini
+    );
+    assert_eq!(detect_provider_kind(Some("vertex")), ProviderKind::Gemini);
 
     // Anthropic routing: claude prefix or anthropic/ namespace
     assert_eq!(
@@ -120,6 +134,18 @@ fn test_resolve_provider_missing_api_keys() {
     clear_provider_env();
 
     // When keys are missing, resolve_provider propagates the provider-specific MissingKey error
+    match resolve_provider(Some("vertex/gemini-4-argon")) {
+        Err(ProviderError::MissingKey(key)) => assert_eq!(key, "GOOGLE_CLOUD_PROJECT"),
+        Ok(_) => panic!("expected MissingKey(GOOGLE_CLOUD_PROJECT), got Ok"),
+        Err(e) => panic!("expected MissingKey(GOOGLE_CLOUD_PROJECT), got other error: {e}"),
+    }
+
+    match resolve_provider(Some("vertex")) {
+        Err(ProviderError::MissingKey(key)) => assert_eq!(key, "GOOGLE_CLOUD_PROJECT"),
+        Ok(_) => panic!("expected MissingKey(GOOGLE_CLOUD_PROJECT), got Ok"),
+        Err(e) => panic!("expected MissingKey(GOOGLE_CLOUD_PROJECT), got other error: {e}"),
+    }
+
     match resolve_provider(Some("anthropic/claude-3-7-sonnet")) {
         Err(ProviderError::MissingKey(key)) => assert_eq!(key, "ANTHROPIC_API_KEY"),
         Ok(_) => panic!("expected MissingKey(ANTHROPIC_API_KEY), got Ok"),
@@ -153,6 +179,14 @@ fn test_resolve_provider_with_credentials_and_prefix_stripping() {
     std::env::set_var("ANTHROPIC_API_KEY", "mock-key");
     std::env::set_var("GEMINI_API_KEY", "mock-key");
     std::env::set_var("OLLAMA_API_KEY", "mock-key");
+    std::env::set_var("GOOGLE_CLOUD_PROJECT", "mock-project");
+
+    // Strips vertex/ prefix and configures Vertex provider
+    let vertex = resolve_provider(Some("vertex/gemini-4-argon")).unwrap();
+    assert_eq!(vertex.model_id(), "vertex/gemini-4-argon");
+
+    let vertex_bare = resolve_provider(Some("vertex")).unwrap();
+    assert_eq!(vertex_bare.model_id(), "vertex/gemini-3.8-flash");
 
     // Strips anthropic/ prefix and configures Anthropic provider
     let anthropic = resolve_provider(Some("anthropic/claude-3-7-sonnet")).unwrap();

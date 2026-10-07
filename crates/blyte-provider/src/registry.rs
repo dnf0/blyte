@@ -37,6 +37,9 @@ pub enum ProviderKind {
 pub fn detect_provider_kind(model: Option<&str>) -> ProviderKind {
     // 1. Inspect explicit prefix or well-known model family patterns
     if let Some(m) = model {
+        if m.starts_with("vertex/") || m == "vertex" {
+            return ProviderKind::Gemini;
+        }
         if m.starts_with("chatgpt/") || m == "chatgpt" {
             return ProviderKind::ChatGpt;
         }
@@ -89,12 +92,21 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
     // Determine provider kind first so routing logic is unified
     let kind = detect_provider_kind(model);
 
+    let is_vertex = match model {
+        Some(m) => m.starts_with("vertex/") || m == "vertex",
+        None => std::env::var("BLYTE_MODEL")
+            .map(|m| m.starts_with("vertex/") || m == "vertex")
+            .unwrap_or(false),
+    };
+
     // Strip provider prefix from model string if present, treating bare provider names as default
     let clean_model = match model {
         Some("anthropic") | Some("ollama") | Some("gemini") | Some("openai")
-        | Some("openrouter") | Some("chatgpt") => None,
+        | Some("openrouter") | Some("chatgpt") | Some("vertex") => None,
         Some(m) => {
-            let stripped = if let Some(s) = m.strip_prefix("chatgpt/") {
+            let stripped = if let Some(s) = m.strip_prefix("vertex/") {
+                s
+            } else if let Some(s) = m.strip_prefix("chatgpt/") {
                 s
             } else if let Some(s) = m.strip_prefix("openai/") {
                 s
@@ -121,7 +133,11 @@ pub fn resolve_provider(model: Option<&str>) -> Result<Box<dyn Provider>, Provid
     // Instantiate provider adapter and apply stripped model identifier override if provided
     match kind {
         ProviderKind::Gemini => {
-            let mut p = crate::gemini::Gemini::from_env()?;
+            let mut p = if is_vertex {
+                crate::gemini::Gemini::vertex_from_env()?
+            } else {
+                crate::gemini::Gemini::from_env()?
+            };
             if let Some(m) = clean_model {
                 p = p.with_model(m);
             }
@@ -202,4 +218,18 @@ pub fn discover_all_models() -> Vec<(String, Result<Vec<ModelInfo>, ProviderErro
             Err(e) => ("ChatGPT".to_string(), Err(e)),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_provider_kind_vertex() {
+        assert_eq!(
+            detect_provider_kind(Some("vertex/gemini-4-argon")),
+            ProviderKind::Gemini
+        );
+        assert_eq!(detect_provider_kind(Some("vertex")), ProviderKind::Gemini);
+    }
 }
