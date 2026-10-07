@@ -170,9 +170,18 @@ fn main() {
     }
 
     if let Some(ref prompt) = cli.prompt {
-        if prompt.trim().is_empty() {
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
             eprintln!("Error: prompt cannot be empty");
             std::process::exit(1);
+        }
+        if !trimmed.contains(char::is_whitespace) {
+            let cmd = Cli::command();
+            let version = cmd.get_version().unwrap_or(env!("CARGO_PKG_VERSION"));
+            eprintln!(
+                "error: `{trimmed}` is not a blyte command in this build (blyte {version}); a prompt needs more than one word"
+            );
+            std::process::exit(2);
         }
         let config = blyte_cli::task_runner::TaskConfig::from(&cli);
         match blyte_cli::task_runner::run_task(config) {
