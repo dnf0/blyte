@@ -1,3 +1,9 @@
+## v0.23.1 (2026-10-07)
+
+### Perf
+
+- **dashboard**: the Plans view builds only running plans and never overlaps requests (#243)
+
 ## v0.23.0 (2026-10-07)
 
 ### Feat
