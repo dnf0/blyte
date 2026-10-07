@@ -24,6 +24,7 @@ fn test_slash_help() {
     assert_eq!(res, ReplControl::Handled);
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("/help"));
+    assert!(text.contains("/cost"));
     assert!(text.contains("/state"));
     assert!(text.contains("/diff"));
     assert!(text.contains("/gate"));
@@ -302,4 +303,72 @@ fn test_state_counts_conversation_messages() {
     assert!(text.contains("conversation: 2 messages"));
     assert!(!text.contains("secret question"));
     assert!(!text.contains("secret answer"));
+}
+
+#[test]
+fn test_slash_cost() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log_path = tmp.path().join("usage.jsonl");
+
+    let config = ReplConfig {
+        repo_root: std::path::PathBuf::from("."),
+        model: None,
+        gate: None,
+        context_strategy: "state-only".to_string(),
+        container: None,
+        max_turns: 60,
+        max_gates: 5,
+        rollback: true,
+        orchestrate: false,
+        fold_budget: None,
+    };
+    let mut session = ReplSession::new(&config);
+
+    let entry1 = blyte_cli::usage_log::Entry {
+        ts: 1700000000,
+        repo: "/repo/test".into(),
+        session: Some(session.session_id.clone()),
+        dispatch: None,
+        research: false,
+        model: "m1".into(),
+        outcome: "verified".into(),
+        turns: 1,
+        input: 100,
+        cached: 0,
+        output: 50,
+        thinking: 0,
+        cost_usd: Some(0.10),
+    };
+    let entry2 = blyte_cli::usage_log::Entry {
+        ts: 1700000010,
+        repo: "/repo/test".into(),
+        session: Some(session.session_id.clone()),
+        dispatch: Some("disp-1".into()),
+        research: false,
+        model: "m2".into(),
+        outcome: "verified".into(),
+        turns: 3,
+        input: 300,
+        cached: 0,
+        output: 150,
+        thinking: 0,
+        cost_usd: Some(0.25),
+    };
+    blyte_cli::usage_log::append(&log_path, &entry1).unwrap();
+    blyte_cli::usage_log::append(&log_path, &entry2).unwrap();
+
+    let old = std::env::var_os("BLYTE_USAGE_LOG");
+    std::env::set_var("BLYTE_USAGE_LOG", &log_path);
+
+    let mut out = Vec::new();
+    let res = handle_repl_command(&mut session, "/cost", &mut out).unwrap();
+    assert_eq!(res, ReplControl::Handled);
+
+    match old {
+        Some(val) => std::env::set_var("BLYTE_USAGE_LOG", val),
+        None => std::env::remove_var("BLYTE_USAGE_LOG"),
+    }
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("blyte $0.35 (orchestrator $0.10, implementers $0.25 in 1 runs)"));
 }

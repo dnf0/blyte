@@ -44,6 +44,8 @@ pub enum Command {
         #[arg(long)]
         rollback: bool,
     },
+    /// Show orchestrator and implementer costs
+    Cost(CostArgs),
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
@@ -232,6 +234,25 @@ pub struct CleanArgs {
     /// Clean every repository in the registry
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct CostArgs {
+    /// Session identifier to filter by
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
+
+    /// Filter runs at or after this Unix timestamp in seconds
+    #[arg(long, value_name = "UNIX_SECS")]
+    pub since: Option<u64>,
+
+    /// Repository path to filter by
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<PathBuf>,
+
+    /// Output totals as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]

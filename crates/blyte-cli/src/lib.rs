@@ -1,6 +1,7 @@
 pub mod clean;
 pub mod cli;
 pub mod config;
+pub mod cost;
 pub mod dashboard;
 pub mod dispatch;
 pub mod env_file;
