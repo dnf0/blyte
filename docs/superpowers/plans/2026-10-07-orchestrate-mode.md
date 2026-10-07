@@ -504,7 +504,7 @@ finished, unknown ones included). `run` keeps passing its 15 s grace.
 **Tests** (in `wait.rs`'s test module, using the existing helpers there):
 1. update the existing unknown-id test to pass a small `grace` (e.g. 50 ms) and assert exit 1 and
    `no dispatch T9 here`, and that it returned in under 1 s;
-2. a start file and then a summary written by a thread 100 ms after `wait_in` starts (grace 2 s, poll
+2. a summary `.wt/<id>.json` (no start file) written by a thread 100 ms after `wait_in` starts (grace 2 s, poll
    10 ms): exits 0 and prints that run's summary line;
 3. two ids, one with a summary, one never appearing (grace 50 ms): exit 1, `no dispatch` names only the
    missing one.
