@@ -827,15 +827,22 @@ impl<'a> Runner<'a> {
                             .take(100)
                             .collect()
                     } else {
-                        call.arguments
+                        let clean = |s: &str| s.trim_end().replace('\n', " ↵ ");
+                        let text = call
+                            .arguments
                             .get("command")
                             .or_else(|| call.arguments.get("pattern"))
                             .or_else(|| call.arguments.get("path"))
                             .and_then(|v| v.as_str())
-                            .map(|s| s.chars().take(70).collect::<String>())
-                            .unwrap_or_else(|| {
-                                call.arguments.to_string().chars().take(70).collect()
-                            })
+                            .map(clean)
+                            .unwrap_or_else(|| clean(&call.arguments.to_string()));
+                        if text.chars().count() > 2000 {
+                            let mut cut: String = text.chars().take(2000).collect();
+                            cut.push('…');
+                            cut
+                        } else {
+                            text
+                        }
                     };
                     self.emit(Event::Tool {
                         name: &call.name,
