@@ -557,3 +557,36 @@ Run: `cargo test -p blyte --lib plan_section`.
 **Depends on:** none.
 
 **Commit message:** `fix(dispatch): say when a plan heading is hidden inside an unclosed code block`
+
+### Task OC10: a Gemini reply with text and tool calls goes back as one model turn
+
+**Goal:** when Gemini answers with text and tool calls in one response, the loop stores
+`Message::Assistant(text)` followed by `Message::ToolCall`s (`run.rs`, around lines 784-795), and
+`Gemini::body` sends them back as two consecutive `"role": "model"` contents, because only a preceding
+`ToolCall` makes a call join the previous content (`crates/blyte-provider/src/gemini.rs`, the
+`Message::ToolCall` arm of `body`). Gemini returned them as one content; send them back the same way so
+user and model turns alternate.
+
+**Files:** `crates/blyte-provider/src/gemini.rs`; `crates/blyte-provider/tests/test_gemini_wire.rs`.
+
+**What to build:** in the `Message::ToolCall` arm, join the previous content with `push_part` when `prev`
+is `Some(Message::ToolCall { .. })` **or** `Some(Message::Assistant(_))`; otherwise push a new model
+content as today. Update the comment above it to say both cases. Change nothing else (signatures are
+still put on the functionCall part exactly as now).
+
+**Tests** (add to `test_gemini_wire.rs`, using its `gemini()` helper; build `ToolCall`s as the existing
+tests there do):
+1. messages `[User("go"), Assistant("I'll look"), ToolCall(read_file, signature Some("sig")),
+   ToolResult]`: `contents` has 3 entries with roles `user`, `model`, `user`; the model content's
+   `parts` is `[{"text": "I'll look"}, {"functionCall": ..., "thoughtSignature": "sig"}]` in that order;
+2. messages `[User, Assistant("a"), ToolCall(c1), ToolCall(c2), ToolResult, ToolResult]`: one model
+   content with 3 parts (text, c1, c2) and one user content with 2 functionResponse parts;
+3. messages `[User("q"), Assistant("answer"), User("next")]`: 3 contents, roles user, model, user
+   (an assistant text with no call is unchanged);
+4. no two consecutive entries of `contents` share a role in any of the above (assert it in each test).
+Existing tests pass unmodified.
+Run: `cargo test -p blyte-provider --test test_gemini_wire`.
+
+**Depends on:** none. **Siblings:** OC9 (plan_section.rs, dispatch.rs) runs separately; do not touch it.
+
+**Commit message:** `fix(gemini): send a reply's text and tool calls back as one model turn`
