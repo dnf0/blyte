@@ -16,6 +16,7 @@ pub mod report;
 pub mod review_checks;
 pub mod setup;
 pub mod skill;
+pub mod statusline;
 pub mod task_runner;
 pub mod update;
 pub mod usage_log;
