@@ -2,8 +2,31 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, RwLock};
 
 use crate::dashboard::{self, Job, Sources};
+
+static IS_MERGED_GIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+type IsMergedKey = (PathBuf, String, String);
+type IsMergedCache = LazyLock<RwLock<HashMap<IsMergedKey, bool>>>;
+
+static IS_MERGED_CACHE: IsMergedCache = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+pub fn is_merged_git_call_count() -> usize {
+    IS_MERGED_GIT_CALLS.load(Ordering::SeqCst)
+}
+
+pub fn reset_is_merged_git_call_count() {
+    IS_MERGED_GIT_CALLS.store(0, Ordering::SeqCst);
+}
+
+pub fn clear_is_merged_cache() {
+    if let Ok(mut cache) = IS_MERGED_CACHE.write() {
+        cache.clear();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlanDoc {
@@ -730,19 +753,21 @@ fn read_plan_content(
     None
 }
 
-fn is_merged(job: &Job) -> bool {
-    let Some(ref root) = job.root else {
-        return false;
-    };
-    let mut merged_by_branch = false;
-    if let Some(last_commit) = job.commits.last() {
+pub fn is_merged(root: &Path, branch: &str, head: &str) -> bool {
+    let key = (root.to_path_buf(), branch.to_string(), head.to_string());
+    if let Ok(cache) = IS_MERGED_CACHE.read() {
+        if let Some(&res) = cache.get(&key) {
+            return res;
+        }
+    }
+
+    IS_MERGED_GIT_CALLS.fetch_add(1, Ordering::SeqCst);
+
+    let clean_branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    let mut merged = false;
+    if !head.is_empty() {
         if let Ok(output) = std::process::Command::new("git")
-            .args([
-                "branch",
-                "--contains",
-                &last_commit.sha,
-                "--format=%(refname:short)",
-            ])
+            .args(["branch", "--contains", head, "--format=%(refname:short)"])
             .current_dir(root)
             .output()
         {
@@ -750,16 +775,34 @@ fn is_merged(job: &Job) -> bool {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     let b = line.trim();
-                    if !b.is_empty() && !b.starts_with("wip/") && !b.starts_with('(') {
-                        merged_by_branch = true;
+                    if !b.is_empty()
+                        && b != clean_branch
+                        && !b.starts_with("wip/")
+                        && !b.starts_with('(')
+                    {
+                        merged = true;
                         break;
                     }
                 }
             }
         }
     }
-    if merged_by_branch {
-        return true;
+
+    if let Ok(mut cache) = IS_MERGED_CACHE.write() {
+        cache.insert(key, merged);
+    }
+    merged
+}
+
+fn is_job_merged(job: &Job) -> bool {
+    let Some(ref root) = job.root else {
+        return false;
+    };
+    let branch = format!("wip/{}", job.id);
+    if let Some(last_commit) = job.commits.last() {
+        if is_merged(root, &branch, &last_commit.sha) {
+            return true;
+        }
     }
 
     let is_accepted_or_fixed = job
@@ -795,11 +838,11 @@ fn choose_task_job<'a>(jobs: &[&'a Job]) -> Option<&'a Job> {
         return Some(j);
     }
 
-    // 2. else a verified job for which is_merged(job) is true (the latest such one);
+    // 2. else a verified job for which is_job_merged(job) is true (the latest such one);
     if let Some(j) = jobs
         .iter()
         .copied()
-        .filter(|j| j.status == "verified" && is_merged(j))
+        .filter(|j| j.status == "verified" && is_job_merged(j))
         .max_by_key(|j| j.started_at.unwrap_or(0))
     {
         return Some(j);
@@ -838,15 +881,306 @@ struct PlanEvent {
     text: String,
 }
 
+fn job_explicit_plan_relpath(
+    job: &Job,
+    git_names_cache: &mut HashMap<PathBuf, Vec<String>>,
+) -> Option<PathBuf> {
+    let root = job.root.as_ref()?;
+    if let Some(ref p) = job.start_plan {
+        if !p.contains('/') && !p.ends_with(".md") {
+            if let Some(rp) = resolve_bare_stem(root, p, git_names_cache) {
+                Some(rp)
+            } else {
+                Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
+            }
+        } else {
+            Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
+        }
+    } else if let Some(stem) = find_tag_plan_stem(job) {
+        if stem.contains('/') {
+            Some(extract_relpath(
+                root,
+                Path::new(&stem),
+                job.worktree.as_deref(),
+            ))
+        } else {
+            let stem_clean = stem.strip_suffix(".md").unwrap_or(&stem);
+            resolve_bare_stem(root, stem_clean, git_names_cache)
+        }
+    } else if let Some(ref p) = job.plan {
+        Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
+    } else if let Some(ref tf) = job
+        .task_file
+        .as_ref()
+        .filter(|tf| is_plan_task_file(Path::new(tf)))
+    {
+        Some(extract_relpath(
+            root,
+            Path::new(tf),
+            job.worktree.as_deref(),
+        ))
+    } else {
+        first_backticked_plan_path(&job.task)
+            .map(|p| extract_relpath(root, Path::new(&p), job.worktree.as_deref()))
+    }
+}
+
+fn build_standalone_plan(
+    job: &Job,
+    plan_file_abs: &Path,
+    content: &str,
+    doc: &PlanDoc,
+    now: u64,
+) -> Option<PlanItem> {
+    let seven_days = 7 * 24 * 3600;
+    let is_active = job.status == "running"
+        || job
+            .started_at
+            .is_some_and(|st| st >= now.saturating_sub(seven_days));
+    if !is_active {
+        return None;
+    }
+
+    let heading_title = first_heading(content);
+    let title = heading_title.unwrap_or_else(|| job.id.clone());
+    let task_title = title.clone();
+    let task_heading = title.clone();
+
+    let state = if job.status == "running" {
+        "running".to_string()
+    } else if job.verdict.as_deref() == Some("redone") {
+        "redone".to_string()
+    } else if job.status == "verified" {
+        if is_job_merged(job) {
+            "merged".to_string()
+        } else {
+            "verified".to_string()
+        }
+    } else {
+        "failed".to_string()
+    };
+
+    let files = if !job.changed_files.is_empty() {
+        job.changed_files.clone()
+    } else {
+        Vec::new()
+    };
+
+    let task_val = serde_json::json!({
+        "id": job.id,
+        "title": task_title,
+        "heading": task_heading,
+        "lane": "tasks",
+        "deps": [],
+        "state": state,
+        "dispatch": job.key,
+        "now": job.now,
+        "gate_running": job.gate_running,
+        "gate_attempts": job.gate_attempts,
+        "elapsed_s": job.elapsed_s,
+        "cost_usd": job.cost_usd,
+        "turns": job.turns,
+        "files": files,
+        "commits": job.commits,
+        "verdict": job.verdict,
+        "notes": job.verdict_notes,
+        "added": false,
+    });
+
+    let mut events = Vec::new();
+    if let Some(st) = job.started_at {
+        events.push(PlanEvent {
+            at: st,
+            task: job.id.clone(),
+            text: "dispatched".to_string(),
+        });
+    }
+    if job.status != "running" {
+        if let Some(fin) = job.finished_at.or(job.log_mtime) {
+            events.push(PlanEvent {
+                at: fin,
+                task: job.id.clone(),
+                text: job.status.clone(),
+            });
+        }
+    }
+    if let Some(ref v) = job.verdict {
+        if let Some(ts) = job.verdict_ts {
+            events.push(PlanEvent {
+                at: ts,
+                task: job.id.clone(),
+                text: format!("verdict {v}"),
+            });
+        }
+    }
+    events.sort_by_key(|e| std::cmp::Reverse(e.at));
+    let events_json: Vec<serde_json::Value> = events
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "at": e.at,
+                "task": e.task,
+                "text": e.text,
+            })
+        })
+        .collect();
+
+    let mut decisions_json = Vec::new();
+    for d in &doc.decisions {
+        decisions_json.push(serde_json::json!({
+            "text": d,
+            "source": "plan",
+        }));
+    }
+    if let Some(ref notes) = job.verdict_notes {
+        if !notes.trim().is_empty() {
+            decisions_json.push(serde_json::json!({
+                "text": notes,
+                "source": format!("{} verdict note", job.id),
+            }));
+        }
+    }
+
+    let (merged, verified, running, not_started) = match state.as_str() {
+        "merged" => (1, 0, 0, 0),
+        "verified" => (0, 1, 0, 0),
+        "running" => (0, 0, 1, 0),
+        "ready" | "waiting" => (0, 0, 0, 1),
+        _ => (0, 0, 0, 0),
+    };
+    let cost_usd = job.cost_usd.unwrap_or(0.0);
+    let cost_usd = (cost_usd * 100.0).round() / 100.0;
+    let stats_json = serde_json::json!({
+        "tasks": 1,
+        "merged": merged,
+        "verified": verified,
+        "running": running,
+        "not_started": not_started,
+        "cost_usd": cost_usd,
+        "first_dispatch_at": job.started_at,
+        "max_parallel": if running > 0 { 1 } else { 0 },
+    });
+
+    let key = format!("{}/{}", job.repo, job.id);
+    let repo = job.repo.clone();
+    let repos = vec![job.repo.clone()];
+    let lanes = vec![serde_json::json!({
+        "id": "tasks",
+        "label": "Tasks",
+    })];
+    let path_str = plan_file_abs.to_string_lossy().to_string();
+
+    let has_running = running > 0;
+    let latest_activity = events_json
+        .first()
+        .and_then(|e| e["at"].as_u64())
+        .or(job.started_at)
+        .unwrap_or(0);
+
+    let plan_val = serde_json::json!({
+        "key": key,
+        "repo": repo,
+        "repos": repos,
+        "path": path_str,
+        "title": title,
+        "lanes": lanes,
+        "tasks": [task_val],
+        "events": events_json,
+        "decisions": decisions_json,
+        "stats": stats_json,
+    });
+
+    Some(PlanItem {
+        key,
+        has_running,
+        latest_activity,
+        val: plan_val,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollectPlansOptions {
+    pub running_only: bool,
+}
+
 pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
+    collect_plans_with_options(src, now, CollectPlansOptions::default())
+}
+
+pub fn collect_plans_running(src: &Sources, now: u64) -> serde_json::Value {
+    collect_plans_with_options(src, now, CollectPlansOptions { running_only: true })
+}
+
+pub fn collect_plans_filtered(src: &Sources, now: u64, running_only: bool) -> serde_json::Value {
+    collect_plans_with_options(src, now, CollectPlansOptions { running_only })
+}
+
+pub fn collect_plans_with_options(
+    src: &Sources,
+    now: u64,
+    opts: CollectPlansOptions,
+) -> serde_json::Value {
     let mut plan_src = src.clone();
     plan_src.hours = plan_src.hours.max(7 * 24);
     let jobs = dashboard::collect_jobs(&plan_src, now);
 
-    let mut groups: HashMap<PathBuf, Vec<&Job>> = HashMap::new();
     let mut git_names_cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    let mut standalone_plans: Vec<PlanItem> = Vec::new();
     let mut plan_content_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+
+    let (active_plan_files, active_standalone_job_ids) = if opts.running_only {
+        let running_jobs: Vec<&Job> = jobs
+            .iter()
+            .filter(|j| !j.research && j.root.is_some() && j.status == "running")
+            .collect();
+        if running_jobs.is_empty() {
+            return serde_json::json!({
+                "generated_at": now,
+                "plans": [],
+            });
+        }
+
+        let mut plan_files = HashSet::new();
+        let mut standalone_ids = HashSet::new();
+
+        for job in &running_jobs {
+            let root = job.root.as_ref().unwrap();
+            if let Some(rp) = job_explicit_plan_relpath(job, &mut git_names_cache) {
+                let plan_file_abs = root.join(rp);
+                plan_files.insert(plan_file_abs);
+            } else if let Some(ref tf) = job.task_file {
+                let tf_path = Path::new(tf);
+                let relpath = extract_relpath(root, tf_path, job.worktree.as_deref());
+                let plan_file_abs = root.join(&relpath);
+                if let Some(content) =
+                    read_plan_content(&plan_file_abs, &[job], &mut plan_content_cache)
+                {
+                    let doc = parse_plan(&content);
+                    let pt = job.plan_task.as_deref().unwrap_or(&job.id);
+                    if doc.tasks.iter().any(|t| matches_task(t, pt)) {
+                        plan_files.insert(plan_file_abs);
+                    } else {
+                        standalone_ids.insert(job.id.clone());
+                    }
+                } else {
+                    standalone_ids.insert(job.id.clone());
+                }
+            }
+        }
+
+        if plan_files.is_empty() && standalone_ids.is_empty() {
+            return serde_json::json!({
+                "generated_at": now,
+                "plans": [],
+            });
+        }
+
+        (Some(plan_files), Some(standalone_ids))
+    } else {
+        (None, None)
+    };
+
+    let mut groups: HashMap<PathBuf, Vec<&Job>> = HashMap::new();
+    let mut standalone_plans: Vec<PlanItem> = Vec::new();
 
     for job in &jobs {
         if job.research {
@@ -856,230 +1190,72 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             continue;
         };
 
-        let relpath = if let Some(ref p) = job.start_plan {
-            if !p.contains('/') && !p.ends_with(".md") {
-                if let Some(rp) = resolve_bare_stem(root, p, &mut git_names_cache) {
-                    Some(rp)
-                } else {
-                    Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
+        if let Some(ref active_files) = active_plan_files {
+            if let Some(rp) = job_explicit_plan_relpath(job, &mut git_names_cache) {
+                let plan_file_abs = root.join(rp);
+                if active_files.contains(&plan_file_abs) {
+                    groups.entry(plan_file_abs).or_default().push(job);
                 }
-            } else {
-                Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
+            } else if let Some(ref tf) = job.task_file {
+                let tf_path = Path::new(tf);
+                let relpath = extract_relpath(root, tf_path, job.worktree.as_deref());
+                let plan_file_abs = root.join(&relpath);
+                if active_files.contains(&plan_file_abs) {
+                    if let Some(content) =
+                        read_plan_content(&plan_file_abs, &[job], &mut plan_content_cache)
+                    {
+                        let doc = parse_plan(&content);
+                        let pt = job.plan_task.as_deref().unwrap_or(&job.id);
+                        if doc.tasks.iter().any(|t| matches_task(t, pt)) {
+                            groups.entry(plan_file_abs).or_default().push(job);
+                            continue;
+                        }
+                    }
+                }
+                if let Some(ref standalone_ids) = active_standalone_job_ids {
+                    if standalone_ids.contains(&job.id) {
+                        if let Some(content) =
+                            read_plan_content(&plan_file_abs, &[job], &mut plan_content_cache)
+                        {
+                            let doc = parse_plan(&content);
+                            if let Some(item) =
+                                build_standalone_plan(job, &plan_file_abs, &content, &doc, now)
+                            {
+                                standalone_plans.push(item);
+                            }
+                        }
+                    }
+                }
             }
-        } else if let Some(stem) = find_tag_plan_stem(job) {
-            if stem.contains('/') {
-                Some(extract_relpath(
-                    root,
-                    Path::new(&stem),
-                    job.worktree.as_deref(),
-                ))
-            } else {
-                let stem_clean = stem.strip_suffix(".md").unwrap_or(&stem);
-                resolve_bare_stem(root, stem_clean, &mut git_names_cache)
-            }
-        } else if let Some(ref p) = job.plan {
-            Some(extract_relpath(root, Path::new(p), job.worktree.as_deref()))
-        } else if let Some(ref tf) = job
-            .task_file
-            .as_ref()
-            .filter(|tf| is_plan_task_file(Path::new(tf)))
-        {
-            Some(extract_relpath(
-                root,
-                Path::new(tf),
-                job.worktree.as_deref(),
-            ))
         } else {
-            first_backticked_plan_path(&job.task)
-                .map(|p| extract_relpath(root, Path::new(&p), job.worktree.as_deref()))
-        };
-
-        if let Some(relpath) = relpath {
-            let plan_file_abs = root.join(&relpath);
-            groups.entry(plan_file_abs).or_default().push(job);
-        } else {
-            let Some(ref tf) = job.task_file else {
-                continue;
-            };
-            let tf_path = Path::new(tf);
-            let relpath = extract_relpath(root, tf_path, job.worktree.as_deref());
-            let plan_file_abs = root.join(&relpath);
-            let Some(content) = read_plan_content(&plan_file_abs, &[job], &mut plan_content_cache)
-            else {
-                continue;
-            };
-            let doc = parse_plan(&content);
-            let pt = job.plan_task.as_deref().unwrap_or(&job.id);
-            let has_matching_task = doc.tasks.iter().any(|t| matches_task(t, pt));
-            if has_matching_task {
+            if let Some(rp) = job_explicit_plan_relpath(job, &mut git_names_cache) {
+                let plan_file_abs = root.join(rp);
                 groups.entry(plan_file_abs).or_default().push(job);
-                continue;
-            }
-
-            let seven_days = 7 * 24 * 3600;
-            let is_active = job.status == "running"
-                || job
-                    .started_at
-                    .is_some_and(|st| st >= now.saturating_sub(seven_days));
-            if !is_active {
-                continue;
-            }
-
-            let heading_title = first_heading(&content);
-            let title = heading_title.unwrap_or_else(|| job.id.clone());
-            let task_title = title.clone();
-            let task_heading = title.clone();
-
-            let state = if job.status == "running" {
-                "running".to_string()
-            } else if job.verdict.as_deref() == Some("redone") {
-                "redone".to_string()
-            } else if job.status == "verified" {
-                if is_merged(job) {
-                    "merged".to_string()
-                } else {
-                    "verified".to_string()
-                }
             } else {
-                "failed".to_string()
-            };
+                let Some(ref tf) = job.task_file else {
+                    continue;
+                };
+                let tf_path = Path::new(tf);
+                let relpath = extract_relpath(root, tf_path, job.worktree.as_deref());
+                let plan_file_abs = root.join(&relpath);
+                let Some(content) =
+                    read_plan_content(&plan_file_abs, &[job], &mut plan_content_cache)
+                else {
+                    continue;
+                };
+                let doc = parse_plan(&content);
+                let pt = job.plan_task.as_deref().unwrap_or(&job.id);
+                let has_matching_task = doc.tasks.iter().any(|t| matches_task(t, pt));
+                if has_matching_task {
+                    groups.entry(plan_file_abs).or_default().push(job);
+                    continue;
+                }
 
-            let files = if !job.changed_files.is_empty() {
-                job.changed_files.clone()
-            } else {
-                Vec::new()
-            };
-
-            let task_val = serde_json::json!({
-                "id": job.id,
-                "title": task_title,
-                "heading": task_heading,
-                "lane": "tasks",
-                "deps": [],
-                "state": state,
-                "dispatch": job.key,
-                "now": job.now,
-                "gate_running": job.gate_running,
-                "gate_attempts": job.gate_attempts,
-                "elapsed_s": job.elapsed_s,
-                "cost_usd": job.cost_usd,
-                "turns": job.turns,
-                "files": files,
-                "commits": job.commits,
-                "verdict": job.verdict,
-                "notes": job.verdict_notes,
-                "added": false,
-            });
-
-            let mut events = Vec::new();
-            if let Some(st) = job.started_at {
-                events.push(PlanEvent {
-                    at: st,
-                    task: job.id.clone(),
-                    text: "dispatched".to_string(),
-                });
-            }
-            if job.status != "running" {
-                if let Some(fin) = job.finished_at.or(job.log_mtime) {
-                    events.push(PlanEvent {
-                        at: fin,
-                        task: job.id.clone(),
-                        text: job.status.clone(),
-                    });
+                if let Some(item) = build_standalone_plan(job, &plan_file_abs, &content, &doc, now)
+                {
+                    standalone_plans.push(item);
                 }
             }
-            if let Some(ref v) = job.verdict {
-                if let Some(ts) = job.verdict_ts {
-                    events.push(PlanEvent {
-                        at: ts,
-                        task: job.id.clone(),
-                        text: format!("verdict {v}"),
-                    });
-                }
-            }
-            events.sort_by_key(|e| std::cmp::Reverse(e.at));
-            let events_json: Vec<serde_json::Value> = events
-                .into_iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "at": e.at,
-                        "task": e.task,
-                        "text": e.text,
-                    })
-                })
-                .collect();
-
-            let mut decisions_json = Vec::new();
-            for d in &doc.decisions {
-                decisions_json.push(serde_json::json!({
-                    "text": d,
-                    "source": "plan",
-                }));
-            }
-            if let Some(ref notes) = job.verdict_notes {
-                if !notes.trim().is_empty() {
-                    decisions_json.push(serde_json::json!({
-                        "text": notes,
-                        "source": format!("{} verdict note", job.id),
-                    }));
-                }
-            }
-
-            let (merged, verified, running, not_started) = match state.as_str() {
-                "merged" => (1, 0, 0, 0),
-                "verified" => (0, 1, 0, 0),
-                "running" => (0, 0, 1, 0),
-                "ready" | "waiting" => (0, 0, 0, 1),
-                _ => (0, 0, 0, 0),
-            };
-            let cost_usd = job.cost_usd.unwrap_or(0.0);
-            let cost_usd = (cost_usd * 100.0).round() / 100.0;
-            let stats_json = serde_json::json!({
-                "tasks": 1,
-                "merged": merged,
-                "verified": verified,
-                "running": running,
-                "not_started": not_started,
-                "cost_usd": cost_usd,
-                "first_dispatch_at": job.started_at,
-                "max_parallel": if running > 0 { 1 } else { 0 },
-            });
-
-            let key = format!("{}/{}", job.repo, job.id);
-            let repo = job.repo.clone();
-            let repos = vec![job.repo.clone()];
-            let lanes = vec![serde_json::json!({
-                "id": "tasks",
-                "label": "Tasks",
-            })];
-            let path_str = plan_file_abs.to_string_lossy().to_string();
-
-            let has_running = running > 0;
-            let latest_activity = events_json
-                .first()
-                .and_then(|e| e["at"].as_u64())
-                .or(job.started_at)
-                .unwrap_or(0);
-
-            let plan_val = serde_json::json!({
-                "key": key,
-                "repo": repo,
-                "repos": repos,
-                "path": path_str,
-                "title": title,
-                "lanes": lanes,
-                "tasks": [task_val],
-                "events": events_json,
-                "decisions": decisions_json,
-                "stats": stats_json,
-            });
-
-            standalone_plans.push(PlanItem {
-                key,
-                has_running,
-                latest_activity,
-                val: plan_val,
-            });
         }
     }
 
@@ -1183,7 +1359,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             } else if chosen.verdict.as_deref() == Some("redone") {
                 "redone".to_string()
             } else if chosen.status == "verified" {
-                if is_merged(chosen) {
+                if is_job_merged(chosen) {
                     "merged".to_string()
                 } else {
                     "verified".to_string()
@@ -1230,7 +1406,7 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
                     } else if chosen.verdict.as_deref() == Some("redone") {
                         "redone".to_string()
                     } else if chosen.status == "verified" {
-                        if is_merged(chosen) {
+                        if is_job_merged(chosen) {
                             "merged".to_string()
                         } else {
                             "verified".to_string()
@@ -1522,6 +1698,9 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
         });
 
         let has_running = running_count > 0;
+        if opts.running_only && !has_running {
+            continue;
+        }
         let latest_activity = events_json
             .first()
             .and_then(|e| e["at"].as_u64())
@@ -1547,6 +1726,10 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
             latest_activity,
             val: plan_val,
         });
+    }
+
+    if opts.running_only {
+        plan_items.retain(|p| p.has_running);
     }
 
     plan_items.sort_by(|a, b| match (a.has_running, b.has_running) {
