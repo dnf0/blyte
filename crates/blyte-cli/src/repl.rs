@@ -126,6 +126,31 @@ pub fn format_usage_line(turns: u32, usage: &blyte_provider::Usage) -> String {
     )
 }
 
+/// Formats turns, token usage, and session cost into a single line summary.
+pub fn format_usage_line_with_session(
+    turns: u32,
+    usage: &blyte_provider::Usage,
+    totals: &crate::cost::Totals,
+) -> String {
+    let total = totals.orchestrator_usd + totals.implementers_usd;
+    format!(
+        "{} · session ${:.2} (implementers ${:.2}, {} runs)",
+        format_usage_line(turns, usage),
+        total,
+        totals.implementers_usd,
+        totals.runs
+    )
+}
+
+/// Reads the usage log and computes totals for the given session.
+fn current_session_totals(session_id: &str) -> crate::cost::Totals {
+    let entries = crate::usage_log::default_path()
+        .as_deref()
+        .map(crate::usage_log::read)
+        .unwrap_or_default();
+    crate::cost::totals(&entries, Some(session_id), None, None)
+}
+
 /// Formats a runtime event emitted during agent turn or gate execution.
 pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
     match event {
@@ -285,6 +310,8 @@ pub fn handle_repl_command<W: Write>(
                     "  /model [name|idx] - Discover and switch active AI model"
                 )
                 .map_err(|e| e.to_string())?;
+                writeln!(writer, "  /cost         - Show session cost totals")
+                    .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
                     "  /state        - Inspect SKILL.state (Orchestrator, Runtime)"
@@ -427,6 +454,12 @@ pub fn handle_repl_command<W: Write>(
                     writeln!(writer, "Switched active model to: {} ({:?})", args, kind)
                         .map_err(|e| e.to_string())?;
                 }
+                Ok(ReplControl::Handled)
+            }
+            "/cost" => {
+                let totals = current_session_totals(&session.session_id);
+                writeln!(writer, "{}", crate::cost::format_totals(&totals))
+                    .map_err(|e| e.to_string())?;
                 Ok(ReplControl::Handled)
             }
             "/state" => {
@@ -594,10 +627,15 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                 ) {
                     Ok((blyte_agent::run::Outcome::Verified, report)) => {
                         if session.orchestrate {
+                            let totals = current_session_totals(&session.session_id);
                             writeln!(
                                 writer,
                                 "{}",
-                                format_usage_line(report.outcome_turns, &report.usage)
+                                format_usage_line_with_session(
+                                    report.outcome_turns,
+                                    &report.usage,
+                                    &totals
+                                )
                             )
                             .map_err(|e| e.to_string())?;
                         } else {
@@ -611,10 +649,15 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     }
                     Ok((outcome, report)) => {
                         if session.orchestrate {
+                            let totals = current_session_totals(&session.session_id);
                             writeln!(
                                 writer,
                                 "Stopped ({outcome:?}): {}",
-                                format_usage_line(report.outcome_turns, &report.usage)
+                                format_usage_line_with_session(
+                                    report.outcome_turns,
+                                    &report.usage,
+                                    &totals
+                                )
                             )
                             .map_err(|e| e.to_string())?;
                         } else {
@@ -665,5 +708,90 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("session: "));
         assert!(text.contains(&format!("session: {}", session.session_id)));
+    }
+
+    #[test]
+    fn test_repl_cost_command_with_usage_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("usage.jsonl");
+
+        let config = ReplConfig {
+            orchestrate: true,
+            ..Default::default()
+        };
+        let mut session = ReplSession::new(&config);
+
+        let entry1 = crate::usage_log::Entry {
+            ts: 1700000000,
+            repo: "/test/repo".into(),
+            session: Some(session.session_id.clone()),
+            dispatch: None,
+            research: false,
+            model: "model-a".into(),
+            outcome: "verified".into(),
+            turns: 2,
+            input: 500,
+            cached: 100,
+            output: 200,
+            thinking: 0,
+            cost_usd: Some(0.12),
+        };
+
+        let entry2 = crate::usage_log::Entry {
+            ts: 1700000010,
+            repo: "/test/repo".into(),
+            session: Some(session.session_id.clone()),
+            dispatch: Some("disp-1".into()),
+            research: false,
+            model: "model-b".into(),
+            outcome: "verified".into(),
+            turns: 5,
+            input: 1000,
+            cached: 200,
+            output: 400,
+            thinking: 0,
+            cost_usd: Some(0.34),
+        };
+
+        crate::usage_log::append(&log_path, &entry1).unwrap();
+        crate::usage_log::append(&log_path, &entry2).unwrap();
+
+        let old_env = std::env::var_os("BLYTE_USAGE_LOG");
+        std::env::set_var("BLYTE_USAGE_LOG", &log_path);
+
+        let mut out = Vec::new();
+        let res = handle_repl_command(&mut session, "/cost", &mut out).unwrap();
+        assert_eq!(res, ReplControl::Handled);
+
+        match old_env {
+            Some(val) => std::env::set_var("BLYTE_USAGE_LOG", val),
+            None => std::env::remove_var("BLYTE_USAGE_LOG"),
+        }
+
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text.trim(),
+            "blyte $0.46 (orchestrator $0.12, implementers $0.34 in 1 runs)"
+        );
+    }
+
+    #[test]
+    fn test_format_usage_line_with_session() {
+        let usage = blyte_provider::Usage {
+            input: 12000,
+            cached: 9000,
+            output: 450,
+            thinking: 0,
+        };
+        let totals = crate::cost::Totals {
+            orchestrator_usd: 0.15,
+            implementers_usd: 0.35,
+            runs: 2,
+        };
+        let line = format_usage_line_with_session(3, &usage, &totals);
+        assert_eq!(
+            line,
+            "3 turns · 12000 in (9000 cached) · 450 out · session $0.50 (implementers $0.35, 2 runs)"
+        );
     }
 }
