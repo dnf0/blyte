@@ -466,8 +466,17 @@ pub fn handle_repl_command<W: Write>(
                 writeln!(writer, "=== Blyte SKILL.state ===").map_err(|e| e.to_string())?;
                 writeln!(writer, "session: {}", session.session_id).map_err(|e| e.to_string())?;
                 // Render orchestrator contract: goal specification and verification gate
-                let orch = serde_json::to_string_pretty(&session.state.orchestrator)
-                    .map_err(|e| e.to_string())?;
+                let mut orch_val =
+                    serde_json::to_value(&session.state.orchestrator).map_err(|e| e.to_string())?;
+                if let Some(map) = orch_val.as_object_mut() {
+                    if let Some(serde_json::Value::String(instructions)) =
+                        map.get_mut("instructions")
+                    {
+                        let n = instructions.chars().count();
+                        *instructions = format!("<{n} characters>");
+                    }
+                }
+                let orch = serde_json::to_string_pretty(&orch_val).map_err(|e| e.to_string())?;
                 writeln!(writer, "Orchestrator:\n{}", orch).map_err(|e| e.to_string())?;
 
                 // Render runtime state including attempt counts, rollback metrics, and action ledger
@@ -702,12 +711,16 @@ mod tests {
     fn test_repl_state_contains_session() {
         let config = ReplConfig::default();
         let mut session = ReplSession::new(&config);
+        let instructions = "x".repeat(600);
+        session.state.orchestrator.instructions = Some(instructions.clone());
         let mut out = Vec::new();
         let res = handle_repl_command(&mut session, "/state", &mut out).unwrap();
         assert_eq!(res, ReplControl::Handled);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("session: "));
         assert!(text.contains(&format!("session: {}", session.session_id)));
+        assert!(text.contains("<600 characters>"));
+        assert!(!text.contains(&instructions));
     }
 
     #[test]
