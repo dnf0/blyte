@@ -944,8 +944,10 @@ and an unknown key fails to parse (`deny_unknown_fields`), so it cannot be set t
   or `~` with no home, is an `Err` naming the entry and `blyte.toml`.
 - `load` calls `expand_allow_read` with `dirs`/`HOME` (whatever `config.rs` or the crate already uses
   for the home directory; `std::env::var_os("HOME")` if nothing) and `main_checkout(root)` falling back
-  to `root`, and returns its error, so a bad entry fails the load with a clear message.
-- `dispatch.rs`: the child gets `--allow-read <path>` for every expanded `allow_read` entry from
+  to `root` to validate the entries, and returns its error, so a bad entry fails the load with a clear
+  message; `dispatch.allow_read` keeps the entries as written.
+- `dispatch.rs`: expand `dispatch_cfg.allow_read` the same way, then give the child
+  `--allow-read <path>` for every expanded entry from
   `blyte.toml` followed by every `--allow-read` given on the command line (both apply; no
   de-duplication needed).
 - `docs/usage.md`: an `allow_read` row in the key table (`array of strings`, "extra paths the sandbox may
