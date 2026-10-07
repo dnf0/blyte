@@ -208,12 +208,42 @@ fn extract_title(task: &str) -> String {
         }
     }
     for line in task.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let text = trimmed.trim_start_matches('#').trim();
+            if !text.is_empty() {
+                return text.chars().take(120).collect();
+            }
+        }
+    }
+    for line in task.lines() {
         let trimmed = line.trim_start_matches(['#', ' ']).trim_end();
         if !trimmed.is_empty() {
             return trimmed.chars().take(120).collect();
         }
     }
     String::new()
+}
+
+fn job_title(task: &str, id: &str) -> String {
+    let title = extract_title(task);
+    if id.is_empty() {
+        return title;
+    }
+    let p_colon = format!("Task {id}:");
+    let p_space = format!("Task {id} ");
+    let rest = if let Some(after) = title.strip_prefix(&p_colon) {
+        after.trim()
+    } else if let Some(after) = title.strip_prefix(&p_space) {
+        after.trim()
+    } else {
+        return title;
+    };
+    if rest.is_empty() {
+        title
+    } else {
+        rest.chars().take(120).collect()
+    }
 }
 
 fn extract_plan(task: &str) -> Option<String> {
@@ -869,7 +899,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
         std::collections::HashMap::new();
 
     for raw in raw_jobs {
-        let title = extract_title(&raw.task);
+        let title = job_title(&raw.task, &raw.id);
         let plan = extract_plan(&raw.task);
         let prompt_task_title = extract_prompt_task_title(&raw.task);
         let plan_file = raw.start_plan.clone().or_else(|| plan.clone());
@@ -1433,4 +1463,40 @@ pub fn run(args: &crate::cli::DashboardArgs) -> i32 {
     }
 
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_title_first_markdown_heading() {
+        assert_eq!(
+            extract_title(
+                "From the plan docs/p.md:\n\n### Task G2: an empty gate is skipped\n\nbody"
+            ),
+            "Task G2: an empty gate is skipped"
+        );
+    }
+
+    #[test]
+    fn extract_title_no_heading_fallback() {
+        assert_eq!(extract_title("fix the bug\nmore"), "fix the bug");
+    }
+
+    #[test]
+    fn extract_title_task_rule_wins() {
+        assert_eq!(
+            extract_title("# Heading\nTask: \"explicit title\"\nmore"),
+            "explicit title"
+        );
+    }
+
+    #[test]
+    fn job_title_strips_task_id_prefix() {
+        let text1 = "From the plan docs/p.md:\n\n### Task G2: an empty gate is skipped\n\nbody";
+        assert_eq!(job_title(text1, "G2"), "an empty gate is skipped");
+        assert_eq!(job_title("Task G3: x", "G2"), "Task G3: x");
+        assert_eq!(job_title("Task G2:", "G2"), "Task G2:");
+    }
 }
