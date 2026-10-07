@@ -113,6 +113,20 @@ blyte dispatch T2 /abs/task-T2.md > /dev/null &
 wait
 ```
 
+**Under `blyte --orchestrate`** (your commands run in a shell that keeps background jobs alive, but you
+are not told when they exit, and each command times out after 300 s): start each dispatch in the
+background with both outputs redirected, or the command waits for it, then wait with `blyte wait`:
+
+```bash
+blyte dispatch T1 --plan plan.md --plan-task "Task T1" > /dev/null 2>&1 &
+blyte dispatch T2 --plan plan.md --plan-task "Task T2" > /dev/null 2>&1 &
+blyte wait --any T1 T2
+```
+
+`blyte wait` prints `<id> <outcome> <turns> <cost>` for each run that has finished. Review those, drop them
+from the list and call it again for the rest. Exit 2 means none finished within its timeout (280 s): call
+it again.
+
 Each dispatch also saves its summary to `.wt/<id>.json`, so nothing is lost when output is
 discarded. `blyte dashboard` shows every dispatch on the machine while they run.
 

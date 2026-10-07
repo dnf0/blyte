@@ -11,6 +11,8 @@ fn create_test_session() -> ReplSession {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     ReplSession::new(&config)
 }

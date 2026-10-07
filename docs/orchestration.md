@@ -214,6 +214,22 @@ minutes, $0.19). Before the skill named `sandbox_permissions`, Codex ran the dis
 sandbox, where it failed, and then wrote the code itself; `codex exec` also needs
 `--sandbox workspace-write` and `-c approval_policy=on-request` for escalation to be possible.
 
+## blyte as the orchestrator
+
+`blyte --orchestrate -m vertex/gemini-4-argon` runs interactive blyte as the orchestrator.
+It plans the work, dispatches implementers with `blyte dispatch`, reviews their results and merges,
+just as Claude Code does with the skill. Its own interactive shell is unsandboxed so that it can
+create worktrees, run git commands, and launch dispatches; every implementer it dispatches runs in
+its own isolated sandbox.
+
+Because orchestrator sessions span planning, multiple dispatches, and review, `--orchestrate` defaults
+to 1000 turns and a 100,000-token folded tail budget. You can override either with `--max-turns` and
+`--fold-budget`. The conversation history is kept across prompts so the model remembers the whole plan;
+`/clear` resets the conversation when you start a new feature. You can provide personal orchestration
+rules in `~/.config/blyte/orchestrator.md` (or `$XDG_CONFIG_HOME/blyte/orchestrator.md`). To run parallel
+tasks, start dispatches in the background redirected to `/dev/null` and use `blyte wait --any` to pick
+up finished runs as they land.
+
 ## Watching parallel dispatches
 
 With several dispatches running, and several sessions dispatching in different repositories,

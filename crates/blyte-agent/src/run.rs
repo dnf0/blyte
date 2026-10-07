@@ -302,6 +302,27 @@ impl<'a> Runner<'a> {
     /// Held constant for the whole run so it caches.
     fn system_prompt(&self, state: &State, goal: &str) -> String {
         let bins = tools::available_binaries(self.shell, &self.root).join(", ");
+        let where_ = self.shell.describe();
+        let rules = crate::rules::prompt_section(&self.root);
+
+        if let Some(text) = &state.orchestrator.instructions {
+            return format!(
+                "{text}## Your user's first request\n{goal}\n\n\
+                 ## Environment\n{where_}\nAvailable: {bins}\n\n\
+                 Change nothing outside the repository yourself (blyte's own files under `.wt/` and its records are fine).\n\n\
+                 {rules}\
+                 ## Working efficiently\n\
+                 Independent reads, searches and commands can be issued as several tool calls in one \
+                 turn: they run in order and you see every result together. Batch them whenever one \
+                 does not depend on another's result; every turn you save is a full model call.\n",
+                text = text,
+                goal = goal,
+                where_ = where_,
+                bins = bins,
+                rules = rules,
+            );
+        }
+
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         // Ungated runs have no check command, so the model must verify the work itself before stopping.
         let completion = if steps.is_empty() {
@@ -339,9 +360,9 @@ impl<'a> Runner<'a> {
              does not depend on another's result; every turn you save is a full model call.\n",
             goal = goal,
             completion = completion,
-            where_ = self.shell.describe(),
+            where_ = where_,
             bins = bins,
-            rules = crate::rules::prompt_section(&self.root),
+            rules = rules,
         )
     }
 

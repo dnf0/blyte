@@ -15,6 +15,8 @@ fn test_slash_help() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -40,6 +42,8 @@ fn test_slash_gate_get_and_set() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let mut session = ReplSession::new(&config);
 
@@ -76,6 +80,8 @@ fn test_slash_state_inspection() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -97,6 +103,8 @@ fn test_slash_exit() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let mut session = ReplSession::new(&config);
 
@@ -120,6 +128,8 @@ fn test_repl_stream_driving() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let session = ReplSession::new(&config);
 
@@ -223,6 +233,8 @@ fn test_prompt_submission() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -250,6 +262,8 @@ fn test_clear_starts_new_conversation() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let mut session = ReplSession::new(&config);
     session.state.runtime.conversation = Some(vec![Message::User("hi".into())]);
@@ -272,6 +286,8 @@ fn test_state_counts_conversation_messages() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
+        orchestrate: false,
+        fold_budget: None,
     };
     let mut session = ReplSession::new(&config);
     session.state.runtime.conversation = Some(vec![

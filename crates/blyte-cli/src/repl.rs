@@ -12,6 +12,8 @@ pub struct ReplConfig {
     pub max_turns: usize,
     pub max_gates: usize,
     pub rollback: bool,
+    pub orchestrate: bool,
+    pub fold_budget: Option<usize>,
 }
 
 impl Default for ReplConfig {
@@ -25,6 +27,8 @@ impl Default for ReplConfig {
             max_turns: 60,
             max_gates: 5,
             rollback: true,
+            orchestrate: false,
+            fold_budget: None,
         }
     }
 }
@@ -40,6 +44,8 @@ pub struct ReplSession {
     pub max_turns: usize,
     pub max_gates: usize,
     pub rollback: bool,
+    pub orchestrate: bool,
+    pub fold_budget: Option<usize>,
     pub state: blyte_agent::state::State,
 }
 
@@ -51,6 +57,19 @@ impl ReplSession {
         let goal = "Interactive REPL session".to_string();
         let mut state = blyte_agent::state::State::new(goal, verification_cmd);
         state.runtime.conversation = Some(Vec::new());
+
+        if config.orchestrate {
+            let rules_path = blyte_agent::orchestrator::user_rules_path();
+            let loaded_rules = rules_path
+                .as_deref()
+                .and_then(|p| blyte_agent::orchestrator::load_user_rules(p).map(|text| (p, text)));
+            let rules_ref = loaded_rules.as_ref().map(|(p, t)| (*p, t.as_str()));
+            state.orchestrator.instructions = Some(blyte_agent::orchestrator::prompt_sections(
+                crate::skill::SKILL_MD,
+                rules_ref,
+            ));
+        }
+
         Self {
             repo_root: config.repo_root.clone(),
             gate,
@@ -64,6 +83,8 @@ impl ReplSession {
             max_turns: config.max_turns,
             max_gates: config.max_gates,
             rollback: config.rollback,
+            orchestrate: config.orchestrate,
+            fold_budget: config.fold_budget,
             state,
         }
     }
@@ -75,6 +96,14 @@ pub enum ReplControl {
     Handled,
     Exit,
     SubmitPrompt(String),
+}
+
+/// Formats turns and token usage into a single line summary.
+pub fn format_usage_line(turns: u32, usage: &blyte_provider::Usage) -> String {
+    format!(
+        "{} turns · {} in ({} cached) · {} out",
+        turns, usage.input, usage.cached, usage.output
+    )
 }
 
 /// Formats a runtime event emitted during agent turn or gate execution.
@@ -184,7 +213,11 @@ pub fn render_banner_to<W: Write>(writer: &mut W, session: &ReplSession) -> std:
     )?;
     writeln!(writer, "  Repository : {}", repo)?;
     writeln!(writer, "  Model      : {}", model)?;
-    writeln!(writer, "  Gate       : {}", gate)?;
+    if session.orchestrate {
+        writeln!(writer, "  Mode       : orchestrator")?;
+    } else {
+        writeln!(writer, "  Gate       : {}", gate)?;
+    }
     writeln!(writer, "  Toolchains : {}", toolchains_str)?;
     writeln!(
         writer,
@@ -217,6 +250,13 @@ pub fn handle_repl_command<W: Write>(
 
         match cmd {
             "/help" => {
+                if session.orchestrate {
+                    writeln!(
+                        writer,
+                        "Mode: orchestrator (plan, dispatch implementers, review and merge)"
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
                 writeln!(writer, "Available Slash Commands:").map_err(|e| e.to_string())?;
                 writeln!(writer, "  /help         - Show this command reference")
                     .map_err(|e| e.to_string())?;
@@ -423,7 +463,9 @@ pub fn handle_repl_command<W: Write>(
                 Ok(ReplControl::Handled)
             }
             "/gate" => {
-                if args.is_empty() {
+                if session.orchestrate {
+                    writeln!(writer, "No gate in orchestrate mode.").map_err(|e| e.to_string())?;
+                } else if args.is_empty() {
                     match &session.gate {
                         Some(g) => {
                             writeln!(writer, "Current gate: {}", g).map_err(|e| e.to_string())?
@@ -511,8 +553,12 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     max_seconds: None,
                     max_cost_usd: None,
                     report: None,
-                    fold_budget: None,
-                    sandbox: "on".into(),
+                    fold_budget: session.fold_budget,
+                    sandbox: if session.orchestrate {
+                        "off".into()
+                    } else {
+                        "on".into()
+                    },
                     network: "on".into(),
                     allow_read: Vec::new(),
                     pass_env: Vec::new(),
@@ -526,20 +572,38 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     &mut writer,
                 ) {
                     Ok((blyte_agent::run::Outcome::Verified, report)) => {
-                        writeln!(
-                            writer,
-                            "Task verified in {} turns (usage: {:?})",
-                            report.outcome_turns, report.usage
-                        )
-                        .map_err(|e| e.to_string())?;
+                        if session.orchestrate {
+                            writeln!(
+                                writer,
+                                "{}",
+                                format_usage_line(report.outcome_turns, &report.usage)
+                            )
+                            .map_err(|e| e.to_string())?;
+                        } else {
+                            writeln!(
+                                writer,
+                                "Task verified in {} turns (usage: {:?})",
+                                report.outcome_turns, report.usage
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
                     }
                     Ok((outcome, report)) => {
-                        writeln!(
-                            writer,
-                            "Task finished with outcome: {:?} in {} turns",
-                            outcome, report.outcome_turns
-                        )
-                        .map_err(|e| e.to_string())?;
+                        if session.orchestrate {
+                            writeln!(
+                                writer,
+                                "Stopped ({outcome:?}): {}",
+                                format_usage_line(report.outcome_turns, &report.usage)
+                            )
+                            .map_err(|e| e.to_string())?;
+                        } else {
+                            writeln!(
+                                writer,
+                                "Task finished with outcome: {:?} in {} turns",
+                                outcome, report.outcome_turns
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
                     }
                     Err(err) => {
                         writeln!(writer, "Task execution error: {}", err)

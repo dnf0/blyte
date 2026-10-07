@@ -307,6 +307,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub gate: Option<String>,
 
+    /// Run interactive blyte as the orchestrator: plan, dispatch implementers with `blyte dispatch`, review and merge
+    #[arg(long, conflicts_with = "gate")]
+    pub orchestrate: bool,
+
     /// Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
     #[arg(
         long,
@@ -398,4 +402,17 @@ pub struct Cli {
     /// Whether this is a research run: periodically remind the model to keep report.md updated
     #[arg(long)]
     pub research: bool,
+}
+
+/// Turn and context defaults for `--orchestrate`. A flag the user gave explicitly wins.
+pub fn apply_orchestrate_defaults(cli: &mut Cli, matches: &clap::ArgMatches) {
+    if !cli.orchestrate {
+        return;
+    }
+    if matches.value_source("max_turns") == Some(clap::parser::ValueSource::DefaultValue) {
+        cli.max_turns = 1000;
+    }
+    if cli.fold_budget.is_none() {
+        cli.fold_budget = Some(100_000);
+    }
 }
