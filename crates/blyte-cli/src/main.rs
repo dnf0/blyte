@@ -68,6 +68,7 @@ fn main() {
                     force,
                     default: _,
                     no_default,
+                    no_statusline,
                     harness,
                 } => {
                     let targets = match blyte_cli::skill::Harness::parse_all(&harness) {
@@ -78,15 +79,19 @@ fn main() {
                         }
                     };
                     for &target in &targets {
-                        let written =
-                            match blyte_cli::skill::install_for(target, project, force, no_default)
-                            {
-                                Ok(w) => w,
-                                Err(e) => {
-                                    eprintln!("{e}");
-                                    std::process::exit(1);
-                                }
-                            };
+                        let written = match blyte_cli::skill::install_for(
+                            target,
+                            project,
+                            force,
+                            no_default,
+                            no_statusline,
+                        ) {
+                            Ok(w) => w,
+                            Err(e) => {
+                                eprintln!("{e}");
+                                std::process::exit(1);
+                            }
+                        };
                         for path in written {
                             if path.extension().is_some_and(|ext| ext == "rules") {
                                 println!("wrote {}", path.display());
