@@ -294,3 +294,134 @@ flags the module as unused, it will not: the items are `pub`.
 **Siblings.** OC3 changes `state.rs`, `run.rs` and `repl.rs` in a separate worktree; do not touch them.
 
 **Commit message:** `feat(agent): orchestrator instructions: preamble, skill and the user's orchestrator.md`
+
+### Task OC5: `blyte --orchestrate`
+
+**Goal.** `blyte --orchestrate -m <model>` starts interactive blyte as the orchestrator: it plans, dispatches
+implementers with `blyte dispatch`, waits with `blyte wait`, reviews and merges, as Claude Code does with the
+blyte-implementer skill. This task wires together what OC2 (`blyte wait`), OC3 (the conversation continues
+across prompts) and OC4 (`blyte_agent::orchestrator`) built. Spec: `docs/superpowers/specs/2026-10-07-orchestrate-mode.md`.
+
+**Files.** `crates/blyte-cli/src/cli.rs`, `crates/blyte-cli/src/main.rs`, `crates/blyte-cli/src/repl.rs`,
+`crates/blyte-agent/src/state.rs`, `crates/blyte-agent/src/run.rs`,
+`crates/blyte-cli/assets/blyte-implementer/SKILL.md`, `docs/orchestration.md`, a new test file
+`crates/blyte-cli/tests/test_orchestrate.rs`, a new test file `crates/blyte-agent/tests/test_orchestrator_prompt.rs`,
+and literal updates in `crates/blyte-cli/tests/test_repl_commands.rs` / `test_repl_model_cmd.rs` only where a new
+`ReplConfig` field must be added.
+
+**What to build.**
+
+1. **Flag** (`cli.rs`, on `Cli`, next to `--gate`):
+   ```rust
+   /// Run interactive blyte as the orchestrator: plan, dispatch implementers with `blyte dispatch`, review and merge
+   #[arg(long, conflicts_with = "gate")]
+   pub orchestrate: bool,
+   ```
+   And in `cli.rs`:
+   ```rust
+   /// Turn and context defaults for `--orchestrate`. A flag the user gave explicitly wins.
+   pub fn apply_orchestrate_defaults(cli: &mut Cli, matches: &clap::ArgMatches)
+   ```
+   When `cli.orchestrate`: if `max_turns` came from its default (`matches.value_source("max_turns") ==
+   Some(clap::parser::ValueSource::DefaultValue)`), set it to 1000; if `fold_budget` is `None`, set
+   `Some(100_000)`. `context` keeps its default `folded`. Does nothing when `orchestrate` is false. Do not
+   change the existing fields' types or defaults (existing tests assert them).
+2. **main.rs:** parse with `let matches = Cli::command().get_matches(); let mut cli =
+   Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());` (imports `clap::{CommandFactory,
+   FromArgMatches}`), then `apply_orchestrate_defaults(&mut cli, &matches)`. Behaviour without
+   `--orchestrate` is unchanged. If `cli.orchestrate` and a prompt is given (`cli.prompt.is_some()`): print
+   `error: --orchestrate is interactive; start it without a prompt` to stderr and exit 2. Pass
+   `orchestrate: cli.orchestrate` and `fold_budget: cli.fold_budget` into `ReplConfig`.
+3. **`state.rs`:** `Orchestrator` gains
+   ```rust
+   /// Set for `blyte --orchestrate`: the orchestrator's instructions, which replace the implementer's
+   /// framing in the system prompt.
+   #[serde(default, skip_serializing_if = "Option::is_none")]
+   pub instructions: Option<String>,
+   ```
+   (`None` in `State::new`.)
+4. **`run.rs`, `system_prompt`:** when `state.orchestrator.instructions` is `Some(text)`, return instead:
+   ```
+   {text}## Your user's first request\n{goal}\n\n## Environment\n{where_}\nAvailable: {bins}\n\n
+   Change nothing outside the repository yourself (blyte's own files under `.wt/` and its records are fine).\n\n
+   {rules}## Working efficiently\n<the same batching paragraph as today>
+   ```
+   where `goal` is the goal the system prompt already uses (OC3's `conversation_goal` when set). It has no
+   "You are a software engineer" line and no "How completion is decided" section. Without `instructions`
+   the prompt is byte-for-byte what it is today.
+5. **`repl.rs`:**
+   - `ReplConfig` gains `pub orchestrate: bool` and `pub fold_budget: Option<usize>` (`false`/`None` in
+     `Default`); `ReplSession` gains `pub orchestrate: bool` and `pub fold_budget: Option<usize>`.
+   - `ReplSession::new`: when `config.orchestrate`, set `state.orchestrator.instructions =
+     Some(blyte_agent::orchestrator::prompt_sections(crate::skill::SKILL_MD, rules))`, where `rules` comes
+     from `blyte_agent::orchestrator::user_rules_path()` and `load_user_rules` (as `Some((path, text))` when
+     the file has text). The session's goal string stays as it is.
+   - `SubmitPrompt`: `sandbox` is `"off"` when `session.orchestrate`, else `"on"` (today); `network` stays
+     `"on"`; `fold_budget: session.fold_budget`.
+   - After each reply, when `session.orchestrate`, print only the usage line instead of "Task verified in…"/
+     "Task finished with outcome…": `format_usage_line(report.outcome_turns, &report.usage)`, a new `pub fn`
+     returning `"{turns} turns · {input} in ({cached} cached) · {output} out"` (token counts from `Usage`,
+     e.g. `"3 turns · 12000 in (9000 cached) · 450 out"`). If the outcome is not `Verified`, prefix
+     `"Stopped ({outcome:?}): "`. Without `--orchestrate` these lines are unchanged.
+   - `/gate <cmd>` when `session.orchestrate`: print `No gate in orchestrate mode.` and change nothing.
+   - The banner or `/help` mentions orchestrate mode when it is on (one line).
+6. **SKILL.md**, section "Starting parallel tasks" (around lines 104-117): after the `wait` code block, add:
+   ```markdown
+   **Under `blyte --orchestrate`** (your commands run in a shell that keeps background jobs alive, but you
+   are not told when they exit, and each command times out after 300 s): start each dispatch in the
+   background with both outputs redirected, or the command waits for it, then wait with `blyte wait`:
+
+   ```bash
+   blyte dispatch T1 --plan plan.md --plan-task "Task T1" > /dev/null 2>&1 &
+   blyte dispatch T2 --plan plan.md --plan-task "Task T2" > /dev/null 2>&1 &
+   blyte wait --any T1 T2
+   ```
+
+   `blyte wait` prints `<id> <outcome> <turns> <cost>` for each run that has finished. Review those, drop them
+   from the list and call it again for the rest. Exit 2 means none finished within its timeout (280 s): call
+   it again.
+   ```
+   (Use a four-backtick fence or indentation in the real file so the inner fence nests correctly.)
+7. **`docs/orchestration.md`:** a section `## blyte as the orchestrator` (about 15 lines): starting it
+   (`blyte --orchestrate -m vertex/gemini-4-argon`), what it does, that its own shell is not sandboxed while
+   every implementer it dispatches is, the 1000-turn and 100k-token folded defaults and their overrides, the
+   conversation kept across prompts and `/clear`, `~/.config/blyte/orchestrator.md`, and `blyte wait`.
+
+**Tests.**
+- `crates/blyte-cli/tests/test_orchestrate.rs`:
+  - `orchestrate_sets_defaults`: `Cli::command().try_get_matches_from(["blyte", "--orchestrate"])` → after
+    `apply_orchestrate_defaults`, `max_turns == 1000`, `fold_budget == Some(100_000)`, `context == "folded"`.
+  - `explicit_flags_win`: `["blyte", "--orchestrate", "--max-turns", "30", "--fold-budget", "5000"]` → 30 and
+    `Some(5000)`.
+  - `without_orchestrate_nothing_changes`: `["blyte"]` → `max_turns == 25`, `fold_budget == None`.
+  - `orchestrate_conflicts_with_gate`: `["blyte", "--orchestrate", "--gate", "true"]` is a parse error.
+  - `orchestrate_with_prompt_is_rejected`: run the built binary (`env!("CARGO_BIN_EXE_blyte")`) with
+    `--orchestrate "do it"` → exit code 2, stderr contains `--orchestrate is interactive`.
+  - `session_gets_instructions`: `ReplSession::new(&ReplConfig { orchestrate: true, ..Default::default() })`
+    → `state.orchestrator.instructions` contains `"## The blyte-implementer skill"` and `"blyte wait"`; with
+    `orchestrate: false` it is `None`.
+  - `gate_refused_in_orchestrate`: `/gate true` on an orchestrate session prints `No gate in orchestrate mode.`
+    and leaves `session.gate` `None`.
+  - `usage_line_format`: `format_usage_line(3, &Usage { input: 12000, cached: 9000, output: 450, thinking: 0 })`
+    is exactly `"3 turns · 12000 in (9000 cached) · 450 out"`.
+  - `skill_tells_orchestrator_to_redirect_and_wait`: `SKILL_MD` contains `"Under \`blyte --orchestrate\`"`,
+    `"> /dev/null 2>&1 &"` and `"blyte wait --any"`.
+- `crates/blyte-agent/tests/test_orchestrator_prompt.rs` (a recording provider, as in
+  `tests/test_parallel_calls.rs`):
+  - `instructions_replace_the_implementer_framing`: a `State` with `instructions = Some("## How you work\nX\n\n")`
+    → the system prompt starts with `"## How you work\nX"`, contains `"## Your user's first request"` and the
+    goal, and contains neither `"You are a software engineer"` nor `"How completion is decided"`.
+  - `without_instructions_the_prompt_is_unchanged`: the system prompt contains `"You are a software engineer"`
+    and `"How completion is decided"`.
+  - `orchestrator_state_serializes_without_instructions`: `serde_json::to_value(State::new("g", ""))` has no
+    `instructions` key.
+
+Run: `cargo test -p blyte-cli --test test_orchestrate` and `cargo test -p blyte-agent --test test_orchestrator_prompt`.
+
+**Constraints.** Existing tests pass unmodified, except that a `ReplConfig { .. }` or `Orchestrator { .. }`
+literal may gain the new fields. No new dependencies. No change to `dispatch.rs`, `wait.rs`, `task_runner.rs`
+or `orchestrator.rs`.
+
+**Depends on:** OC2, OC2b, OC3, OC4 (all on `main` before this is dispatched).
+
+**Commit message:** `feat(repl): blyte --orchestrate runs interactive blyte as the orchestrator that dispatches implementers`
