@@ -215,7 +215,33 @@ pub fn pricing(model_id: &str) -> Option<Pricing> {
             output: 3.75,
         });
     }
+    // Gemini 4 Argon, introductory price announced 2026-09-30 (cached input 95% off).
+    if model_id.contains("gemini-4-argon") {
+        return Some(Pricing {
+            input: 2.00,
+            cached: 0.10,
+            output: 10.00,
+        });
+    }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pricing_gemini_4_argon() {
+        let p = pricing("vertex/gemini-4-argon").expect("known price");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.cached, 0.10);
+        assert_eq!(p.output, 10.00);
+
+        let p2 = pricing("gemini-4-argon").expect("known price");
+        assert_eq!(p2.input, 2.00);
+        assert_eq!(p2.cached, 0.10);
+        assert_eq!(p2.output, 10.00);
+    }
 }
 
 /// Metadata describing a model supported by a provider.

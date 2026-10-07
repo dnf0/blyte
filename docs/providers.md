@@ -6,6 +6,7 @@ credentials itself; they are removed from the environment of every command the m
 | model name | provider | credentials |
 |---|---|---|
 | `gemini-3.8-flash-high` (default) | Google Gemini; `-low` / `-medium` / `-high` sets the thinking level | `GEMINI_API_KEY` |
+| `vertex/<model>` (e.g. `vertex/gemini-4-argon`) | Google Gemini on Vertex AI; ADC authentication | `gcloud auth application-default login`, `GOOGLE_CLOUD_PROJECT` |
 | `claude-…` or `anthropic/…` | Anthropic | `ANTHROPIC_API_KEY` |
 | `openai/<model>` | any OpenAI-compatible API: OpenAI, or a local vLLM or LM Studio server | `OPENAI_API_KEY`, `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) |
 | `openrouter/<vendor>/<model>` | OpenRouter | `OPENROUTER_API_KEY` |
@@ -30,7 +31,10 @@ report's `cost_usd` and `--max-cost` work. For another model, compare token coun
 ## Notes per provider
 
 **Gemini.** The default. The thinking suffix is part of the name: `gemini-3.8-flash-low` thinks
-least and costs least.
+least and costs least. Models prefixed with `vertex/` (e.g. `vertex/gemini-4-argon`) reach Gemini
+through Vertex AI using Google Cloud Application Default Credentials (`gcloud auth application-default login`)
+rather than an API key. The project is read from `GOOGLE_CLOUD_PROJECT` (or `CLOUDSDK_CORE_PROJECT`), and location
+from `GOOGLE_CLOUD_LOCATION` (default `global`). Tokens are cached for 45 minutes and refreshed automatically.
 
 **Anthropic.** Prompt caching is on: blyte marks cache breakpoints on the tool definitions and the
 latest message, so each turn pays full price only for what is new.
@@ -67,6 +71,6 @@ away) is not retried: the run ends with a message saying when it resets.
 
 When blyte knows a model's list price, the report carries `cost_usd` and `--max-cost` can cap it.
 Costs are computed from the provider's reported usage, with cache hits at their discounted price.
-Today the price table covers **Gemini 3.8 Flash** only; for other models `cost_usd` is `null` and
+Today the price table covers **Gemini 3.8 Flash** and **Gemini 4 Argon**; for other models `cost_usd` is `null` and
 `--max-cost` is refused rather than silently ignored. Token counts are reported for every
 provider.
