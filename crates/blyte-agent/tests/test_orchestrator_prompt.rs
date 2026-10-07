@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
+use blyte_agent::orchestrator::{prompt_sections, PREAMBLE};
 use blyte_agent::run::{Budget, Runner};
 use blyte_agent::shell::LocalShell;
 use blyte_agent::state::State;
@@ -78,4 +79,20 @@ fn orchestrator_state_serializes_without_instructions() {
     let val = serde_json::to_value(&state).unwrap();
     assert!(val.get("instructions").is_none());
     assert!(val["orchestrator"].get("instructions").is_none());
+}
+
+#[test]
+fn preamble_starts_work_straight_away() {
+    assert!(PREAMBLE.contains("do not run `--help`"));
+    assert!(PREAMBLE.contains("reports a missing key itself"));
+
+    let paragraph = "\
+Start on the work at once. The skill below documents every blyte command you need, so do not run \
+`--help`, and do not check the environment or `~/.config/blyte` for API keys: `blyte dispatch` reports a \
+missing key itself. When the request names a plan, read it and dispatch its independent tasks in your \
+first turns.";
+    assert!(PREAMBLE.contains(paragraph));
+
+    let sections = prompt_sections("dummy skill", None);
+    assert!(sections.contains(paragraph));
 }
