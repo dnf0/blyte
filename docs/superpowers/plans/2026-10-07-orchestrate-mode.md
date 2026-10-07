@@ -711,3 +711,119 @@ Run: `cargo test -p blyte cost` and `cargo test -p blyte repl`.
 **Depends on:** U1, U2.
 
 **Commit message:** `feat(usage): blyte cost and the session's combined cost in the REPL`
+
+## Worktree setup (2026-10-07)
+
+From the `provision` deletion job on the EC2 box `provision-deployment`: its gate runs
+`.venv/bin/python -m pytest ...`, a fresh worktree has no `.venv`, and del-T1 spent about 70 turns
+(6 minutes) failing to build one before it was redone; del-T2 passed only because the main
+checkout's `.venv` was symlinked into its worktree by hand. blyte has no step that prepares a
+worktree's environment. Decision: an optional `setup` command in `blyte.toml`, run once by
+`blyte dispatch` in the new worktree before the implementer starts. It is the repository owner's
+command (like the gate), run outside the sandbox so it can reach package caches and indexes; a
+failure ends the run as `blocked` without spending a turn.
+
+### Task S1: `[dispatch].setup` runs before the implementer
+
+**Goal:** prepare a dispatch worktree's environment (a virtualenv, `node_modules`) with a command from
+`blyte.toml`, so the implementer never spends turns on it, and a broken environment is reported as
+`blocked` at once.
+
+**Files:** `crates/blyte-cli/src/config.rs`, new `crates/blyte-cli/src/setup.rs` (and `pub mod setup;`
+in `crates/blyte-cli/src/lib.rs`), `crates/blyte-cli/src/dispatch.rs`, `docs/usage.md`, new
+`crates/blyte-cli/tests/test_dispatch_setup.rs`.
+
+**What to build:**
+- `DispatchConfig` gains `pub setup: Option<String>`. The commented template in `config.rs` (the
+  `# fold_budget = 60000` block) gains `# setup = "uv sync"   # prepares each new worktree before the
+  implementer starts`.
+- `setup.rs`:
+  ```rust
+  pub const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+  /// Runs `setup` with bash in `worktree`, outside the sandbox, writing its combined output to
+  /// `log_path`. Every `env` entry and `BLYTE_MAIN_CHECKOUT=<main_checkout>` are exported first.
+  /// Ok(()) on exit 0; Err(message) otherwise, where message is
+  /// "setup failed (exit N)" or "setup failed: <error>" (a timeout or spawn failure), followed by
+  /// a newline and the last 20 lines of the output.
+  pub fn run_setup(setup: &str, worktree: &Path, main_checkout: &Path,
+                   env: &BTreeMap<String, String>, log_path: &Path,
+                   timeout: Duration) -> Result<(), String>
+  ```
+  Run it through `blyte_agent::shell::LocalShell::new().exec(script, worktree, timeout)` (as
+  `init.rs` `verify_steps` does). That shell removes `BLYTE_*` variables from the environment, so
+  pass the variables as `export NAME='value'` lines at the top of the script, quoting each value in
+  single quotes with `'` written as `'\''`. Write the log even when the command fails.
+- `dispatch.rs` `run_dispatch`: after step 3 (base sha) and before writing the task file and spawning
+  the child, when not `--research` and `dispatch_cfg.setup` is `Some`, print
+  `setup: <first line of setup>` to stderr and call `run_setup` with the worktree, the main checkout
+  (`config::main_checkout(&root)`, falling back to `root`), `dispatch_cfg.env`,
+  `.wt/<id>.setup.log`, and `SETUP_TIMEOUT`. On `Err(msg)`: print and write `.wt/<id>.json` exactly
+  as the normal path does, with outcome `blocked`, exit `exit_code("blocked")`, `error` =
+  the first line of `msg`, `final_message` = `msg`, no commits or changed files, zero turns and gate
+  attempts, `cost_usd` None, `log` = the setup log path, `report` = `""`; then return that exit code.
+  Factor the summary printing and writing into one helper used by both paths rather than copying it.
+  On `Ok`, continue as today. With no `setup`, nothing changes.
+- `docs/usage.md`: a `setup` row in the `blyte.toml` key table (`string`, "a command run once in each
+  new dispatch worktree before the implementer starts, outside the sandbox, with `[dispatch.env]` and
+  `BLYTE_MAIN_CHECKOUT` set; a failure ends the run as `blocked`"), and a short paragraph with the two
+  usual forms: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and
+  `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but
+  runs that change dependencies affect each other).
+
+**Tests** (`test_dispatch_setup.rs`, using temp dirs; set `BLYTE_USAGE_LOG=off` for any child process):
+1. `load` reads `setup = "uv sync"` into `dispatch.setup`; a blyte.toml without it gives `None`.
+2. `run_setup("echo hi > made.txt && echo \"$BLYTE_MAIN_CHECKOUT|$FOO\"", ...)` with env
+   `FOO = "it's"` returns Ok, creates `made.txt` in the worktree, and the log contains
+   `<main_checkout>|it's`.
+3. `run_setup("echo broken; exit 3", ...)` returns Err starting with `setup failed (exit 3)` and
+   containing `broken`; the log exists and contains `broken`.
+4. Output of 30 lines (`seq 1 30; exit 1`): the Err holds lines 11..=30 and not line `10`.
+5. A timeout (`sleep 5` with a 1 s timeout) returns Err starting with `setup failed:`.
+6. End to end, through the binary (`env!("CARGO_BIN_EXE_blyte")`): a temp git repository with one
+   commit and `blyte.toml` holding `gate = "true"` and `setup = "echo broken; exit 3"`; run
+   `blyte dispatch S1x <task.md>` in it. It exits `5` (the `blocked` code), `.wt/S1x.json` has
+   outcome `blocked` and a `final_message` containing `broken`, `.wt/S1x.setup.log` exists, and no
+   `.wt/S1x.log` exists (the implementer never started). No API key or model is needed, since the run
+   stops before the child is spawned.
+
+Run: `cargo test -p blyte --test test_dispatch_setup`.
+
+**Constraints:** existing tests pass unmodified. Do not change `init.rs` (Task S2).
+
+**Depends on:** none.
+
+**Commit message:** `feat(dispatch): run blyte.toml's setup in each new worktree before the implementer`
+
+### Task S2: `blyte init` proposes a setup for uv repositories
+
+**Goal:** a repository with `uv.lock` gets a working `setup` from `blyte init`, and init's own step
+checks run after it, so a gate that uses `.venv/bin/...` is proved the way dispatch will run it.
+
+**Files:** `crates/blyte-cli/src/init.rs`, `crates/blyte-cli/tests/test_init_verified.rs` (add tests).
+
+**What to build:**
+- `pub fn detect_setup(root: &Path) -> Option<String>`: `Some("uv sync")` when `root/uv.lock` exists,
+  else `None` (`UV_FROZEN`, which `detect_env` already sets, makes it frozen).
+- `verify_steps` takes `setup: Option<&str>` and, when given, runs it in the init worktree with
+  `blyte_cli::setup::run_setup` (env, main checkout = `root`, log under the init worktree's parent as
+  `init-<pid>.setup.log`, `SETUP_TIMEOUT`) before the steps. If setup fails, print
+  `warning: setup failed; left out of blyte.toml:` and the message, and verify the steps without it.
+  Return whether setup passed along with the steps (change the return type as needed).
+- `render_verified` takes `setup: Option<&str>` plus whether it passed: passed renders
+  `setup = "<setup>"` under `[dispatch]` before `gate`, with the comment line
+  `# prepares each new worktree before the implementer starts`; failed renders it commented out
+  (`# setup = "<setup>"   # left out: failed in a fresh worktree`); `None` renders neither.
+- `run` passes `detect_setup(root)` through.
+
+**Tests:** `detect_setup` with and without `uv.lock`; `render_verified` for each of the three cases,
+and in each case the rendered text loads with `blyte_cli::config::load` (written to a temp
+`blyte.toml`) with `dispatch.setup` equal to `Some("uv sync")` only when it passed.
+Run: `cargo test -p blyte --test test_init_verified`.
+
+**Constraints:** existing tests pass; update existing callers of `render_verified` and
+`verify_steps` for the new parameters only.
+
+**Depends on:** S1 (uses `setup::run_setup` and the `setup` field).
+
+**Commit message:** `feat(init): propose uv sync as the worktree setup for uv repositories`
