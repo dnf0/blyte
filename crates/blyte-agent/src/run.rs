@@ -886,6 +886,10 @@ impl<'a> Runner<'a> {
                 }
             }
 
+            if state.orchestrator.verification_cmd.trim().is_empty() {
+                return (Outcome::Verified, report);
+            }
+
             report.gate_attempts += 1;
             report.gate_turns.push(turn);
             self.emit(Event::GateStart {
