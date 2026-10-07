@@ -681,6 +681,17 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                             }
                         }
                     }
+                    if let Some(s) = start_val
+                        .as_ref()
+                        .and_then(|v| v["session"].as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        let prefix: String = s.chars().take(8).collect();
+                        let tag = format!("session:{prefix}");
+                        if !file_tags.contains(&tag) {
+                            file_tags.push(tag);
+                        }
+                    }
 
                     let summary_path = wt_dir.join(format!("{id}.json"));
                     let mut commits = Vec::new();
@@ -1498,5 +1509,64 @@ mod tests {
         assert_eq!(job_title(text1, "G2"), "an empty gate is skipped");
         assert_eq!(job_title("Task G3: x", "G2"), "Task G3: x");
         assert_eq!(job_title("Task G2:", "G2"), "Task G2:");
+    }
+
+    #[test]
+    fn session_tag_from_start_file() {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("repos/repo-a/.wt");
+        std::fs::create_dir_all(&wt).unwrap();
+
+        let me = std::process::id();
+        std::fs::write(
+            wt.join("T1.start.json"),
+            format!(r#"{{"id":"T1","pid":{me},"session":"4f83bf80-a445-4090","tags":["x"]}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            wt.join("T2.start.json"),
+            format!(r#"{{"id":"T2","pid":{me},"session":"abc"}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            wt.join("T3.start.json"),
+            format!(r#"{{"id":"T3","pid":{me},"tags":["x"]}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            wt.join("T4.start.json"),
+            format!(r#"{{"id":"T4","pid":{me},"session":"4f83bf80-a445-4090","tags":["session:4f83bf80"]}}"#),
+        )
+        .unwrap();
+
+        let src = Sources {
+            roots: vec![d.path().join("repos")],
+            runs_dirs: vec![],
+            hours: 24,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let jobs = collect_jobs(&src, now);
+
+        let t1 = jobs.iter().find(|j| j.id == "T1").unwrap();
+        assert!(t1.tags.contains(&"x".to_string()));
+        assert!(t1.tags.contains(&"session:4f83bf80".to_string()));
+
+        let t2 = jobs.iter().find(|j| j.id == "T2").unwrap();
+        assert!(t2.tags.contains(&"session:abc".to_string()));
+
+        let t3 = jobs.iter().find(|j| j.id == "T3").unwrap();
+        assert!(!t3.tags.iter().any(|t| t.starts_with("session:")));
+
+        let t4 = jobs.iter().find(|j| j.id == "T4").unwrap();
+        assert_eq!(
+            t4.tags
+                .iter()
+                .filter(|t| t.as_str() == "session:4f83bf80")
+                .count(),
+            1
+        );
     }
 }
