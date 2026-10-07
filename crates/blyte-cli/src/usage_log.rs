@@ -50,6 +50,15 @@ pub fn path_from(
     None
 }
 
+/// Resolves the session identifier, falling back from `blyte` to `claude`.
+///
+/// Returns the first of the two that is `Some` and non-empty after trimming, `blyte` first; otherwise `None`.
+pub fn session_from(blyte: Option<String>, claude: Option<String>) -> Option<String> {
+    blyte
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| claude.filter(|s| !s.trim().is_empty()))
+}
+
 /// An entry in the usage log recording metadata and token consumption of a single run.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -293,5 +302,20 @@ mod tests {
 
         let parsed: Entry = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed, entry);
+    }
+
+    #[test]
+    fn test_session_from() {
+        assert_eq!(
+            session_from(Some("b".into()), Some("c".into())),
+            Some("b".into())
+        );
+        assert_eq!(session_from(None, Some("c".into())), Some("c".into()));
+        assert_eq!(
+            session_from(Some("".into()), Some("c".into())),
+            Some("c".into())
+        );
+        assert_eq!(session_from(Some("  ".into()), None), None);
+        assert_eq!(session_from(None, None), None);
     }
 }
