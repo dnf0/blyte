@@ -391,8 +391,37 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
     };
 
     let (outcome, report) = runner.run(state);
+    let model_id = provider.model_id();
+
+    let entry = crate::usage_log::Entry {
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        repo: crate::usage_log::repo_of(&config.root),
+        session: std::env::var("BLYTE_SESSION")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        dispatch: std::env::var("BLYTE_DISPATCH_ID")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        research: config.research,
+        model: model_id.clone(),
+        outcome: format!("{outcome:?}").to_lowercase(),
+        turns: report.outcome_turns,
+        input: report.usage.input,
+        cached: report.usage.cached,
+        output: report.usage.output,
+        thinking: report.usage.thinking,
+        cost_usd: blyte_provider::pricing(&model_id).map(|p| p.cost(&report.usage)),
+    };
+    if let Some(path) = crate::usage_log::default_path() {
+        if let Err(err) = crate::usage_log::append(&path, &entry) {
+            eprintln!("warning: usage log: {err}");
+        }
+    }
+
     if let Some(path) = &config.report {
-        let model_id = blyte_provider::Provider::model_id(provider.as_ref());
         let mut record = crate::report::RunRecord::from_run(
             config,
             &model_id,
