@@ -27,6 +27,10 @@ pub struct Orchestrator {
     pub verification_cmd: String,
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
+    /// Set for `blyte --orchestrate`: the orchestrator's instructions, which replace the implementer's
+    /// framing in the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 /// Facts the harness observed. Not opinions, and not reported by the worker.
@@ -57,6 +61,7 @@ impl State {
                 goal: goal.into(),
                 verification_cmd: verification_cmd.into(),
                 max_cost_usd: None,
+                instructions: None,
             },
             runtime: Runtime::default(),
         }

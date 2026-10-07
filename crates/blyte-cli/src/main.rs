@@ -1,5 +1,5 @@
-use blyte_cli::cli::Cli;
-use clap::Parser;
+use blyte_cli::cli::{apply_orchestrate_defaults, Cli};
+use clap::{CommandFactory, FromArgMatches};
 use std::path::PathBuf;
 
 /// Restore the default SIGPIPE behaviour.
@@ -26,7 +26,9 @@ fn main() {
         }
     }
 
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    apply_orchestrate_defaults(&mut cli, &matches);
 
     if let Some(cmd) = cli.command {
         match cmd {
@@ -155,6 +157,11 @@ fn main() {
         }
     }
 
+    if cli.orchestrate && cli.prompt.is_some() {
+        eprintln!("error: --orchestrate is interactive; start it without a prompt");
+        std::process::exit(2);
+    }
+
     if !cli.no_gate_slot {
         blyte_agent::gate_slots::enable();
     }
@@ -196,6 +203,8 @@ fn main() {
         max_turns: cli.max_turns,
         max_gates: cli.max_gates,
         rollback: cli.rollback,
+        orchestrate: cli.orchestrate,
+        fold_budget: cli.fold_budget,
     };
     if let Err(e) = blyte_cli::repl::run_repl(repl_config) {
         eprintln!("REPL error: {e}");
