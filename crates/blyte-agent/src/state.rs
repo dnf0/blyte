@@ -30,9 +30,17 @@ pub struct Orchestrator {
 }
 
 /// Facts the harness observed. Not opinions, and not reported by the worker.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Runtime {
     pub rollbacks: u32,
+    /// The conversation so far, kept across prompts in an interactive session. `None`: each run starts
+    /// fresh (one-shot runs and dispatches). `Some`: the run continues it and stores it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Vec<blyte_provider::Message>>,
+    /// The goal of the conversation's first prompt; the system prompt is built from it for the whole
+    /// conversation, so it stays identical and its cache holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_goal: Option<String>,
 }
 
 /// Execution state across two regions: [`Orchestrator`] and [`Runtime`].

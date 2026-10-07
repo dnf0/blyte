@@ -300,7 +300,7 @@ impl<'a> Runner<'a> {
     /// The immutable part of the prompt: who the worker is, what it may touch, where it runs.
     ///
     /// Held constant for the whole run so it caches.
-    fn system_prompt(&self, state: &State) -> String {
+    fn system_prompt(&self, state: &State, goal: &str) -> String {
         let bins = tools::available_binaries(self.shell, &self.root).join(", ");
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         // Ungated runs have no check command, so the model must verify the work itself before stopping.
@@ -337,7 +337,7 @@ impl<'a> Runner<'a> {
              Independent reads, searches and commands can be issued as several tool calls in one \
              turn: they run in order and you see every result together. Batch them whenever one \
              does not depend on another's result; every turn you save is a full model call.\n",
-            goal = state.orchestrator.goal,
+            goal = goal,
             completion = completion,
             where_ = self.shell.describe(),
             bins = bins,
@@ -581,10 +581,52 @@ impl<'a> Runner<'a> {
         state: &mut State,
         deadline: Option<std::time::Instant>,
     ) -> (Outcome, RunReport) {
+        let is_empty_conversation = state
+            .runtime
+            .conversation
+            .as_ref()
+            .map(|c| c.is_empty())
+            .unwrap_or(false);
+        if is_empty_conversation {
+            state.runtime.conversation_goal = Some(state.orchestrator.goal.clone());
+        }
+
+        let mut history = match &state.runtime.conversation {
+            None => vec![Message::User(format!("Begin. {}", state.orchestrator.goal))],
+            Some(prev) if prev.is_empty() => {
+                vec![Message::User(format!("Begin. {}", state.orchestrator.goal))]
+            }
+            Some(prev) => {
+                let mut h = prev.clone();
+                h.push(Message::User(state.orchestrator.goal.clone()));
+                h
+            }
+        };
+
+        let goal = match &state.runtime.conversation_goal {
+            Some(g) => g.as_str(),
+            None => state.orchestrator.goal.as_str(),
+        };
+        let system = self.system_prompt(state, goal);
+
+        let (outcome, report) = self.run_loop(state, &mut history, &system, deadline);
+
+        if state.runtime.conversation.is_some() {
+            state.runtime.conversation = Some(history);
+        }
+
+        (outcome, report)
+    }
+
+    fn run_loop(
+        &self,
+        state: &mut State,
+        history: &mut Vec<Message>,
+        system: &str,
+        deadline: Option<std::time::Instant>,
+    ) -> (Outcome, RunReport) {
         let mut deadline = deadline;
         let mut report = RunReport::default();
-        let mut history = vec![Message::User(format!("Begin. {}", state.orchestrator.goal))];
-        let system = self.system_prompt(state);
         let specs = tools::specs();
         let baseline = self.checkpoint();
         let mut last_sent: Option<Vec<Message>> = None;
@@ -628,8 +670,8 @@ impl<'a> Runner<'a> {
             }
 
             let req = Request {
-                system: system.clone(),
-                messages: self.context.build(state, &history),
+                system: system.to_string(),
+                messages: self.context.build(state, history),
                 tools: specs.clone(),
                 max_output_tokens: None,
             };
@@ -645,7 +687,7 @@ impl<'a> Runner<'a> {
                 }
                 _ => (false, req.messages.iter().map(message_chars).sum()),
             };
-            let fold_budget = self.context.fold_budget(&history);
+            let fold_budget = self.context.fold_budget(history);
             last_sent = Some(req.messages.clone());
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.
