@@ -47,11 +47,30 @@ pub struct ReplSession {
     pub orchestrate: bool,
     pub fold_budget: Option<usize>,
     pub state: blyte_agent::state::State,
+    pub session_id: String,
+}
+
+/// Formats a session identifier from a Unix timestamp (in seconds) and process ID.
+pub fn new_session_id(now_secs: u64, pid: u32) -> String {
+    format!("{now_secs}-{pid}")
 }
 
 impl ReplSession {
     /// Creates a new `ReplSession` initialized with the given `ReplConfig`.
     pub fn new(config: &ReplConfig) -> Self {
+        let session_id = match std::env::var("BLYTE_SESSION") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let id = new_session_id(now_secs, std::process::id());
+                std::env::set_var("BLYTE_SESSION", &id);
+                id
+            }
+        };
+
         let gate = config.gate.clone();
         let verification_cmd = gate.clone().unwrap_or_default();
         let goal = "Interactive REPL session".to_string();
@@ -86,6 +105,7 @@ impl ReplSession {
             orchestrate: config.orchestrate,
             fold_budget: config.fold_budget,
             state,
+            session_id,
         }
     }
 }
@@ -411,6 +431,7 @@ pub fn handle_repl_command<W: Write>(
             }
             "/state" => {
                 writeln!(writer, "=== Blyte SKILL.state ===").map_err(|e| e.to_string())?;
+                writeln!(writer, "session: {}", session.session_id).map_err(|e| e.to_string())?;
                 // Render orchestrator contract: goal specification and verification gate
                 let orch = serde_json::to_string_pretty(&session.state.orchestrator)
                     .map_err(|e| e.to_string())?;
@@ -623,4 +644,26 @@ pub fn run_repl(config: ReplConfig) -> Result<(), String> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     run_repl_stream(stdin.lock(), stdout.lock(), session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_session_id_format() {
+        assert_eq!(new_session_id(1700000000, 42), "1700000000-42");
+    }
+
+    #[test]
+    fn test_repl_state_contains_session() {
+        let config = ReplConfig::default();
+        let mut session = ReplSession::new(&config);
+        let mut out = Vec::new();
+        let res = handle_repl_command(&mut session, "/state", &mut out).unwrap();
+        assert_eq!(res, ReplControl::Handled);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("session: "));
+        assert!(text.contains(&format!("session: {}", session.session_id)));
+    }
 }

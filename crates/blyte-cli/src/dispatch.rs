@@ -418,6 +418,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     for (k, v) in &dispatch_cfg.env {
         cmd.env(k, v);
     }
+    cmd.env("BLYTE_DISPATCH_ID", &args.id);
 
     cmd.arg("--gate").arg(&gate);
     cmd.arg("--rollback=false");

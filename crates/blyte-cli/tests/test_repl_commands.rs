@@ -90,6 +90,7 @@ fn test_slash_state_inspection() {
     let text = String::from_utf8(out).unwrap();
     assert!(text.to_lowercase().contains("orchestrator"));
     assert!(text.to_lowercase().contains("runtime"));
+    assert!(text.contains("session: "));
 }
 
 #[test]
