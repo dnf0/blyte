@@ -264,3 +264,28 @@ fn test_malformed_stdin() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(stdout.trim(), "claude");
 }
+
+#[test]
+fn test_after_command_that_does_not_read_stdin() {
+    // An --after command that closes its input must not kill blyte with SIGPIPE: the input here is
+    // larger than a pipe buffer, so the write always hits the closed pipe.
+    let pad = "x".repeat(256 * 1024);
+    let stdin_payload = format!(r#"{{"model":{{"display_name":"Opus"}},"pad":"{pad}"}}"#);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
+    cmd.args(["statusline", "--after", "exec 0<&-; echo mine"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(stdin_payload.as_bytes()).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("mine"),
+        "expected line starting with mine: {stdout}"
+    );
+}

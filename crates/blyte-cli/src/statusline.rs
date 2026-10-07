@@ -123,6 +123,12 @@ fn run_after(cmd_str: &str, stdin_bytes: &[u8], timeout: Duration) -> Option<Str
 
     let mut child = cmd.spawn().ok()?;
 
+    // The command may exit without reading its input; main restores the default SIGPIPE, which would
+    // then kill this process on the write, so ignore it here and take the EPIPE error instead.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(stdin_bytes);
         let _ = stdin.flush();
