@@ -971,3 +971,117 @@ Run: `cargo test -p blyte --test test_config_allow_read`.
 separately; not here.
 
 **Commit message:** `feat(config): allow_read in blyte.toml for paths every dispatch may read`
+
+## blyte on the Claude Code status line (2026-10-07)
+
+User decision: when blyte is installed for Claude Code, it puts its costs on Claude Code's status line.
+`blyte statusline` prints the line; `blyte skill install` (which `blyte update` re-runs) sets it in
+`~/.claude/settings.json`. A status line the user already has is kept and wrapped
+(`blyte statusline --after '<their command>'`), not replaced; uninstall restores it. The line's blyte
+part needs C1 (dispatches logged under the Claude session id).
+
+### Task SL1: `blyte statusline`
+
+**Goal:** a status line command for Claude Code that shows the session's Claude cost and what its blyte
+dispatches cost.
+
+**Files:** new `crates/blyte-cli/src/statusline.rs`, `crates/blyte-cli/src/lib.rs` (`pub mod statusline;`),
+`crates/blyte-cli/src/cli.rs`, `crates/blyte-cli/src/main.rs`, new `crates/blyte-cli/tests/test_statusline.rs`.
+
+**What to build:**
+- `blyte statusline [--after <COMMAND>]`: reads Claude Code's status JSON from stdin, prints one line,
+  always exits 0 (any error degrades to a shorter line, never a panic or a non-zero exit).
+- `pub fn base_line(d: &serde_json::Value, compact_window: Option<u64>) -> String`, built from the parts
+  that are present, joined with ` · `:
+  - `d.model.display_name`, or `claude` when missing.
+  - context: with `p = d.context_window.used_percentage` and `size = d.context_window.context_window_size`
+    (or `.size`): `used = p / 100 * size`, `limit = min(size, compact_window.unwrap_or(200000))`,
+    text `context {used/1000:.0}k of {limit/1000}k`, plus ` — consider /compact or a new session` when
+    `100 * used / limit >= 60`. With `p` but no size: `context {p:.0}%`. Without `p`: no part.
+  - `${d.cost.total_cost_usd:.2} this session` when present.
+- `compact_window` comes from `autoCompactWindow` in `~/.claude/settings.json` (`None` if missing or
+  unreadable).
+- `pub fn blyte_part(totals: &crate::cost::Totals, claude_cost: Option<f64>) -> Option<String>`: `None`
+  when `totals.runs == 0`; otherwise `blyte ${implementers_usd:.2} ({runs} runs)`, followed by
+  ` · total ${claude_cost + implementers_usd:.2}` when `claude_cost` is `Some`.
+- The totals are `crate::cost::totals(&usage_log::read(default_path()), Some(d.session_id), None, None)`;
+  no `session_id` in the input means no blyte part.
+- With `--after <COMMAND>`: run `sh -c <COMMAND>` with the same stdin bytes, a 2-second timeout and
+  stderr discarded; the base is the first line of its stdout, trimmed. If it fails, times out or
+  prints nothing, use `base_line` instead.
+- Output: the base, then ` · ` and the blyte part when there is one.
+
+**Tests** (`test_statusline.rs`):
+1. `base_line` for full input (`used_percentage: 45`, `context_window_size: 200000`, cost `1.5`, model
+   `Opus`) with `compact_window: Some(200000)` gives `Opus · context 90k of 200k · $1.50 this session`.
+2. 65% of 200k gives the `consider /compact` suffix; percentage without size gives `context 45%`;
+   `{}` gives `claude`.
+3. `blyte_part` with 0 runs is `None`; with 2 runs and $0.07 and claude cost 2.5 it is
+   `blyte $0.07 (2 runs) · total $2.57`; with claude cost `None` there is no total.
+4. Through the binary with `BLYTE_USAGE_LOG` pointing at a temp file holding two entries for session `s1`
+   (one with `dispatch: Some`), stdin `{"session_id":"s1","model":{"display_name":"Opus"},"cost":{"total_cost_usd":1}}`:
+   the output contains `Opus` and `blyte $` and `(1 runs)`, and the exit is 0.
+5. `--after "echo mine"` prints a line starting with `mine`; `--after "exit 1"` falls back to the base
+   line; `--after "sleep 5"` falls back within 4 seconds.
+6. Malformed stdin (`not json`) prints `claude` and exits 0.
+
+Run: `cargo test -p blyte --test test_statusline`.
+
+**Constraints:** existing tests pass unmodified.
+
+**Depends on:** none. **Siblings:** SL2 changes `skill.rs`; A1 changes `config.rs`, `dispatch.rs`;
+C1 changes `usage_log.rs`, `task_runner.rs`; ST1 changes `repl.rs`. None are in this worktree.
+
+**Commit message:** `feat(statusline): blyte statusline, Claude Code's line with blyte's costs`
+
+### Task SL2: `blyte skill install` sets the Claude Code status line
+
+**Goal:** installing blyte for Claude Code puts `blyte statusline` on Claude Code's status line,
+keeping a status line the user already has.
+
+**Files:** `crates/blyte-cli/src/skill.rs`, `crates/blyte-cli/src/cli.rs` (the `--no-statusline` flag on
+`skill install` only), `crates/blyte-cli/src/main.rs` (pass it through), `Cargo.toml` (serde_json
+`preserve_order` feature), new `crates/blyte-cli/tests/test_skill_statusline.rs`.
+
+**What to build:**
+- Enable serde_json's `preserve_order` feature in the workspace `Cargo.toml`, so rewriting
+  `settings.json` keeps the user's key order.
+- In `skill.rs`, pure functions on the settings file's text (an empty string means `{}`):
+  - `pub fn set_status_line(settings: &str) -> Result<Option<String>, String>`: `Ok(None)` (no change)
+    when `statusLine.command` already starts with `blyte statusline`. Otherwise it returns the new text
+    with `statusLine` set to `{"type":"command","command":C}`, where C is `blyte statusline` when there
+    was no `statusLine` (or it had no command) and `blyte statusline --after '<old>'` when there was a
+    command `<old>`, with `'` in `<old>` written as `'\''`. Other keys and their order are kept; output
+    is pretty-printed with two-space indent and a trailing newline. Invalid JSON is an `Err` (the file
+    is then left alone).
+  - `pub fn remove_status_line(settings: &str) -> Result<Option<String>, String>`: if the command is
+    exactly `blyte statusline`, remove `statusLine`; if it is `blyte statusline --after '<old>'`, set
+    the command back to `<old>` (undoing the quoting); otherwise `Ok(None)`.
+- `install_for` with `Harness::Claude` and not `project` and not `no_statusline`: apply
+  `set_status_line` to `~/.claude/settings.json` (create it if missing). Before the first change, copy
+  the existing file to `~/.claude/settings.json.blyte-backup` if no backup exists. Print
+  `status line: set to blyte statusline` (or `... wrapped your status line command`) when it changes. A
+  JSON error prints a warning naming the file and does not fail the install.
+- `uninstall_for` with `Harness::Claude` and not `project`: apply `remove_status_line`.
+- `skill install` gains `--no-statusline` ("do not set Claude Code's status line").
+
+**Tests** (`test_skill_statusline.rs`, pure functions only, no real home directory):
+1. `set_status_line("")` and `set_status_line("{}")` give `statusLine.command == "blyte statusline"`.
+2. `{"model":"opus","statusLine":{"type":"command","command":"/u/it's.py"},"z":1}` gives
+   `blyte statusline --after '/u/it'\''s.py'`, and the keys come out in the order `model`, `statusLine`, `z`.
+3. Running `set_status_line` again on its own output is `Ok(None)`.
+4. `remove_status_line` of (1)'s output has no `statusLine`; of (2)'s output gives back command
+   `/u/it's.py`; of `{"statusLine":{"command":"mine"}}` is `Ok(None)`.
+5. `set_status_line("{not json")` is `Err`.
+
+Run: `cargo test -p blyte --test test_skill_statusline`.
+
+**Constraints:** existing tests pass unmodified (if enabling `preserve_order` breaks one that compares
+JSON text, say so in your final message and fix that test's expectation only). Do not add the
+`statusline` command itself (SL1).
+
+**Depends on:** none (it writes the command's name only). **Siblings:** SL1 adds `blyte statusline`
+and touches `cli.rs`/`main.rs` too; keep your `cli.rs`/`main.rs` edits to the one flag so the merge is
+small. A1, C1 and ST1 are separate as well.
+
+**Commit message:** `feat(skill): installing for Claude Code sets the status line to blyte statusline`
