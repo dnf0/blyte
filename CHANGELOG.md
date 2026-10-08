@@ -1,3 +1,9 @@
+## v0.26.0 (2026-10-08)
+
+### Feat
+
+- **skill**: keep context rules in the global CLAUDE.md (#251)
+
 ## v0.25.0 (2026-10-07)
 
 ### Feat
