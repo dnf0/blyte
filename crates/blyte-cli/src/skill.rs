@@ -14,15 +14,32 @@ worktree each); run tasks one after another only when one depends on another. Ke
 yourself: design decisions, ambiguous requirements, one-line edits, and anything with no check.
 <!-- /blyte:default -->";
 
+pub const CONTEXT_BLOCK: &str = "\
+<!-- blyte:context -->
+## Context: keep this session small
+
+Everything a tool returns stays in the conversation and is re-read on every turn, so it is most of
+what a session costs.
+- Trim command output at the source: `| tail -n 20`, `grep` for the lines you need, `sed -n`
+  ranges, `--quiet`/`-q`; `git diff --stat` before any full diff.
+- Read files by range (offset and limit), not whole, once you know where to look.
+- For a dispatched run, read `blyte review <id>` and the JSON fields you need
+  (`jq -r .outcome .wt/<id>.json`), not the whole summary or log; search `.wt/<id>.log` with
+  `grep`/`tail` only for what `== checks` flags.
+- Write tasks as `### Task <ID>` sections of the plan and dispatch with `--plan`/`--plan-task`;
+  do not write task files that copy the plan.
+- An investigation needing more than about five file reads goes to `blyte dispatch --research`;
+  read its report, not the files.
+- One session per piece of work. When the status line shows the context past about 60% of its
+  window, tell the user to `/compact` or start a new session before going on.
+<!-- /blyte:context -->";
+
 pub const CODEX_RULES: &str = "\
 # Written by `blyte skill install --harness codex`; removed by `blyte skill uninstall --harness codex`.
 # blyte dispatch needs the network and applies its own sandbox, so it runs outside Codex's.
 prefix_rule(pattern=[\"blyte\", \"dispatch\"], decision=\"allow\")
 prefix_rule(pattern=[\"blyte\", \"review\"], decision=\"allow\")
 ";
-
-const START_MARKER: &str = "<!-- blyte:default -->";
-const END_MARKER: &str = "<!-- /blyte:default -->";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
@@ -114,38 +131,50 @@ pub fn codex_rules_path() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".codex/rules/blyte.rules"))
 }
 
-pub fn set_default_block(text: &str) -> String {
-    if let Some(start) = text.find(START_MARKER) {
-        if let Some(end_rel) = text[start..].find(END_MARKER) {
-            let end = start + end_rel + END_MARKER.len();
-            let mut result = format!("{}{DEFAULT_BLOCK}{}", &text[..start], &text[end..]);
-            while result.ends_with("\n\n") {
-                result.pop();
+pub fn set_block(text: &str, block: &str) -> String {
+    let start_marker = block.lines().next().unwrap_or("");
+    let end_marker = block.lines().last().unwrap_or("");
+
+    if !start_marker.is_empty() && !end_marker.is_empty() {
+        if let Some(start) = text.find(start_marker) {
+            if let Some(end_rel) = text[start..].find(end_marker) {
+                let end = start + end_rel + end_marker.len();
+                let mut result = format!("{}{block}{}", &text[..start], &text[end..]);
+                while result.ends_with("\n\n") {
+                    result.pop();
+                }
+                if !result.ends_with('\n') {
+                    result.push('\n');
+                }
+                return result;
             }
-            if !result.ends_with('\n') {
-                result.push('\n');
-            }
-            return result;
         }
     }
 
     if text.is_empty() {
-        format!("{DEFAULT_BLOCK}\n")
+        format!("{block}\n")
     } else if text.ends_with('\n') {
-        format!("{text}\n{DEFAULT_BLOCK}\n")
+        format!("{text}\n{block}\n")
     } else {
-        format!("{text}\n\n{DEFAULT_BLOCK}\n")
+        format!("{text}\n\n{block}\n")
     }
 }
 
-pub fn remove_default_block(text: &str) -> String {
-    let Some(start) = text.find(START_MARKER) else {
+pub fn remove_block(text: &str, block: &str) -> String {
+    let start_marker = block.lines().next().unwrap_or("");
+    let end_marker = block.lines().last().unwrap_or("");
+
+    if start_marker.is_empty() || end_marker.is_empty() {
+        return text.to_string();
+    }
+
+    let Some(start) = text.find(start_marker) else {
         return text.to_string();
     };
-    let Some(end_rel) = text[start..].find(END_MARKER) else {
+    let Some(end_rel) = text[start..].find(end_marker) else {
         return text.to_string();
     };
-    let end = start + end_rel + END_MARKER.len();
+    let end = start + end_rel + end_marker.len();
 
     let prefix = &text[..start];
     let prefix_clean = if prefix.ends_with("\n\n") {
@@ -163,6 +192,36 @@ pub fn remove_default_block(text: &str) -> String {
     };
 
     format!("{prefix_clean}{suffix}")
+}
+
+pub fn set_default_block(text: &str) -> String {
+    set_block(text, DEFAULT_BLOCK)
+}
+
+pub fn remove_default_block(text: &str) -> String {
+    remove_block(text, DEFAULT_BLOCK)
+}
+
+pub fn ensure_context_block(home: &Path) -> Result<Option<PathBuf>, String> {
+    let claude_dir = home.join(".claude");
+    if !claude_dir.exists() {
+        return Ok(None);
+    }
+    let claude_md = claude_dir.join("CLAUDE.md");
+    let existing = if claude_md.exists() {
+        std::fs::read_to_string(&claude_md)
+            .map_err(|e| format!("failed to read {}: {e}", claude_md.display()))?
+    } else {
+        String::new()
+    };
+    let updated = set_block(&existing, CONTEXT_BLOCK);
+    if updated != existing {
+        std::fs::write(&claude_md, updated)
+            .map_err(|e| format!("failed to write {}: {e}", claude_md.display()))?;
+        Ok(Some(claude_md))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn set_status_line(settings: &str) -> Result<Option<String>, String> {
@@ -259,6 +318,13 @@ pub fn install_for(
     no_default: bool,
     no_statusline: bool,
 ) -> Result<Vec<PathBuf>, String> {
+    let claude_context_written = if harness == Harness::Claude && !project {
+        let home = home_dir()?;
+        ensure_context_block(&home)?
+    } else {
+        None
+    };
+
     let dirs = skill_dirs(harness, project)?;
     let skill_paths: Vec<PathBuf> = dirs.iter().map(|d| d.join("SKILL.md")).collect();
 
@@ -302,7 +368,9 @@ pub fn install_for(
         let updated = set_default_block(&existing);
         std::fs::write(&md_path, updated)
             .map_err(|e| format!("failed to write {}: {e}", md_path.display()))?;
-        written.push(md_path);
+        if !written.contains(&md_path) {
+            written.push(md_path);
+        }
     } else if md_path.exists() {
         // Switching to "only when asked" drops the default block an earlier install wrote, so it
         // does not need an uninstall first (2026-09-30).
@@ -312,7 +380,15 @@ pub fn install_for(
         if updated != existing {
             std::fs::write(&md_path, updated)
                 .map_err(|e| format!("failed to write {}: {e}", md_path.display()))?;
-            written.push(md_path);
+            if !written.contains(&md_path) {
+                written.push(md_path);
+            }
+        }
+    }
+
+    if let Some(path) = claude_context_written {
+        if !written.contains(&path) {
+            written.push(path);
         }
     }
 
@@ -406,7 +482,10 @@ pub fn uninstall_for(harness: Harness, project: bool) -> Result<Vec<PathBuf>, St
     if md_path.exists() {
         let existing = std::fs::read_to_string(&md_path)
             .map_err(|e| format!("failed to read {}: {e}", md_path.display()))?;
-        let updated = remove_default_block(&existing);
+        let mut updated = remove_default_block(&existing);
+        if harness == Harness::Claude && !project {
+            updated = remove_block(&updated, CONTEXT_BLOCK);
+        }
         if updated != existing {
             std::fs::write(&md_path, updated)
                 .map_err(|e| format!("failed to write {}: {e}", md_path.display()))?;

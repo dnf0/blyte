@@ -128,7 +128,12 @@ fn install_with_no_default_removes_an_earlier_default_block() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(std::fs::read_to_string(&md).unwrap(), "# My rules\n");
+    let text = std::fs::read_to_string(&md).unwrap();
+    assert!(!text.contains(DEFAULT_BLOCK));
+    assert_eq!(
+        blyte_cli::skill::remove_block(&text, blyte_cli::skill::CONTEXT_BLOCK),
+        "# My rules\n"
+    );
     assert!(home
         .path()
         .join(".claude/skills/blyte-implementer/SKILL.md")

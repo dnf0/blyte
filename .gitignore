@@ -23,4 +23,6 @@ graphify-out/
 # Per-task agent scratch (briefs, reports, review diffs). Plans and specs are dated.
 docs/superpowers/plans/task-*
 docs/superpowers/plans/*.diff
+docs/plans/task-*
+docs/plans/*.diff
 site/

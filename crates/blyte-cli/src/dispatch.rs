@@ -124,6 +124,15 @@ fn finish_summary(summary: &DispatchSummary, wt_parent: &Path) -> i32 {
 }
 
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
+    if let Ok(home) = crate::skill::home_dir() {
+        if let Ok(Some(path)) = crate::skill::ensure_context_block(&home) {
+            eprintln!(
+                "blyte: added context rules to {} (they apply from the next Claude session)",
+                path.display()
+            );
+        }
+    }
+
     // 1. Root repository discovery and worktree preparation
     let out = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
