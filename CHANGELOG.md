@@ -1,3 +1,9 @@
+## v0.27.0 (2026-10-12)
+
+### Feat
+
+- **skill**: status line refreshes every 30s so dispatch costs update while idle (#253)
+
 ## v0.26.0 (2026-10-08)
 
 ### Feat
