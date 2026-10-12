@@ -224,6 +224,8 @@ pub fn ensure_context_block(home: &Path) -> Result<Option<PathBuf>, String> {
     }
 }
 
+pub const STATUS_LINE_REFRESH_SECS: u64 = 30;
+
 pub fn set_status_line(settings: &str) -> Result<Option<String>, String> {
     let mut val: serde_json::Value = if settings.trim().is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
@@ -235,34 +237,61 @@ pub fn set_status_line(settings: &str) -> Result<Option<String>, String> {
         return Err("settings must be a JSON object".to_string());
     };
 
-    if let Some(sl) = obj.get("statusLine") {
-        if let Some(cmd) = sl.get("command").and_then(|c| c.as_str()) {
-            if cmd.starts_with("blyte statusline") {
-                return Ok(None);
+    if let Some(sl) = obj.get_mut("statusLine").and_then(|v| v.as_object_mut()) {
+        let cmd = sl.get("command").and_then(|c| c.as_str());
+        if let Some(cmd_str) = cmd {
+            if cmd_str.starts_with("blyte statusline") {
+                if sl.get("refreshInterval").is_some_and(|v| !v.is_null()) {
+                    return Ok(None);
+                }
+                sl.insert(
+                    "refreshInterval".to_string(),
+                    serde_json::json!(STATUS_LINE_REFRESH_SECS),
+                );
+                let mut out = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
+                out.push('\n');
+                return Ok(Some(out));
             }
         }
+
+        let command_str = match cmd {
+            Some(old) => format!("blyte statusline --after '{}'", old.replace('\'', r"'\''")),
+            None => "blyte statusline".to_string(),
+        };
+
+        sl.insert(
+            "type".to_string(),
+            serde_json::Value::String("command".to_string()),
+        );
+        sl.insert(
+            "command".to_string(),
+            serde_json::Value::String(command_str),
+        );
+        if sl
+            .get("refreshInterval")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            sl.insert(
+                "refreshInterval".to_string(),
+                serde_json::json!(STATUS_LINE_REFRESH_SECS),
+            );
+        }
+    } else {
+        let mut sl_map = serde_json::Map::new();
+        sl_map.insert(
+            "type".to_string(),
+            serde_json::Value::String("command".to_string()),
+        );
+        sl_map.insert(
+            "command".to_string(),
+            serde_json::Value::String("blyte statusline".to_string()),
+        );
+        sl_map.insert(
+            "refreshInterval".to_string(),
+            serde_json::json!(STATUS_LINE_REFRESH_SECS),
+        );
+        obj.insert("statusLine".to_string(), serde_json::Value::Object(sl_map));
     }
-
-    let command_str = match obj
-        .get("statusLine")
-        .and_then(|sl| sl.get("command"))
-        .and_then(|c| c.as_str())
-    {
-        Some(old) => format!("blyte statusline --after '{}'", old.replace('\'', r"'\''")),
-        None => "blyte statusline".to_string(),
-    };
-
-    let mut sl_map = serde_json::Map::new();
-    sl_map.insert(
-        "type".to_string(),
-        serde_json::Value::String("command".to_string()),
-    );
-    sl_map.insert(
-        "command".to_string(),
-        serde_json::Value::String(command_str),
-    );
-
-    obj.insert("statusLine".to_string(), serde_json::Value::Object(sl_map));
 
     let mut out = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
     out.push('\n');
@@ -296,6 +325,11 @@ pub fn remove_status_line(settings: &str) -> Result<Option<String>, String> {
             let old = inside.replace(r"'\''", "'");
             if let Some(sl_obj) = obj.get_mut("statusLine").and_then(|v| v.as_object_mut()) {
                 sl_obj.insert("command".to_string(), serde_json::Value::String(old));
+                if sl_obj.get("refreshInterval").and_then(|v| v.as_u64())
+                    == Some(STATUS_LINE_REFRESH_SECS)
+                {
+                    sl_obj.remove("refreshInterval");
+                }
             } else {
                 return Ok(None);
             }

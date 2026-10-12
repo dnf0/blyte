@@ -8,9 +8,10 @@ fn test_1_empty_settings_give_blyte_statusline() {
     let val_empty: serde_json::Value = serde_json::from_str(&res_empty).unwrap();
     assert_eq!(val_empty["statusLine"]["command"], "blyte statusline");
     assert_eq!(val_empty["statusLine"]["type"], "command");
+    assert_eq!(val_empty["statusLine"]["refreshInterval"], 30);
     assert_eq!(
         res_empty,
-        "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"blyte statusline\"\n  }\n}\n"
+        "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"blyte statusline\",\n    \"refreshInterval\": 30\n  }\n}\n"
     );
 
     let res_obj = set_status_line("{}")
@@ -19,9 +20,10 @@ fn test_1_empty_settings_give_blyte_statusline() {
     let val_obj: serde_json::Value = serde_json::from_str(&res_obj).unwrap();
     assert_eq!(val_obj["statusLine"]["command"], "blyte statusline");
     assert_eq!(val_obj["statusLine"]["type"], "command");
+    assert_eq!(val_obj["statusLine"]["refreshInterval"], 30);
     assert_eq!(
         res_obj,
-        "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"blyte statusline\"\n  }\n}\n"
+        "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"blyte statusline\",\n    \"refreshInterval\": 30\n  }\n}\n"
     );
 }
 
@@ -37,6 +39,7 @@ fn test_2_existing_command_is_wrapped_and_key_order_preserved() {
         val["statusLine"]["command"],
         r"blyte statusline --after '/u/it'\''s.py'"
     );
+    assert_eq!(val["statusLine"]["refreshInterval"], 30);
 
     let keys: Vec<_> = val
         .as_object()
@@ -51,7 +54,8 @@ fn test_2_existing_command_is_wrapped_and_key_order_preserved() {
         "  \"model\": \"opus\",\n",
         "  \"statusLine\": {\n",
         "    \"type\": \"command\",\n",
-        "    \"command\": \"blyte statusline --after '/u/it'\\\\''s.py'\"\n",
+        "    \"command\": \"blyte statusline --after '/u/it'\\\\''s.py'\",\n",
+        "    \"refreshInterval\": 30\n",
         "  },\n",
         "  \"z\": 1\n",
         "}\n"
@@ -118,4 +122,58 @@ fn test_4_remove_status_line() {
 fn test_5_invalid_json_is_err() {
     assert!(set_status_line("{not json").is_err());
     assert!(remove_status_line("{not json").is_err());
+}
+
+#[test]
+fn test_existing_bare_statusline_gains_refresh_interval() {
+    let input = r#"{"statusLine":{"type":"command","command":"blyte statusline"}}"#;
+    let res = set_status_line(input)
+        .unwrap()
+        .expect("should produce new settings");
+    let val: serde_json::Value = serde_json::from_str(&res).unwrap();
+    assert_eq!(val["statusLine"]["command"], "blyte statusline");
+    assert_eq!(val["statusLine"]["refreshInterval"], 30);
+
+    assert_eq!(set_status_line(&res), Ok(None));
+}
+
+#[test]
+fn test_existing_wrapped_with_refresh_interval_is_left_alone() {
+    let input = r#"{"statusLine":{"type":"command","command":"blyte statusline --after 'custom'","refreshInterval":5}}"#;
+    assert_eq!(set_status_line(input), Ok(None));
+}
+
+#[test]
+fn test_wrapping_preserves_padding() {
+    let input = r#"{"statusLine":{"type":"command","command":"mine","padding":2}}"#;
+    let res = set_status_line(input)
+        .unwrap()
+        .expect("should produce new settings");
+    let val: serde_json::Value = serde_json::from_str(&res).unwrap();
+    assert_eq!(
+        val["statusLine"]["command"],
+        "blyte statusline --after 'mine'"
+    );
+    assert_eq!(val["statusLine"]["padding"], 2);
+    assert_eq!(val["statusLine"]["type"], "command");
+    assert_eq!(val["statusLine"]["refreshInterval"], 30);
+}
+
+#[test]
+fn test_remove_wrapped_refresh_interval() {
+    let input_30 = r#"{"statusLine":{"type":"command","command":"blyte statusline --after 'mine'","refreshInterval":30}}"#;
+    let rem_30 = remove_status_line(input_30)
+        .unwrap()
+        .expect("should restore statusLine");
+    let val_30: serde_json::Value = serde_json::from_str(&rem_30).unwrap();
+    assert_eq!(val_30["statusLine"]["command"], "mine");
+    assert!(val_30["statusLine"].get("refreshInterval").is_none());
+
+    let input_5 = r#"{"statusLine":{"type":"command","command":"blyte statusline --after 'mine'","refreshInterval":5}}"#;
+    let rem_5 = remove_status_line(input_5)
+        .unwrap()
+        .expect("should restore statusLine");
+    let val_5: serde_json::Value = serde_json::from_str(&rem_5).unwrap();
+    assert_eq!(val_5["statusLine"]["command"], "mine");
+    assert_eq!(val_5["statusLine"]["refreshInterval"], 5);
 }
