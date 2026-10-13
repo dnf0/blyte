@@ -4,12 +4,14 @@ version.workspace = true
 description = "The blyte agent loop: tools, context, persistent shell sessions, search and the command sandbox."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-blyte-provider = { path = "../blyte-provider" }
+blyte-provider = { path = "../blyte-provider", version = "0.27.0" }
 grep-searcher.workspace = true
 grep-regex.workspace = true
 ignore.workspace = true

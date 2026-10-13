@@ -1,14 +1,4 @@
 # Until publication: the repository's current home and author
 Cargo.toml: Climate X Engineering
-Cargo.toml: github.com/climate-x-org/blyte
-CONTRIBUTING.md: github.com/climate-x-org/blyte
-crates/blyte-cli/README.md: github.com/climate-x-org/blyte
-docs/getting-started.md: github.com/climate-x-org/blyte
-docs/getting-started.md: climate-x-org/blyte
-docs/index.md: github.com/climate-x-org/blyte
-docs/security.md: github.com/climate-x-org/blyte
 LICENSE: Climate X Engineering
 mkdocs.yml: Climate X Engineering
-mkdocs.yml: github.com/climate-x-org/blyte
-README.md: github.com/climate-x-org/blyte
-SECURITY.md: github.com/climate-x-org/blyte
