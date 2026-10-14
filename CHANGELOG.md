@@ -1,3 +1,9 @@
+## v0.28.1 (2026-10-14)
+
+### Fix
+
+- **release**: bump blyte-agent's blyte-provider pin with the version (#257)
+
 ## v0.28.0 (2026-10-14)
 
 ### Feat
