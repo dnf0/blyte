@@ -1,3 +1,9 @@
+## v0.30.0 (2026-10-14)
+
+### Feat
+
+- **cli**: choose the default model during blyte skill install (#263)
+
 ## v0.29.1 (2026-10-14)
 
 ### Fix
