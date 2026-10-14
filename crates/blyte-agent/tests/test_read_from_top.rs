@@ -59,3 +59,13 @@ fn a_range_from_the_top_of_a_file_too_big_to_fit_is_honoured() {
     assert_eq!(o.lines().count(), 100);
     assert!(!o.contains("elided"));
 }
+
+#[test]
+fn an_end_line_before_the_start_line_is_an_error_not_a_panic() {
+    let d = tempfile::tempdir().unwrap();
+    file(&d, "run.rs", 700);
+    let args = json!({"path": "run.rs", "start_line": 220, "end_line": 200});
+    let o = execute(d.path(), &LocalShell, &LocalFs, "read", &args);
+    assert!(o.is_error);
+    assert!(o.content.contains("before start_line"));
+}
