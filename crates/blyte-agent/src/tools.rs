@@ -888,7 +888,13 @@ fn execute_unbounded(
                         } else {
                             format!("exit {}", output.status.code().unwrap_or(1))
                         };
-                        ToolOutcome::err(tail)
+                        // The dispatch command may report its result on stdout even when it fails.
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if stdout.trim().is_empty() {
+                            ToolOutcome::err(tail)
+                        } else {
+                            ToolOutcome::err(format!("{}\n{tail}", stdout.trim_end()))
+                        }
                     }
                 }
                 Err(e) => ToolOutcome::err(format!("dispatch command failed: {e}")),
