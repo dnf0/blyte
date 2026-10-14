@@ -1,3 +1,9 @@
+## v0.29.1 (2026-10-14)
+
+### Fix
+
+- **agent**: return an error, not a panic, when read's end_line is before start_line (#262)
+
 ## v0.29.0 (2026-10-14)
 
 ### Feat
