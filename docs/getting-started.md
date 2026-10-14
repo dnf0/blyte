@@ -26,15 +26,17 @@ versions; `--rollback` restores the previous build, kept as `blyte.prev`).
 
 ## 2. Give it a model
 
-blyte's model does the implementation, so pick a cheap one that follows instructions well. The
-default, and the one blyte has been measured on, is Gemini 3.8 Flash:
+blyte's model does the implementation, so pick one that follows instructions well. `blyte skill
+install` asks for your default model (`gemini-4-argon` recommended, `gemini-3.8-flash-high` built-in
+default, or any model id) and writes `BLYTE_MODEL` to `~/.config/blyte/env` (or pass `blyte skill
+install --model <id>`):
 
 ```bash
 export GEMINI_API_KEY=...
 ```
 
 A session that did not start with the key exported (a Claude Code session opened from another
-shell, say) will not see it. So you can keep it in a file instead, which blyte reads for any
+shell, say) will not see it. So you can keep it in `~/.config/blyte/env`, which blyte reads for any
 variable not already set:
 
 ```bash
@@ -63,7 +65,9 @@ or for one repository only (committed with it, so everyone on the repository get
 cd your-repo && blyte skill install --project
 ```
 
-Installing also adds a short, marked block to `CLAUDE.md` (`~/.claude/CLAUDE.md`, or the
+In an interactive terminal, `blyte skill install` asks for the default implementer model when
+`BLYTE_MODEL` is not yet in `~/.config/blyte/env`; pass `--model <id>` to set `BLYTE_MODEL` without
+asking. Installing also adds a short, marked block to `CLAUDE.md` (`~/.claude/CLAUDE.md`, or the
 repository's with `--project`) that makes blyte Claude Code's default implementer, with
 independent tasks dispatched in parallel. Pass `--no-default` to skip it; `blyte skill uninstall`
 removes both. The skill always matches the installed blyte; after upgrading blyte, run

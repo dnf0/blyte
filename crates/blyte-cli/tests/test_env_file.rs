@@ -4,7 +4,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-use blyte_cli::env_file::{load, parse};
+use blyte_cli::env_file::{get, load, parse, set};
 
 #[test]
 fn parse_reads_names_and_values() {
@@ -70,4 +70,53 @@ fn the_binary_loads_the_file_named_by_blyte_env_file() {
     };
     assert!(stderr(path.as_os_str()).contains("chmod 600"));
     assert!(!stderr(std::ffi::OsStr::new("")).contains("chmod 600"));
+}
+
+#[test]
+fn set_creates_file_with_mode_0600_replaces_existing_and_appends_without_trailing_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested/blyte/env");
+
+    // Creates parent directories and file with mode 0600.
+    set(&path, &[("BLYTE_MODEL", "gemini-4-argon")]).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "BLYTE_MODEL=gemini-4-argon\n"
+    );
+    assert_eq!(
+        get(&path, "BLYTE_MODEL").unwrap(),
+        Some("gemini-4-argon".to_string())
+    );
+
+    // Replaces existing BLYTE_MODEL line and keeps other lines and comments.
+    std::fs::write(
+        &path,
+        "# comment\nGEMINI_API_KEY=secret\nBLYTE_MODEL=old-model\nOTHER=1\n",
+    )
+    .unwrap();
+    set(
+        &path,
+        &[
+            ("BLYTE_MODEL", "gemini-4-argon"),
+            ("BLYTE_MODEL_TIMEOUT_SECS", "600"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# comment\nGEMINI_API_KEY=secret\nBLYTE_MODEL=gemini-4-argon\nOTHER=1\nBLYTE_MODEL_TIMEOUT_SECS=600\n"
+    );
+
+    // Appends to a file with no trailing newline.
+    let no_nl = dir.path().join("no_nl_env");
+    std::fs::write(&no_nl, "GEMINI_API_KEY=secret").unwrap();
+    set(&no_nl, &[("BLYTE_MODEL", "gemini-3.8-flash-high")]).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&no_nl).unwrap(),
+        "GEMINI_API_KEY=secret\nBLYTE_MODEL=gemini-3.8-flash-high\n"
+    );
+    let no_nl_mode = std::fs::metadata(&no_nl).unwrap().permissions().mode() & 0o777;
+    assert_eq!(no_nl_mode, 0o600);
 }

@@ -23,29 +23,109 @@ pub fn default_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/blyte/env"))
 }
 
+/// Parses a single `NAME=value` line (with optional `export ` prefix and surrounding quotes).
+fn parse_line(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+    let (name, value) = line.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let value = value.trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(value);
+    Some((name, value))
+}
+
 /// The `NAME=value` pairs in `text`.
 pub fn parse(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
-            let (name, value) = line.split_once('=')?;
-            let name = name.trim();
-            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                return None;
-            }
-            let value = value.trim();
-            let value = value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-                .unwrap_or(value);
+            let (name, value) = parse_line(line)?;
             Some((name.to_string(), value.to_string()))
         })
         .collect()
+}
+
+/// Reads the value of `name` from `path`, or `Ok(None)` if the file or variable is absent.
+pub fn get(path: &Path, name: &str) -> Result<Option<String>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    Ok(parse(&text)
+        .into_iter()
+        .rfind(|(k, _)| k == name)
+        .map(|(_, v)| v))
+}
+
+/// Sets one or more `NAME=value` lines in the file at `path`: replaces an existing line for the
+/// same name, keeps all other lines and comments, and appends new names. Creates the file and its
+/// parent directory if needed, with file mode 0600 on Unix.
+pub fn set(path: &Path, vars: &[(&str, &str)]) -> Result<(), String> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+
+    let mut placed = vec![false; vars.len()];
+    let mut out = String::new();
+    for line in existing.lines() {
+        if let Some((line_name, _)) = parse_line(line) {
+            if let Some(idx) = vars.iter().position(|(k, _)| *k == line_name) {
+                if !placed[idx] {
+                    let (k, v) = vars[idx];
+                    out.push_str(&format!("{k}={v}\n"));
+                    placed[idx] = true;
+                }
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    for (idx, (k, v)) in vars.iter().enumerate() {
+        if !placed[idx] {
+            out.push_str(&format!("{k}={v}\n"));
+            placed[idx] = true;
+        }
+    }
+
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        file.write_all(out.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, out).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+
+    Ok(())
 }
 
 /// Sets each variable in the file at `path` that is not already set, and returns their names.

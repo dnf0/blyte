@@ -89,13 +89,16 @@ export GEMINI_API_KEY=...          # the implementer's model; see Providers for 
 ## Quick start: with Claude Code
 
 ```bash
-blyte skill install          # the skill, and blyte as Claude Code's default implementer
+blyte skill install          # the skill, default model choice, and blyte as Claude Code's default implementer
 ```
 
-That's all. Ask Claude Code for a change as usual. It splits the work into independent tasks,
-runs `blyte dispatch` for each **in parallel** (one worktree each, your check command as the
-gate), reads each JSON summary, reviews each diff with `blyte review` and merges them in order.
+That's all. `blyte skill install` asks which default implementer model to save as `BLYTE_MODEL` in
+`~/.config/blyte/env` (or pass `--model <id>` to set it without asking). Ask Claude Code for a
+change as usual. It splits the work into independent tasks, runs `blyte dispatch` for each **in
+parallel** (one worktree each, your check command as the gate), reads each JSON summary, reviews
+each diff with `blyte review` and merges them in order.
 
+- `--model <id>` writes `BLYTE_MODEL=<id>` to `~/.config/blyte/env` without asking.
 - `--project` installs into the current repository instead (committed, so everyone gets it).
 - `--no-default` installs the skill without making blyte the default; then ask for it: *"use
   blyte to implement this"*.
@@ -148,20 +151,21 @@ blyte "..." --gate "cargo test --offline" --network=off
 
 ## Providers
 
-The model name picks the provider:
+The model name (`--model` or `BLYTE_MODEL`) picks the provider:
 
 | model name | provider | credentials |
 |---|---|---|
-| `gemini-3.8-flash-high` (default) | Google Gemini (`-low`/`-medium`/`-high` thinking) | `GEMINI_API_KEY` |
+| `gemini-4-argon` (recommended), `gemini-3.8-flash-high` (built-in default) | Google Gemini (`-low`/`-medium`/`-high` thinking) | `GEMINI_API_KEY` |
 | `claude-…`, `anthropic/…` | Anthropic, with prompt caching | `ANTHROPIC_API_KEY` |
 | `openai/<model>` | any OpenAI-compatible API, including local vLLM / LM Studio | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
 | `openrouter/<vendor>/<model>` | OpenRouter | `OPENROUTER_API_KEY` |
 | `<name>:<tag>`, `ollama/…` | Ollama, local or cloud | `OLLAMA_HOST` or `OLLAMA_API_KEY` |
 | `chatgpt/<model>` | a ChatGPT subscription, via the Codex CLI's login | `~/.codex/auth.json` (read only) |
 
-For the implementer, start with the default, Gemini 3.8 Flash: it is the model blyte has been
-measured on. Credentials are read by blyte and never reach the commands the model runs. Details:
-[docs/providers.md](docs/providers.md).
+`blyte skill install` asks for your default model (`gemini-4-argon` recommended,
+`gemini-3.8-flash-high`, or any model id) and writes `BLYTE_MODEL` to `~/.config/blyte/env` (or pass
+`blyte skill install --model <id>`). Credentials are read by blyte and never reach the commands the
+model runs. Details: [docs/providers.md](docs/providers.md).
 
 ## Documentation
 
