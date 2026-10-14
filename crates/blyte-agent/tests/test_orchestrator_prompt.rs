@@ -96,3 +96,18 @@ first turns.";
     let sections = prompt_sections("dummy skill", None);
     assert!(sections.contains(paragraph));
 }
+
+#[test]
+fn prompt_contains_dispatch_tool_instruction_only_when_configured() {
+    use blyte_agent::orchestrator::{prompt_sections_with_dispatch, DISPATCH_TOOL_INSTRUCTION};
+
+    let without_dispatch = prompt_sections("dummy skill", None);
+    assert!(!without_dispatch.contains(DISPATCH_TOOL_INSTRUCTION));
+
+    let without_dispatch_explicit = prompt_sections_with_dispatch("dummy skill", None, false);
+    assert!(!without_dispatch_explicit.contains(DISPATCH_TOOL_INSTRUCTION));
+
+    let with_dispatch = prompt_sections_with_dispatch("dummy skill", None, true);
+    assert!(with_dispatch.contains(DISPATCH_TOOL_INSTRUCTION));
+    assert!(with_dispatch.contains("## Delegating work"));
+}

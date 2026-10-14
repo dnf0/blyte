@@ -13,6 +13,7 @@ pub struct ReplConfig {
     pub max_gates: usize,
     pub rollback: bool,
     pub orchestrate: bool,
+    pub dispatch_cmd: Option<String>,
     pub fold_budget: Option<usize>,
 }
 
@@ -28,6 +29,7 @@ impl Default for ReplConfig {
             max_gates: 5,
             rollback: true,
             orchestrate: false,
+            dispatch_cmd: None,
             fold_budget: None,
         }
     }
@@ -45,6 +47,7 @@ pub struct ReplSession {
     pub max_gates: usize,
     pub rollback: bool,
     pub orchestrate: bool,
+    pub dispatch_cmd: Option<String>,
     pub fold_budget: Option<usize>,
     pub state: blyte_agent::state::State,
     pub session_id: String,
@@ -83,10 +86,12 @@ impl ReplSession {
                 .as_deref()
                 .and_then(|p| blyte_agent::orchestrator::load_user_rules(p).map(|text| (p, text)));
             let rules_ref = loaded_rules.as_ref().map(|(p, t)| (*p, t.as_str()));
-            state.orchestrator.instructions = Some(blyte_agent::orchestrator::prompt_sections(
-                crate::skill::SKILL_MD,
-                rules_ref,
-            ));
+            state.orchestrator.instructions =
+                Some(blyte_agent::orchestrator::prompt_sections_with_dispatch(
+                    crate::skill::SKILL_MD,
+                    rules_ref,
+                    config.dispatch_cmd.is_some(),
+                ));
         }
 
         Self {
@@ -103,6 +108,7 @@ impl ReplSession {
             max_gates: config.max_gates,
             rollback: config.rollback,
             orchestrate: config.orchestrate,
+            dispatch_cmd: config.dispatch_cmd.clone(),
             fold_budget: config.fold_budget,
             state,
             session_id,
@@ -626,6 +632,8 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     allow_read: Vec::new(),
                     pass_env: Vec::new(),
                     research: false,
+                    orchestrate: session.orchestrate,
+                    dispatch_cmd: session.dispatch_cmd.clone(),
                 };
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer
@@ -634,7 +642,10 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     &mut session.state,
                     &mut writer,
                 ) {
-                    Ok((blyte_agent::run::Outcome::Verified, report)) => {
+                    Ok((
+                        blyte_agent::run::Outcome::Verified | blyte_agent::run::Outcome::Finished,
+                        report,
+                    )) => {
                         if session.orchestrate {
                             let totals = current_session_totals(&session.session_id);
                             writeln!(

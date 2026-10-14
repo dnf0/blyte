@@ -77,19 +77,38 @@ pub fn load_user_rules(path: &Path) -> Option<String> {
     }
 }
 
+/// Instruction added to the prompt when `--dispatch-cmd` is configured.
+pub const DISPATCH_TOOL_INSTRUCTION: &str =
+    "Delegate work through the `dispatch` tool, one self-contained task per call, and do not run `blyte dispatch` in your shell.";
+
 /// The orchestrator sections of the system prompt, in this order:
 /// "## How you work\n{PREAMBLE}\n\n## The blyte-implementer skill\n{skill}\n\n", then, if `user_rules`
 /// is `Some((path, text))`, "## Your rules (from {path})\n{text}\n\n". `skill` is inserted trimmed.
 pub fn prompt_sections(skill: &str, user_rules: Option<(&Path, &str)>) -> String {
+    prompt_sections_with_dispatch(skill, user_rules, false)
+}
+
+/// The orchestrator sections of the system prompt, optionally including dispatch tool instructions.
+pub fn prompt_sections_with_dispatch(
+    skill: &str,
+    user_rules: Option<(&Path, &str)>,
+    dispatch_tool: bool,
+) -> String {
     let skill = skill.trim();
-    if let Some((path, text)) = user_rules {
-        format!(
-            "## How you work\n{PREAMBLE}\n\n## The blyte-implementer skill\n{skill}\n\n## Your rules (from {})\n{text}\n\n",
-            path.display()
-        )
-    } else {
-        format!("## How you work\n{PREAMBLE}\n\n## The blyte-implementer skill\n{skill}\n\n")
+    let mut out = format!("## How you work\n{PREAMBLE}\n\n");
+    if dispatch_tool {
+        out.push_str("## Delegating work\n");
+        out.push_str(DISPATCH_TOOL_INSTRUCTION);
+        out.push_str("\n\n");
     }
+    out.push_str(&format!("## The blyte-implementer skill\n{skill}\n\n"));
+    if let Some((path, text)) = user_rules {
+        out.push_str(&format!(
+            "## Your rules (from {})\n{text}\n\n",
+            path.display()
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

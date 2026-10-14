@@ -33,6 +33,8 @@ fn config() -> TaskConfig {
         allow_read: Vec::new(),
         pass_env: Vec::new(),
         research: false,
+        orchestrate: false,
+        dispatch_cmd: None,
     }
 }
 
@@ -122,6 +124,35 @@ fn an_error_outcome_carries_its_message() {
     let v = serde_json::to_value(&r).unwrap();
     assert_eq!(v["outcome"], "error");
     assert_eq!(v["error"], "provider returned 500");
+}
+
+#[test]
+fn a_finished_run_maps_outcome_finished() {
+    let state = State::new("plan it", "");
+    let report = RunReport {
+        outcome_turns: 3,
+        usage: Usage {
+            input: 100,
+            cached: 50,
+            output: 20,
+            thinking: 0,
+        },
+        ..Default::default()
+    };
+    let mut conf = config();
+    conf.orchestrate = true;
+    conf.gate = None;
+    let r = RunRecord::from_run(
+        &conf,
+        "gemini-3.8-flash",
+        &Outcome::Finished,
+        &report,
+        &state,
+        Duration::from_secs(5),
+    );
+    let v = serde_json::to_value(&r).unwrap();
+    assert_eq!(v["outcome"], "finished");
+    assert!(v["error"].is_null());
 }
 
 #[test]

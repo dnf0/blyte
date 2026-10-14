@@ -84,6 +84,31 @@ fn empty_gate_is_skipped() {
 }
 
 #[test]
+fn orchestrator_empty_gate_reports_finished() {
+    let d = tempfile::tempdir().unwrap();
+    let runner = Runner {
+        provider: &DoneProvider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 5,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        on_event: None,
+        research: false,
+    };
+    let mut state = State::new("orchestrate plan", "");
+    state.orchestrator.instructions = Some("orchestrator prompt".into());
+    let (outcome, report) = runner.run(&mut state);
+    assert_eq!(outcome, Outcome::Finished);
+    assert_eq!(report.gate_attempts, 0);
+}
+
+#[test]
 fn whitespace_gate_is_skipped() {
     let (outcome, report, events) = run_with_events("  \n", 1);
     assert_eq!(outcome, Outcome::Verified);

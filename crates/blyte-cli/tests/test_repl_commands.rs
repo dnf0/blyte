@@ -17,6 +17,7 @@ fn test_slash_help() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -45,6 +46,7 @@ fn test_slash_gate_get_and_set() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
 
@@ -83,6 +85,7 @@ fn test_slash_state_inspection() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -107,6 +110,7 @@ fn test_slash_exit() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
 
@@ -132,6 +136,7 @@ fn test_repl_stream_driving() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let session = ReplSession::new(&config);
 
@@ -237,6 +242,7 @@ fn test_prompt_submission() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -266,6 +272,7 @@ fn test_clear_starts_new_conversation() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
     session.state.runtime.conversation = Some(vec![Message::User("hi".into())]);
@@ -290,6 +297,7 @@ fn test_state_counts_conversation_messages() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
     session.state.runtime.conversation = Some(vec![
@@ -321,6 +329,7 @@ fn test_slash_cost() {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     let mut session = ReplSession::new(&config);
 

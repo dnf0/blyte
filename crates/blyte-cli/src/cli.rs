@@ -353,9 +353,13 @@ pub struct Cli {
     #[arg(short, long)]
     pub gate: Option<String>,
 
-    /// Run interactive blyte as the orchestrator: plan, dispatch implementers with `blyte dispatch`, review and merge
+    /// Run blyte as the orchestrator: plan, dispatch implementers with `blyte dispatch`, review and merge
     #[arg(long, conflicts_with = "gate")]
     pub orchestrate: bool,
+
+    /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool
+    #[arg(long, requires = "orchestrate")]
+    pub dispatch_cmd: Option<String>,
 
     /// Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
     #[arg(

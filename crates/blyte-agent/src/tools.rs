@@ -19,6 +19,23 @@ use crate::fs::Fs;
 use crate::shell::Shell;
 
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Set the host dispatch command for the orchestrator's `dispatch` tool.
+pub fn set_dispatch_cmd(cmd: Option<String>) {
+    match DISPATCH_CMD.write() {
+        Ok(mut lock) => *lock = cmd,
+        Err(poisoned) => *poisoned.into_inner() = cmd,
+    }
+}
+
+/// The currently configured dispatch command, if any.
+pub fn dispatch_cmd() -> Option<String> {
+    DISPATCH_CMD
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
 
 /// Extra directories allowed for reading with `read` and `grep`.
 ///
@@ -440,7 +457,7 @@ pub fn available_binaries(shell: &dyn Shell, root: &Path) -> Vec<String> {
 }
 
 pub fn specs() -> Vec<ToolSpec> {
-    vec![
+    let mut tools = vec![
         ToolSpec {
             name: "read".into(),
             description: "Read a file. Up to 2,000 lines (60,000 characters) come back in one call, so read whole files; pass start_line/end_line only for larger ones.".into(),
@@ -500,7 +517,32 @@ pub fn specs() -> Vec<ToolSpec> {
                 "glob":{"type":"string","description":"restrict to files matching this glob, e.g. `*.ts`"}},
                 "required":["pattern"]}),
         },
-    ]
+    ];
+    if dispatch_cmd().is_some() {
+        tools.push(ToolSpec {
+            name: "dispatch".into(),
+            description: "Delegate work to an implementer task on the host.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Task instructions for the implementer"
+                    },
+                    "gate": {
+                        "type": "string",
+                        "description": "Verification command that decides completion"
+                    },
+                    "max_seconds": {
+                        "type": "integer",
+                        "description": "Optional wall-clock limit in seconds"
+                    }
+                },
+                "required": ["task", "gate"]
+            }),
+        });
+    }
+    tools
 }
 
 /// The search command. ripgrep honours .gitignore, which keeps dependency and build trees out of
@@ -797,6 +839,65 @@ fn execute_unbounded(
                 ))
             } else {
                 ToolOutcome::ok(format!("{} match(es):\n{}", lines.len(), lines.join("\n")))
+            }
+        }
+        "dispatch" => {
+            let Some(cmd) = dispatch_cmd() else {
+                return ToolOutcome::err("unknown tool: dispatch");
+            };
+            let parent_session = std::env::var("BLYTE_SESSION").unwrap_or_else(|_| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                format!("{now}-{}", std::process::id())
+            });
+            let mut cmd_builder = std::process::Command::new("sh");
+            cmd_builder
+                .arg("-c")
+                .arg(&cmd)
+                .env("BLYTE_DISPATCH_PARENT", &parent_session)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            if root.is_dir() {
+                cmd_builder.current_dir(root);
+            }
+            let mut child = match cmd_builder.spawn() {
+                Ok(c) => c,
+                Err(e) => return ToolOutcome::err(format!("dispatch failed to spawn: {e}")),
+            };
+
+            if let Some(mut stdin) = child.stdin.take() {
+                let json_bytes = serde_json::to_vec(args).unwrap_or_default();
+                let _ = std::io::Write::write_all(&mut stdin, &json_bytes);
+            }
+
+            match child.wait_with_output() {
+                Ok(output) => {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                        ToolOutcome::ok(stdout)
+                    } else {
+                        let stderr_str = String::from_utf8_lossy(&output.stderr);
+                        let lines: Vec<&str> = stderr_str.lines().collect();
+                        let tail = if lines.len() > OUTPUT_LINE_BUDGET {
+                            lines[lines.len() - OUTPUT_LINE_BUDGET..].join("\n")
+                        } else if !stderr_str.trim().is_empty() {
+                            stderr_str.trim_end().to_string()
+                        } else {
+                            format!("exit {}", output.status.code().unwrap_or(1))
+                        };
+                        // The dispatch command may report its result on stdout even when it fails.
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if stdout.trim().is_empty() {
+                            ToolOutcome::err(tail)
+                        } else {
+                            ToolOutcome::err(format!("{}\n{tail}", stdout.trim_end()))
+                        }
+                    }
+                }
+                Err(e) => ToolOutcome::err(format!("dispatch command failed: {e}")),
             }
         }
         other => ToolOutcome::err(format!("unknown tool: {other}")),

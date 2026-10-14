@@ -734,3 +734,84 @@ fn legitimate_dot_segments_inside_the_workspace_still_work() {
     );
     assert!(!r.is_error && r.content.contains("inside"), "{r:?}");
 }
+
+static DISPATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct ResetDispatch;
+impl Drop for ResetDispatch {
+    fn drop(&mut self) {
+        blyte_agent::tools::set_dispatch_cmd(None);
+    }
+}
+
+#[test]
+fn dispatch_tool_runs_stub_command_and_echoes_json() {
+    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _guard = ResetDispatch;
+    blyte_agent::tools::set_dispatch_cmd(Some("cat".into()));
+
+    let tool_specs = specs();
+    assert!(tool_specs.iter().any(|t| t.name == "dispatch"));
+
+    let d = ws();
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "dispatch",
+        &json!({"task": "implement feature X", "gate": "cargo test", "max_seconds": 60}),
+    );
+    assert!(!r.is_error, "expected success, got {r:?}");
+    let v: serde_json::Value =
+        serde_json::from_str(&r.content).expect("stdout should be valid json");
+    assert_eq!(v["task"], "implement feature X");
+    assert_eq!(v["gate"], "cargo test");
+    assert_eq!(v["max_seconds"], 60);
+}
+
+#[test]
+fn dispatch_tool_failing_command_gives_error_result() {
+    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _guard = ResetDispatch;
+    blyte_agent::tools::set_dispatch_cmd(Some(
+        "sh -c 'echo failed to execute task >&2; exit 1'".into(),
+    ));
+
+    let d = ws();
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "dispatch",
+        &json!({"task": "fail", "gate": "false"}),
+    );
+    assert!(r.is_error, "expected error, got {r:?}");
+    assert!(
+        r.content.contains("failed to execute task"),
+        "content was: {:?}",
+        r.content
+    );
+}
+
+#[test]
+fn dispatch_tool_sets_dispatch_parent_env() {
+    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _guard = ResetDispatch;
+    std::env::set_var("BLYTE_SESSION", "test-orch-session-123");
+    blyte_agent::tools::set_dispatch_cmd(Some("sh -c 'echo parent=$BLYTE_DISPATCH_PARENT'".into()));
+
+    let d = ws();
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "dispatch",
+        &json!({"task": "test", "gate": "true"}),
+    );
+    assert!(!r.is_error, "expected success, got {r:?}");
+    assert!(
+        r.content.contains("parent=test-orch-session-123"),
+        "content was: {:?}",
+        r.content
+    );
+}

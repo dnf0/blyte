@@ -94,6 +94,8 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         allow_read: Vec::new(),
         pass_env: Vec::new(),
         research: false,
+        orchestrate: false,
+        dispatch_cmd: None,
     };
 
     let result = run_task(config);
@@ -133,6 +135,8 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         allow_read: Vec::new(),
         pass_env: Vec::new(),
         research: false,
+        orchestrate: false,
+        dispatch_cmd: None,
     };
 
     let err = run_task(anthropic_config).unwrap_err();
@@ -161,6 +165,8 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         allow_read: Vec::new(),
         pass_env: Vec::new(),
         research: false,
+        orchestrate: false,
+        dispatch_cmd: None,
     };
 
     let err = run_task(ollama_config).unwrap_err();
@@ -200,6 +206,8 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         allow_read: Vec::new(),
         pass_env: Vec::new(),
         research: false,
+        orchestrate: false,
+        dispatch_cmd: None,
     };
 
     let mut state = blyte_agent::state::State::new("custom goal", "echo 1");
