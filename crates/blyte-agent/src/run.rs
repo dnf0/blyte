@@ -141,6 +141,7 @@ pub enum Event<'e> {
     Turn {
         n: u32,
         text: &'e str,
+        usage: Usage,
     },
     /// `input` is the call's arguments, abbreviated. Logging only the RESULT made a run
     /// undiagnosable: twenty bash calls that changed nothing, with no record of what was run.
@@ -780,6 +781,7 @@ impl<'a> Runner<'a> {
             self.emit(Event::Turn {
                 n: turn,
                 text: trimmed,
+                usage: resp.usage,
             });
             if !trimmed.is_empty() {
                 report.final_message = Some(trimmed.to_string());

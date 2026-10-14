@@ -158,6 +158,7 @@ fn test_format_event() {
     let e1 = Event::Turn {
         n: 1,
         text: "Thinking about plan",
+        usage: Default::default(),
     };
     let s1 = format_event(&e1);
     assert!(s1.contains('1') && s1.contains("Thinking about plan"));
@@ -204,7 +205,11 @@ fn test_format_event() {
 #[test]
 fn test_format_event_turn_full_text() {
     let text = "x".repeat(299) + "Z";
-    let event = Event::Turn { n: 3, text: &text };
+    let event = Event::Turn {
+        n: 3,
+        text: &text,
+        usage: Default::default(),
+    };
     let formatted = format_event(&event);
     assert_eq!(formatted, format!("[Turn 3] {text}"));
     assert!(formatted.contains('Z'));
@@ -214,7 +219,11 @@ fn test_format_event_turn_full_text() {
 #[test]
 fn test_format_event_turn_multiline() {
     let text = "Plan:\n1. a\n2. b\nShall I go ahead?";
-    let event = Event::Turn { n: 1, text };
+    let event = Event::Turn {
+        n: 1,
+        text,
+        usage: Default::default(),
+    };
     assert_eq!(
         format_event(&event),
         "[Turn 1] Plan:\n1. a\n2. b\nShall I go ahead?"
@@ -224,7 +233,11 @@ fn test_format_event_turn_multiline() {
 #[test]
 fn test_format_event_turn_multibyte() {
     let text = "é".repeat(100);
-    let event = Event::Turn { n: 1, text: &text };
+    let event = Event::Turn {
+        n: 1,
+        text: &text,
+        usage: Default::default(),
+    };
     let formatted = format_event(&event);
     assert_eq!(formatted.chars().count(), "[Turn 1] ".len() + 100);
 }

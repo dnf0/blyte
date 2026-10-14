@@ -56,7 +56,7 @@ fn main() {
     let log = |e: blyte_agent::run::Event<'_>| {
         use blyte_agent::run::Event::*;
         match e {
-            Turn { n, text } if !text.is_empty() => {
+            Turn { n, text, .. } if !text.is_empty() => {
                 println!("  turn {n}: {}", text.lines().next().unwrap_or(""))
             }
             Turn { n, .. } => println!("  turn {n}:"),

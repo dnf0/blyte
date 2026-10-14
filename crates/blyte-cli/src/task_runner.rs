@@ -14,6 +14,7 @@ pub struct Progress {
     pub gate_attempts: u32,
     pub in_gate: bool,
     pub gate_wait_ms: u64,
+    pub usage: blyte_provider::Usage,
 }
 
 /// Execution parameters for running an autonomous solver task to completion.
@@ -187,6 +188,18 @@ pub fn run_task(
                     crate::report::RunRecord::from_error(&watchdog_config, &msg, started.elapsed());
                 record.turns = p.turns;
                 record.gate_attempts = p.gate_attempts;
+                record.usage = crate::report::UsageRecord {
+                    input: p.usage.input,
+                    cached: p.usage.cached,
+                    output: p.usage.output,
+                    thinking: p.usage.thinking,
+                };
+                let model_id = blyte_provider::resolve_provider(watchdog_config.model.as_deref())
+                    .map(|pr| pr.model_id())
+                    .ok()
+                    .or_else(|| watchdog_config.model.clone())
+                    .unwrap_or_default();
+                record.cost_usd = blyte_provider::pricing(&model_id).map(|pr| pr.cost(&p.usage));
                 let _ = crate::report::write(path, &record);
             }
             eprintln!("blyte: {msg}");
@@ -401,8 +414,12 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
                 Err(e) => e.into_inner(),
             };
             match &event {
-                blyte_agent::run::Event::Turn { n, .. } => {
+                blyte_agent::run::Event::Turn { n, usage, .. } => {
                     p.turns = *n;
+                    p.usage.input += usage.input;
+                    p.usage.cached += usage.cached;
+                    p.usage.output += usage.output;
+                    p.usage.thinking += usage.thinking;
                     p.in_gate = false;
                 }
                 blyte_agent::run::Event::GateStart { attempt } => {
