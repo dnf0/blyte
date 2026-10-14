@@ -56,6 +56,10 @@ pub struct TaskConfig {
     pub pass_env: Vec<String>,
     /// Whether this is a research run: periodically remind the model to keep report.md updated.
     pub research: bool,
+    /// Whether this run is in orchestrate mode (`--orchestrate`).
+    pub orchestrate: bool,
+    /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool (`--dispatch-cmd`).
+    pub dispatch_cmd: Option<String>,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -80,11 +84,17 @@ impl From<&crate::cli::Cli> for TaskConfig {
             max_cost_usd: cli.max_cost_usd,
             report: cli.report.clone(),
             fold_budget: cli.fold_budget,
-            sandbox: cli.sandbox.clone(),
+            sandbox: if cli.orchestrate {
+                "off".into()
+            } else {
+                cli.sandbox.clone()
+            },
             network: cli.network.clone(),
             allow_read: cli.allow_read.clone(),
             pass_env: cli.pass_env.clone(),
             research: cli.research,
+            orchestrate: cli.orchestrate,
+            dispatch_cmd: cli.dispatch_cmd.clone(),
         }
     }
 }
@@ -186,6 +196,19 @@ pub fn run_task(
     let verification_cmd = config.gate.as_deref().unwrap_or("");
     let mut state = blyte_agent::state::State::new(&config.prompt, verification_cmd);
     state.orchestrator.max_cost_usd = config.max_cost_usd;
+    if config.orchestrate {
+        let rules_path = blyte_agent::orchestrator::user_rules_path();
+        let loaded_rules = rules_path
+            .as_deref()
+            .and_then(|p| blyte_agent::orchestrator::load_user_rules(p).map(|text| (p, text)));
+        let rules_ref = loaded_rules.as_ref().map(|(p, t)| (*p, t.as_str()));
+        state.orchestrator.instructions =
+            Some(blyte_agent::orchestrator::prompt_sections_with_dispatch(
+                crate::skill::SKILL_MD,
+                rules_ref,
+                config.dispatch_cmd.is_some(),
+            ));
+    }
     let mut stdout = std::io::stdout();
     let result =
         run_task_with_state_writer_and_progress(&config, &mut state, &mut stdout, progress);
@@ -232,6 +255,33 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
     let started = std::time::Instant::now();
+    if config.orchestrate {
+        if std::env::var("BLYTE_SESSION")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
+        {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let id = crate::repl::new_session_id(now_secs, std::process::id());
+            std::env::set_var("BLYTE_SESSION", &id);
+        }
+        if state.orchestrator.instructions.is_none() {
+            let rules_path = blyte_agent::orchestrator::user_rules_path();
+            let loaded_rules = rules_path
+                .as_deref()
+                .and_then(|p| blyte_agent::orchestrator::load_user_rules(p).map(|text| (p, text)));
+            let rules_ref = loaded_rules.as_ref().map(|(p, t)| (*p, t.as_str()));
+            state.orchestrator.instructions =
+                Some(blyte_agent::orchestrator::prompt_sections_with_dispatch(
+                    crate::skill::SKILL_MD,
+                    rules_ref,
+                    config.dispatch_cmd.is_some(),
+                ));
+        }
+    }
+    blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());
     // 1. Initialize LLM provider from environment credentials or model specification.
     // If credentials for the detected provider are missing, produce a clear error indicating which key to set.
     let provider = match blyte_provider::resolve_provider(config.model.as_deref()) {

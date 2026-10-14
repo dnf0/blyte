@@ -52,14 +52,37 @@ fn orchestrate_conflicts_with_gate() {
 }
 
 #[test]
-fn orchestrate_with_prompt_is_rejected() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["--orchestrate", "do it"])
-        .output()
-        .expect("failed to execute process");
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--orchestrate is interactive"));
+fn orchestrate_with_prompt_is_accepted() {
+    let matches = Cli::command()
+        .try_get_matches_from(["blyte", "--orchestrate", "--", "plan the release"])
+        .unwrap();
+    let cli = Cli::from_arg_matches(&matches).unwrap();
+    assert!(cli.orchestrate);
+    assert_eq!(cli.prompt.as_deref(), Some("plan the release"));
+}
+
+#[test]
+fn dispatch_cmd_without_orchestrate_is_rejected() {
+    let res = Cli::command().try_get_matches_from(["blyte", "--dispatch-cmd", "echo test"]);
+    assert!(res.is_err());
+}
+
+#[test]
+fn dispatch_cmd_with_orchestrate_is_accepted() {
+    let matches = Cli::command()
+        .try_get_matches_from([
+            "blyte",
+            "--orchestrate",
+            "--dispatch-cmd",
+            "echo test",
+            "--",
+            "plan the release",
+        ])
+        .unwrap();
+    let cli = Cli::from_arg_matches(&matches).unwrap();
+    assert!(cli.orchestrate);
+    assert_eq!(cli.dispatch_cmd.as_deref(), Some("echo test"));
+    assert_eq!(cli.prompt.as_deref(), Some("plan the release"));
 }
 
 #[test]

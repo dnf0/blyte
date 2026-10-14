@@ -23,6 +23,10 @@ Arguments:
 Options:
   -g, --gate <GATE>
           Verification gate command (e.g. 'pytest', 'cargo test'). Several steps may be given one per line: every step runs and all failures are reported together
+      --orchestrate
+          Run blyte as the orchestrator: plan, dispatch implementers with `blyte dispatch`, review and merge
+      --dispatch-cmd <DISPATCH_CMD>
+          Command to run on the host when the orchestrator delegates work via the `dispatch` tool
       --context <CONTEXT>
           Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget) [default: folded] [possible values: conversational, folded]
   -m, --model <MODEL>

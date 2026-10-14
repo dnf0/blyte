@@ -29,6 +29,7 @@ pub struct UsageRecord {
 fn outcome_name(outcome: &Outcome) -> (&'static str, Option<String>) {
     match outcome {
         Outcome::Verified => ("verified", None),
+        Outcome::Finished => ("finished", None),
         Outcome::BudgetExhausted => ("budget_exhausted", None),
         Outcome::GateFailed => ("gate_failed", None),
         Outcome::Blocked(why) => ("blocked", Some(why.clone())),

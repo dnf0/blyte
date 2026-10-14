@@ -38,6 +38,8 @@ fn config() -> TaskConfig {
         allow_read: Vec::new(),
         pass_env: Vec::new(),
         research: false,
+        orchestrate: false,
+        dispatch_cmd: None,
     }
 }
 

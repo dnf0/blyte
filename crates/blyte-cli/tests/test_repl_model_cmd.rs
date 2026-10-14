@@ -13,6 +13,7 @@ fn create_test_session() -> ReplSession {
         rollback: true,
         orchestrate: false,
         fold_budget: None,
+        dispatch_cmd: None,
     };
     ReplSession::new(&config)
 }

@@ -171,9 +171,17 @@ fn main() {
         }
     }
 
-    if cli.orchestrate && cli.prompt.is_some() {
-        eprintln!("error: --orchestrate is interactive; start it without a prompt");
-        std::process::exit(2);
+    if cli.orchestrate
+        && std::env::var("BLYTE_SESSION")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
+    {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let id = blyte_cli::repl::new_session_id(now_secs, std::process::id());
+        std::env::set_var("BLYTE_SESSION", &id);
     }
 
     if !cli.no_gate_slot {
@@ -203,6 +211,13 @@ fn main() {
                 );
                 std::process::exit(0);
             }
+            Ok((blyte_agent::run::Outcome::Finished, report)) => {
+                println!(
+                    "Task finished in {} turns (usage: {:?})",
+                    report.outcome_turns, report.usage
+                );
+                std::process::exit(0);
+            }
             Ok((outcome, report)) => {
                 eprintln!(
                     "Task finished with outcome: {outcome:?} in {} turns",
@@ -227,6 +242,7 @@ fn main() {
         max_gates: cli.max_gates,
         rollback: cli.rollback,
         orchestrate: cli.orchestrate,
+        dispatch_cmd: cli.dispatch_cmd,
         fold_budget: cli.fold_budget,
     };
     if let Err(e) = blyte_cli::repl::run_repl(repl_config) {

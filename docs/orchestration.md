@@ -230,6 +230,12 @@ rules in `~/.config/blyte/orchestrator.md` (or `$XDG_CONFIG_HOME/blyte/orchestra
 tasks, start dispatches in the background redirected to `/dev/null` and use `blyte wait --any` to pick
 up finished runs as they land.
 
+### Headless orchestrate and `--dispatch-cmd`
+
+`blyte --orchestrate [flags] -- "<prompt>"` runs unattended: given a prompt, it plans and orchestrates once, writes `--report <path>` if requested, and exits when the model stops calling tools. Orchestrator runs do not take `--gate`, and their outcome is recorded as `finished` (the orchestrator's work is verified through the implementers' gates and the caller).
+
+With `--dispatch-cmd <cmd>`, the orchestrator delegates tasks through a dedicated `dispatch` tool rather than invoking `blyte dispatch` from its shell. The command runs on the host outside any container or sandbox, with `BLYTE_DISPATCH_PARENT` set to the orchestrator session id, and receives `{ "task": string, "gate": string, "max_seconds": integer }` on stdin.
+
 ## Watching parallel dispatches
 
 With several dispatches running, and several sessions dispatching in different repositories,

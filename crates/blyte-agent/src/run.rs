@@ -37,6 +37,8 @@ use crate::tools;
 pub enum Outcome {
     /// The verification command exited 0. The only way to succeed.
     Verified,
+    /// The task completed without a verification gate (e.g. orchestrator task).
+    Finished,
     /// Budget spent without the gate passing.
     BudgetExhausted,
     /// The model stopped calling tools and the gate kept failing.
@@ -887,6 +889,9 @@ impl<'a> Runner<'a> {
             }
 
             if state.orchestrator.verification_cmd.trim().is_empty() {
+                if state.orchestrator.instructions.is_some() {
+                    return (Outcome::Finished, report);
+                }
                 return (Outcome::Verified, report);
             }
 
