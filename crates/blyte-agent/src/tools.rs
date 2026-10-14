@@ -659,6 +659,12 @@ fn execute_unbounded(
                     lines.len()
                 ));
             }
+            if end < start {
+                return ToolOutcome::err(format!(
+                    "end_line {end} is before start_line {start} in {}",
+                    s("path")
+                ));
+            }
             // Numbered, because an agent that cannot cite a line cannot edit precisely.
             let body = lines[start - 1..end]
                 .iter()
