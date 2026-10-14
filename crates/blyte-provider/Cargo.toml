@@ -4,6 +4,8 @@ version.workspace = true
 description = "Model providers for blyte (Gemini, Anthropic, OpenAI-compatible, Ollama, ChatGPT), behind one trait."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 serde.workspace = true
