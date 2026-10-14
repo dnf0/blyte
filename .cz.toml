@@ -12,6 +12,7 @@ changelog_incremental = true
 changelog_file = "CHANGELOG.md"
 version_files = [
     "Cargo.toml:^version = ",
-    # blyte-cli pins its sibling crates; a 0.x caret requirement only matches the same minor.
+    # blyte-cli and blyte-agent pin their sibling crates; a 0.x caret requirement only matches the same minor.
     "crates/blyte-cli/Cargo.toml:^blyte-(agent|provider) = ",
+    "crates/blyte-agent/Cargo.toml:^blyte-provider = ",
 ]
