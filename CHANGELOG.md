@@ -1,3 +1,9 @@
+## v0.28.0 (2026-10-14)
+
+### Feat
+
+- publish to crates.io from dnf0/blyte (#255)
+
 ## v0.27.0 (2026-10-12)
 
 ### Feat
