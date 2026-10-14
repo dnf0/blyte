@@ -13,6 +13,7 @@ authors = ["Climate X Engineering"]
 license = "Apache-2.0"
 repository = "https://github.com/dnf0/blyte"
 homepage = "https://github.com/dnf0/blyte"
+documentation = "https://dnf0.github.io/blyte/"
 readme = "README.md"
 keywords = ["coding-agent", "llm", "harness", "sandbox", "cli"]
 categories = ["development-tools", "command-line-utilities"]
