@@ -73,6 +73,7 @@ fn main() {
                     no_default,
                     no_statusline,
                     harness,
+                    model,
                 } => {
                     let targets = match blyte_cli::skill::Harness::parse_all(&harness) {
                         Ok(t) => t,
@@ -129,6 +130,24 @@ fn main() {
                                     );
                                 }
                             }
+                        }
+                    }
+                    if let Some(env_path) = blyte_cli::env_file::default_path() {
+                        use std::io::IsTerminal;
+                        let is_tty =
+                            std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+                        let stdin = std::io::stdin();
+                        let mut reader = stdin.lock();
+                        let mut stdout = std::io::stdout();
+                        if let Err(e) = blyte_cli::skill::configure_model(
+                            &env_path,
+                            model.as_deref(),
+                            is_tty,
+                            &mut reader,
+                            &mut stdout,
+                        ) {
+                            eprintln!("{e}");
+                            std::process::exit(1);
                         }
                     }
                     if let Ok(home) = blyte_cli::skill::home_dir() {

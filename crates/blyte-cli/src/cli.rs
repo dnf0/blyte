@@ -307,6 +307,10 @@ pub enum SkillAction {
             value_parser = ["claude", "codex", "all"]
         )]
         harness: String,
+
+        /// Default implementer model to write to the env file
+        #[arg(long, value_name = "ID")]
+        model: Option<String>,
     },
 
     /// Remove the skill and the CLAUDE.md block

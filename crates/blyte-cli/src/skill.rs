@@ -611,3 +611,125 @@ pub fn warn_superseded(home: &Path) {
         eprintln!("{}", superseded_warning(&path));
     }
 }
+
+pub const RECOMMENDED_MODEL: &str = "gemini-4-argon";
+pub const FLASH_MODEL: &str = "gemini-3.8-flash-high";
+pub const ARGON_TIMEOUT_SECS: &str = "600";
+
+fn parse_model_choice(input: &str) -> Option<String> {
+    let s = input.trim();
+    if s.is_empty() || s == "1" {
+        return Some(RECOMMENDED_MODEL.to_string());
+    }
+    if s == "2" {
+        return Some(FLASH_MODEL.to_string());
+    }
+    if s.len() < 2 || s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | ':' | '.'))
+    {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// Prompts for the default model on `writer` and reads the answer from `reader`. Re-asks once on
+/// an answer that is not `1`, `2`, empty, or a valid model id.
+pub fn prompt_model<R: std::io::BufRead, W: std::io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<String, String> {
+    write!(
+        writer,
+        "Default implementer model:\n  \
+         1) {RECOMMENDED_MODEL} (recommended: passes more gates in fewer turns and lower total cost)\n  \
+         2) {FLASH_MODEL} (cheaper per token, more turns)\n  \
+         3) any other model id, typed in\n\
+         Choice [1]: "
+    )
+    .and_then(|_| writer.flush())
+    .map_err(|e| e.to_string())?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+    if let Some(chosen) = parse_model_choice(&line) {
+        return Ok(chosen);
+    }
+
+    write!(
+        writer,
+        "Enter 1, 2, or a model id (default {RECOMMENDED_MODEL}) [1]: "
+    )
+    .and_then(|_| writer.flush())
+    .map_err(|e| e.to_string())?;
+
+    line.clear();
+    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(parse_model_choice(&line).unwrap_or_else(|| RECOMMENDED_MODEL.to_string()))
+}
+
+fn write_model_env<W: std::io::Write>(
+    env_path: &Path,
+    model: &str,
+    writer: &mut W,
+) -> Result<(), String> {
+    if model.to_ascii_lowercase().contains("argon") {
+        crate::env_file::set(
+            env_path,
+            &[
+                ("BLYTE_MODEL", model),
+                ("BLYTE_MODEL_TIMEOUT_SECS", ARGON_TIMEOUT_SECS),
+            ],
+        )?;
+        writeln!(
+            writer,
+            "wrote BLYTE_MODEL={model} and BLYTE_MODEL_TIMEOUT_SECS={ARGON_TIMEOUT_SECS} to {}",
+            env_path.display()
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        crate::env_file::set(env_path, &[("BLYTE_MODEL", model)])?;
+        writeln!(
+            writer,
+            "wrote BLYTE_MODEL={model} to {}",
+            env_path.display()
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Sets or reports the default implementer model in `env_path` during `blyte skill install`.
+pub fn configure_model<R: std::io::BufRead, W: std::io::Write>(
+    env_path: &Path,
+    model_flag: Option<&str>,
+    is_terminal: bool,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<Option<String>, String> {
+    if let Some(model) = model_flag {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err("--model cannot be empty".to_string());
+        }
+        write_model_env(env_path, model, writer)?;
+        return Ok(Some(model.to_string()));
+    }
+
+    if let Some(existing) = crate::env_file::get(env_path, "BLYTE_MODEL")? {
+        writeln!(writer, "BLYTE_MODEL={existing} (in {})", env_path.display())
+            .map_err(|e| e.to_string())?;
+        return Ok(Some(existing));
+    }
+
+    if !is_terminal {
+        return Ok(None);
+    }
+
+    let chosen = prompt_model(reader, writer)?;
+    write_model_env(env_path, &chosen, writer)?;
+    Ok(Some(chosen))
+}
