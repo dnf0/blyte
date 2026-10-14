@@ -1,3 +1,9 @@
+## v0.29.0 (2026-10-14)
+
+### Feat
+
+- **orchestrate**: headless orchestrator with a host dispatch tool (#260)
+
 ## v0.28.1 (2026-10-14)
 
 ### Fix
