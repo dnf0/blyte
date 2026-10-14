@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/dnf0/blyte/actions/workflows/ci.yml"><img src="https://github.com/dnf0/blyte/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://dnf0.github.io/blyte/"><img src="https://img.shields.io/badge/docs-dnf0.github.io%2Fblyte-3E6D64" alt="Docs"></a>
   <img src="https://img.shields.io/badge/license-Apache--2.0-3E6D64" alt="License: Apache-2.0">
   <img src="https://img.shields.io/badge/rust-stable-A6441A" alt="Rust stable">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-56616A" alt="macOS and Linux">

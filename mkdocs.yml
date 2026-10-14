@@ -1,6 +1,7 @@
 site_name: blyte
 site_description: A lean coding-agent harness in Rust. One loop, a sealed verification gate, sandboxed tools.
 site_author: Climate X Engineering
+site_url: https://dnf0.github.io/blyte/
 repo_url: https://github.com/dnf0/blyte
 repo_name: blyte
 edit_uri: edit/main/docs/

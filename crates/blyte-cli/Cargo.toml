@@ -5,6 +5,8 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 readme = "README.md"
 description = "The blyte coding-agent harness: headless runs with a sealed verification gate, and a REPL."
 
