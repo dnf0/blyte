@@ -1,3 +1,9 @@
+## v0.32.1 (2026-10-15)
+
+### Fix
+
+- **provider**: schedule gemini-4-argon pricing from 2026-12-01 (#274)
+
 ## v0.32.0 (2026-10-15)
 
 ### Feat
