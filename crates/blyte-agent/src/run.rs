@@ -173,6 +173,19 @@ pub enum Event<'e> {
 /// Retries allowed for one model call before a transient failure ends the run.
 pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
+/// Tool calls an orchestrator may make before its first dispatch without getting a reminder (2026-10-15 Argon benchmark).
+pub const ORCHESTRATOR_EXPLORE_NUDGE: u32 = 8;
+
+fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
+    call.name == "dispatch"
+        || (call.name == "bash"
+            && call
+                .arguments
+                .get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|cmd| cmd.contains("blyte dispatch")))
+}
+
 fn parse_resets_in_seconds(body: &str) -> Option<u64> {
     let key = "\"resets_in_seconds\"";
     let pos = body.find(key)?;
@@ -668,6 +681,9 @@ impl<'a> Runner<'a> {
         } else {
             None
         };
+        let mut pre_dispatch_calls: u32 = 0;
+        let mut has_dispatched = false;
+        let mut explore_nudge_sent = false;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -698,6 +714,17 @@ impl<'a> Runner<'a> {
                     ));
                 }
                 last_report = current_report;
+            }
+
+            if state.orchestrator.instructions.is_some()
+                && !has_dispatched
+                && !explore_nudge_sent
+                && pre_dispatch_calls >= ORCHESTRATOR_EXPLORE_NUDGE
+            {
+                explore_nudge_sent = true;
+                history.push(Message::User(format!(
+                    "You have made {ORCHESTRATOR_EXPLORE_NUDGE} tool calls without dispatching. Dispatch the work now from what you know; the implementer reads the code it changes. Keep reading only if you cannot yet say which files the task is about."
+                )));
             }
 
             let req = Request {
@@ -821,6 +848,11 @@ impl<'a> Runner<'a> {
                 for call in &resp.tool_calls {
                     report.tool_calls += 1;
                     *report.tool_counts.entry(call.name.clone()).or_default() += 1;
+                    if is_dispatch_call(call) {
+                        has_dispatched = true;
+                    } else if !has_dispatched {
+                        pre_dispatch_calls += 1;
+                    }
 
                     let outcome = tools::execute(
                         &self.root,
