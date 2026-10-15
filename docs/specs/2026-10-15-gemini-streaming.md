@@ -21,6 +21,11 @@ live calls off. A dead connection then also takes up to 600 s to notice.
   - thought summaries on: the first chunk after 3.4 s, a thought-summary chunk every 3-6 s while
     it thinks, longest gap 6.2 s.
 - Streaming is only worth doing with thought summaries on.
+- Cost of thought summaries (decision 4), measured on 4 prompts with `thinkingLevel: high`, each
+  run with summaries on and off:
+  - off: 2186 thinking + 8084 output tokens; on: 2282 thinking + 8003 output tokens;
+  - $0.103 either way, so summaries cost nothing measurable;
+  - longest gap between chunks: 11.4 s with summaries on, 24.2 s with them off.
 - blyte already ignores thought parts in a response, except for their `thoughtSignature`.
 
 ## Decisions (user, 2026-10-15)
