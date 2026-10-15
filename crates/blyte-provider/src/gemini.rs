@@ -414,16 +414,59 @@ impl Gemini {
     /// Parse a response body. Also separated for testing: this is where a provider's shape
     /// changes silently under you.
     pub fn parse(v: &Value) -> Result<Response, ProviderError> {
-        let cand = v
-            .get("candidates")
-            .and_then(|c| c.get(0))
-            .ok_or_else(|| ProviderError::Parse(format!("no candidates in {v}")))?;
+        let usage = if let Some(u) = v.get("usageMetadata") {
+            let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            Usage {
+                // promptTokenCount INCLUDES cached tokens, so subtract to get what was actually
+                // fresh. Reporting the raw figure would overstate the cost of a well-cached
+                // turn, which is the number this harness exists to reduce.
+                input: n("promptTokenCount").saturating_sub(n("cachedContentTokenCount")),
+                cached: n("cachedContentTokenCount"),
+                output: n("candidatesTokenCount"),
+                thinking: n("thoughtsTokenCount"),
+            }
+        } else {
+            Usage::default()
+        };
+
+        let Some(cand) = v.get("candidates").and_then(|c| c.get(0)) else {
+            let pf = v.get("promptFeedback");
+            let block_reason = pf
+                .and_then(|p| p.get("blockReason"))
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            let block_reason_message = pf
+                .and_then(|p| p.get("blockReasonMessage"))
+                .and_then(|m| m.as_str())
+                .map(String::from);
+            return Err(ProviderError::NoAnswer {
+                block_reason,
+                block_reason_message,
+                usage,
+            });
+        };
+
+        if !cand.is_object() {
+            return Err(ProviderError::Parse(format!("malformed candidate in {v}")));
+        }
+
+        if let Some(c) = cand.get("content") {
+            if !c.is_object() {
+                return Err(ProviderError::Parse(format!("malformed candidate in {v}")));
+            }
+            if let Some(p) = c.get("parts") {
+                if !p.is_array() {
+                    return Err(ProviderError::Parse(format!("malformed candidate in {v}")));
+                }
+            }
+        }
 
         let mut out = Response {
             finish_reason: cand
                 .get("finishReason")
                 .and_then(|f| f.as_str())
                 .map(String::from),
+            usage,
             ..Default::default()
         };
 
@@ -452,18 +495,6 @@ impl Gemini {
             }
         }
 
-        if let Some(u) = v.get("usageMetadata") {
-            let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-            out.usage = Usage {
-                // promptTokenCount INCLUDES cached tokens, so subtract to get what was actually
-                // fresh. Reporting the raw figure would overstate the cost of a well-cached
-                // turn, which is the number this harness exists to reduce.
-                input: n("promptTokenCount").saturating_sub(n("cachedContentTokenCount")),
-                cached: n("cachedContentTokenCount"),
-                output: n("candidatesTokenCount"),
-                thinking: n("thoughtsTokenCount"),
-            };
-        }
         Ok(out)
     }
 
