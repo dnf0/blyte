@@ -38,7 +38,7 @@ pub fn split_effort(model: &str) -> (String, Option<String>) {
     (model.to_string(), None)
 }
 
-/// Pure function computing the Vertex AI generateContent endpoint URL.
+/// Pure function computing the Vertex AI streamGenerateContent endpoint URL.
 ///
 /// Host is `aiplatform.googleapis.com` when location is `global`, else `<location>-aiplatform.googleapis.com`.
 /// The model identifier has any effort suffix stripped.
@@ -49,7 +49,7 @@ pub fn vertex_url(project: &str, location: &str, model: &str) -> String {
     } else {
         format!("{location}-aiplatform.googleapis.com")
     };
-    format!("https://{host}/v1/projects/{project}/locations/{location}/publishers/google/models/{base_model}:generateContent")
+    format!("https://{host}/v1/projects/{project}/locations/{location}/publishers/google/models/{base_model}:streamGenerateContent?alt=sse")
 }
 
 /// Provider of OAuth2 access tokens for Vertex AI requests.
@@ -169,10 +169,23 @@ fn push_part(contents: &mut [Value], part: Value) {
     }
 }
 
+fn thought_summaries_from(val: Option<&str>) -> bool {
+    val.map(|s| s.trim() != "0").unwrap_or(true)
+}
+
+fn thought_summaries_from_env() -> bool {
+    thought_summaries_from(
+        std::env::var("BLYTE_GEMINI_THOUGHT_SUMMARIES")
+            .ok()
+            .as_deref(),
+    )
+}
+
 pub struct Gemini {
     auth: Auth,
     model: String,
     thinking_level: Option<String>,
+    thought_summaries: bool,
 }
 
 impl Gemini {
@@ -187,6 +200,7 @@ impl Gemini {
             auth: Auth::ApiKey(api_key),
             model,
             thinking_level,
+            thought_summaries: thought_summaries_from_env(),
         })
     }
 
@@ -222,6 +236,7 @@ impl Gemini {
             auth: Auth::Vertex(VertexAuth::new(project, location)),
             model,
             thinking_level,
+            thought_summaries: thought_summaries_from_env(),
         })
     }
 
@@ -232,6 +247,7 @@ impl Gemini {
             auth: Auth::ApiKey(api_key.into()),
             model,
             thinking_level,
+            thought_summaries: true,
         }
     }
 
@@ -242,6 +258,7 @@ impl Gemini {
             auth: Auth::Vertex(VertexAuth::new(project, location)),
             model,
             thinking_level,
+            thought_summaries: true,
         }
     }
 
@@ -251,6 +268,11 @@ impl Gemini {
         let (model, thinking_level) = split_effort(clean);
         self.model = model;
         self.thinking_level = thinking_level;
+        self
+    }
+
+    pub fn with_thought_summaries(mut self, enabled: bool) -> Self {
+        self.thought_summaries = enabled;
         self
     }
 
@@ -299,7 +321,7 @@ impl Gemini {
 
     pub fn endpoint_url(&self) -> String {
         match &self.auth {
-            Auth::ApiKey(_) => format!("{API_ROOT}/{}:generateContent", self.model),
+            Auth::ApiKey(_) => format!("{API_ROOT}/{}:streamGenerateContent?alt=sse", self.model),
             Auth::Vertex(v) => vertex_url(&v.project, &v.location, &self.model),
         }
     }
@@ -402,8 +424,15 @@ impl Gemini {
         if let Some(max) = req.max_output_tokens {
             generation.insert("maxOutputTokens".into(), json!(max));
         }
+        let mut thinking = serde_json::Map::new();
         if let Some(level) = &self.thinking_level {
-            generation.insert("thinkingConfig".into(), json!({"thinkingLevel": level}));
+            thinking.insert("thinkingLevel".into(), json!(level));
+        }
+        if self.thought_summaries {
+            thinking.insert("includeThoughts".into(), json!(true));
+        }
+        if !thinking.is_empty() {
+            generation.insert("thinkingConfig".into(), Value::Object(thinking));
         }
         if !generation.is_empty() {
             body["generationConfig"] = Value::Object(generation);
@@ -471,16 +500,26 @@ impl Gemini {
         };
 
         if let Some(parts) = cand.pointer("/content/parts").and_then(|p| p.as_array()) {
+            let mut pending_signature: Option<String> = None;
             for (i, part) in parts.iter().enumerate() {
-                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                    out.text.push_str(t);
+                let is_thought = part
+                    .get("thought")
+                    .and_then(|t| t.as_bool())
+                    .unwrap_or(false);
+                if !is_thought {
+                    if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                        out.text.push_str(t);
+                    }
                 }
                 if let Some(fc) = part.get("functionCall") {
+                    let sig = part
+                        .get("thoughtSignature")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                        .or_else(|| pending_signature.take());
+                    pending_signature = None;
                     out.tool_calls.push(ToolCall {
-                        signature: part
-                            .get("thoughtSignature")
-                            .and_then(|s| s.as_str())
-                            .map(String::from),
+                        signature: sig,
                         // Synthesised: Gemini does not issue ids. Stable within a turn, which
                         // is all the loop needs to pair a result with its call.
                         id: format!("call_{i}"),
@@ -491,11 +530,200 @@ impl Gemini {
                             .to_string(),
                         arguments: fc.get("args").cloned().unwrap_or(json!({})),
                     });
+                } else if let Some(s) = part.get("thoughtSignature").and_then(|s| s.as_str()) {
+                    pending_signature = Some(s.to_string());
                 }
             }
         }
 
         Ok(out)
+    }
+
+    /// Read an SSE stream from `:streamGenerateContent?alt=sse`, merge the chunks into a single
+    /// `generateContent`-shaped JSON value, and parse it with [`Self::parse`].
+    pub fn parse_stream<R: std::io::BufRead>(
+        mut reader: R,
+        cap: Duration,
+        started: Instant,
+    ) -> Result<Response, ProviderError> {
+        let mut merged_parts: Vec<Value> = Vec::new();
+        let mut finish_reason: Option<Value> = None;
+        let mut usage_metadata: Option<Value> = None;
+        let mut prompt_feedback: Option<Value> = None;
+        let mut model_version: Option<Value> = None;
+        let mut saw_candidate = false;
+
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).map_err(|e| {
+                let msg = e.to_string();
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) && !msg.to_ascii_lowercase().contains("timed out")
+                {
+                    ProviderError::Transport(format!("timed out: {e}"))
+                } else {
+                    ProviderError::Transport(msg)
+                }
+            })?;
+            if n == 0 {
+                if started.elapsed() > cap {
+                    return Err(ProviderError::Transport(format!(
+                        "timed out: stream exceeded {}s",
+                        cap.as_secs()
+                    )));
+                }
+                break;
+            }
+            if started.elapsed() > cap {
+                return Err(ProviderError::Transport(format!(
+                    "timed out: stream exceeded {}s",
+                    cap.as_secs()
+                )));
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with(':')
+                || trimmed.starts_with("event:")
+                || trimmed.starts_with("id:")
+                || trimmed.starts_with("retry:")
+            {
+                continue;
+            }
+            let Some(rest) = trimmed.strip_prefix("data:") else {
+                continue;
+            };
+            let data = rest.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+
+            let chunk: Value = serde_json::from_str(data)
+                .map_err(|e| ProviderError::Parse(format!("failed to parse SSE data: {e}")))?;
+
+            if let Some(err_val) = chunk.get("error") {
+                if !err_val.is_null() {
+                    let status = err_val
+                        .get("code")
+                        .and_then(|c| c.as_u64())
+                        .and_then(|c| u16::try_from(c).ok())
+                        .unwrap_or(500);
+                    return Err(ProviderError::Api {
+                        status,
+                        body: data.to_string(),
+                    });
+                }
+            }
+
+            if let Some(u) = chunk.get("usageMetadata") {
+                usage_metadata = Some(u.clone());
+            }
+            if let Some(pf) = chunk.get("promptFeedback") {
+                prompt_feedback = Some(pf.clone());
+            }
+            if let Some(mv) = chunk.get("modelVersion") {
+                model_version = Some(mv.clone());
+            }
+
+            if let Some(cand) = chunk.get("candidates").and_then(|c| c.get(0)) {
+                if !cand.is_object() {
+                    return Err(ProviderError::Parse(format!(
+                        "malformed candidate in {chunk}"
+                    )));
+                }
+                if let Some(c) = cand.get("content") {
+                    if !c.is_object() {
+                        return Err(ProviderError::Parse(format!(
+                            "malformed candidate in {chunk}"
+                        )));
+                    }
+                    if let Some(p) = c.get("parts") {
+                        if !p.is_array() {
+                            return Err(ProviderError::Parse(format!(
+                                "malformed candidate in {chunk}"
+                            )));
+                        }
+                    }
+                }
+
+                saw_candidate = true;
+                if let Some(fr) = cand.get("finishReason") {
+                    if !fr.is_null() {
+                        finish_reason = Some(fr.clone());
+                    }
+                }
+                if let Some(parts) = cand.pointer("/content/parts").and_then(|p| p.as_array()) {
+                    for part in parts {
+                        let is_text_only = part.get("text").and_then(|t| t.as_str()).is_some()
+                            && part.get("functionCall").is_none();
+                        let thought_flag = part
+                            .get("thought")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(false);
+
+                        let can_concat = is_text_only
+                            && merged_parts.last().is_some_and(|prev| {
+                                prev.get("text").and_then(|t| t.as_str()).is_some()
+                                    && prev.get("functionCall").is_none()
+                                    && prev
+                                        .get("thought")
+                                        .and_then(|b| b.as_bool())
+                                        .unwrap_or(false)
+                                        == thought_flag
+                            });
+
+                        if can_concat {
+                            if let Some(prev) = merged_parts.last_mut() {
+                                let prev_text = prev
+                                    .get("text")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or_default();
+                                let curr_text = part
+                                    .get("text")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or_default();
+                                let combined = format!("{prev_text}{curr_text}");
+                                if let Some(obj) = prev.as_object_mut() {
+                                    obj.insert("text".into(), Value::String(combined));
+                                    if let Some(sig) = part.get("thoughtSignature") {
+                                        obj.insert("thoughtSignature".into(), sig.clone());
+                                    }
+                                }
+                            }
+                        } else {
+                            merged_parts.push(part.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut merged = serde_json::Map::new();
+        if saw_candidate {
+            let mut cand = serde_json::Map::new();
+            let mut content = serde_json::Map::new();
+            content.insert("role".into(), json!("model"));
+            content.insert("parts".into(), Value::Array(merged_parts));
+            cand.insert("content".into(), Value::Object(content));
+            if let Some(fr) = finish_reason {
+                cand.insert("finishReason".into(), fr);
+            }
+            merged.insert("candidates".into(), Value::Array(vec![Value::Object(cand)]));
+        }
+        if let Some(u) = usage_metadata {
+            merged.insert("usageMetadata".into(), u);
+        }
+        if let Some(pf) = prompt_feedback {
+            merged.insert("promptFeedback".into(), pf);
+        }
+        if let Some(mv) = model_version {
+            merged.insert("modelVersion".into(), mv);
+        }
+
+        Self::parse(&Value::Object(merged))
     }
 
     /// Parse a models list response body from Google GenAI `models.list`.
@@ -564,14 +792,17 @@ impl Gemini {
 impl Provider for Gemini {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = self.endpoint_url();
-        let agent = crate::http_client();
+        let agent = crate::streaming_http_client();
         let body = self.body(req);
+        let cap = Duration::from_secs(crate::model_stream_cap_secs());
+        let mut started = Instant::now();
 
         let resp = match &self.auth {
             Auth::ApiKey(key) => agent
                 .post(&url)
                 .set("x-goog-api-key", key)
                 .set("content-type", "application/json")
+                .set("Accept", "text/event-stream")
                 .send_json(body),
             Auth::Vertex(vertex) => {
                 let token = vertex.get_token()?;
@@ -579,14 +810,17 @@ impl Provider for Gemini {
                     .post(&url)
                     .set("Authorization", &format!("Bearer {token}"))
                     .set("content-type", "application/json")
+                    .set("Accept", "text/event-stream")
                     .send_json(body.clone());
                 if let Err(ureq::Error::Status(401, _)) = &resp {
                     vertex.invalidate_token();
                     let new_token = vertex.get_token()?;
+                    started = Instant::now();
                     agent
                         .post(&url)
                         .set("Authorization", &format!("Bearer {new_token}"))
                         .set("content-type", "application/json")
+                        .set("Accept", "text/event-stream")
                         .send_json(body)
                 } else {
                     resp
@@ -596,10 +830,8 @@ impl Provider for Gemini {
 
         match resp {
             Ok(r) => {
-                let v: Value = r
-                    .into_json()
-                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
-                Self::parse(&v)
+                let reader = std::io::BufReader::new(r.into_reader());
+                Self::parse_stream(reader, cap, started)
             }
             Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
                 status,
@@ -654,11 +886,11 @@ mod tests {
     fn test_vertex_url_cases() {
         assert_eq!(
             vertex_url("p", "global", "gemini-4-argon"),
-            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:generateContent"
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:streamGenerateContent?alt=sse"
         );
         assert_eq!(
             vertex_url("p", "us-central1", "gemini-4-argon"),
-            "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-4-argon:generateContent"
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-4-argon:streamGenerateContent?alt=sse"
         );
     }
 
@@ -667,7 +899,7 @@ mod tests {
         let g = Gemini::new_vertex("p", "global").with_model("gemini-4-argon-high");
         assert_eq!(
             g.endpoint_url(),
-            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:generateContent"
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:streamGenerateContent?alt=sse"
         );
         assert_eq!(g.thinking_level(), Some("high"));
         assert_eq!(g.effort(), Some("high".to_string()));
