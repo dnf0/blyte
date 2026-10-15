@@ -716,14 +716,16 @@ impl<'a> Runner<'a> {
                 last_report = current_report;
             }
 
+            // Headless runs only: in the interactive REPL the person may just be asking questions.
             if state.orchestrator.instructions.is_some()
+                && state.runtime.conversation.is_none()
                 && !has_dispatched
                 && !explore_nudge_sent
                 && pre_dispatch_calls >= ORCHESTRATOR_EXPLORE_NUDGE
             {
                 explore_nudge_sent = true;
                 history.push(Message::User(format!(
-                    "You have made {ORCHESTRATOR_EXPLORE_NUDGE} tool calls without dispatching. Dispatch the work now from what you know; the implementer reads the code it changes. Keep reading only if you cannot yet say which files the task is about."
+                    "You have made {pre_dispatch_calls} tool calls without dispatching. Dispatch the work now from what you know; the implementer reads the code it changes. Keep reading only if you cannot yet say which files the task is about."
                 )));
             }
 

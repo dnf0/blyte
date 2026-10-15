@@ -190,7 +190,6 @@ fn orchestrator_run_nudges_once_after_eight_reads() {
 
     let mut state = State::new("plan and dispatch", "");
     state.orchestrator.instructions = Some("## How you work\nOrchestrate.\n\n".to_string());
-    state.runtime.conversation = Some(Vec::new());
 
     let runner = Runner {
         provider: &p,
@@ -229,8 +228,49 @@ fn orchestrator_run_nudges_once_after_eight_reads() {
         "request after the 8th tool call must end with the reminder"
     );
 
-    let final_history = state.runtime.conversation.as_ref().unwrap();
-    assert_eq!(count_explore_reminders(final_history), 1);
+    assert_eq!(count_explore_reminders(&seen[9].messages), 1);
+}
+
+#[test]
+fn interactive_orchestrator_run_never_nudges() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("sample.txt"), "hello\n").unwrap();
+
+    let mut responses: Vec<Response> = (1..=9).map(read_response).collect();
+    responses.push(Response {
+        text: "done".into(),
+        ..Default::default()
+    });
+    let p = ScriptedProvider::new(responses);
+
+    // The REPL keeps a conversation; there the person may only be asking questions.
+    let mut state = State::new("explain the code", "");
+    state.orchestrator.instructions = Some("## How you work\nOrchestrate.\n\n".to_string());
+    state.runtime.conversation = Some(Vec::new());
+
+    let runner = Runner {
+        provider: &p,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 15,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        on_event: None,
+        research: false,
+    };
+
+    let (outcome, _) = runner.run(&mut state);
+    assert_eq!(outcome, Outcome::Finished);
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 10);
+    for req in seen.iter() {
+        assert_eq!(count_explore_reminders(&req.messages), 0);
+    }
 }
 
 #[test]
@@ -265,7 +305,6 @@ fn orchestrator_run_with_early_dispatch_never_nudges() {
 
         let mut state = State::new("plan and dispatch", "");
         state.orchestrator.instructions = Some("## How you work\nOrchestrate.\n\n".to_string());
-        state.runtime.conversation = Some(Vec::new());
 
         let runner = Runner {
             provider: &p,
@@ -291,8 +330,6 @@ fn orchestrator_run_with_early_dispatch_never_nudges() {
         for req in seen.iter() {
             assert_eq!(count_explore_reminders(&req.messages), 0);
         }
-        let final_history = state.runtime.conversation.as_ref().unwrap();
-        assert_eq!(count_explore_reminders(final_history), 0);
     }
 }
 
