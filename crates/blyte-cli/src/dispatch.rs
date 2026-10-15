@@ -106,6 +106,7 @@ pub struct DispatchSummary {
     pub gate_attempts: u32,
     pub gate_failures: Vec<String>,
     pub cost_usd: Option<f64>,
+    pub model: Option<String>,
     pub seconds: u64,
     pub sandbox: String,
     pub log: String,
@@ -419,6 +420,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     gate_attempts: 0,
                     gate_failures: Vec::new(),
                     cost_usd: None,
+                    model: None,
                     seconds: 0,
                     sandbox: args.sandbox.clone(),
                     log: setup_log_path.display().to_string(),
@@ -669,6 +671,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         gate_attempts,
         gate_failures,
         cost_usd,
+        model,
         seconds,
         sandbox,
     ) = match record {
@@ -705,6 +708,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     .unwrap_or(0) as u32,
                 gate_failures,
                 rec.get("cost_usd").and_then(|v| v.as_f64()),
+                rec.get("model_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 rec.get("duration_seconds")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0)
@@ -722,6 +728,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             0,
             0,
             Vec::new(),
+            None,
             None,
             0,
             args.sandbox.clone(),
@@ -762,6 +769,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         gate_attempts,
         gate_failures,
         cost_usd,
+        model,
         seconds,
         sandbox,
         log: log_path.display().to_string(),

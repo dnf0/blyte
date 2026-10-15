@@ -78,7 +78,7 @@ pub fn http_client() -> &'static ureq::Agent {
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProviderError {
     #[error("no API key: set {0}")]
     MissingKey(&'static str),
@@ -90,6 +90,21 @@ pub enum ProviderError {
     Api { status: u16, body: String },
     #[error("could not parse provider response: {0}")]
     Parse(String),
+    #[error("{}", format_no_answer(.block_reason.as_deref(), .block_reason_message.as_deref()))]
+    NoAnswer {
+        block_reason: Option<String>,
+        block_reason_message: Option<String>,
+        usage: Usage,
+    },
+}
+
+fn format_no_answer(reason: Option<&str>, message: Option<&str>) -> String {
+    match (reason, message) {
+        (Some(r), Some(m)) => format!("Gemini returned no answer: prompt blocked ({r}): {m}"),
+        (Some(r), None) => format!("Gemini returned no answer: prompt blocked ({r})"),
+        (None, Some(m)) => format!("Gemini returned no answer: {m}"),
+        (None, None) => "Gemini returned no answer".to_string(),
+    }
 }
 
 impl ProviderError {

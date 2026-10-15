@@ -114,6 +114,7 @@ there with rollback off, and prints one JSON object. From a real run of the task
   "turns": 10,
   "gate_failures": [],
   "cost_usd": 0.0172,
+  "model": "gemini/gemini-3.8-flash",
   "seconds": 19,
   "sandbox": "seatbelt"
 }

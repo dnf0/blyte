@@ -91,6 +91,11 @@ fn transient_errors_are_recognised() {
         assert!(!is_transient(&api(s)), "{s}");
     }
     assert!(is_transient(&ProviderError::Transport("reset".into())));
+    assert!(is_transient(&ProviderError::NoAnswer {
+        block_reason: Some("SAFETY".into()),
+        block_reason_message: None,
+        usage: Default::default(),
+    }));
     assert!(!is_transient(&ProviderError::Parse("bad json".into())));
     assert!(!is_transient(&ProviderError::MissingKey("GEMINI_API_KEY")));
 }
@@ -142,4 +147,45 @@ fn no_wait_outlasts_the_deadline() {
         "the first 2s wait would pass a 1s deadline"
     );
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+fn no_answer(input: u64) -> ProviderError {
+    ProviderError::NoAnswer {
+        block_reason: Some("SAFETY".into()),
+        block_reason_message: Some("The prompt is blocked due to safety".into()),
+        usage: blyte_provider::Usage {
+            input,
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn no_answer_is_retried_once_and_recovers() {
+    let d = tempfile::tempdir().unwrap();
+    let p = Flaky::new(vec![no_answer(300)]);
+    let mut st = State::new("g", "true");
+    let (outcome, report) = runner(&p, d.path(), None).run(&mut st);
+    assert_eq!(outcome, Outcome::Verified);
+    assert_eq!(report.provider_retries, 1);
+    assert_eq!(*p.calls.lock().unwrap(), 2);
+    assert_eq!(report.usage.input, 300);
+}
+
+#[test]
+fn no_answer_fails_after_one_retry() {
+    let d = tempfile::tempdir().unwrap();
+    let p = Flaky::new(vec![no_answer(300), no_answer(400), no_answer(500)]);
+    let mut st = State::new("g", "true");
+    let (outcome, report) = runner(&p, d.path(), None).run(&mut st);
+    match outcome {
+        Outcome::Error(e) => {
+            assert!(e.contains("no answer"), "{e}");
+            assert!(e.contains("SAFETY"), "{e}");
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert_eq!(report.provider_retries, 1);
+    assert_eq!(*p.calls.lock().unwrap(), 2);
+    assert_eq!(report.usage.input, 700);
 }

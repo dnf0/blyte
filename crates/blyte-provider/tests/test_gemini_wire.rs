@@ -167,10 +167,50 @@ fn a_response_with_no_usage_block_does_not_fail() {
 fn a_candidateless_response_is_an_error_not_a_silent_empty() {
     // Safety blocks and quota errors arrive shaped like successes. Returning an empty response
     // would look to the loop like a model that chose to say nothing.
-    let err = Gemini::parse(&json!({"promptFeedback":{"blockReason":"SAFETY"}}));
+    let err = Gemini::parse(&json!({
+        "promptFeedback": {
+            "blockReason": "SAFETY",
+            "blockReasonMessage": "The prompt is blocked due to safety"
+        },
+        "usageMetadata": {
+            "promptTokenCount": 500,
+            "cachedContentTokenCount": 100
+        }
+    }))
+    .unwrap_err();
+    assert_eq!(
+        err,
+        blyte_provider::ProviderError::NoAnswer {
+            block_reason: Some("SAFETY".into()),
+            block_reason_message: Some("The prompt is blocked due to safety".into()),
+            usage: Usage {
+                input: 400,
+                cached: 100,
+                output: 0,
+                thinking: 0,
+            },
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "Gemini returned no answer: prompt blocked (SAFETY): The prompt is blocked due to safety"
+    );
+
+    let empty_err = Gemini::parse(&json!({})).unwrap_err();
+    assert_eq!(
+        empty_err,
+        blyte_provider::ProviderError::NoAnswer {
+            block_reason: None,
+            block_reason_message: None,
+            usage: Usage::default(),
+        }
+    );
+    assert_eq!(empty_err.to_string(), "Gemini returned no answer");
+
+    let malformed = Gemini::parse(&json!({"candidates": ["not-an-object"]})).unwrap_err();
     assert!(
-        err.is_err(),
-        "a response with no candidates must surface, not parse to empty"
+        matches!(malformed, blyte_provider::ProviderError::Parse(_)),
+        "expected Parse, got {malformed:?}"
     );
 }
 

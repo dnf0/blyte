@@ -226,8 +226,15 @@ pub fn is_transient(e: &ProviderError) -> bool {
     }
     match e {
         ProviderError::Api { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
-        ProviderError::Transport(_) => true,
+        ProviderError::Transport(_) | ProviderError::NoAnswer { .. } => true,
         _ => false,
+    }
+}
+
+fn max_retries_for(e: &ProviderError) -> u32 {
+    match e {
+        ProviderError::NoAnswer { .. } => 1,
+        _ => MAX_PROVIDER_RETRIES,
     }
 }
 
@@ -721,37 +728,45 @@ impl<'a> Runner<'a> {
                 let call_start = std::time::Instant::now();
                 match self.provider.complete(&req) {
                     Ok(r) => break r,
-                    Err(e) if is_transient(&e) && attempt < MAX_PROVIDER_RETRIES => {
-                        let elapsed = call_start.elapsed().as_secs_f64().round() as u64;
-                        let s = if elapsed > 0 {
-                            elapsed
-                        } else {
-                            blyte_provider::model_timeout_secs()
-                        };
-                        attempt += 1;
-                        let wait = retry_wait(&e, attempt);
-                        if deadline.is_some_and(|d| std::time::Instant::now() + wait >= d) {
-                            return (Outcome::Error(e.to_string()), report);
-                        }
-                        report.provider_retries += 1;
-                        if e.is_timeout() {
-                            eprintln!(
-                                "model call timed out after {s} s; retrying ({attempt} of {MAX_PROVIDER_RETRIES})"
-                            );
-                        } else {
-                            eprintln!(
-                                "provider: {e}; retrying in {}s ({attempt}/{MAX_PROVIDER_RETRIES})",
-                                wait.as_secs()
-                            );
-                        }
-                        std::thread::sleep(wait);
-                    }
                     Err(e) => {
-                        let err_msg = match quota_exhausted(&e) {
-                            Some(msg) => format!("{msg}: {e}"),
-                            None => e.to_string(),
-                        };
-                        return (Outcome::Error(err_msg), report);
+                        if let ProviderError::NoAnswer { usage, .. } = &e {
+                            report.usage.input += usage.input;
+                            report.usage.cached += usage.cached;
+                            report.usage.output += usage.output;
+                            report.usage.thinking += usage.thinking;
+                        }
+                        let max_retries = max_retries_for(&e);
+                        if is_transient(&e) && attempt < max_retries {
+                            let elapsed = call_start.elapsed().as_secs_f64().round() as u64;
+                            let s = if elapsed > 0 {
+                                elapsed
+                            } else {
+                                blyte_provider::model_timeout_secs()
+                            };
+                            attempt += 1;
+                            let wait = retry_wait(&e, attempt);
+                            if deadline.is_some_and(|d| std::time::Instant::now() + wait >= d) {
+                                return (Outcome::Error(e.to_string()), report);
+                            }
+                            report.provider_retries += 1;
+                            if e.is_timeout() {
+                                eprintln!(
+                                    "model call timed out after {s} s; retrying ({attempt} of {max_retries})"
+                                );
+                            } else {
+                                eprintln!(
+                                    "provider: {e}; retrying in {}s ({attempt}/{max_retries})",
+                                    wait.as_secs()
+                                );
+                            }
+                            std::thread::sleep(wait);
+                        } else {
+                            let err_msg = match quota_exhausted(&e) {
+                                Some(msg) => format!("{msg}: {e}"),
+                                None => e.to_string(),
+                            };
+                            return (Outcome::Error(err_msg), report);
+                        }
                     }
                 }
             };
