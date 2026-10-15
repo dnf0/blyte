@@ -275,7 +275,30 @@ impl Pricing {
     }
 }
 
-pub fn pricing(model_id: &str) -> Option<Pricing> {
+fn utc_date_from_epoch_secs(secs: u64) -> (u32, u32, u32) {
+    let days = secs / 86_400;
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year as u32, m as u32, d as u32)
+}
+
+fn today_utc() -> (u32, u32, u32) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    utc_date_from_epoch_secs(secs)
+}
+
+pub fn pricing_on(model_id: &str, date: (u32, u32, u32)) -> Option<Pricing> {
     // Gemini 3.8 Flash, list price through 2026-12-31.
     if model_id.contains("gemini-3.8-flash") {
         return Some(Pricing {
@@ -284,15 +307,29 @@ pub fn pricing(model_id: &str) -> Option<Pricing> {
             output: 3.75,
         });
     }
-    // Gemini 4 Argon, introductory price announced 2026-09-30 (cached input 95% off).
+    // Gemini 4 Argon, introductory price announced 2026-09-30 (cached input 95% off)
+    // through 2026-11-30; post-introductory price from 2026-12-01.
     if model_id.contains("gemini-4-argon") {
-        return Some(Pricing {
-            input: 2.00,
-            cached: 0.10,
-            output: 10.00,
-        });
+        if date <= (2026, 11, 30) {
+            return Some(Pricing {
+                input: 2.00,
+                cached: 0.10,
+                output: 10.00,
+            });
+        } else {
+            // The cached rate from 2026-12-01 is unannounced; 10% of input ($0.40) is an assumption.
+            return Some(Pricing {
+                input: 4.00,
+                cached: 0.40,
+                output: 20.00,
+            });
+        }
     }
     None
+}
+
+pub fn pricing(model_id: &str) -> Option<Pricing> {
+    pricing_on(model_id, today_utc())
 }
 
 #[cfg(test)]
@@ -310,6 +347,47 @@ mod tests {
         assert_eq!(p2.input, 2.00);
         assert_eq!(p2.cached, 0.10);
         assert_eq!(p2.output, 10.00);
+    }
+
+    #[test]
+    fn test_pricing_on_gemini_4_argon_cutoff() {
+        let intro = Pricing {
+            input: 2.00,
+            cached: 0.10,
+            output: 10.00,
+        };
+        let post_intro = Pricing {
+            input: 4.00,
+            cached: 0.40,
+            output: 20.00,
+        };
+
+        for model in ["gemini-4-argon", "vertex/gemini-4-argon"] {
+            assert_eq!(pricing_on(model, (2026, 10, 1)), Some(intro));
+            assert_eq!(pricing_on(model, (2026, 11, 30)), Some(intro));
+            assert_eq!(pricing_on(model, (2026, 12, 1)), Some(post_intro));
+            assert_eq!(pricing_on(model, (2027, 1, 1)), Some(post_intro));
+        }
+    }
+
+    #[test]
+    fn test_pricing_on_other_models_unchanged() {
+        let flash = Pricing {
+            input: 0.75,
+            cached: 0.075,
+            output: 3.75,
+        };
+        assert_eq!(pricing_on("gemini-3.8-flash", (2026, 11, 30)), Some(flash));
+        assert_eq!(pricing_on("gemini-3.8-flash", (2026, 12, 1)), Some(flash));
+        assert_eq!(pricing_on("unknown-model", (2026, 11, 30)), None);
+        assert_eq!(pricing_on("unknown-model", (2026, 12, 1)), None);
+    }
+
+    #[test]
+    fn test_utc_date_from_epoch_secs() {
+        assert_eq!(utc_date_from_epoch_secs(0), (1970, 1, 1));
+        assert_eq!(utc_date_from_epoch_secs(1_796_083_199), (2026, 11, 30));
+        assert_eq!(utc_date_from_epoch_secs(1_796_083_200), (2026, 12, 1));
     }
 }
 
