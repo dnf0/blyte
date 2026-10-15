@@ -1,3 +1,9 @@
+## v0.30.1 (2026-10-15)
+
+### Fix
+
+- **cli**: report usage and cost when the watchdog stops a run (#266)
+
 ## v0.30.0 (2026-10-14)
 
 ### Feat
