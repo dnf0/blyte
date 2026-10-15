@@ -33,7 +33,13 @@ before any `--diff` and open the diff only for what it flags, and trim long outp
 Start on the work at once. The skill below documents every blyte command you need, so do not run \
 `--help`, and do not check the environment or `~/.config/blyte` for API keys: `blyte dispatch` reports a \
 missing key itself. When the request names a plan, read it and dispatch its independent tasks in your \
-first turns.";
+first turns.
+
+Get oriented with a few cheap calls (list the files, grep for the names in the request, read the one or \
+two files the work centres on), then dispatch. The implementer reads the code it changes and writes its \
+own tests, so do not read files on its behalf, and do not read the whole repository to plan. Split work \
+with separable parts into several focused dispatches, each naming its files and how to check it, rather \
+than one large one. Further reading is for reviewing a dispatch's result, not for preparing it.";
 
 /// The user's rules file: `$XDG_CONFIG_HOME/blyte/orchestrator.md` when `XDG_CONFIG_HOME` is set and not
 /// empty, else `$HOME/.config/blyte/orchestrator.md`; `None` when neither variable is set.
@@ -78,8 +84,11 @@ pub fn load_user_rules(path: &Path) -> Option<String> {
 }
 
 /// Instruction added to the prompt when `--dispatch-cmd` is configured.
-pub const DISPATCH_TOOL_INSTRUCTION: &str =
-    "Delegate work through the `dispatch` tool, one self-contained task per call, and do not run `blyte dispatch` in your shell.";
+pub const DISPATCH_TOOL_INSTRUCTION: &str = "\
+Delegate work through the `dispatch` tool, one self-contained task per call, and do not run `blyte dispatch` \
+in your shell. Make the first dispatch early, with each task naming the files to change and the check that \
+shows it worked. When the report shows the gate failed or work is missing, send a focused follow-up dispatch \
+rather than doing it yourself.";
 
 /// The orchestrator sections of the system prompt, in this order:
 /// "## How you work\n{PREAMBLE}\n\n## The blyte-implementer skill\n{skill}\n\n", then, if `user_rules`
