@@ -12,7 +12,7 @@ documentation.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-blyte-provider = { path = "../blyte-provider", version = "0.32.0" }
+blyte-provider = { path = "../blyte-provider", version = "0.32.1" }
 grep-searcher.workspace = true
 grep-regex.workspace = true
 ignore.workspace = true
