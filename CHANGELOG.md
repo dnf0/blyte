@@ -1,3 +1,10 @@
+## v0.30.1 (2026-10-15)
+
+### Fix
+
+- **provider**: retry Gemini's empty responses once and name them; model in dispatch summaries (#267)
+- **cli**: report usage and cost when the watchdog stops a run (#266)
+
 ## v0.30.0 (2026-10-14)
 
 ### Feat
