@@ -160,7 +160,7 @@ fn current_session_totals(session_id: &str) -> crate::cost::Totals {
 /// Formats a runtime event emitted during agent turn or gate execution.
 pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
     match event {
-        blyte_agent::run::Event::Turn { n, text } => {
+        blyte_agent::run::Event::Turn { n, text, .. } => {
             format!("[Turn {}] {}", n, text)
         }
         blyte_agent::run::Event::Tool {

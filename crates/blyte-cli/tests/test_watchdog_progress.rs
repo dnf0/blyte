@@ -81,7 +81,7 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
         .env_remove("OLLAMA_API_KEY")
         .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"))
         .env("OPENAI_API_KEY", "test")
-        .env("BLYTE_MODEL", "openai/test-model")
+        .env("BLYTE_MODEL", "openai/gemini-3.8-flash")
         .env("BLYTE_WATCHDOG_GRACE_SECS", "1")
         .output()
         .unwrap();
@@ -98,4 +98,12 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
     assert!(err.contains("gate attempt 1 was still running"), "{err}");
     assert_eq!(v["turns"], 1, "{v}");
     assert_eq!(v["gate_attempts"], 1, "{v}");
+    assert_eq!(v["usage"]["input"], 10, "{v}");
+    assert_eq!(v["usage"]["cached"], 0, "{v}");
+    assert_eq!(v["usage"]["output"], 2, "{v}");
+    assert_eq!(v["usage"]["thinking"], 0, "{v}");
+    let expected_cost = (10.0 * 0.75 + 2.0 * 3.75) / 1e6;
+    let cost = v["cost_usd"].as_f64().expect("cost_usd should be set");
+    assert!(cost > 0.0, "{v}");
+    assert!((cost - expected_cost).abs() < 1e-12, "{v}");
 }
