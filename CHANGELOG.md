@@ -1,3 +1,9 @@
+## v0.32.0 (2026-10-15)
+
+### Feat
+
+- **gemini**: stream responses with an idle timeout (#271)
+
 ## v0.31.0 (2026-10-15)
 
 ### Feat
