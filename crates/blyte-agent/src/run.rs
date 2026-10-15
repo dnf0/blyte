@@ -780,7 +780,7 @@ impl<'a> Runner<'a> {
                             report.provider_retries += 1;
                             if e.is_timeout() {
                                 eprintln!(
-                                    "model call timed out after {s} s; retrying ({attempt} of {max_retries})"
+                                    "model call timed out after {s} s; retrying ({attempt} of {max_retries}; raise BLYTE_MODEL_IDLE_TIMEOUT_SECS for silence or BLYTE_MODEL_TIMEOUT_SECS for whole call)"
                                 );
                             } else {
                                 eprintln!(

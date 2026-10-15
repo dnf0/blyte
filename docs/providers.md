@@ -35,6 +35,9 @@ least and costs least. Models prefixed with `vertex/` (e.g. `vertex/gemini-4-arg
 through Vertex AI using Google Cloud Application Default Credentials (`gcloud auth application-default login`)
 rather than an API key. The project is read from `GOOGLE_CLOUD_PROJECT` (or `CLOUDSDK_CORE_PROJECT`), and location
 from `GOOGLE_CLOUD_LOCATION` (default `global`). Tokens are cached for 45 minutes and refreshed automatically.
+Gemini calls stream over SSE (`:streamGenerateContent?alt=sse`) with thought summaries on
+(`thinkingConfig.includeThoughts: true`) so chunks arrive while the model thinks; summaries are
+discarded and not shown. Set `BLYTE_GEMINI_THOUGHT_SUMMARIES=0` to turn them off.
 
 **Anthropic.** Prompt caching is on: blyte marks cache breakpoints on the tool definitions and the
 latest message, so each turn pays full price only for what is new.
@@ -63,7 +66,11 @@ when it resets.
 
 Burst rate limits (HTTP 429 with a short retry delay), server errors and dropped connections are
 retried with backoff (2, 4, 8, 16, 32, then 60 seconds, six times), never past `--max-seconds`.
-Set `BLYTE_MODEL_TIMEOUT_SECS` to override the per-call timeout (default 180 s, with a read timeout 30 s shorter, at least 30 s) for slow providers such as a local Ollama instance.
+Streamed Gemini calls fail after `BLYTE_MODEL_IDLE_TIMEOUT_SECS` (default 90 s) of silence with no
+bytes received, or once `BLYTE_MODEL_TIMEOUT_SECS` (default 1800 s for streamed calls) has passed.
+Other providers do not stream and use `BLYTE_MODEL_TIMEOUT_SECS` as a whole-call HTTP timeout
+(default 180 s, with a read timeout 30 s shorter, at least 30 s) for slow providers such as a local
+Ollama instance.
 An exhausted **quota** (a daily limit, `insufficient_quota`, or a reset more than five minutes
 away) is not retried: the run ends with a message saying when it resets.
 

@@ -70,11 +70,11 @@ fn test_resolve_provider_cloudsdk_core_project_fallback() {
 fn test_vertex_url_pure_function() {
     assert_eq!(
         vertex_url("p", "global", "gemini-4-argon"),
-        "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:generateContent"
+        "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:streamGenerateContent?alt=sse"
     );
     assert_eq!(
         vertex_url("p", "us-central1", "gemini-4-argon"),
-        "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-4-argon:generateContent"
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-4-argon:streamGenerateContent?alt=sse"
     );
 }
 
@@ -85,7 +85,7 @@ fn test_vertex_effort_suffix() {
     // puts gemini-4-argon in the URL
     assert_eq!(
         g.endpoint_url(),
-        "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:generateContent"
+        "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-4-argon:streamGenerateContent?alt=sse"
     );
 
     // sets the thinking level as today
@@ -230,7 +230,7 @@ fn test_vertex_from_env_custom_location() {
     assert_eq!(g.project(), Some("custom-proj"));
     assert_eq!(
         g.endpoint_url(),
-        "https://europe-west4-aiplatform.googleapis.com/v1/projects/custom-proj/locations/europe-west4/publishers/google/models/gemini-3.8-flash:generateContent"
+        "https://europe-west4-aiplatform.googleapis.com/v1/projects/custom-proj/locations/europe-west4/publishers/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
     );
 
     clear_vertex_env();

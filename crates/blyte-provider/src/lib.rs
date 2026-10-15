@@ -40,6 +40,42 @@ pub fn model_timeouts_from(val: Option<&str>) -> (std::time::Duration, std::time
     )
 }
 
+/// Computes the streaming idle timeout in seconds from an optional string value or default (90 s).
+/// Invalid or zero values fall back to the default.
+pub fn model_idle_timeout_secs_from(val: Option<&str>) -> u64 {
+    val.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(90)
+}
+
+/// Streaming idle timeout in seconds, derived from `BLYTE_MODEL_IDLE_TIMEOUT_SECS` or default 90 s, read once.
+pub fn model_idle_timeout_secs() -> u64 {
+    static IDLE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *IDLE.get_or_init(|| {
+        model_idle_timeout_secs_from(
+            std::env::var("BLYTE_MODEL_IDLE_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// Computes the streaming whole-call cap in seconds from an optional string value or default (1800 s).
+/// Invalid or zero values fall back to the default.
+pub fn model_stream_cap_secs_from(val: Option<&str>) -> u64 {
+    val.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1800)
+}
+
+/// Streaming whole-call cap in seconds, derived from `BLYTE_MODEL_TIMEOUT_SECS` or default 1800 s, read once.
+pub fn model_stream_cap_secs() -> u64 {
+    static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        model_stream_cap_secs_from(std::env::var("BLYTE_MODEL_TIMEOUT_SECS").ok().as_deref())
+    })
+}
+
 /// Timeouts (whole-call, read) derived from `BLYTE_MODEL_TIMEOUT_SECS` or default (180 s, 150 s), read once.
 pub fn model_timeouts() -> (std::time::Duration, std::time::Duration) {
     static TIMEOUTS: std::sync::OnceLock<(std::time::Duration, std::time::Duration)> =
@@ -66,6 +102,16 @@ pub fn build_http_client(
         .build()
 }
 
+/// Builds an HTTP client for streaming calls with a 20 s connect timeout and `timeout_read(idle)`.
+///
+/// No whole-call `.timeout(..)` is set: in ureq 2 a whole-call timeout replaces the read timeout.
+pub fn build_streaming_http_client(idle: std::time::Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(20))
+        .timeout_read(idle)
+        .build()
+}
+
 /// The process's one HTTP client. `ureq::Agent` pools connections, so every model call after
 /// the first reuses one instead of paying a TCP and TLS handshake (15-45 ms) each time.
 pub fn http_client() -> &'static ureq::Agent {
@@ -73,6 +119,14 @@ pub fn http_client() -> &'static ureq::Agent {
     CLIENT.get_or_init(|| {
         let (whole, read) = model_timeouts();
         build_http_client(whole, read)
+    })
+}
+
+/// The process's shared HTTP client for streaming calls, with a connect timeout and idle read timeout.
+pub fn streaming_http_client() -> &'static ureq::Agent {
+    static CLIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        build_streaming_http_client(std::time::Duration::from_secs(model_idle_timeout_secs()))
     })
 }
 

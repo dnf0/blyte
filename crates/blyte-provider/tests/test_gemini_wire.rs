@@ -220,6 +220,10 @@ fn effort_suffix_becomes_thinking_level_and_leaves_the_model_id() {
     let g = gemini().with_model("gemini-3.8-flash-high");
     assert_eq!(g.model_id(), "gemini/gemini-3.8-flash");
     assert_eq!(g.thinking_level(), Some("high"));
+    assert_eq!(
+        g.endpoint_url(),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
+    );
     let b = g.body(&Request {
         messages: vec![Message::User("hi".into())],
         ..Default::default()
@@ -227,6 +231,10 @@ fn effort_suffix_becomes_thinking_level_and_leaves_the_model_id() {
     assert_eq!(
         b["generationConfig"]["thinkingConfig"]["thinkingLevel"],
         "high"
+    );
+    assert_eq!(
+        b["generationConfig"]["thinkingConfig"]["includeThoughts"],
+        true
     );
 }
 
@@ -238,7 +246,38 @@ fn a_bare_model_sends_no_generation_config() {
         messages: vec![Message::User("hi".into())],
         ..Default::default()
     });
-    assert!(b.get("generationConfig").is_none());
+    assert!(b["generationConfig"]["thinkingConfig"]
+        .get("thinkingLevel")
+        .is_none());
+    assert_eq!(
+        b["generationConfig"]["thinkingConfig"]["includeThoughts"],
+        true
+    );
+
+    let g_no_summaries = g.with_thought_summaries(false);
+    let b_no_summaries = g_no_summaries.body(&Request {
+        messages: vec![Message::User("hi".into())],
+        ..Default::default()
+    });
+    assert!(b_no_summaries.get("generationConfig").is_none());
+}
+
+#[test]
+fn body_omits_include_thoughts_when_summaries_turned_off() {
+    let g = gemini()
+        .with_model("gemini-3.8-flash-high")
+        .with_thought_summaries(false);
+    let b = g.body(&Request {
+        messages: vec![Message::User("hi".into())],
+        ..Default::default()
+    });
+    assert_eq!(
+        b["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high"
+    );
+    assert!(b["generationConfig"]["thinkingConfig"]
+        .get("includeThoughts")
+        .is_none());
 }
 
 #[test]
@@ -531,4 +570,164 @@ fn assistant_text_with_no_tool_calls_remains_unchanged() {
     assert_eq!(contents[2]["parts"][0], json!({"text": "next"}));
 
     assert_no_consecutive_same_role(contents);
+}
+
+#[test]
+fn parse_stream_joins_text_split_over_three_chunks_without_newlines() {
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hel\"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"lo \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"world\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+    );
+    let r = Gemini::parse_stream(
+        std::io::Cursor::new(sse.as_bytes()),
+        std::time::Duration::from_secs(60),
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(r.text, "Hello world");
+    assert_eq!(r.finish_reason.as_deref(), Some("STOP"));
+}
+
+#[test]
+fn parse_stream_discards_thought_chunks_and_keeps_text_and_signature() {
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Let me \",\"thought\":true}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"think about this.\",\"thought\":true}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Here is \",\"thoughtSignature\":\"sig-old\"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"the answer.\",\"thoughtSignature\":\"sig-final\"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"bash\",\"args\":{\"command\":\"true\"}}}]},\"finishReason\":\"STOP\"}]}\n\n",
+    );
+    let r = Gemini::parse_stream(
+        std::io::Cursor::new(sse.as_bytes()),
+        std::time::Duration::from_secs(60),
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(r.text, "Here is the answer.");
+    assert!(!r.text.contains("think"));
+    assert_eq!(r.tool_calls.len(), 1);
+    assert_eq!(r.tool_calls[0].signature.as_deref(), Some("sig-final"));
+}
+
+#[test]
+fn parse_stream_extracts_function_call_in_later_chunk() {
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"thinking...\",\"thought\":true}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Reading file.\"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"src/lib.rs\"}},\"thoughtSignature\":\"sig-call\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+    );
+    let r = Gemini::parse_stream(
+        std::io::Cursor::new(sse.as_bytes()),
+        std::time::Duration::from_secs(60),
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(r.text, "Reading file.");
+    assert_eq!(r.tool_calls.len(), 1);
+    assert_eq!(r.tool_calls[0].id, "call_2");
+    assert_eq!(r.tool_calls[0].name, "read");
+    assert_eq!(r.tool_calls[0].arguments["path"], "src/lib.rs");
+    assert_eq!(r.tool_calls[0].signature.as_deref(), Some("sig-call"));
+}
+
+#[test]
+fn parse_stream_takes_usage_metadata_from_last_chunk() {
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"part 1 \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"part 2\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":500,\"cachedContentTokenCount\":300,\"candidatesTokenCount\":40,\"thoughtsTokenCount\":90}}\n\n",
+    );
+    let r = Gemini::parse_stream(
+        std::io::Cursor::new(sse.as_bytes()),
+        std::time::Duration::from_secs(60),
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(r.text, "part 1 part 2");
+    assert_eq!(r.usage.input, 200);
+    assert_eq!(r.usage.cached, 300);
+    assert_eq!(r.usage.output, 40);
+    assert_eq!(r.usage.thinking, 90);
+}
+
+#[test]
+fn parse_stream_with_only_prompt_feedback_gives_no_answer() {
+    let sse = "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked by policy\"},\"usageMetadata\":{\"promptTokenCount\":120}}\n\n";
+    let err = Gemini::parse_stream(
+        std::io::Cursor::new(sse.as_bytes()),
+        std::time::Duration::from_secs(60),
+        std::time::Instant::now(),
+    )
+    .unwrap_err();
+    match err {
+        blyte_provider::ProviderError::NoAnswer {
+            block_reason,
+            block_reason_message,
+            usage,
+        } => {
+            assert_eq!(block_reason.as_deref(), Some("SAFETY"));
+            assert_eq!(block_reason_message.as_deref(), Some("blocked by policy"));
+            assert_eq!(usage.input, 120);
+        }
+        other => panic!("expected NoAnswer, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_stream_returns_api_error_on_error_payload() {
+    let sse = "data: {\"error\":{\"code\":503,\"message\":\"The model is overloaded.\",\"status\":\"UNAVAILABLE\"}}\n\n";
+    let err = Gemini::parse_stream(
+        std::io::Cursor::new(sse.as_bytes()),
+        std::time::Duration::from_secs(60),
+        std::time::Instant::now(),
+    )
+    .unwrap_err();
+    match err {
+        blyte_provider::ProviderError::Api { status, body } => {
+            assert_eq!(status, 503);
+            assert!(body.contains("overloaded"), "{body}");
+        }
+        other => panic!("expected Api, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_stream_empty_stream_gives_no_answer() {
+    let err = Gemini::parse_stream(
+        std::io::Cursor::new(b"" as &[u8]),
+        std::time::Duration::from_secs(60),
+        std::time::Instant::now(),
+    )
+    .unwrap_err();
+    match err {
+        blyte_provider::ProviderError::NoAnswer {
+            block_reason,
+            block_reason_message,
+            usage,
+        } => {
+            assert_eq!(block_reason, None);
+            assert_eq!(block_reason_message, None);
+            assert_eq!(usage.input, 0);
+        }
+        other => panic!("expected NoAnswer, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_stream_exceeding_cap_gives_timed_out_transport_error() {
+    let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hi\"}]}}]}\n\n";
+    let started = std::time::Instant::now() - std::time::Duration::from_millis(50);
+    let err = Gemini::parse_stream(
+        std::io::Cursor::new(sse.as_bytes()),
+        std::time::Duration::from_secs(0),
+        started,
+    )
+    .unwrap_err();
+    assert!(err.is_timeout(), "expected timeout error, got {err:?}");
+    match err {
+        blyte_provider::ProviderError::Transport(msg) => {
+            assert!(msg.contains("timed out"), "{msg}");
+        }
+        other => panic!("expected Transport, got {other:?}"),
+    }
 }
