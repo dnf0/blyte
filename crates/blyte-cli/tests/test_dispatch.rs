@@ -181,3 +181,44 @@ fn review_shows_the_run() {
     }
     assert_eq!(blyte(r.path(), &["review", "nope"]).status.code(), Some(2));
 }
+
+#[test]
+fn summary_carries_model_from_report() {
+    let r = repo();
+    std::fs::write(r.path().join("task.md"), "Append b to f.txt.\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args([
+            "dispatch",
+            "T1",
+            "task.md",
+            "--gate",
+            "true",
+            "--model",
+            "gemini-4-argon",
+            "--max-turns",
+            "0",
+            "--sandbox",
+            "off",
+        ])
+        .current_dir(r.path())
+        .env("GEMINI_API_KEY", "test-key")
+        .env("BLYTE_USAGE_LOG", "off")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("BLYTE_MODEL")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rep: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(r.path().join(".wt/T1.report.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rep["model_id"], "gemini/gemini-4-argon");
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is one JSON object");
+    assert_eq!(v["model"], "gemini/gemini-4-argon");
+}
