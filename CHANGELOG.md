@@ -1,3 +1,9 @@
+## v0.31.0 (2026-10-15)
+
+### Feat
+
+- **agent**: the orchestrator dispatches early (#270)
+
 ## v0.30.1 (2026-10-15)
 
 ### Fix
