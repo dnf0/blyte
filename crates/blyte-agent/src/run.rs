@@ -28,6 +28,7 @@ use blyte_provider::{Message, Provider, ProviderError, Request, Usage};
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
 use crate::gate_slots;
+use crate::research_check;
 use crate::shell::Shell;
 use crate::state::State;
 use crate::tools;
@@ -604,6 +605,36 @@ impl<'a> Runner<'a> {
         (out.exit_code == 0).then(|| out.stdout.trim().to_string())
     }
 
+    /// Problems with report.md's quotes and line citations (see `research_check`).
+    fn check_report_quotes(&self) -> Vec<String> {
+        let Ok(report) = self.fs.read(&self.root.join("report.md")) else {
+            return Vec::new();
+        };
+        let read_roots = tools::read_roots();
+        let mut listing = Vec::new();
+        for dir in std::iter::once(&self.root).chain(read_roots.iter()) {
+            if let Ok(o) = self.shell.exec(
+                "git -c core.quotePath=off ls-files -co --exclude-standard",
+                dir,
+                Duration::from_secs(60),
+            ) {
+                if o.exit_code == 0 {
+                    listing.extend(o.stdout.lines().map(|l| dir.join(l)));
+                }
+            }
+        }
+        let read = |p: &Path| self.fs.read(p);
+        research_check::check(
+            &report,
+            &research_check::Sources {
+                workspace: &self.root,
+                read_roots: &read_roots,
+                listing: &listing,
+                read: &read,
+            },
+        )
+    }
+
     fn reset_to(&self, commit: &str) {
         let _ = self.shell.exec(
             &format!("git reset --hard {commit} && git clean -fd"),
@@ -952,8 +983,15 @@ impl<'a> Runner<'a> {
                 attempt: report.gate_attempts,
             });
             let gate_start = std::time::Instant::now();
-            let (passed, output, wait_ms, failing) = self.run_gate(state, &last_failed);
+            let (mut passed, mut output, wait_ms, failing) = self.run_gate(state, &last_failed);
             last_failed = failing;
+            if passed && self.research {
+                let problems = self.check_report_quotes();
+                if !problems.is_empty() {
+                    passed = false;
+                    output = format!("exit 1\n{}", research_check::render(&problems));
+                }
+            }
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);
             if let Some(d) = deadline.as_mut() {
@@ -992,11 +1030,15 @@ impl<'a> Runner<'a> {
             } else {
                 ""
             };
-            history.push(Message::User(format!(
-                "Verification did not pass.\n\n{output}\n\n\
-                 If the failure is caused by your change, fix your change, not the machine. \
+            let advice = if self.research {
+                "Fix report.md as listed above, then reply with one line."
+            } else {
+                "If the failure is caused by your change, fix your change, not the machine. \
                  If it is not caused by your change (disk space, network, a missing service), \
-                 say so and stop.{reset_note}"
+                 say so and stop."
+            };
+            history.push(Message::User(format!(
+                "Verification did not pass.\n\n{output}\n\n{advice}{reset_note}"
             )));
         }
         (Outcome::BudgetExhausted, report)

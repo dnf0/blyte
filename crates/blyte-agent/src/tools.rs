@@ -47,6 +47,14 @@ pub fn set_read_roots(roots: Vec<PathBuf>) {
     }
 }
 
+/// The directories set with `set_read_roots`.
+pub fn read_roots() -> Vec<PathBuf> {
+    READ_ROOTS
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
 /// Output over this many lines is distilled to head and tail before entering context.
 ///
 /// Sized from measurement, not intuition: across 64 recorded command outputs the median was

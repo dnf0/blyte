@@ -16,6 +16,7 @@ pub mod context;
 pub mod fs;
 pub mod gate_slots;
 pub mod orchestrator;
+pub mod research_check;
 pub mod rules;
 pub mod run;
 pub mod sandbox;

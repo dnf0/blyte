@@ -28,7 +28,9 @@ pub const RESEARCH_RULES: &str = r#"Rules:
 - Do not run git commands that change state (no checkout, pull, commit, stash, worktree), and do not build, install, push, open pull requests, or write to any service.
 - Read the code with the read and grep tools, using absolute paths under the repository; use the shell only when they cannot do what you need.
 - Answer the question with evidence: file paths with line numbers, and quote only what is needed.
-- Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them. The harness checks that `report.md` exists.
+- Quote code only from what you have just read. Earlier tool output is folded out of your context as the run goes on; read the file again before quoting it, never quote from memory.
+- Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them.
+- The harness checks report.md: every cited `path:line` must exist, and a code block whose preceding line cites `path:line` must be copied from those lines of that file. Code you propose or sketch goes in a ```proposed or ```diff block. If the check fails you get the list of mismatches to fix.
 - Start report.md early, after your first findings, and keep it updated as you go, so it always holds your best answer."#;
 
 pub fn wrap_research(question: &str, root: &Path) -> String {
@@ -521,6 +523,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
     for p in &args.pass_env {
         cmd.arg("--pass-env").arg(p);
+    }
+    // The read and grep tools may read what the sandbox may read.
+    for r in config_allow_read.iter().chain(&args.allow_read) {
+        cmd.arg("--read-root").arg(r);
     }
     if args.research {
         cmd.arg("--read-root").arg(&root);
