@@ -1,3 +1,9 @@
+## v0.32.2 (2026-10-16)
+
+### Fix
+
+- **research**: check report quotes against the cited files (#276)
+
 ## v0.32.1 (2026-10-15)
 
 ### Fix
