@@ -30,7 +30,7 @@ pub const RESEARCH_RULES: &str = r#"Rules:
 - Answer the question with evidence: file paths with line numbers, and quote only what is needed.
 - Quote code only from what you have just read. Earlier tool output is folded out of your context as the run goes on; read the file again before quoting it, never quote from memory.
 - Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them.
-- The harness checks report.md: every cited `path:line` must exist, and a code block whose preceding line cites `path:line` must be copied from those lines of that file. Code you propose or sketch goes in a ```proposed or ```diff block. If the check fails you get the list of mismatches to fix.
+- The harness checks report.md: every cited `path:line` must exist, and a code block must be copied from the file and lines cited on the line before it (`path:N-M`). A code block with no citation fails unless it is a command or output (```bash, ```text) or is tagged ```proposed (code you propose or sketch, not in the repository). If the check fails you get the list of problems to fix.
 - Start report.md early, after your first findings, and keep it updated as you go, so it always holds your best answer."#;
 
 pub fn wrap_research(question: &str, root: &Path) -> String {

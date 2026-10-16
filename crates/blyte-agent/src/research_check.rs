@@ -3,11 +3,18 @@
 //! Research runs have no test suite to answer to, so a report can cite lines that don't exist
 //! and quote code nobody wrote: on 2026-10-15 a run passed with 44 of its 442 quotes real. The
 //! check is deliberately narrow, so a careful report always passes it:
-//! - a citation is `path:N`, `path:N-M` or `path:N-M,K`, where `path` has a file extension;
-//! - a cited path containing `/` must exist, and every cited line must be inside the file;
-//! - a fenced code block whose nearest non-blank line before it holds a citation is a quote of
-//!   the last citation on that line (or of a first-line comment in the block), unless it is tagged `diff`, `patch` or `proposed`; a block
-//!   of mostly numbered lines with no citation there quotes the report's most recent citation;
+//! - a citation is `path:N`, `path:N-M` or `path:N-M,K`, where `path` has a file extension or
+//!   is a `Makefile`, `Dockerfile` and the like;
+//! - a cited path must exist if it contains `/` or has a source-code extension, and every cited
+//!   line must be inside the file;
+//! - a fenced code block quotes the last citation on the nearest non-blank line before it, or on
+//!   a first-line comment in the block. Failing that, a path named on that line (`In
+//!   src/x.py:`, `` `x.toml` (lines 3-8) ``) is cited, as the whole file when no lines are given;
+//! - a block of mostly numbered lines with no citation there quotes the report's most recent
+//!   citation;
+//! - blocks tagged `diff`, `patch` or `proposed` are not checked, and neither are commands,
+//!   output and untagged plain blocks; any other block tagged with a language, or numbered, must
+//!   have a citation;
 //! - a quoted line may elide parts with `...`;
 //! - a quoted line starting with a line number (as `read` and `nl -ba` print them) must equal
 //!   that line of the file; any other quoted line must occur near the cited lines.
@@ -28,7 +35,7 @@ const SLACK: usize = 5;
 const EXAMPLES_PER_BLOCK: usize = 3;
 
 /// Files a bare or relative name may match by suffix before it is treated as ambiguous noise.
-const MAX_SUFFIX_MATCHES: usize = 5;
+const MAX_SUFFIX_MATCHES: usize = 20;
 
 /// Where cited files are looked for.
 pub struct Sources<'a> {
@@ -45,7 +52,10 @@ pub struct Sources<'a> {
 
 struct Citation {
     path: String,
+    /// Empty for a whole file.
     ranges: Vec<(usize, usize)>,
+    /// Named in a block's lead-in rather than cited as `path:N`, so not checked as prose.
+    named: bool,
 }
 
 enum Resolved {
@@ -58,9 +68,63 @@ enum Resolved {
 fn citation_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"([\w./~-]*\.[A-Za-z][A-Za-z0-9_]*):(\d+(?:-\d+)?(?:, ?\d+(?:-\d+)?)*)")
-            .expect("citation regex")
+        Regex::new(&format!(
+            r"((?:[\w./~-]*\.[A-Za-z][A-Za-z0-9_]*)|(?:[\w./~-]*/)?(?:{BARE_NAMES})):(\d+(?:-\d+)?(?:, ?\d+(?:-\d+)?)*)"
+        ))
+        .expect("citation regex")
     })
+}
+
+/// File names with no extension that are cited as they are.
+const BARE_NAMES: &str =
+    "Makefile|Dockerfile|Containerfile|Justfile|Gemfile|Rakefile|Procfile|Jenkinsfile|Vagrantfile";
+
+/// Extensions of source files: a citation of one that resolves to nothing is reported even
+/// without a `/` in it.
+const CODE_EXTENSIONS: &[&str] = &[
+    "py", "pyi", "rs", "go", "ts", "tsx", "js", "jsx", "mjs", "java", "kt", "scala", "rb", "php",
+    "cs", "c", "h", "cc", "cpp", "hpp", "swift", "lua", "sh", "tf", "hcl", "sql", "yaml", "yml",
+    "toml", "json", "ipynb",
+];
+
+/// Block tags that are not quotes of a file: commands, their output, and plain text.
+const NOT_QUOTE_TAGS: &[&str] = &[
+    "proposed",
+    "diff",
+    "patch",
+    "bash",
+    "sh",
+    "shell",
+    "zsh",
+    "console",
+    "terminal",
+    "text",
+    "txt",
+    "plain",
+    "plaintext",
+    "output",
+    "log",
+    "csv",
+    "tsv",
+    "mermaid",
+    "markdown",
+    "md",
+];
+
+/// A path named without line numbers, for a code block's lead-in.
+fn path_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(&format!(
+            r"(?:^|[\s`(\[])((?:[\w.~-]+/)*(?:[\w.-]*\.[A-Za-z][A-Za-z0-9_]*|{BARE_NAMES}))(?:$|[\s`):,\]])"
+        ))
+        .expect("path regex")
+    })
+}
+
+fn lines_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\blines?\s+(\d+)(?:\s*[-–]\s*(\d+))?").expect("lines regex"))
 }
 
 fn numbered_re() -> &'static Regex {
@@ -98,7 +162,11 @@ fn citations(line: &str) -> Vec<Citation> {
             }
         }
         if !ranges.is_empty() {
-            out.push(Citation { path, ranges });
+            out.push(Citation {
+                path,
+                ranges,
+                named: false,
+            });
         }
     }
     out
@@ -178,7 +246,8 @@ impl<'a> Resolver<'a> {
         } else if !hits.is_empty() {
             return Resolved::Skip;
         }
-        if path.contains('/') {
+        let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+        if path.contains('/') || ext.is_some_and(|e| CODE_EXTENSIONS.contains(&e.as_str())) {
             Resolved::Missing(format!("no such file: {path}"))
         } else {
             Resolved::Skip
@@ -207,7 +276,11 @@ fn cite_text(c: &Citation) -> String {
             }
         })
         .collect();
-    format!("{}:{}", c.path, ranges.join(","))
+    if ranges.is_empty() {
+        c.path.clone()
+    } else {
+        format!("{}:{}", c.path, ranges.join(","))
+    }
 }
 
 /// Where `text` occurs in `lines`, 1-based, or None.
@@ -341,7 +414,8 @@ pub fn check(report: &str, src: &Sources<'_>) -> Vec<String> {
         }
         let mut body = &lines[start..end.min(lines.len())];
         let lang = info.split_whitespace().next().unwrap_or("");
-        let mut anchor = last_text.take().and_then(|(_, t)| citations(&t).pop());
+        let lead_in = last_text.take().map(|(_, t)| t);
+        let mut anchor = lead_in.as_deref().and_then(|t| citations(t).pop());
         // A block may name its source in a first-line comment: `# path/x.py:34-39`.
         let first = body.iter().position(|l| !l.trim().is_empty());
         if let Some(f) = first {
@@ -353,17 +427,43 @@ pub fn check(report: &str, src: &Sources<'_>) -> Vec<String> {
                 }
             }
         }
+        if anchor.is_none() {
+            anchor = lead_in.as_deref().and_then(named_path);
+        }
+        // `In line 415:` names lines of the file cited last.
+        if anchor.is_none() {
+            if let (Some(t), Some(prev)) = (lead_in.as_deref(), &last_cite) {
+                if let Some(ranges) = lead_in_lines(t) {
+                    anchor = Some(Citation {
+                        path: prev.path.clone(),
+                        ranges,
+                        named: true,
+                    });
+                }
+            }
+        }
+        let numbered = mostly_numbered(body);
         // Numbered lines are a quote whatever precedes them: they come from the most recent
         // citation when the lead-in has none.
         let anchor = match anchor {
             Some(c) => Some(c),
-            None if mostly_numbered(body) => last_cite.take(),
+            None if numbered => last_cite.take(),
             None => None,
         };
-        if let Some(cite) = &anchor {
-            if !matches!(lang, "diff" | "patch" | "proposed") {
-                check_block(&mut resolver, start, cite, body, &mut problems);
+        let is_quote = !NOT_QUOTE_TAGS.contains(&lang) && (!lang.is_empty() || numbered);
+        match &anchor {
+            Some(cite) if !matches!(lang, "diff" | "patch" | "proposed") => {
+                check_block(&mut resolver, start, cite, body, &mut problems)
             }
+            None if is_quote && body.iter().any(|l| !l.trim().is_empty()) => {
+                let tag = if lang.is_empty() { "numbered" } else { lang };
+                problems.push(format!(
+                    "report.md:{start}: {tag} code block with no citation: put `path:N-M` on the \
+                     line before it if it is quoted from a file, or tag it ```proposed if it is \
+                     not in the repository"
+                ));
+            }
+            _ => {}
         }
         if anchor.is_some() {
             last_cite = anchor;
@@ -371,6 +471,31 @@ pub fn check(report: &str, src: &Sources<'_>) -> Vec<String> {
         i = end + 1;
     }
     problems
+}
+
+/// The last path named on a lead-in line, with the lines given as `line N` or `lines N-M`, or
+/// the whole file when none are given.
+fn named_path(line: &str) -> Option<Citation> {
+    let path = path_re()
+        .captures_iter(line)
+        .map(|c| c[1].trim_start_matches("./").to_string())
+        .filter(|p| !p.starts_with('~') && !p.starts_with(".."))
+        .filter(|p| p.contains('/') || line.contains(&format!("`{p}`")) || p.ends_with("file"))
+        .last()?;
+    let ranges = lead_in_lines(line).unwrap_or_default();
+    Some(Citation {
+        path,
+        ranges,
+        named: true,
+    })
+}
+
+/// Lines given as `line N` or `lines N-M` on a lead-in line.
+fn lead_in_lines(line: &str) -> Option<Vec<(usize, usize)>> {
+    let c = lines_re().captures(line)?;
+    let a: usize = c[1].parse().ok()?;
+    let b = c.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(a);
+    (a > 0).then_some(vec![(a, b.max(a))])
 }
 
 /// At least half the block's quoted lines start with a line number.
@@ -415,7 +540,16 @@ fn check_block(
 ) {
     let files = match resolver.resolve(&cite.path) {
         Resolved::Files(f) => f,
-        // A missing file is already reported for the citation line itself.
+        // A missing `path:N` is already reported for the line that cites it.
+        Resolved::Missing(why) if cite.named => {
+            let why = why.clone();
+            problems.push(format!(
+                "report.md:{start}: code block quoting {}: {why}; tag the block ```proposed if \
+                 it is a file you propose",
+                cite.path
+            ));
+            return;
+        }
         _ => return,
     };
     let quoted: Vec<&str> = body
@@ -426,16 +560,20 @@ fn check_block(
     if quoted.is_empty() {
         return;
     }
-    let windows: Vec<(usize, usize)> = cite
-        .ranges
-        .iter()
-        .map(|&(a, b)| {
-            (
-                a.saturating_sub(SLACK).max(1),
-                b.max(a + body.len()) + SLACK,
-            )
-        })
-        .collect();
+    // A citation without lines quotes anywhere in the file.
+    let windows: Vec<(usize, usize)> = if cite.ranges.is_empty() {
+        vec![(1, usize::MAX / 2)]
+    } else {
+        cite.ranges
+            .iter()
+            .map(|&(a, b)| {
+                (
+                    a.saturating_sub(SLACK).max(1),
+                    b.max(a + body.len()) + SLACK,
+                )
+            })
+            .collect()
+    };
     let bad: Vec<String> = quoted
         .iter()
         .filter_map(|l| check_quoted_line(files, &windows, l))
