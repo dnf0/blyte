@@ -322,7 +322,18 @@ a worktree of the repository. The dispatch passes `--read-root <repository root>
 allowing the `read` and `grep` tools to inspect the repository by absolute path while writing remains
 strictly sealed to the scratch workspace. The task prompt directs the model to read the code under the repository root
 by absolute path and write findings to `report.md`. The gate is `test -s report.md`, verifying that a
-non-empty report was written. When finished, the report is copied to `.wt/<id>.report.md` (and to
+non-empty report was written, followed by a quote check that blyte runs itself:
+- every cited `path:N` or `path:N-M` must name an existing file (paths resolve against the
+  workspace, each read root and its parent, then as a suffix of a tracked file) and lines inside it;
+- a fenced code block whose preceding line (or first-line comment) cites `path:N-M` must be copied
+  from those lines, give or take 5: a line starting with a line number (`   245\t...`) must equal
+  that line, `...` may stand for omitted code, and blocks tagged `proposed`, `diff` or `patch` are
+  not checked.
+
+A failed check is a failed gate: the model gets the list of mismatches and fixes the report.
+Research runs fold their context at 96K tokens instead of 48K (unless `--fold-budget` is given), so
+the code the model read is still in context when it writes the report. Paths given with
+`--allow-read` (or `[dispatch] allow_read`) are read roots too, for every dispatch. When finished, the report is copied to `.wt/<id>.report.md` (and to
 `--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to
 300 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
 `--max-seconds` flags still win).

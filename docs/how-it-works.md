@@ -44,7 +44,7 @@ Every turn re-sends the prompt, so the prompt's shape decides the bill. blyte's 
 [opening: system prompt + task] [digest 1] … [digest k] [verbatim recent turns]
 ```
 
-When the verbatim part passes the fold budget (48K tokens by default), its older half becomes one
+When the verbatim part passes the fold budget (48K tokens by default, 96K for research runs), its older half becomes one
 digest: a line per tool call (``- `bash` `cargo test` -> exit 101``), written by the harness, not
 summarised by a model. Digests never change once written, so everything before the
 newest fold stays cached.

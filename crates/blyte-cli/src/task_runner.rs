@@ -7,6 +7,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// Fold budget for research runs, which quote code read many turns before they write it up.
+/// Twice the default; prompts stay under 200k tokens.
+pub const RESEARCH_FOLD_BUDGET: usize = 96_000;
+
 /// Tracks turn and gate progress across the run, for the deadline watchdog.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Progress {
@@ -317,9 +321,12 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
 
     // 2. Select context assembly strategy.
     let folded = blyte_agent::context::Folded {
-        budget_tokens: config
-            .fold_budget
-            .unwrap_or(blyte_agent::context::Folded::default().budget_tokens),
+        // Research quotes code read many turns earlier, so it keeps more before folding.
+        budget_tokens: config.fold_budget.unwrap_or(if config.research {
+            RESEARCH_FOLD_BUDGET
+        } else {
+            blyte_agent::context::Folded::default().budget_tokens
+        }),
     };
     let conversational = blyte_agent::context::Conversational;
     let context_strategy: &dyn blyte_agent::context::ContextStrategy =

@@ -174,3 +174,82 @@ fn research_reminder_repeats_at_turn_60_if_report_never_changed() {
 
     assert_eq!(report.gate_attempts, 0);
 }
+
+/// Writes a report quoting code that isn't in `src.py`, finishes, then fixes the quote.
+struct Misquoter {
+    turn: Mutex<usize>,
+    seen: Mutex<Vec<Request>>,
+}
+
+impl Provider for Misquoter {
+    fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        self.seen.lock().unwrap().push(req.clone());
+        let mut t = self.turn.lock().unwrap();
+        *t += 1;
+        let write = |body: &str| Response {
+            tool_calls: vec![ToolCall {
+                id: format!("c{t}"),
+                name: "write".into(),
+                arguments: json!({"path": "report.md", "content": format!("Entry point, src.py:1-2:\n```\n{body}\n```\n")}),
+                signature: None,
+            }],
+            ..Default::default()
+        };
+        Ok(match *t {
+            1 => write("def main():\n    validate_all()"),
+            3 => write("def main():\n    run()"),
+            _ => Response {
+                text: "done".into(),
+                ..Default::default()
+            },
+        })
+    }
+
+    fn model_id(&self) -> String {
+        "scripted".into()
+    }
+}
+
+#[test]
+fn research_gate_fails_on_a_misquote_until_it_is_fixed() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("src.py"), "def main():\n    run()\n").unwrap();
+    let provider = Misquoter {
+        turn: Mutex::new(0),
+        seen: Mutex::new(Vec::new()),
+    };
+    let runner = Runner {
+        provider: &provider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 10,
+            max_gate_attempts: 3,
+            max_duration: Some(Duration::from_secs(30)),
+        },
+        rollback: false,
+        on_event: None,
+        research: true,
+    };
+    let mut st = State::new("research task", "test -s report.md");
+    let (outcome, report) = runner.run(&mut st);
+    assert!(
+        matches!(outcome, blyte_agent::run::Outcome::Verified),
+        "{outcome:?}"
+    );
+    assert_eq!(report.gate_attempts, 2);
+    let seen = provider.seen.lock().unwrap();
+    let feedback = seen[2]
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            Message::User(t) if t.contains("quote check") => Some(t.clone()),
+            _ => None,
+        })
+        .expect("quote-check feedback");
+    assert!(feedback.contains("validate_all()"), "{feedback}");
+    assert!(feedback.contains("Fix report.md"), "{feedback}");
+}

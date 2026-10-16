@@ -85,8 +85,11 @@ fn clip(text: &str, max: usize) -> String {
 /// call order). Not by id: Gemini issues no ids, the adapter numbers calls from `call_0` every
 /// turn, so ids repeat across turns and an id match would pair a call with another turn's result.
 fn digest(folded: &[Message], first: usize, last: usize) -> Message {
-    let mut text =
-        format!("## Earlier turns, folded (messages {first}-{last}; summarised by the harness)\n");
+    let mut text = format!(
+        "## Earlier turns, folded (messages {first}-{last}; summarised by the harness)\n\
+                 The output of these tool calls is no longer in your context: read a file again \
+                 before quoting or relying on its exact text.\n"
+    );
     let mut i = 0;
     while i < folded.len() {
         match &folded[i] {

@@ -176,7 +176,7 @@ default, keeps the prompt **append-only** so the provider's prefix cache stays v
 [system] [opening: the task] [digest 1] … [digest k] [recent turns, verbatim]
 ```
 
-When the verbatim tail passes the fold budget (48K tokens by default, estimated as characters ÷ 4),
+When the verbatim tail passes the fold budget (48K tokens by default, 96K for research runs, estimated as characters ÷ 4),
 its older half becomes one digest: a line per tool call, written by the harness, not summarised
 by a model. Fold boundaries are computed greedily from the start of the history, so each depends
 only on the messages before it. The next turn reproduces every earlier fold exactly, so between
