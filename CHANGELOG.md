@@ -1,3 +1,9 @@
+## v0.32.3 (2026-10-16)
+
+### Fix
+
+- **research**: read more citation forms and fail uncited code blocks (#279)
+
 ## v0.32.2 (2026-10-16)
 
 ### Fix
