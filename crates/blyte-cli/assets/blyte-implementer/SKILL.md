@@ -225,8 +225,8 @@ blyte dispatch R1 /abs/question-R1.md --research
 ```
 
 blyte works in a scratch directory under `.wt/R1`, reads the repository by absolute path, and cannot
-change it; the run passes when it has written a report, copied to `.wt/R1.report.md` (and to
-`--report-to <path>`). Leave the budget at its default (300 turns, 30 minutes) rather than tightening it: a run cut short wastes what it spent, and it is warned ten turns before the end to finish its report. Check any claim you will act on against the code it cites.
+change it; the run passes when it has written a report whose cited lines and quoted code match the
+files, copied to `.wt/R1.report.md` (and to `--report-to <path>`). Leave the budget at its default (300 turns, 30 minutes) rather than tightening it: a run cut short wastes what it spent, and it is warned ten turns before the end to finish its report. The check covers quotes, not conclusions: check any claim you will act on against the code it cites.
 
 ## Rules
 
