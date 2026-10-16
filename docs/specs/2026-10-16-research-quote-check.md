@@ -55,6 +55,23 @@ right, R-V5b6 2 of 178. Others cited files that don't exist.
    the sandbox.
 4. The research rules tell the model about the check and how to mark proposed code.
 
+## Follow-up: closing the gaps (user, 2026-10-16)
+
+Measured on 79 saved reports (691 code blocks) before choosing the rules:
+- 254 blocks had no recognised citation. Many cited in forms the check didn't read (a path with
+  no line number, `` `x.toml` (line 8) ``, `Makefile:6-21`, `In line 415:`); those forms are now
+  read. Of the rest, a sample of the language-tagged ones was mostly code presented as real
+  ("executes:", "contains:") with no file named, so an uncited block tagged with a language, or
+  numbered, now fails; commands, output and untagged plain blocks don't. 116 such blocks remain
+  in the saved reports, so a report written without the rule needs about 1.5 fixes on average;
+  the research rules now state it up front.
+- A cited source file given without a directory (`scorer.py:40`) must exist.
+- Rejected: requiring a citation in every findings paragraph. 2,922 of 6,130 prose lines of 60+
+  characters cite no file, and a sample was mostly legitimate (sub-points of a cited parent,
+  arithmetic, web research), so the rule would mostly flag honest text.
+- Next, not built: checking that a cited quote supports the conclusion drawn from it needs a model
+  call per claim; measure it on saved reports first.
+
 ## Validation (2026-10-16)
 
 - R-V5b7 (fetched from provision-deployment, checked against the provision checkout): 59

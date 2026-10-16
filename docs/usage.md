@@ -327,8 +327,13 @@ non-empty report was written, followed by a quote check that blyte runs itself:
   workspace, each read root and its parent, then as a suffix of a tracked file) and lines inside it;
 - a fenced code block whose preceding line (or first-line comment) cites `path:N-M` must be copied
   from those lines, give or take 5: a line starting with a line number (`   245\t...`) must equal
-  that line, `...` may stand for omitted code, and blocks tagged `proposed`, `diff` or `patch` are
-  not checked.
+  that line, and `...` may stand for omitted code. A preceding line that only names a file
+  (`` In `src/x.py`: ``, `` `x.toml` (lines 3-8) ``) cites it, as the whole file without lines, and
+  `In line 415:` refers to the file cited last;
+- a code block with no citation fails if it is tagged with a language or its lines are numbered.
+  Blocks tagged `proposed`, `diff` or `patch`, commands and output (`bash`, `sh`, `console`,
+  `text`, `output`, ...) and untagged plain blocks are not checked;
+- a cited source file (`.py`, `.rs`, `.tf`, ...) must exist even when given without a directory.
 
 A failed check is a failed gate: the model gets the list of mismatches and fixes the report.
 Research runs fold their context at 96K tokens instead of 48K (unless `--fold-budget` is given), so

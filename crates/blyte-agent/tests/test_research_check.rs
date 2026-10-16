@@ -9,6 +9,10 @@ fn files() -> HashMap<PathBuf, String> {
     let mut m = HashMap::new();
     m.insert(PathBuf::from("/ws/src/main.rs"), SRC.to_string());
     m.insert(
+        PathBuf::from("/ws/Makefile"),
+        "test:\n\tcargo test\n".to_string(),
+    );
+    m.insert(
         PathBuf::from("/repo/lib/util.py"),
         "def f():\n    return 1\n".to_string(),
     );
@@ -132,4 +136,70 @@ fn a_first_line_comment_names_the_source() {
     let r =
         "Somewhere in src/main.rs:1:\n```python\n# lib/util.py:1-2\ndef f():\n    return 1\n```\n";
     assert!(run_check(r).is_empty(), "{:?}", run_check(r));
+}
+
+#[test]
+fn lead_ins_naming_a_path_without_a_colon_cite_it() {
+    let ok = [
+        "In `src/main.rs`:\n```rust\n    run(x);\n```\n",
+        "- **`src/main.rs`** (lines 6-8):\n```rust\nfn run(x: Config) {\n```\n",
+        "The test target, Makefile:1-2:\n```makefile\ntest:\n\tcargo test\n```\n",
+        "File: `Makefile`\n```\ntest:\n```\n",
+    ];
+    for r in ok {
+        assert!(run_check(r).is_empty(), "{r}: {:?}", run_check(r));
+    }
+    let p = run_check("In `src/main.rs`:\n```rust\n    walk(x);\n```\n");
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].contains("quoting src/main.rs:"), "{}", p[0]);
+}
+
+#[test]
+fn line_numbers_alone_refer_to_the_last_cited_file() {
+    let r = "See src/main.rs:1.\n\nIn line 3:\n```rust\nrun(x);\n```\n";
+    assert!(run_check(r).is_empty(), "{:?}", run_check(r));
+    let r = "See src/main.rs:1.\n\nLine 7:\n```rust\nfn main() {\n```\n";
+    assert_eq!(run_check(r).len(), 1);
+}
+
+#[test]
+fn uncited_code_blocks_fail_unless_commands_output_or_proposed() {
+    let p = run_check("The loader does:\n\n```python\nconfig = load()\n```\n");
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(
+        p[0].contains("python code block with no citation"),
+        "{}",
+        p[0]
+    );
+    let p = run_check("Output of the read:\n```\n  12\tfoo()\n  13\tbar()\n```\n");
+    assert!(
+        p[0].contains("numbered code block with no citation"),
+        "{}",
+        p[0]
+    );
+    let fine = [
+        "Run it:\n```bash\ncargo test\n```\n",
+        "It prints:\n```text\nok\n```\n",
+        "A diagram:\n```\na -> b\n```\n",
+        "Add a matcher:\n```proposed\ndef m(): pass\n```\n",
+    ];
+    for r in fine {
+        assert!(run_check(r).is_empty(), "{r}: {:?}", run_check(r));
+    }
+}
+
+#[test]
+fn a_proposed_file_named_in_a_lead_in_must_be_tagged() {
+    let p = run_check("Draft `jobs/drought.yaml`:\n```yaml\njob: drought\n```\n");
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].contains("no such file: jobs/drought.yaml"), "{}", p[0]);
+    assert!(run_check("Draft `jobs/drought.yaml`:\n```proposed\njob: drought\n```\n").is_empty());
+}
+
+#[test]
+fn unresolved_bare_source_files_are_reported() {
+    let p = run_check("See scorer.py:40.\n");
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].contains("no such file: scorer.py"), "{}", p[0]);
+    assert!(run_check("See notes.txt:4 and README.md:3.\n").is_empty());
 }
