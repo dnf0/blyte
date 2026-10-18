@@ -87,3 +87,36 @@ Measured on 79 saved reports (691 code blocks) before choosing the rules:
 
 - Checking claims that aren't quotes or line citations.
 - Implementation runs (their gate is the repository's checks).
+
+## Measured 2026-10-18: a model claim check, and the R-V5b7 rerun
+
+**Claim check** (`crates/blyte-agent/examples/claim_check.rs`, plan
+`docs/plans/2026-10-18-claim-check-experiment.md`). Gemini-4-argon was given each prose claim that cites code, with
+the cited lines and 5 lines either side, and asked `supported` / `contradicted` / `not_enough_evidence`. Five claims
+per report were rewritten by the model to be false (seeded) and mixed in. 13 saved reports from 9 repositories, each
+checked against its repository's HEAD at the run's start (from the reflog).
+
+- Cost: $1.24 for 408 claims and 65 seeds (102 calls, about $0.10 a report, 20 minutes).
+- Six reports read only that checkout; the other seven also read `origin/main` with `git show` or other
+  repositories, so their code differs from what the checker saw and their numbers are not used. On the six:
+  - seeded: 23 of 30 `contradicted` (77%); 4 judged `supported` (some seeds were label-only claims such as
+    "*File*: `openai.rs`"), 2 parse errors;
+  - the reports' own claims: 245; 95 `supported`, 80 `not_enough_evidence`, 57 `contradicted` (23%), 13 parse errors.
+  - Flags checked by hand were right: RC2 quotes `parse_group_key` and `build_tile_group_key`, which never existed in
+    any provision branch; reliability-orchestrator R1 cites `Dockerfile:19` for a line at 29. These reports predate
+    the quote check (0.32.3).
+- 27 of 408 claims (two batches) failed to parse; batching smaller or retrying once would fix that.
+
+**R-V5b7 rerun on 0.32.5** (provision-deployment, same question, same code `ed047efe`, same 1,800 s limit): ran out
+of time at $4.17 (original: verified at $3.60), 87 turns, model time 1,801 s, cached input 7.7M tokens (original
+3.6M). The gate never ran, so the quote check never saw the report. Run by hand, the check finds 15 of 28 code blocks
+(about 350 of 539 numbered lines) that match nothing; `_read_chunk_bands`, `build_sot_fire_v0_chunk_s3_keys` and
+`_build_fire_v0_sot_source_paths` never existed in any provision branch, though the run made 49 `read` calls on the
+right checkout.
+
+Conclusions:
+- The quote check catches invented code only if the gate runs; a research run that runs out of time or turns should
+  still run it on whatever `report.md` exists and report the result.
+- Argon invents numbered code blocks even after reading the files; the quote check, not instructions, is what stops it.
+- A claim check adds about $0.10 a report and catches what the quote check cannot (wrong line numbers in prose,
+  wrong figures, conclusions the cited code does not support); 77% recall on seeded errors.
