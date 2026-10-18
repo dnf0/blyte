@@ -104,6 +104,10 @@ Details that matter:
   the binaries available, and the rule to change nothing outside the repository.
 - **No tool calls means "I'm done."** The model has no `finish` tool and can't claim to be
   finished. When a response has no tool calls, the runtime runs the gate.
+- **A truncated reply gets another turn instead of being acted on.** When a reply hits the output
+  token limit (`MAX_TOKENS`, `CONTINUATION`, `max_tokens`, `length` or `incomplete`), its partial
+  text and tool calls are discarded, a harness note asks the model to reply more briefly, and
+  `truncated_turns` is incremented.
 - **A turn's tool calls run in order, and their results come back together.** The history records
   all of a turn's calls first, then all of their results, because Gemini signs only the first
   call of a parallel batch and rejects a history that interleaves them.
