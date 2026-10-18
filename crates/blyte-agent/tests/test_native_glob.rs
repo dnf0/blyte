@@ -9,7 +9,7 @@ use std::process::Command;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::search::{glob_filter, glob_paths};
 use blyte_agent::shell::{LocalShell, Output, Shell};
-use blyte_agent::tools::execute;
+use blyte_agent::tools::{execute, set_read_roots};
 use serde_json::json;
 
 struct NoShell;
@@ -167,4 +167,54 @@ fn outside_a_git_repository_the_container_route_falls_back_to_the_shell() {
         &json!({"pattern": "**/*.rs"}),
     );
     assert_eq!(o.content, "1 file(s):\ntarget/x.rs");
+}
+
+#[test]
+fn path_searches_under_a_read_root_and_rejects_paths_outside() {
+    let ws = tempfile::tempdir().unwrap();
+    let code = repo();
+    let dir = code.path().to_string_lossy().to_string();
+
+    let rejected = execute(
+        ws.path(),
+        &NoShell,
+        &LocalFs,
+        "glob",
+        &json!({"pattern": "src/**/*.rs", "path": &dir}),
+    );
+    let grep_rejected = execute(
+        ws.path(),
+        &NoShell,
+        &LocalFs,
+        "grep",
+        &json!({"pattern": "x", "path": &dir}),
+    );
+    assert!(rejected.is_error);
+    assert_eq!(rejected.content, grep_rejected.content);
+
+    set_read_roots(vec![code.path().to_path_buf()]);
+    let o = execute(
+        ws.path(),
+        &NoShell,
+        &LocalFs,
+        "glob",
+        &json!({"pattern": "src/**/*.rs", "path": &dir}),
+    );
+    assert!(!o.is_error, "{o:?}");
+    assert_eq!(
+        o.content,
+        format!("2 file(s):\n{dir}/src/b.rs\n{dir}/src/deep/c.rs")
+    );
+    let container = execute(
+        ws.path(),
+        &LocalShell,
+        &NotLocal,
+        "glob",
+        &json!({"pattern": "src/**/*.rs", "path": &dir}),
+    );
+    assert_eq!(
+        container.content,
+        format!("2 file(s):\n{dir}/src/b.rs\n{dir}/src/deep/c.rs")
+    );
+    set_read_roots(vec![]);
 }

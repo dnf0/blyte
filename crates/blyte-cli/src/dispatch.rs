@@ -9,6 +9,7 @@ use crate::cli::{DispatchArgs, ReviewArgs};
 pub const DISPATCH_RULES: &str = r#"Rules:
 - Stay within the task. If it cannot pass without a small change elsewhere, make the smallest one and say so.
 - Never delete, clean or modify anything outside the worktree, and never change the machine to make a check pass. If a check fails because of the environment (disk, network, a missing service), stop and say so.
+- Find files with the glob tool and search file contents with the grep tool. Do not run `find`, `grep -r` or `rg` in the shell over `/`, your home directory, or any directory outside the worktree: they walk huge trees and are killed at the time limit.
 - Do not push, open pull requests, or read secrets.
 - Commit locally before you stop, with the exact commit message the task gives (or a conventional one if it gives none).
 - When you believe the task is done and committed, stop calling tools: the harness then runs the check. Before that, run the check's quick steps (formatting, lint, the tests for your change) yourself; the full run happens at the gate.
@@ -26,7 +27,7 @@ pub fn wrap_task(task: &str) -> String {
 pub const RESEARCH_RULES: &str = r#"Rules:
 - Do not create, modify, move or delete any file anywhere except `report.md` in your working directory.
 - Do not run git commands that change state (no checkout, pull, commit, stash, worktree), and do not build, install, push, open pull requests, or write to any service.
-- Read the code with the read and grep tools, using absolute paths under the repository; use the shell only when they cannot do what you need.
+- Read the code with the read, grep and glob tools, using absolute paths under the repository (glob and grep with `path` set to the repository's absolute path); use the shell only when they cannot do what you need. Do not run `find`, `grep -r` or `rg` in the shell over `/`, your home directory, or any directory outside the repository: they walk huge trees and are killed at the time limit.
 - Answer the question with evidence: file paths with line numbers, and quote only what is needed.
 - Quote code only from what you have just read. Earlier tool output is folded out of your context as the run goes on; read the file again before quoting it, never quote from memory.
 - Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them.

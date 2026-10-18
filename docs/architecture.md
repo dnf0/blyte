@@ -201,7 +201,7 @@ which is free, not turns, which aren't.
 | `write` / `edit` | through `Fs`; `edit` needs a unique exact match | |
 | `bash` | the persistent user session (`exec_user`) | 5-minute deadline, 400 lines (head and tail) |
 | `grep` | local: in-process, with ripgrep's libraries. Container: one command, `rg` if present, else `grep -rnIE` | 200 matches; long lines cut to excerpts around up to 5 matches |
-| `glob` | local: in-process, respecting `.gitignore`; container: one `git ls-files`, matched in-process | 200 matches |
+| `glob` | local: in-process, respecting `.gitignore`; container: one `git ls-files`, matched in-process (`pattern`, optional `path` under the workspace or a read root) | 200 matches |
 
 Every path is resolved inside the workspace first. Every result goes through one bounding step
 (`tools::execute`), and no result exceeds 60K characters. `read` returns whole files by default
