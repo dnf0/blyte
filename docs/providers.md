@@ -66,7 +66,7 @@ when it resets.
 
 Burst rate limits (HTTP 429 with a short retry delay), server errors and dropped connections are
 retried with backoff (2, 4, 8, 16, 32, then 60 seconds, six times), never past `--max-seconds`.
-Streamed Gemini calls fail after `BLYTE_MODEL_IDLE_TIMEOUT_SECS` (default 90 s) of silence with no
+Streamed Gemini calls fail after `BLYTE_MODEL_IDLE_TIMEOUT_SECS` (default 300 s; Gemini can think silently for over two minutes before a long reply) of silence with no
 bytes received, or once `BLYTE_MODEL_TIMEOUT_SECS` (default 1800 s for streamed calls) has passed.
 Other providers do not stream and use `BLYTE_MODEL_TIMEOUT_SECS` as a whole-call HTTP timeout
 (default 180 s, with a read timeout 30 s shorter, at least 30 s) for slow providers such as a local

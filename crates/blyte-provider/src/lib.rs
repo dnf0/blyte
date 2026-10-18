@@ -40,15 +40,15 @@ pub fn model_timeouts_from(val: Option<&str>) -> (std::time::Duration, std::time
     )
 }
 
-/// Computes the streaming idle timeout in seconds from an optional string value or default (90 s).
+/// Computes the streaming idle timeout in seconds from an optional string value or default (300 s): Gemini can think silently for minutes before a long reply.
 /// Invalid or zero values fall back to the default.
 pub fn model_idle_timeout_secs_from(val: Option<&str>) -> u64 {
     val.and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(90)
+        .unwrap_or(300)
 }
 
-/// Streaming idle timeout in seconds, derived from `BLYTE_MODEL_IDLE_TIMEOUT_SECS` or default 90 s, read once.
+/// Streaming idle timeout in seconds, derived from `BLYTE_MODEL_IDLE_TIMEOUT_SECS` or default 300 s, read once.
 pub fn model_idle_timeout_secs() -> u64 {
     static IDLE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *IDLE.get_or_init(|| {

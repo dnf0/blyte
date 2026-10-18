@@ -22,12 +22,12 @@ fn default_timeouts() {
 
 #[test]
 fn streaming_timeout_helpers_defaults_and_parsing() {
-    assert_eq!(blyte_provider::model_idle_timeout_secs_from(None), 90);
-    assert_eq!(blyte_provider::model_idle_timeout_secs_from(Some("")), 90);
-    assert_eq!(blyte_provider::model_idle_timeout_secs_from(Some("0")), 90);
+    assert_eq!(blyte_provider::model_idle_timeout_secs_from(None), 300);
+    assert_eq!(blyte_provider::model_idle_timeout_secs_from(Some("")), 300);
+    assert_eq!(blyte_provider::model_idle_timeout_secs_from(Some("0")), 300);
     assert_eq!(
         blyte_provider::model_idle_timeout_secs_from(Some("not-a-number")),
-        90
+        300
     );
     assert_eq!(
         blyte_provider::model_idle_timeout_secs_from(Some(" 45 ")),
