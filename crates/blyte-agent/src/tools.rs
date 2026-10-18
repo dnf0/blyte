@@ -495,7 +495,10 @@ pub fn specs() -> Vec<ToolSpec> {
             description: format!(
                 "Run a shell command in the workspace and wait for it to finish. \
                  Commands run to completion (up to {}s) -- there is no background mode and \
-                 nothing to poll. Output over {} lines is elided in the middle.",
+                 nothing to poll. Output over {} lines is elided in the middle. \
+                 To find files or search file contents use the `glob` and `grep` tools, not \
+                 `find`, `grep -r` or `rg` in the shell; they respect .gitignore, are capped \
+                 and cannot hang.",
                 COMMAND_TIMEOUT.as_secs(),
                 OUTPUT_LINE_BUDGET
             ),
@@ -509,7 +512,8 @@ pub fn specs() -> Vec<ToolSpec> {
                           first move when you do not know where something lives."
                 .into(),
             parameters: json!({"type":"object","properties":{
-                "pattern":{"type":"string","description":"glob, relative to the workspace"}},
+                "pattern":{"type":"string","description":"glob, relative to path (or the workspace)"},
+                "path":{"type":"string","description":"directory to search under; defaults to the workspace; may be an absolute path under a read root"}},
                 "required":["pattern"]}),
         },
         ToolSpec {
@@ -729,6 +733,12 @@ fn execute_unbounded(
         },
         "glob" => {
             let pattern = s("pattern");
+            let raw_path = s("path");
+            let sub = if raw_path.is_empty() { "." } else { &raw_path };
+            let dir = match resolve_for_read(fs, root, sub) {
+                Ok(d) => d,
+                Err(e) => return ToolOutcome::err(e),
+            };
             // .gitignore-aware, fd/ripgrep style. A local workspace expands in-process; a
             // container lists its repository with one `git ls-files` and matches here. Outside a
             // git repository, or for patterns not handled here, the shell glob below runs as before.
@@ -736,18 +746,26 @@ fn execute_unbounded(
                 if hits.is_empty() {
                     ToolOutcome::ok(format!("no files match {pattern}"))
                 } else {
-                    ToolOutcome::ok(format!("{} file(s):\n{}", hits.len(), hits.join("\n")))
+                    let shown: Vec<String> = if raw_path.is_empty() {
+                        hits
+                    } else {
+                        let base = Path::new(&raw_path);
+                        hits.into_iter()
+                            .map(|h| base.join(h).to_string_lossy().into_owned())
+                            .collect()
+                    };
+                    ToolOutcome::ok(format!("{} file(s):\n{}", shown.len(), shown.join("\n")))
                 }
             };
             if fs.is_local() {
-                if let Some(hits) = crate::search::glob_paths(root, &pattern, MAX_MATCHES) {
+                if let Some(hits) = crate::search::glob_paths(&dir, &pattern, MAX_MATCHES) {
                     return outcome(hits);
                 }
             } else if let Ok(o) = shell.exec(
                 "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
                  git -c core.quotePath=off ls-files -co --exclude-standard; \
                  else echo __BLYTE_NO_GIT__; fi",
-                root,
+                &dir,
                 COMMAND_TIMEOUT,
             ) {
                 if o.exit_code == 0 && !o.stdout.starts_with("__BLYTE_NO_GIT__") {
@@ -772,15 +790,15 @@ fn execute_unbounded(
                      printf '%s\\n' {pattern}; \
                  fi | head -n {MAX_MATCHES}"
             );
-            match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
+            match shell.exec(&cmd, &dir, COMMAND_TIMEOUT) {
                 Ok(o) => {
-                    let body = o.stdout.clone();
-                    let hits: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
-                    if hits.is_empty() {
-                        ToolOutcome::ok(format!("no files match {pattern}"))
-                    } else {
-                        ToolOutcome::ok(format!("{} file(s):\n{}", hits.len(), hits.join("\n")))
-                    }
+                    let hits: Vec<String> = o
+                        .stdout
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(String::from)
+                        .collect();
+                    outcome(hits)
                 }
                 Err(e) => ToolOutcome::err(format!("glob failed: {e}")),
             }

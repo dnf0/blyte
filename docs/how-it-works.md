@@ -58,7 +58,7 @@ newest fold stays cached.
 | `edit` | replace an exact string in a file | the match must be unique |
 | `bash` | a command in the persistent shell session | 5-minute deadline; 400 lines kept, head and tail |
 | `grep` | regex search, in-process (ripgrep's libraries), respecting `.gitignore` | 200 matches |
-| `glob` | find files by pattern, respecting `.gitignore` | 200 matches |
+| `glob` | find files by pattern (`pattern`, optional `path` under the workspace or a read root), respecting `.gitignore` | 200 matches |
 
 No single result can exceed 60K characters. `read` returns whole files because every extra turn
 re-sends the prompt: paging through a 650-line file once cost 15 turns.
