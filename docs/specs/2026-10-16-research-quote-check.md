@@ -146,3 +146,17 @@ Three earlier research questions (R-interrupt2, R-orchearly, R-sota), each run o
 
 Decision: keep 96k for research runs. No change to coding runs, and no guard for the loop, since it
 happened once in 548 runs.
+
+Repeated 2026-10-18 to see whether 48k is cheaper, which would justify starting research runs at 48k and
+growing the budget only when the loop appears. Each question ran 4 times at each budget (the runs above plus 3 more):
+
+| Question | Budget | Median cost | Mean cost | Runs (cost) |
+|---|---|---|---|---|
+| interrupt | 48k | $1.78 | $1.62 | 0.97, 1.95 (out of time, no report), 1.88, 1.69 |
+| interrupt | 96k | $1.53 | $1.79 | 1.54, 1.41, 2.71, 1.52 |
+| orchearly | 48k | $1.34 | $1.39 | 0.96, 1.16, 1.93, 1.52 |
+| orchearly | 96k | $1.34 | $1.32 | 1.00, 1.60, 1.19, 1.49 |
+
+48k is not cheaper: the medians are the same or higher, and the spread within one budget is wider than
+the gap between budgets. All the finished reports had zero quote problems. A dynamic budget that starts at
+48k would save nothing, so the fixed 96k stays and the dynamic budget is not built.
