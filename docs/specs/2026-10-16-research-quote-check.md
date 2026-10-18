@@ -120,3 +120,29 @@ Conclusions:
 - Argon invents numbered code blocks even after reading the files; the quote check, not instructions, is what stops it.
 - A claim check adds about $0.10 a report and catches what the quote check cannot (wrong line numbers in prose,
   wrong figures, conclusions the cited code does not support); 77% recall on seeded errors.
+
+## Measured 2026-10-18: research fold budget, 48k vs 96k
+
+Three earlier research questions (R-interrupt2, R-orchearly, R-sota), each run once at
+`--fold-budget 48000` and once at 96000 on 0.33.1, gemini-4-argon, $4 cost cap:
+
+| Question | Fold budget | Outcome | Cost | Turns | Seconds | Quote problems |
+|---|---|---|---|---|---|---|
+| interrupt | 48k | verified | $0.97 | 39 | 936 | 0 |
+| interrupt | 96k | verified | $1.54 | 36 | 948 | 0 |
+| orchearly | 48k | verified | $0.96 | 16 | 431 | 0 |
+| orchearly | 96k | verified | $1.00 | 17 | 388 | 0 |
+| sota | 48k | budget_exhausted (cost cap) | $4.04 | 63 | 1172 | 11 |
+| sota | 96k | verified | $0.42 | 6 | 221 | 0 |
+
+- At 48k, sota went into a fold loop: its first reads (about 53k tokens in one turn) were more than
+  the verbatim tail holds, so the next turns folded them away and the model read them again. That
+  happened 26 times, with 265 reads in 63 turns, until the cost cap stopped it. The report left behind
+  had 11 quote problems.
+- The interrupt pair reached the same verdict as the original run. The 48k run was cheaper here, but
+  each question ran only once, so the difference is within run-to-run variation.
+- Across 548 saved runs of 15 or more turns, folding on more than 30% of turns happened once: the
+  48k sota run above. Coding runs at 48k don't show the loop.
+
+Decision: keep 96k for research runs. No change to coding runs, and no guard for the loop, since it
+happened once in 548 runs.
