@@ -612,9 +612,11 @@ impl<'a> Runner<'a> {
         };
         let read_roots = tools::read_roots();
         let mut listing = Vec::new();
+        // A read root can be any repository; `core.fsmonitor` in its config would run a command
+        // on `ls-files` (GitSpawn, 2026-10).
         for dir in std::iter::once(&self.root).chain(read_roots.iter()) {
             if let Ok(o) = self.shell.exec(
-                "git -c core.quotePath=off ls-files -co --exclude-standard",
+                "git -c core.quotePath=off -c core.fsmonitor=false ls-files -co --exclude-standard",
                 dir,
                 Duration::from_secs(60),
             ) {

@@ -253,3 +253,55 @@ fn research_gate_fails_on_a_misquote_until_it_is_fixed() {
     assert!(feedback.contains("validate_all()"), "{feedback}");
     assert!(feedback.contains("Fix report.md"), "{feedback}");
 }
+
+#[test]
+fn the_quote_check_does_not_run_a_repositorys_fsmonitor() {
+    let d = tempfile::tempdir().unwrap();
+    let marker = d.path().join("fsmonitor-ran");
+    std::fs::write(d.path().join("src.py"), "def main():\n    run()\n").unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(d.path())
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "config",
+        "core.fsmonitor",
+        &format!("touch {}; false", marker.display()),
+    ]);
+    let provider = Misquoter {
+        turn: Mutex::new(0),
+        seen: Mutex::new(Vec::new()),
+    };
+    let runner = Runner {
+        provider: &provider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 10,
+            max_gate_attempts: 3,
+            max_duration: Some(Duration::from_secs(30)),
+        },
+        rollback: false,
+        on_event: None,
+        research: true,
+    };
+    let mut st = State::new("research task", "test -s report.md");
+    let (outcome, _) = runner.run(&mut st);
+    assert!(
+        matches!(outcome, blyte_agent::run::Outcome::Verified),
+        "{outcome:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "core.fsmonitor ran during the quote check"
+    );
+}
