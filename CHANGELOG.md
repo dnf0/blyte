@@ -1,3 +1,9 @@
+## v0.32.5 (2026-10-18)
+
+### Fix
+
+- **research**: don't run a read root's core.fsmonitor when listing its files (#284)
+
 ## v0.32.4 (2026-10-18)
 
 ### Fix
