@@ -110,6 +110,8 @@ pub struct RunReport {
     /// Turns whose response contained neither text nor a tool call -- pure waste, tracked
     /// because 47.6% of a previous harness's tokens went to turns that only waited (13.29).
     pub empty_turns: u32,
+    /// Turns whose reply hit the output token limit and was cut off.
+    pub truncated_turns: u32,
     pub tool_calls: u32,
     pub gate_attempts: u32,
     /// Transient provider failures (rate limits, overload) waited out during the run.
@@ -185,6 +187,13 @@ fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
                 .get("command")
                 .and_then(|v| v.as_str())
                 .is_some_and(|cmd| cmd.contains("blyte dispatch")))
+}
+
+fn truncated(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some("MAX_TOKENS" | "CONTINUATION" | "max_tokens" | "length" | "incomplete")
+    )
 }
 
 fn parse_resets_in_seconds(body: &str) -> Option<u64> {
@@ -852,14 +861,21 @@ impl<'a> Runner<'a> {
             });
 
             let trimmed = resp.text.trim();
-            if trimmed.is_empty() && resp.tool_calls.is_empty() {
-                report.empty_turns += 1;
-            }
             self.emit(Event::Turn {
                 n: turn,
                 text: trimmed,
                 usage: resp.usage,
             });
+            if truncated(resp.finish_reason.as_deref()) {
+                report.truncated_turns += 1;
+                history.push(Message::User(
+                    "Your last reply hit the output token limit and was cut off, so none of it was used. Reply again more briefly: make one tool call at a time and keep edits small.".to_string(),
+                ));
+                continue;
+            }
+            if trimmed.is_empty() && resp.tool_calls.is_empty() {
+                report.empty_turns += 1;
+            }
             if !trimmed.is_empty() {
                 report.final_message = Some(trimmed.to_string());
                 history.push(Message::Assistant(resp.text.clone()));
