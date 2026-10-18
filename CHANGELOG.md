@@ -1,3 +1,9 @@
+## v0.32.4 (2026-10-18)
+
+### Fix
+
+- longer model idle timeout, and steer file searches to glob and grep (#282)
+
 ## v0.32.3 (2026-10-16)
 
 ### Fix
