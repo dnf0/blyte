@@ -1,3 +1,9 @@
+## v0.33.0 (2026-10-18)
+
+### Feat
+
+- **research**: claim_check example, and claim-check and R-V5b7 rerun results (#288)
+
 ## v0.32.5 (2026-10-18)
 
 ### Fix
