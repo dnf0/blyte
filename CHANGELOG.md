@@ -1,3 +1,9 @@
+## v0.33.1 (2026-10-18)
+
+### Fix
+
+- **research**: quote-check the report when a research run stops without a passing gate (#290)
+
 ## v0.33.0 (2026-10-18)
 
 ### Feat
