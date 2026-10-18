@@ -763,7 +763,7 @@ fn execute_unbounded(
                 }
             } else if let Ok(o) = shell.exec(
                 "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
-                 git -c core.quotePath=off ls-files -co --exclude-standard; \
+                 git -c core.quotePath=off -c core.fsmonitor=false ls-files -co --exclude-standard; \
                  else echo __BLYTE_NO_GIT__; fi",
                 &dir,
                 COMMAND_TIMEOUT,
