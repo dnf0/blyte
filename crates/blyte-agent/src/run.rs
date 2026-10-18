@@ -132,6 +132,8 @@ pub struct RunReport {
     pub cost_capped: bool,
     /// The model's last non-empty text response (trimmed).
     pub final_message: Option<String>,
+    /// Problems with `report.md`'s quotes (`None` when the check did not run, `Some(vec![])` when it passed).
+    pub quote_problems: Option<Vec<String>>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -695,7 +697,18 @@ impl<'a> Runner<'a> {
         };
         let system = self.system_prompt(state, goal);
 
-        let (outcome, report) = self.run_loop(state, &mut history, &system, deadline);
+        let (outcome, mut report) = self.run_loop(state, &mut history, &system, deadline);
+        if self.research
+            && outcome != Outcome::Verified
+            && self
+                .fs
+                .read(&self.root.join("report.md"))
+                .is_ok_and(|s| !s.is_empty())
+        {
+            let mut problems = self.check_report_quotes();
+            problems.truncate(research_check::MAX_PROBLEMS);
+            report.quote_problems = Some(problems);
+        }
 
         if state.runtime.conversation.is_some() {
             state.runtime.conversation = Some(history);
@@ -1004,11 +1017,13 @@ impl<'a> Runner<'a> {
             let (mut passed, mut output, wait_ms, failing) = self.run_gate(state, &last_failed);
             last_failed = failing;
             if passed && self.research {
-                let problems = self.check_report_quotes();
+                let mut problems = self.check_report_quotes();
                 if !problems.is_empty() {
                     passed = false;
                     output = format!("exit 1\n{}", research_check::render(&problems));
                 }
+                problems.truncate(research_check::MAX_PROBLEMS);
+                report.quote_problems = Some(problems);
             }
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);

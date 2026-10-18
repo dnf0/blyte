@@ -335,7 +335,9 @@ non-empty report was written, followed by a quote check that blyte runs itself:
   `text`, `output`, ...) and untagged plain blocks are not checked;
 - a cited source file (`.py`, `.rs`, `.tf`, ...) must exist even when given without a directory.
 
-A failed check is a failed gate: the model gets the list of mismatches and fixes the report.
+A failed check is a failed gate: the model gets the list of mismatches and fixes the report. If a
+run stops early without passing the gate, blyte still quote-checks `report.md` and `blyte review`
+shows the result.
 Research runs fold their context at 96K tokens instead of 48K (unless `--fold-budget` is given), so
 the code the model read is still in context when it writes the report. Paths given with
 `--allow-read` (or `[dispatch] allow_read`) are read roots too, for every dispatch. When finished, the report is copied to `.wt/<id>.report.md` (and to

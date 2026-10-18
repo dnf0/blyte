@@ -988,8 +988,13 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .as_ref()
         .and_then(|v| v.get("outcome"))
         .and_then(|x| x.as_str());
+    let quote_problems: Option<Vec<&str>> = report_val
+        .as_ref()
+        .and_then(|v| v.get("quote_problems"))
+        .and_then(|x| x.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect());
 
-    let checks = crate::review_checks::build(
+    let mut checks = crate::review_checks::build(
         task_text.as_deref(),
         &changed_files,
         &subjects,
@@ -997,6 +1002,14 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         reads.len(),
         outcome,
     );
+    if let Some(ref problems) = quote_problems {
+        if !problems.is_empty() {
+            checks.flags.push(format!(
+                "quote check failed ({} problem(s)): see == report",
+                problems.len()
+            ));
+        }
+    }
 
     println!("== checks");
     if checks.flags.is_empty() {
@@ -1034,6 +1047,20 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         }
         if let Some(msg) = v.get("final_message").and_then(|x| x.as_str()) {
             println!("final_message: {msg}");
+        }
+        if let Some(ref problems) = quote_problems {
+            if problems.is_empty() {
+                println!("quote check: passed");
+            } else {
+                println!(
+                    "quote check: FAILED, {} problems (the report's quotes do not match the code)",
+                    problems.len()
+                );
+                for p in problems.iter().take(5) {
+                    let cut: String = p.chars().take(200).collect();
+                    println!("  {cut}");
+                }
+            }
         }
     }
 

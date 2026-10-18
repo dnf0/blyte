@@ -95,6 +95,8 @@ pub struct RunRecord {
     pub model_seconds: f64,
     pub tools_seconds: f64,
     pub gate_seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_problems: Option<Vec<String>>,
 }
 
 impl RunRecord {
@@ -154,6 +156,7 @@ impl RunRecord {
             model_seconds: 0.0,
             tools_seconds: 0.0,
             gate_seconds: 0.0,
+            quote_problems: None,
         }
     }
 
@@ -207,6 +210,7 @@ impl RunRecord {
             model_seconds: model_ms as f64 / 1000.0,
             tools_seconds: tools_ms as f64 / 1000.0,
             gate_seconds: gate_ms_sum as f64 / 1000.0,
+            quote_problems: report.quote_problems.clone(),
             ..Self::base(config, elapsed)
         }
     }

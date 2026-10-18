@@ -103,7 +103,7 @@ checked against its repository's HEAD at the run's start (from the reflog).
     "*File*: `openai.rs`"), 2 parse errors;
   - the reports' own claims: 245; 95 `supported`, 80 `not_enough_evidence`, 57 `contradicted` (23%), 13 parse errors.
   - Flags checked by hand were right: RC2 quotes `parse_group_key` and `build_tile_group_key`, which never existed in
-    any provision branch; reliability-orchestrator R1 cites `Dockerfile:19` for a line at 29. These reports predate
+    any provision branch; R1 cites `Dockerfile:19` for a line at 29. These reports predate
     the quote check (0.32.3).
 - 27 of 408 claims (two batches) failed to parse; batching smaller or retrying once would fix that.
 
