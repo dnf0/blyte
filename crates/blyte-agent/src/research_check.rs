@@ -37,6 +37,30 @@ const EXAMPLES_PER_BLOCK: usize = 3;
 /// Files a bare or relative name may match by suffix before it is treated as ambiguous noise.
 const MAX_SUFFIX_MATCHES: usize = 20;
 
+/// Maximum number of lines in one [`Evidence`] block.
+const MAX_EVIDENCE_LINES: usize = 120;
+
+/// Maximum number of [`Evidence`] blocks attached to one [`Claim`].
+const MAX_EVIDENCE_BLOCKS: usize = 4;
+
+/// One prose unit of a report (paragraph or list item) that cites at least one existing file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Claim {
+    pub id: usize,
+    pub text: String,
+    pub quoted: Option<String>,
+    pub evidence: Vec<Evidence>,
+}
+
+/// Numbered source lines around a citation that resolved to a file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Evidence {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+    pub lines: String,
+}
+
 /// Where cited files are looked for.
 pub struct Sources<'a> {
     /// The run's workspace; relative paths resolve here first.
@@ -615,6 +639,241 @@ pub fn render(problems: &[String]) -> String {
     out.push_str(
         "Re-read each cited file with the read tool and quote it exactly, correct the line \
          numbers, or remove the claim. Mark code you propose rather than quote as ```proposed.",
+    );
+    out
+}
+
+fn is_list_item(trimmed: &str) -> bool {
+    if trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("+ ")
+        || trimmed.starts_with("-\t")
+        || trimmed.starts_with("*\t")
+        || trimmed.starts_with("+\t")
+    {
+        return true;
+    }
+    let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits > 0 {
+        let rest = &trimmed[digits..];
+        if rest.starts_with(". ")
+            || rest.starts_with(") ")
+            || rest.starts_with(".\t")
+            || rest.starts_with(")\t")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn flush_claim_unit(
+    unit_lines: &mut Vec<&str>,
+    resolver: &mut Resolver<'_>,
+    last_path: &mut Option<String>,
+    out: &mut Vec<Claim>,
+    attach_quote_to_last: &mut bool,
+) {
+    if unit_lines.is_empty() {
+        return;
+    }
+    let text = unit_lines.join("\n").trim().to_string();
+    unit_lines.clear();
+    if text.is_empty() {
+        return;
+    }
+
+    let mut cites = Vec::new();
+    for line in text.lines() {
+        let line_cites = citations(line);
+        if !line_cites.is_empty() {
+            cites.extend(line_cites);
+        } else if let Some(c) = named_path(line) {
+            if !c.ranges.is_empty() || cites.is_empty() {
+                cites.push(c);
+            }
+        }
+    }
+    if cites.is_empty() {
+        if let Some(c) = named_path(&text) {
+            cites.push(c);
+        } else if let (Some(ranges), Some(prev)) = (lead_in_lines(&text), last_path.as_deref()) {
+            cites.push(Citation {
+                path: prev.to_string(),
+                ranges,
+                named: true,
+            });
+        }
+    }
+
+    let mut evidence = Vec::new();
+    for cite in cites {
+        let Resolved::Files(files) = resolver.resolve(&cite.path) else {
+            continue;
+        };
+        let Some((_, file_lines)) = files.first() else {
+            continue;
+        };
+        let total = file_lines.len();
+        if total == 0 {
+            continue;
+        }
+        *last_path = Some(cite.path.clone());
+        let ranges = if cite.ranges.is_empty() {
+            vec![(1, total)]
+        } else {
+            cite.ranges
+        };
+        for (a, b) in ranges {
+            if evidence.len() >= MAX_EVIDENCE_BLOCKS {
+                break;
+            }
+            let cite_start = a.clamp(1, total);
+            let cite_end = b.max(a).clamp(1, total);
+            let mut start = cite_start.saturating_sub(SLACK).max(1);
+            let mut end = (cite_end + SLACK).min(total);
+            while end - start + 1 > MAX_EVIDENCE_LINES {
+                if end > cite_end {
+                    end -= 1;
+                } else if start < cite_start {
+                    start += 1;
+                } else {
+                    end = start + MAX_EVIDENCE_LINES - 1;
+                    break;
+                }
+            }
+            let lines = (start..=end)
+                .map(|n| format!("{n}\t{}", file_lines[n - 1]))
+                .collect::<Vec<_>>()
+                .join("\n");
+            evidence.push(Evidence {
+                path: cite.path.clone(),
+                start,
+                end,
+                lines,
+            });
+        }
+        if evidence.len() >= MAX_EVIDENCE_BLOCKS {
+            break;
+        }
+    }
+
+    if !evidence.is_empty() {
+        let id = out.len() + 1;
+        out.push(Claim {
+            id,
+            text,
+            quoted: None,
+            evidence,
+        });
+        *attach_quote_to_last = true;
+    } else {
+        *attach_quote_to_last = false;
+    }
+}
+
+/// Extract prose claims (paragraphs and list items outside fenced code blocks) that cite at least
+/// one resolving file, together with any immediately following fenced code block and widened
+/// numbered evidence lines.
+pub fn claims(report: &str, src: &Sources<'_>) -> Vec<Claim> {
+    let mut resolver = Resolver {
+        src,
+        cache: HashMap::new(),
+    };
+    let mut out = Vec::new();
+    let mut unit_lines: Vec<&str> = Vec::new();
+    let mut last_path: Option<String> = None;
+    let mut attach_quote_to_last = false;
+
+    let lines: Vec<&str> = report.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        let fence = if trimmed.starts_with("```") {
+            "```"
+        } else if trimmed.starts_with("~~~") {
+            "~~~"
+        } else {
+            ""
+        };
+        if !fence.is_empty() {
+            flush_claim_unit(
+                &mut unit_lines,
+                &mut resolver,
+                &mut last_path,
+                &mut out,
+                &mut attach_quote_to_last,
+            );
+            let marker_len = trimmed
+                .chars()
+                .take_while(|&c| c == fence.chars().next().unwrap())
+                .count();
+            let close = fence.chars().next().unwrap().to_string().repeat(marker_len);
+            let start = i + 1;
+            let mut end = start;
+            while end < lines.len() && !lines[end].trim_start().starts_with(&close) {
+                end += 1;
+            }
+            let body = &lines[start..end.min(lines.len())];
+            if attach_quote_to_last {
+                if let Some(last_claim) = out.last_mut() {
+                    last_claim.quoted = Some(body.join("\n"));
+                }
+                attach_quote_to_last = false;
+            }
+            i = end + 1;
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            flush_claim_unit(
+                &mut unit_lines,
+                &mut resolver,
+                &mut last_path,
+                &mut out,
+                &mut attach_quote_to_last,
+            );
+            i += 1;
+            continue;
+        }
+
+        if trimmed.starts_with('#') {
+            flush_claim_unit(
+                &mut unit_lines,
+                &mut resolver,
+                &mut last_path,
+                &mut out,
+                &mut attach_quote_to_last,
+            );
+            attach_quote_to_last = false;
+            i += 1;
+            continue;
+        }
+
+        if is_list_item(trimmed) {
+            flush_claim_unit(
+                &mut unit_lines,
+                &mut resolver,
+                &mut last_path,
+                &mut out,
+                &mut attach_quote_to_last,
+            );
+            unit_lines.push(line);
+            i += 1;
+            continue;
+        }
+
+        unit_lines.push(line);
+        i += 1;
+    }
+
+    flush_claim_unit(
+        &mut unit_lines,
+        &mut resolver,
+        &mut last_path,
+        &mut out,
+        &mut attach_quote_to_last,
     );
     out
 }
