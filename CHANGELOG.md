@@ -1,3 +1,9 @@
+## v0.34.0 (2026-10-19)
+
+### Feat
+
+- **research**: claim check, name check, and read-loop and fold-thrash detection (#294)
+
 ## v0.33.1 (2026-10-18)
 
 ### Fix
