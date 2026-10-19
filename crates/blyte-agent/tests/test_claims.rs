@@ -63,6 +63,7 @@ b_5
 
     // Claim 1: paragraph with attached code block, widened by 5 on each side (10-5=5..=12+5=17).
     assert_eq!(got[0].id, 1);
+    assert_eq!(got[0].line, 9);
     assert_eq!(
         got[0].text,
         "First claim in `src/a.py:10-12` with a following code block:"
@@ -80,6 +81,7 @@ b_5
 
     // Claim 2: first list item; missing citation skipped, existing clamped at file start (1..=7).
     assert_eq!(got[1].id, 2);
+    assert_eq!(got[1].line, 18);
     assert!(got[1].text.starts_with("- First list item"));
     assert_eq!(got[1].quoted, None);
     assert_eq!(got[1].evidence.len(), 1);
@@ -90,6 +92,7 @@ b_5
 
     // Claim 3: third list item with attached quote; clamped at file end (1..=5).
     assert_eq!(got[2].id, 3);
+    assert_eq!(got[2].line, 20);
     assert!(got[2].text.starts_with("- Third list item"));
     assert_eq!(got[2].quoted.as_deref(), Some("b_4\nb_5"));
     assert_eq!(got[2].evidence.len(), 1);

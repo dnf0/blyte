@@ -12,6 +12,7 @@
 //! None of those are fixable from outside. All of them are design decisions from inside.
 
 pub mod bench;
+pub mod claim_check;
 pub mod context;
 pub mod fs;
 pub mod gate_slots;
