@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use blyte_agent::claim_check::{build_check_request, format_evidence, parse_verdict_reply};
 use blyte_agent::fs::{Fs, LocalFs};
 use blyte_agent::research_check::{self, Claim, Evidence, Sources};
 use blyte_agent::shell::{LocalShell, Shell};
@@ -25,13 +26,6 @@ struct PoolClaim {
     text: String,
     quoted: Option<String>,
     evidence: Vec<Evidence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct VerdictItem {
-    id: usize,
-    verdict: String,
-    reason: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -126,16 +120,6 @@ fn batch_slice<T>(items: &[T], batch_size: usize) -> Vec<&[T]> {
     items.chunks(size).collect()
 }
 
-fn format_evidence(evidence: &[Evidence]) -> String {
-    let mut out = String::new();
-    for ev in evidence {
-        out.push_str(&format!("--- {}:{}-{} ---\n", ev.path, ev.start, ev.end));
-        out.push_str(&ev.lines);
-        out.push('\n');
-    }
-    out
-}
-
 fn build_seed_request(claim: &Claim) -> Request {
     let mut prompt = String::new();
     prompt.push_str(
@@ -160,110 +144,6 @@ fn build_seed_request(claim: &Claim) -> Request {
         tools: Vec::new(),
         max_output_tokens: None,
     }
-}
-
-fn build_check_request(batch: &[PoolClaim]) -> Request {
-    let mut prompt = String::new();
-    prompt.push_str(
-        "For each claim below, using ONLY the evidence shown for that claim, determine whether \
-         the claim is `supported`, `contradicted`, or `not_enough_evidence`, with a one-sentence \
-         reason quoting the line number it relies on.\n\
-         Reply with ONLY a JSON array of the form:\n\
-         [{\"id\": 1, \"verdict\": \"supported\" | \"contradicted\" | \"not_enough_evidence\", \"reason\": \"...\"}]\n\n",
-    );
-    for c in batch {
-        prompt.push_str(&format!("### Claim {}\n{}\n", c.id, c.text));
-        if let Some(q) = &c.quoted {
-            prompt.push_str("Quoted block:\n```\n");
-            prompt.push_str(q);
-            prompt.push_str("\n```\n");
-        }
-        prompt.push_str("Evidence:\n");
-        prompt.push_str(&format_evidence(&c.evidence));
-        prompt.push('\n');
-    }
-
-    Request {
-        system: String::new(),
-        messages: vec![Message::User(prompt)],
-        tools: Vec::new(),
-        max_output_tokens: None,
-    }
-}
-
-fn extract_json_array(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    if let Some(start) = trimmed.find("```json") {
-        let rest = &trimmed[start + 7..];
-        if let Some(end) = rest.find("```") {
-            return Some(rest[..end].trim());
-        }
-    }
-    if let Some(start) = trimmed.find("```") {
-        let after = &trimmed[start + 3..];
-        let body_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
-        if let Some(end) = after[body_start..].find("```") {
-            return Some(after[body_start..body_start + end].trim());
-        }
-    }
-    let start = trimmed.find('[')?;
-    let end = trimmed.rfind(']')?;
-    (end >= start).then_some(&trimmed[start..=end])
-}
-
-/// Tolerantly parse a model's JSON array of `{"id", "verdict", "reason"}`.
-fn parse_verdict_reply(text: &str) -> Result<Vec<VerdictItem>, String> {
-    let candidate = extract_json_array(text).ok_or_else(|| "no JSON array found".to_string())?;
-    let val: serde_json::Value = match serde_json::from_str(candidate) {
-        Ok(v) => v,
-        Err(e) => {
-            if let (Some(s), Some(end)) = (text.find('['), text.rfind(']')) {
-                if end >= s {
-                    serde_json::from_str(&text[s..=end]).map_err(|e2| e2.to_string())?
-                } else {
-                    return Err(e.to_string());
-                }
-            } else {
-                return Err(e.to_string());
-            }
-        }
-    };
-    let arr = val
-        .as_array()
-        .ok_or_else(|| "expected JSON array".to_string())?;
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let obj = item
-            .as_object()
-            .ok_or_else(|| "array item is not an object".to_string())?;
-        let id = obj
-            .get("id")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| "missing numeric id".to_string())? as usize;
-        let raw_verdict = obj
-            .get("verdict")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing verdict".to_string())?
-            .trim()
-            .to_ascii_lowercase();
-        if !matches!(
-            raw_verdict.as_str(),
-            "supported" | "contradicted" | "not_enough_evidence"
-        ) {
-            return Err(format!("invalid verdict: {raw_verdict}"));
-        }
-        let reason = obj
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        out.push(VerdictItem {
-            id,
-            verdict: raw_verdict,
-            reason,
-        });
-    }
-    Ok(out)
 }
 
 fn add_usage(dst: &mut Usage, src: &Usage) {
@@ -464,7 +344,22 @@ fn main() {
                 stopped_by_max_cost = true;
                 break;
             }
-            let req = build_check_request(batch);
+            let batch_claims: Vec<Claim> = batch
+                .iter()
+                .map(|c| Claim {
+                    id: c.id,
+                    line: 0,
+                    text: c.text.clone(),
+                    quoted: c.quoted.clone(),
+                    evidence: c.evidence.clone(),
+                })
+                .collect();
+            let pairs: Vec<(usize, &Claim)> = batch
+                .iter()
+                .zip(batch_claims.iter())
+                .map(|(p, c)| (p.id, c))
+                .collect();
+            let req = build_check_request(&pairs);
             rep_calls += 1;
             total_calls += 1;
             let parsed = match provider.complete(&req) {
@@ -675,6 +570,7 @@ mod tests {
         let claims: Vec<Claim> = (1..=12)
             .map(|id| Claim {
                 id,
+                line: id,
                 text: format!("claim {id}"),
                 quoted: None,
                 evidence: Vec::new(),

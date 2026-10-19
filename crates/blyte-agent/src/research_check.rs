@@ -47,6 +47,7 @@ const MAX_EVIDENCE_BLOCKS: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
     pub id: usize,
+    pub line: usize,
     pub text: String,
     pub quoted: Option<String>,
     pub evidence: Vec<Evidence>,
@@ -668,7 +669,7 @@ fn is_list_item(trimmed: &str) -> bool {
 }
 
 fn flush_claim_unit(
-    unit_lines: &mut Vec<&str>,
+    unit_lines: &mut Vec<(usize, &str)>,
     resolver: &mut Resolver<'_>,
     last_path: &mut Option<String>,
     out: &mut Vec<Claim>,
@@ -677,7 +678,14 @@ fn flush_claim_unit(
     if unit_lines.is_empty() {
         return;
     }
-    let text = unit_lines.join("\n").trim().to_string();
+    let first_line = unit_lines[0].0;
+    let text = unit_lines
+        .iter()
+        .map(|(_, l)| *l)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
     unit_lines.clear();
     if text.is_empty() {
         return;
@@ -762,6 +770,7 @@ fn flush_claim_unit(
         let id = out.len() + 1;
         out.push(Claim {
             id,
+            line: first_line,
             text,
             quoted: None,
             evidence,
@@ -781,7 +790,7 @@ pub fn claims(report: &str, src: &Sources<'_>) -> Vec<Claim> {
         cache: HashMap::new(),
     };
     let mut out = Vec::new();
-    let mut unit_lines: Vec<&str> = Vec::new();
+    let mut unit_lines: Vec<(usize, &str)> = Vec::new();
     let mut last_path: Option<String> = None;
     let mut attach_quote_to_last = false;
 
@@ -859,12 +868,12 @@ pub fn claims(report: &str, src: &Sources<'_>) -> Vec<Claim> {
                 &mut out,
                 &mut attach_quote_to_last,
             );
-            unit_lines.push(line);
+            unit_lines.push((i + 1, line));
             i += 1;
             continue;
         }
 
-        unit_lines.push(line);
+        unit_lines.push((i + 1, line));
         i += 1;
     }
 
