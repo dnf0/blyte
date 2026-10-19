@@ -73,3 +73,27 @@ identifiers found nowhere in the three pinned trees (`grep -rF`): 1/92, 6/105, 1
 needed even when every path is readable. Follow-up, not built: label names seen only in an input
 file under review (a draft the run was asked to correct) as coming from the input, rather than
 letting them pass silently.
+
+## Fold experiment (FX, 2026-10-19)
+
+The fold loop (one turn's reads about a whole fold budget, so the next fold drops them) happened
+twice. Measured whether research should fold at all: the R5, R6 and R9 questions above, each run
+twice unfolded (`--fold-budget 900000`) and once at 96k, on 0.33.1 with gemini-4-argon and the right
+`--allow-read`; R5b/R6b/R9b are the earlier 96k runs. "Unseen" are backticked code-like names in the
+report found in none of the three pinned trees; "draft" are those found in the input draft.
+
+| Run | Cost | Turns | Seconds | Peak prompt | Folds | Unseen (draft) |
+|---|---|---|---|---|---|---|
+| R5 96k (b, FX) | $2.75, $3.12 | 24, 30 | 713, 1002 | 100k, 118k | 6, 8 | 1, 8 |
+| R5 unfolded | $1.79, $1.68 | 16, 15 | 516, 520 | 84k, 84k | 0 | 2, 1 |
+| R6 96k | $4.04, $3.37 | 48, 45 | 1118, 1160 | 129k, 144k | 9, 8 | 22, 2 |
+| R6 unfolded | $2.42, $2.49 | 21, 21 | 830, 922 | 94k, 111k | 0 | 1, 1 |
+| R9 96k | $2.76, $2.77 | 35, 42 | 832, 917 | 134k, 145k | 7, 6 | 36 (2), 26 (2) |
+| R9 unfolded | $2.41, $2.78 | 24, 25 | 766, 898 | 67k, 213k | 0 | 28 (26), 31 (29) |
+
+Unfolded runs took about half the turns and 10-40% less money, and invented fewer names: in R9
+(a draft to correct) nearly all of the unfolded runs' unseen names come from the draft, while the
+folded runs' are new (`computeWeightedRiskScore`, `buildProjectLossesQuery`). Folding drops code the
+model read, and it then re-reads or guesses. Quote problems: 0 in all twelve. Decision (Claude's
+recommendation): research fold budget 96k -> 180k, so folding is a safety net; only one of six
+unfolded runs passed 200k prompt tokens, once.

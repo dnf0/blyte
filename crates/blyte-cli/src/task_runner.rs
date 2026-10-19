@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Fold budget for research runs, which quote code read many turns before they write it up.
-/// Twice the default; prompts stay under 200k tokens.
-pub const RESEARCH_FOLD_BUDGET: usize = 96_000;
+/// High enough that folding is only a safety net: unfolded research runs were cheaper, shorter and
+/// invented fewer names than runs folded at 96k (`docs/specs/2026-10-19-claim-check.md`, FX).
+pub const RESEARCH_FOLD_BUDGET: usize = 180_000;
 
 /// Tracks turn and gate progress across the run, for the deadline watchdog.
 #[derive(Debug, Default, Clone, Copy)]

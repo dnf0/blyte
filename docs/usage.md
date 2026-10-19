@@ -347,8 +347,8 @@ report instead of failing the gate again. If a run stops early without passing t
 still runs the quote and claim checks on `report.md` and `blyte review` shows the results (including
 the `claim check: N checked, K contradicted, ...` summary, up to 5 contradicted claims with the
 checker's reason, and a `! claim check: K contradicted claims` flag under `== checks`).
-Research runs fold their context at 96K tokens instead of 48K (unless `--fold-budget` is given), so
-the code the model read is still in context when it writes the report. Paths given with
+Research runs fold their context at 180K tokens instead of 48K (unless `--fold-budget` is given), so
+the code the model read is still in context when it writes the report; most research runs never fold. Paths given with
 `--allow-read` (or `[dispatch] allow_read`) are read roots too, for every dispatch. When finished, the report is copied to `.wt/<id>.report.md` (and to
 `--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to
 300 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and
