@@ -77,54 +77,88 @@ already builds dispatch args without a provider), `docs/usage.md` (dispatch / `-
 
 Gate: the repository checks. Commit: `feat(dispatch): refuse research runs that name paths they cannot read`
 
-### Task C1: claim checker in the research gate, one fix round
+Task C1 (2026-10-19) re-read the same five large files every turn for 250 turns without an edit
+(folding dropped them each time) and was stopped. It is split into C1a then C1b, each with the
+line ranges to read. **Read only the ranges named; never read a whole large file** (`run.rs`,
+`dispatch.rs`, `cli.rs`, `task_runner.rs` are 500-1700 lines). Use `grep -n` to find anything else.
+`Runner` already has `pub claim_check: bool` (false everywhere; commit `1d16018`).
 
-Files: new `crates/blyte-agent/src/claim_check.rs` (+ `lib.rs` module line), `crates/blyte-agent/src/run.rs`,
-`crates/blyte-agent/examples/claim_check.rs`, `crates/blyte-cli/src/report.rs`,
-`crates/blyte-cli/src/dispatch.rs`, new test `crates/blyte-agent/tests/test_claim_gate.rs`, `docs/usage.md`.
+### Task C1a: `claim_check` library module
 
-1. **Library module `claim_check.rs`.** Move from `examples/claim_check.rs` the evidence formatting
-   (`format_evidence`), the check request (`build_check_request`), and the reply parsing
-   (`extract_json_array`, `parse_verdict_reply`, `VerdictItem`) into the library, unchanged in
-   behaviour, and make the example use them. Add:
-   `pub struct ClaimCheck { pub checked: usize, pub unchecked: usize, pub contradicted: Vec<ClaimFlag>, pub not_enough_evidence: usize, pub parse_errors: usize, pub calls: u32, pub usage: Usage }`,
-   `pub struct ClaimFlag { pub line: usize, pub text: String, pub reason: String }` (serde
-   Serialize/Deserialize, `line` = the claim's first line in report.md; add it to `Claim` in
-   `research_check.rs` if `Claim` lacks it), and
-   `pub fn check_claims(provider: &dyn Provider, claims: &[Claim]) -> ClaimCheck`:
-   at most 64 claims (rest counted `unchecked`), batches of 8 numbered 1..n within the batch, one
-   retry of a batch whose reply fails to parse (then its claims count as `parse_errors`), all usage
-   summed (including failed calls). Batches may run concurrently with `std::thread::scope` (up to
-   4) if the provider type is `Sync`; otherwise sequentially.
-2. **Runner switch.** `Runner` gets `claim_check: bool`, default `false`, with a builder method like
-   the existing ones. `blyte dispatch --research` sets it unless the new `--no-claim-check` flag
-   is given.
-3. **In the gate** (`run_loop`, the `if passed && self.research` block): when the quote check
-   passed and `self.claim_check`, read report.md, build `Sources` as `check_report_quotes` does,
-   `research_check::claims(...)`, then `check_claims`. Add its usage to `report.usage` (so cost
-   and `--max-cost` include it) and store `report.claim_check = Some(result)`.
-   - If it found contradicted claims and no claim round has been fed back yet: set the round flag,
-     `passed = false`, and `output` = `exit 1\n` + a list (`report.md:{line}: {text cut to 200 chars}\n  checker: {reason}`)
-     and the line: `These claims do not match the lines they cite. Fix each claim, cite the lines that support it, or remove it.`
-   - Otherwise the gate passes; remaining contradicted claims stay in `report.claim_check`.
-4. **On early stop** (`run_until`, where the quote check on stop runs): if `self.claim_check` and
-   report.md is non-empty, run the claim check too and store it (advisory; outcome unchanged).
-   Add usage to `report.usage`.
-5. **Report and review.** `RunReport.claim_check: Option<ClaimCheck>`; mirror in `RunRecord`
-   (`report.rs`) with `#[serde(default, skip_serializing_if = "Option::is_none")]`. In `blyte review`
-   next to the quote-check line: `claim check: N checked, K contradicted, E not enough evidence, P parse errors, U unchecked ($cost)`
-   and the first 5 contradicted claims (line, text cut to 200, reason); add a `== checks` line when
-   K > 0.
-6. **Tests** (`test_claim_gate.rs`, scripted provider as in `test_research_stop_check.rs`; the
-   claim-check calls consume scripted replies, so script them):
-   - claim check on, report with one cited claim, checker replies `contradicted` → gate fails once
-     with the claim in the fed-back message; model edits; checker replies `supported` → `Verified`,
-     `claim_check.contradicted` empty;
-   - checker replies `contradicted` both times → second gate passes (`Verified`), `contradicted` has 1;
-   - unparseable checker reply then a valid one → one retry, `parse_errors == 0`, `calls == 2`;
-   - claim check off (default) → no checker calls (scripted replies unchanged from today's tests);
-   - unit tests in `claim_check.rs` for batching (17 claims → 8, 8, 1) and the 64 cap.
-7. **Docs:** in the research section of `docs/usage.md`, a short paragraph: the claim checker, one
+Files: new `crates/blyte-agent/src/claim_check.rs`, `crates/blyte-agent/src/lib.rs` (one `pub mod`
+line), `crates/blyte-agent/examples/claim_check.rs`, `crates/blyte-agent/src/research_check.rs`
+(only if `Claim` needs a `line` field).
+
+1. Move from `examples/claim_check.rs` into the new module, behaviour unchanged: `VerdictItem`
+   (line 31), `format_evidence` (129), `build_check_request` (165, generalise its argument from the
+   example's `PoolClaim` to `&[(usize, &Claim)]`, id and claim), `extract_json_array` (194),
+   `parse_verdict_reply` (215). Make them `pub`; the example imports them from
+   `blyte_agent::claim_check` and keeps its own seeding and table code.
+2. Add `ClaimFlag { line: usize, text: String, reason: String }` and
+   `ClaimCheck { checked, unchecked, contradicted: Vec<ClaimFlag>, not_enough_evidence, parse_errors: usize, calls: u32, usage: Usage }`
+   (serde Serialize, Deserialize, Default, Clone, Debug). `line` is the claim's first line in
+   report.md: if `research_check::Claim` (see `pub struct Claim`, about line 48, and `fn claims`,
+   about line 780) has no line number, add `pub line: usize` and set it where the claim unit is
+   flushed (`flush_claim_unit`).
+3. `pub fn check_claims(provider: &dyn Provider, claims: &[Claim]) -> ClaimCheck`: first 64 claims
+   (the rest count as `unchecked`), batches of 8 with ids 1..=n in the batch, sequential calls. A
+   reply that fails to parse (or a provider error) is retried once; if it fails again the batch's
+   claims count as `parse_errors`. Sum usage over all calls, including failed ones
+   (`ProviderError::NoAnswer` carries usage; see how `run.rs` adds it, `grep -n NoAnswer`).
+   `contradicted` verdicts become `ClaimFlag`s; `not_enough_evidence` is counted.
+4. Unit tests at the bottom of `claim_check.rs`, with a tiny scripted `Provider` (copy the pattern
+   from `crates/blyte-agent/tests/test_research_stop_check.rs`, first 60 lines): 17 claims → 3
+   calls (8, 8, 1); 70 claims → 64 checked, 6 unchecked; an unparseable reply then a valid one →
+   `calls == 2`, `parse_errors == 0`; two unparseable → that batch's claims in `parse_errors`;
+   a `contradicted` verdict → one flag with the claim's line and the reason.
+
+Gate: the repository checks. Commit: `feat(research): claim_check library module`
+
+### Task C1b: run the claim check in the research gate, one fix round (after C1a)
+
+Files: `crates/blyte-agent/src/run.rs`, `crates/blyte-cli/src/report.rs`,
+`crates/blyte-cli/src/dispatch.rs`, `crates/blyte-cli/src/cli.rs`, `crates/blyte-cli/src/task_runner.rs`,
+new test `crates/blyte-agent/tests/test_claim_gate.rs`, `docs/usage.md` (research section only).
+
+1. **run.rs.** `RunReport` (`pub struct RunReport`, about line 107; `quote_problems` at about 136):
+   add `pub claim_check: Option<claim_check::ClaimCheck>` next to `quote_problems`, serialized the
+   same way. Add a helper `fn run_claim_check(&self) -> Option<ClaimCheck>` next to
+   `check_report_quotes` (about line 620; read 600-680): `None` unless `self.claim_check` and
+   report.md is non-empty; build `Sources` exactly as `check_report_quotes` does, call
+   `research_check::claims`, then `claim_check::check_claims(self.provider, ...)`.
+   - **Gate** (read 1035-1070; the block starting `if passed && self.research`): after the quote
+     check, if still `passed`, call `run_claim_check`; add its usage into `report.usage`
+     (input, cached, output, thinking) and store it in `report.claim_check`. If it has
+     contradicted claims and a local `claim_round_done` (declared before the turn loop) is false:
+     set it, `passed = false`, and `output` = `exit 1\n` + one entry per flag
+     (`report.md:{line}: {text cut to 200 chars}\n  checker: {reason}`) + the line
+     `These claims do not match the lines they cite. Fix each claim, cite the lines that support it, or remove it.`
+     Otherwise leave `passed` as is.
+   - **Early stop** (read 715-735; where `report.quote_problems = Some(problems)` is set after
+     `run_loop`): also run `run_claim_check`, add its usage, store it. Outcome unchanged.
+2. **report.rs.** Mirror `quote_problems` (lines about 99, 159, 213): field
+   `claim_check: Option<serde_json::Value>` or the typed struct, `#[serde(default, skip_serializing_if = "Option::is_none")]`, mapped from the run report.
+3. **cli.rs / task_runner.rs / dispatch.rs: the switch.** The solver (`task_runner.rs`, config
+   `research` at about lines 63, 100, 464) gets `claim_check: bool` from a new solver CLI flag
+   `--claim-check` (next to `research`/`allow_read` in the solver's args, `cli.rs` about line 446)
+   and sets `Runner.claim_check` (line 465, currently `claim_check: false`). `blyte dispatch`
+   (`dispatch.rs` about line 557, `cmd.arg("--research")`) also passes `--claim-check` for research
+   unless the new dispatch flag `--no-claim-check` is given (add it next to `no_path_check`,
+   `cli.rs` about line 182).
+4. **Review** (`dispatch.rs`, read 1010-1095, where `quote_problems` is printed): after the
+   quote-check line print
+   `claim check: N checked, K contradicted, E not enough evidence, P parse errors, U unchecked`
+   and the first 5 contradicted claims (`report.md:{line}: {text cut to 200}` and the reason on the
+   next line); add a `checks.flags` line `claim check: K contradicted claims` when K > 0, as the
+   quote check does.
+5. **Tests** (`test_claim_gate.rs`; copy the scripted provider and research runner setup from
+   `test_research_stop_check.rs` and set `claim_check: true`). The checker's calls take scripted
+   replies in order with the worker's, so script them:
+   - checker says `contradicted` → gate fails once and the next request contains the claim; worker
+     rewrites report.md; checker says `supported` → `Verified`, `claim_check` has no flags;
+   - checker says `contradicted` twice → second gate passes, `Verified`, one flag kept;
+   - `claim_check: false` → no checker call (scripted replies as before).
+6. **Docs:** a short paragraph in the research section of `docs/usage.md`: the claim checker, one
    fix round, what review shows, `--no-claim-check`.
 
 Gate: the repository checks. Commit: `feat(research): model claim check in the research gate, one fix round`
