@@ -19,7 +19,7 @@
 //! solve (EXP-059). Rollback is on by default and switchable, because it is not free -- one run
 //! reset a worker's committed feature five times (FINDINGS 13.2).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -112,6 +112,8 @@ pub struct RunReport {
     pub empty_turns: u32,
     /// Turns whose reply hit the output token limit and was cut off.
     pub truncated_turns: u32,
+    /// Whether the run stopped because it kept repeating read/grep/glob calls without changing the workspace.
+    pub read_loop: bool,
     pub tool_calls: u32,
     pub gate_attempts: u32,
     /// Transient provider failures (rate limits, overload) waited out during the run.
@@ -180,6 +182,9 @@ pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
 /// Tool calls an orchestrator may make before its first dispatch without getting a reminder (2026-10-15 Argon benchmark).
 pub const ORCHESTRATOR_EXPLORE_NUDGE: u32 = 8;
+
+/// Repeated read/grep/glob calls without a workspace change allowed before ending the run.
+const READ_LOOP_LIMIT: u32 = 60;
 
 fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
     call.name == "dispatch"
@@ -751,6 +756,9 @@ impl<'a> Runner<'a> {
         let mut last_sent: Option<Vec<Message>> = None;
         let mut last_failed: Vec<String> = Vec::new();
         let mut last_fingerprint: Option<String> = None;
+        let mut call_counts: HashMap<String, u32> = HashMap::new();
+        let mut repeats: u32 = 0;
+        let mut change_fp = self.fingerprint();
         let mut last_report = if self.research {
             self.fs.read(&self.root.join("report.md")).ok()
         } else {
@@ -929,6 +937,12 @@ impl<'a> Runner<'a> {
                         signature: call.signature.clone(),
                     });
                 }
+                let current_fp = self.fingerprint();
+                if current_fp != change_fp {
+                    call_counts.clear();
+                    repeats = 0;
+                    change_fp = current_fp;
+                }
                 for call in &resp.tool_calls {
                     report.tool_calls += 1;
                     *report.tool_counts.entry(call.name.clone()).or_default() += 1;
@@ -938,7 +952,7 @@ impl<'a> Runner<'a> {
                         pre_dispatch_calls += 1;
                     }
 
-                    let outcome = tools::execute(
+                    let mut outcome = tools::execute(
                         &self.root,
                         self.shell,
                         self.fs,
@@ -991,12 +1005,35 @@ impl<'a> Runner<'a> {
                             research_check::identifiers(&outcome.content).map(str::to_owned),
                         );
                     }
+                    if !outcome.is_error && matches!(call.name.as_str(), "edit" | "write") {
+                        call_counts.clear();
+                        repeats = 0;
+                    } else if matches!(call.name.as_str(), "read" | "grep" | "glob") {
+                        let key = format!("{}:{}", call.name, call.arguments);
+                        let n = call_counts.entry(key).or_insert(0);
+                        *n += 1;
+                        let n = *n;
+                        if n >= 2 {
+                            repeats += 1;
+                        }
+                        if n >= 3 {
+                            outcome.content.push_str(&format!(
+                                "\n\n[blyte] You have made this exact call {n} times since the workspace last changed; earlier results were dropped from your context to save space. Do not read it again: note what you need from it in your reply, read only the lines you need, and make your change."
+                            ));
+                        }
+                    }
                     history.push(Message::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         content: outcome.content,
                         is_error: outcome.is_error,
                     });
+                    if repeats >= READ_LOOP_LIMIT {
+                        report.turn_usage.last_mut().unwrap().tools_ms =
+                            tools_start.elapsed().as_millis() as u64;
+                        report.read_loop = true;
+                        return (Outcome::BudgetExhausted, report);
+                    }
                 }
                 report.turn_usage.last_mut().unwrap().tools_ms =
                     tools_start.elapsed().as_millis() as u64;

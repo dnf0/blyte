@@ -1017,6 +1017,11 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .and_then(|v| v.get("quote_problems"))
         .and_then(|x| x.as_array())
         .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect());
+    let read_loop = report_val
+        .as_ref()
+        .and_then(|v| v.get("read_loop"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
 
     let mut checks = crate::review_checks::build(
         task_text.as_deref(),
@@ -1033,6 +1038,12 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                 problems.len()
             ));
         }
+    }
+    if read_loop {
+        checks.flags.push(
+            "read loop: the run kept re-reading the same files without changing anything and was stopped"
+                .to_string(),
+        );
     }
     if refused_count > 0 {
         let first_3: Vec<&str> = refused_paths.iter().take(3).map(|s| s.as_str()).collect();
