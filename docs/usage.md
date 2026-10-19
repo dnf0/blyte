@@ -337,9 +337,16 @@ non-empty report was written, followed by a quote check that blyte runs itself:
 - every code-like identifier in a backticked span in prose (containing `_`, an inner capital, `.`
   between identifiers, or followed by `(`) must appear in the task or a tool result the run saw.
 
-A failed check is a failed gate: the model gets the list of mismatches and fixes the report. If a
-run stops early without passing the gate, blyte still quote-checks `report.md` and `blyte review`
-shows the result.
+A failed check is a failed gate: the model gets the list of mismatches and fixes the report. After
+the quote check passes, blyte also runs a model claim check on `report.md` (unless
+`--no-claim-check` is passed to `blyte dispatch`), verifying each prose claim against the file and
+lines it cites (`supported`, `contradicted`, or `not_enough_evidence`). If any claim is
+contradicted, the gate fails once so the model gets one fix round to correct the claim, cite the
+supporting lines, or remove it; any claims still contradicted after that round are kept on the
+report instead of failing the gate again. If a run stops early without passing the gate, blyte
+still runs the quote and claim checks on `report.md` and `blyte review` shows the results (including
+the `claim check: N checked, K contradicted, ...` summary, up to 5 contradicted claims with the
+checker's reason, and a `! claim check: K contradicted claims` flag under `== checks`).
 Research runs fold their context at 96K tokens instead of 48K (unless `--fold-budget` is given), so
 the code the model read is still in context when it writes the report. Paths given with
 `--allow-read` (or `[dispatch] allow_read`) are read roots too, for every dispatch. When finished, the report is copied to `.wt/<id>.report.md` (and to
