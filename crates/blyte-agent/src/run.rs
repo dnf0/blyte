@@ -115,6 +115,10 @@ pub struct RunReport {
     pub truncated_turns: u32,
     /// Whether the run stopped because it kept repeating read/grep/glob calls without changing the workspace.
     pub read_loop: bool,
+    /// Whether the run stopped because consecutive turns kept folding the previous turn's results.
+    pub fold_thrash: bool,
+    /// Turns whose tool output exceeded half of the fold budget.
+    pub big_read_turns: u32,
     pub tool_calls: u32,
     pub gate_attempts: u32,
     /// Transient provider failures (rate limits, overload) waited out during the run.
@@ -812,6 +816,9 @@ impl<'a> Runner<'a> {
         let mut has_dispatched = false;
         let mut explore_nudge_sent = false;
         let mut claim_round_done = false;
+        let mut prev_turn_start: Option<usize> = None;
+        let mut thrash: u32 = 0;
+        let mut last_big_read_warn: Option<u32> = None;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -826,6 +833,7 @@ impl<'a> Runner<'a> {
                 }
             }
             report.outcome_turns = turn;
+            let turn_start = history.len();
 
             if self.budget.max_turns >= 20 && turn == self.budget.max_turns - 9 {
                 history.push(Message::User(format!(
@@ -857,6 +865,47 @@ impl<'a> Runner<'a> {
                 )));
             }
 
+            let fold_budget = self.context.fold_budget(history);
+            if let Some(prev_start) = prev_turn_start {
+                if let Some(budget) = fold_budget {
+                    let n: usize = history[prev_start..]
+                        .iter()
+                        .filter(|m| matches!(m, Message::ToolResult { .. }))
+                        .map(crate::context::approx_tokens)
+                        .sum();
+                    if n > budget / 2 {
+                        report.big_read_turns += 1;
+                        if last_big_read_warn.is_none_or(|last| turn >= last + 5) {
+                            last_big_read_warn = Some(turn);
+                            history.push(Message::User(format!(
+                                "[blyte] Your last turn's tool output was about {n} tokens, more than half of what stays in context ({budget}). Read narrower ranges so it is not dropped before you use it."
+                            )));
+                        }
+                    }
+                }
+                if self
+                    .context
+                    .folds(history)
+                    .last()
+                    .is_some_and(|&(_, b)| b + 1 > prev_start)
+                {
+                    thrash += 1;
+                    if thrash >= 5 {
+                        report.fold_thrash = true;
+                        return (Outcome::BudgetExhausted, report);
+                    }
+                    if thrash == 2 {
+                        let budget = fold_budget.unwrap_or_default();
+                        history.push(Message::User(format!(
+                            "[blyte] Your recent tool results are being dropped from your context because each turn reads more than fits (about {budget} tokens stay verbatim). Read narrower ranges (at most 200 lines), one or two files per turn, and act on what you have read before reading more."
+                        )));
+                    }
+                } else {
+                    thrash = 0;
+                }
+            }
+            prev_turn_start = Some(turn_start);
+
             let req = Request {
                 system: system.to_string(),
                 messages: self.context.build(state, history),
@@ -875,7 +924,6 @@ impl<'a> Runner<'a> {
                 }
                 _ => (false, req.messages.iter().map(message_chars).sum()),
             };
-            let fold_budget = self.context.fold_budget(history);
             last_sent = Some(req.messages.clone());
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.

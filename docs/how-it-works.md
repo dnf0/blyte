@@ -47,7 +47,7 @@ Every turn re-sends the prompt, so the prompt's shape decides the bill. blyte's 
 When the verbatim part passes the fold budget (48K tokens by default, 96K for research runs), its older half becomes one
 digest: a line per tool call (``- `bash` `cargo test` -> exit 101``), written by the harness, not
 summarised by a model. Digests never change once written, so everything before the
-newest fold stays cached.
+newest fold stays cached. If a turn's tool output exceeds half the fold budget, the harness warns the model to read narrower ranges, and if consecutive turns keep folding the previous turn's results it warns on the second and stops the run on the fifth.
 
 ## Tools
 
