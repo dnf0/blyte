@@ -4,7 +4,9 @@ name: Release on merge
 # Conventional Commits since the last tag and writes CHANGELOG.md (.cz.toml has the rules). main
 # takes changes only through pull requests (the organisation's ruleset), so the bump lands as a
 # release PR that this job opens and merges at once; then it tags vX.Y.Z, publishes the GitHub
-# release with that version's changelog, and builds the static binaries. A merge with nothing to
+# release with that version's changelog, builds the static binaries and publishes the crates to
+# crates.io (trusted publishing: no stored token; each crate lists this workflow as a trusted
+# publisher in its crates.io settings). A merge with nothing to
 # release (docs, ci, chore, test) is skipped. A merge made by this workflow's token starts no new
 # run, and the subject guard below covers any other push of a release commit.
 on:
@@ -93,3 +95,35 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.release.outputs.tag }}
+
+  crates:
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          # In dependency order; cargo waits for each to be available before the next.
+          # Cargo.lock is not tracked, so no --locked. A version already on crates.io (a re-run, or a
+          # publish by hand) is skipped.
+          version=${TAG#v}
+          for c in blyte-provider blyte-agent blyte; do
+            if curl -sf -o /dev/null -A "blyte-release (github.com/dnf0/blyte)" \
+                "https://crates.io/api/v1/crates/$c/$version"; then
+              echo "$c $version is already on crates.io; skipping"
+              continue
+            fi
+            cargo publish -p "$c"
+          done

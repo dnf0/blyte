@@ -163,6 +163,6 @@ Kept for about the last four weeks; older items are in the git history and the e
     `cargo binstall blyte`) for a cargo install, detected from `~/.cargo/.crates2.json`, and the
     release binary over plain HTTPS otherwise, with no GitHub CLI needed. Today it always downloads
     the release binary through `gh`.
-  - Publish the crates to crates.io (`cd.yml`, manual, dry run first).
+  - Publish the crates to crates.io (done: every release publishes them from `release-on-merge.yml`).
   - Contributions: a DCO sign-off or a CLA, decided before accepting outside
     pull requests.
