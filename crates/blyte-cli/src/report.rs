@@ -74,6 +74,8 @@ pub struct RunRecord {
     #[serde(default)]
     pub read_loop: bool,
     #[serde(default)]
+    pub peak_read_repeats: u32,
+    #[serde(default)]
     pub fold_thrash: bool,
     #[serde(default)]
     pub big_read_turns: u32,
@@ -147,6 +149,7 @@ impl RunRecord {
             empty_turns: 0,
             truncated_turns: 0,
             read_loop: false,
+            peak_read_repeats: 0,
             fold_thrash: false,
             big_read_turns: 0,
             tool_calls: 0,
@@ -202,6 +205,7 @@ impl RunRecord {
             empty_turns: report.empty_turns,
             truncated_turns: report.truncated_turns,
             read_loop: report.read_loop,
+            peak_read_repeats: report.peak_read_repeats,
             fold_thrash: report.fold_thrash,
             big_read_turns: report.big_read_turns,
             tool_calls: report.tool_calls,

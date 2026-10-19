@@ -115,6 +115,8 @@ pub struct RunReport {
     pub truncated_turns: u32,
     /// Whether the run stopped because it kept repeating read/grep/glob calls without changing the workspace.
     pub read_loop: bool,
+    /// Most repeated read/grep/glob calls seen between two workspace changes (the read-loop count).
+    pub peak_read_repeats: u32,
     /// Whether the run stopped because consecutive turns kept folding the previous turn's results.
     pub fold_thrash: bool,
     /// Turns whose tool output exceeded half of the fold budget.
@@ -191,7 +193,7 @@ pub const MAX_PROVIDER_RETRIES: u32 = 6;
 pub const ORCHESTRATOR_EXPLORE_NUDGE: u32 = 8;
 
 /// Repeated read/grep/glob calls without a workspace change allowed before ending the run.
-const READ_LOOP_LIMIT: u32 = 60;
+const READ_LOOP_LIMIT: u32 = 30;
 
 fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
     call.name == "dispatch"
@@ -1108,6 +1110,7 @@ impl<'a> Runner<'a> {
                         let n = *n;
                         if n >= 2 {
                             repeats += 1;
+                            report.peak_read_repeats = report.peak_read_repeats.max(repeats);
                         }
                         if n >= 3 {
                             outcome.content.push_str(&format!(

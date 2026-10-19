@@ -54,7 +54,7 @@ fn read_response(turn: usize, path: &str) -> Response {
 }
 
 #[test]
-fn same_read_every_turn_warns_on_third_and_stops_after_61_turns() {
+fn same_read_every_turn_warns_on_third_and_stops_after_31_turns() {
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("target.txt"), "hello world\n").unwrap();
 
@@ -83,10 +83,11 @@ fn same_read_every_turn_warns_on_third_and_stops_after_61_turns() {
 
     assert_eq!(outcome, Outcome::BudgetExhausted);
     assert!(report.read_loop);
-    assert_eq!(report.outcome_turns, 61);
+    assert_eq!(report.outcome_turns, 31);
+    assert_eq!(report.peak_read_repeats, 30);
 
     let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 61);
+    assert_eq!(requests.len(), 31);
     let results_after_3: Vec<&str> = requests[3]
         .messages
         .iter()
