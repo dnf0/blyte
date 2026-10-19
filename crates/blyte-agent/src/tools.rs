@@ -408,13 +408,13 @@ fn resolve_for_read(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, Stri
     if let Ok(p) = resolve_in_workspace(fs, root, raw) {
         return Ok(p);
     }
+    let roots = READ_ROOTS
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
     let p = Path::new(raw);
     if p.is_absolute() {
         let joined = lexically_normalize(p);
-        let roots = READ_ROOTS
-            .read()
-            .map(|r| r.clone())
-            .unwrap_or_else(|e| e.into_inner().clone());
         let mut probe = joined.as_path();
         let probe_c = loop {
             if let Ok(c) = fs.canonicalize(probe) {
@@ -435,7 +435,15 @@ fn resolve_for_read(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, Stri
             }
         }
     }
-    Err(format!("path escapes the workspace: {raw}"))
+    let extra = if roots.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+        format!(" and {}", list.join(", "))
+    };
+    Err(format!(
+        "path escapes the workspace: {raw}. This run can read the workspace{extra}. Do not look for another copy: if the task needs this path, say in your answer that it was not readable."
+    ))
 }
 
 /// Single-quote for `bash -lc`, so a pattern containing spaces, `$` or `"` is passed verbatim.
