@@ -61,6 +61,8 @@ pub struct TaskConfig {
     pub pass_env: Vec<String>,
     /// Whether this is a research run: periodically remind the model to keep report.md updated.
     pub research: bool,
+    /// Research run: check report.md's claims against their cited lines.
+    pub claim_check: bool,
     /// Whether this run is in orchestrate mode (`--orchestrate`).
     pub orchestrate: bool,
     /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool (`--dispatch-cmd`).
@@ -98,6 +100,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             allow_read: cli.allow_read.clone(),
             pass_env: cli.pass_env.clone(),
             research: cli.research,
+            claim_check: cli.claim_check,
             orchestrate: cli.orchestrate,
             dispatch_cmd: cli.dispatch_cmd.clone(),
         }
@@ -462,7 +465,7 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
         rollback: config.rollback,
         on_event: Some(&on_event),
         research: config.research,
-        claim_check: false,
+        claim_check: config.claim_check,
     };
 
     let (outcome, report) = runner.run(state);

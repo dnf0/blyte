@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use blyte_provider::{Message, Provider, ProviderError, Request, Usage};
 
+use crate::claim_check;
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
 use crate::gate_slots;
@@ -134,6 +135,8 @@ pub struct RunReport {
     pub final_message: Option<String>,
     /// Problems with `report.md`'s quotes (`None` when the check did not run, `Some(vec![])` when it passed).
     pub quote_problems: Option<Vec<String>>,
+    /// Model check of `report.md`'s claims against their cited lines (`None` when the check did not run).
+    pub claim_check: Option<claim_check::ClaimCheck>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -652,6 +655,40 @@ impl<'a> Runner<'a> {
         problems
     }
 
+    fn run_claim_check(&self) -> Option<claim_check::ClaimCheck> {
+        if !self.claim_check {
+            return None;
+        }
+        let report = self.fs.read(&self.root.join("report.md")).ok()?;
+        if report.is_empty() {
+            return None;
+        }
+        let read_roots = tools::read_roots();
+        let mut listing = Vec::new();
+        for dir in std::iter::once(&self.root).chain(read_roots.iter()) {
+            if let Ok(o) = self.shell.exec(
+                "git -c core.quotePath=off -c core.fsmonitor=false ls-files -co --exclude-standard",
+                dir,
+                Duration::from_secs(60),
+            ) {
+                if o.exit_code == 0 {
+                    listing.extend(o.stdout.lines().map(|l| dir.join(l)));
+                }
+            }
+        }
+        let read = |p: &Path| self.fs.read(p);
+        let claims = research_check::claims(
+            &report,
+            &research_check::Sources {
+                workspace: &self.root,
+                read_roots: &read_roots,
+                listing: &listing,
+                read: &read,
+            },
+        );
+        Some(claim_check::check_claims(self.provider, &claims))
+    }
+
     fn reset_to(&self, commit: &str) {
         let _ = self.shell.exec(
             &format!("git reset --hard {commit} && git clean -fd"),
@@ -727,6 +764,13 @@ impl<'a> Runner<'a> {
             let mut problems = self.check_report_quotes(&seen_names);
             problems.truncate(research_check::MAX_PROBLEMS);
             report.quote_problems = Some(problems);
+            if let Some(cc) = self.run_claim_check() {
+                report.usage.input += cc.usage.input;
+                report.usage.cached += cc.usage.cached;
+                report.usage.output += cc.usage.output;
+                report.usage.thinking += cc.usage.thinking;
+                report.claim_check = Some(cc);
+            }
         }
 
         if state.runtime.conversation.is_some() {
@@ -759,6 +803,7 @@ impl<'a> Runner<'a> {
         let mut pre_dispatch_calls: u32 = 0;
         let mut has_dispatched = false;
         let mut explore_nudge_sent = false;
+        let mut claim_round_done = false;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -1049,6 +1094,32 @@ impl<'a> Runner<'a> {
                 }
                 problems.truncate(research_check::MAX_PROBLEMS);
                 report.quote_problems = Some(problems);
+                if passed {
+                    if let Some(cc) = self.run_claim_check() {
+                        report.usage.input += cc.usage.input;
+                        report.usage.cached += cc.usage.cached;
+                        report.usage.output += cc.usage.output;
+                        report.usage.thinking += cc.usage.thinking;
+                        if !cc.contradicted.is_empty() && !claim_round_done {
+                            claim_round_done = true;
+                            passed = false;
+                            let mut lines: Vec<String> = cc
+                                .contradicted
+                                .iter()
+                                .map(|f| {
+                                    let text: String = f.text.chars().take(200).collect();
+                                    format!("report.md:{}: {text}\n  checker: {}", f.line, f.reason)
+                                })
+                                .collect();
+                            lines.push(
+                                "These claims do not match the lines they cite. Fix each claim, cite the lines that support it, or remove it."
+                                    .to_string(),
+                            );
+                            output = format!("exit 1\n{}", lines.join("\n"));
+                        }
+                        report.claim_check = Some(cc);
+                    }
+                }
             }
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);

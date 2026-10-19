@@ -555,6 +555,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         cmd.arg("--read-root").arg(&root);
         cmd.arg("--no-gate-slot");
         cmd.arg("--research");
+        if !args.no_claim_check {
+            cmd.arg("--claim-check");
+        }
     }
 
     cmd.arg("--");
@@ -1017,6 +1020,10 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .and_then(|v| v.get("quote_problems"))
         .and_then(|x| x.as_array())
         .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect());
+    let claim_check: Option<blyte_agent::claim_check::ClaimCheck> = report_val
+        .as_ref()
+        .and_then(|v| v.get("claim_check"))
+        .and_then(|x| serde_json::from_value(x.clone()).ok());
 
     let mut checks = crate::review_checks::build(
         task_text.as_deref(),
@@ -1031,6 +1038,14 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             checks.flags.push(format!(
                 "quote check failed ({} problem(s)): see == report",
                 problems.len()
+            ));
+        }
+    }
+    if let Some(ref cc) = claim_check {
+        if !cc.contradicted.is_empty() {
+            checks.flags.push(format!(
+                "claim check: {} contradicted claims",
+                cc.contradicted.len()
             ));
         }
     }
@@ -1091,6 +1106,21 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                     let cut: String = p.chars().take(200).collect();
                     println!("  {cut}");
                 }
+            }
+        }
+        if let Some(ref cc) = claim_check {
+            println!(
+                "claim check: {} checked, {} contradicted, {} not enough evidence, {} parse errors, {} unchecked",
+                cc.checked,
+                cc.contradicted.len(),
+                cc.not_enough_evidence,
+                cc.parse_errors,
+                cc.unchecked
+            );
+            for f in cc.contradicted.iter().take(5) {
+                let cut: String = f.text.chars().take(200).collect();
+                println!("  report.md:{}: {cut}", f.line);
+                println!("    {}", f.reason);
             }
         }
     }
