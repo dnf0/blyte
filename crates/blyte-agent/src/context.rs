@@ -62,7 +62,7 @@ impl Default for Folded {
 }
 
 /// Characters / 4: a budget, not a billing figure.
-fn approx_tokens(m: &Message) -> usize {
+pub fn approx_tokens(m: &Message) -> usize {
     let chars = match m {
         Message::User(t) | Message::Assistant(t) => t.len(),
         Message::ToolCall { arguments, .. } => arguments.to_string().len(),
