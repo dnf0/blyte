@@ -94,7 +94,7 @@ max_turns = 300
 | `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
 
-The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other). The sandbox must then be allowed to read the shared virtualenv: `allow_read = ["$BLYTE_MAIN_CHECKOUT/.venv"]`.
+The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other). The sandbox must then be allowed to read the shared virtualenv: `allow_read = ["$BLYTE_MAIN_CHECKOUT/.venv"]`. If a dispatched task names existing absolute paths outside the repository and every `--allow-read` / `allow_read` root, `blyte dispatch --research` refuses to start (and other dispatches warn on stderr) unless `--no-path-check` is passed.
 
 When `blyte dispatch` uses the gate from `blyte.toml` (not an explicit `--gate` or `--research`),
 it checks whether any check commands run by the repository's CI workflows (`.github/workflows/*.yml`

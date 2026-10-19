@@ -177,6 +177,10 @@ pub struct DispatchArgs {
     #[arg(long = "allow-read")]
     pub allow_read: Vec<PathBuf>,
 
+    /// Start even if the task names paths outside the workspace and --allow-read
+    #[arg(long = "no-path-check")]
+    pub no_path_check: bool,
+
     /// Pass this environment variable to commands (repeatable)
     #[arg(long = "pass-env")]
     pub pass_env: Vec<String>,
