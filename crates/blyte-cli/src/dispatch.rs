@@ -1639,7 +1639,10 @@ pub fn unreadable_paths(text: &str, readable: &[PathBuf]) -> Vec<PathBuf> {
         let Ok(canon) = std::fs::canonicalize(p) else {
             continue;
         };
-        if readable_canon.iter().any(|r| canon.starts_with(r)) {
+        if readable_canon.iter().any(|r| canon.starts_with(r))
+            || is_system_path(p)
+            || is_system_path(&canon)
+        {
             continue;
         }
         let pb = PathBuf::from(trimmed);
@@ -1648,6 +1651,26 @@ pub fn unreadable_paths(text: &str, readable: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// A path no research task means as code to read: the filesystem root, a top-level directory,
+/// or anything under the system directories (`/usr/bin/env`, `/tmp`, `/dev/null`).
+fn is_system_path(p: &Path) -> bool {
+    const SYSTEM: &[&str] = &[
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/etc",
+        "/dev",
+        "/opt",
+        "/System",
+        "/Library",
+        "/Applications",
+        "/nix",
+        "/proc",
+        "/sys",
+    ];
+    p.components().count() <= 2 || SYSTEM.iter().any(|s| p.starts_with(s))
 }
 
 pub fn refused_reads(log_content: &str) -> (usize, Vec<String>) {

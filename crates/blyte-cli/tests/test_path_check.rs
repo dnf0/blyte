@@ -218,3 +218,9 @@ fn review_flags_refused_reads_in_checks() {
         "{stdout}"
     );
 }
+
+#[test]
+fn unreadable_paths_ignores_system_paths() {
+    let text = "run /usr/bin/env, write to /tmp and read /etc/hosts or /dev/null";
+    assert!(unreadable_paths(text, &[]).is_empty());
+}

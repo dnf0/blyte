@@ -704,8 +704,10 @@ impl<'a> Runner<'a> {
             seen_names.extend(research_check::identifiers(goal).map(str::to_owned));
             seen_names
                 .extend(research_check::identifiers(&state.orchestrator.goal).map(str::to_owned));
+            // Tool results only: restored user messages include gate feedback that names the
+            // very identifiers the check flagged.
             for msg in &history {
-                if let Message::ToolResult { content, .. } | Message::User(content) = msg {
+                if let Message::ToolResult { content, .. } = msg {
                     seen_names.extend(research_check::identifiers(content).map(str::to_owned));
                 }
             }
