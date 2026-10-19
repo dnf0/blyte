@@ -34,6 +34,7 @@ fn runner<'a>(p: &'a DoneProvider, root: &std::path::Path) -> Runner<'a> {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     }
 }
 

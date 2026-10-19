@@ -79,6 +79,7 @@ fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut st = State::new("g", "true");
 

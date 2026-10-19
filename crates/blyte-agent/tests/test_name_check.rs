@@ -136,6 +136,7 @@ fn runner_flags_unseen_name_and_allows_name_from_tool_result() {
         rollback: false,
         on_event: None,
         research: true,
+        claim_check: false,
     };
 
     let mut st = State::new("research task", "test -s report.md");

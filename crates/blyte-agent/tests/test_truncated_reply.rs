@@ -81,6 +81,7 @@ fn max_tokens_reply_skips_tool_call_and_adds_harness_note() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
 
     let mut state = State::new("goal", "");
@@ -155,6 +156,7 @@ fn continuation_reply_does_not_run_gate_until_normal_reply() {
         rollback: false,
         on_event: Some(&on_event),
         research: false,
+        claim_check: false,
     };
 
     let mut state = State::new("goal", "true");
@@ -211,6 +213,7 @@ fn normal_stop_behaves_as_before() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
 
     let mut state = State::new("goal", "true");
@@ -254,6 +257,7 @@ fn other_provider_truncation_reasons_and_normal_stops() {
             rollback: false,
             on_event: None,
             research: false,
+            claim_check: false,
         };
         let mut state = State::new("goal", "");
         let (outcome, report) = runner.run(&mut state);
@@ -290,6 +294,7 @@ fn other_provider_truncation_reasons_and_normal_stops() {
             rollback: false,
             on_event: None,
             research: false,
+            claim_check: false,
         };
         let mut state = State::new("goal", "");
         let (outcome, report) = runner.run(&mut state);

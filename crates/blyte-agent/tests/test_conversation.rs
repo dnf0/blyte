@@ -59,6 +59,7 @@ fn second_prompt_continues_the_conversation() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut state = State::new("first", "");
     state.runtime.conversation = Some(Vec::new());
@@ -112,6 +113,7 @@ fn system_prompt_is_stable_across_prompts() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut state = State::new("first", "");
     state.runtime.conversation = Some(Vec::new());
@@ -157,6 +159,7 @@ fn without_conversation_each_run_is_fresh() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut state = State::new("first", "");
     assert_eq!(state.runtime.conversation, None);
@@ -204,6 +207,7 @@ fn conversation_is_stored_after_budget_exhausted() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut state = State::new("read a file", "");
     state.runtime.conversation = Some(Vec::new());

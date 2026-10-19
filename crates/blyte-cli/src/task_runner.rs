@@ -462,6 +462,7 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
         rollback: config.rollback,
         on_event: Some(&on_event),
         research: config.research,
+        claim_check: false,
     };
 
     let (outcome, report) = runner.run(state);

@@ -62,6 +62,7 @@ fn run_with_events(gate: &str, max_gates: u32) -> (Outcome, RunReport, Vec<Recor
         rollback: false,
         on_event: Some(&on_event),
         research: false,
+        claim_check: false,
     };
     let mut state = State::new("goal", gate);
     let (outcome, report) = runner.run(&mut state);
@@ -100,6 +101,7 @@ fn orchestrator_empty_gate_reports_finished() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut state = State::new("orchestrate plan", "");
     state.orchestrator.instructions = Some("orchestrator prompt".into());

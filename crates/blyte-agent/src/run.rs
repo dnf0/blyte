@@ -306,6 +306,8 @@ pub struct Runner<'a> {
     pub on_event: Option<&'a dyn Fn(Event<'_>)>,
     /// Research run: periodically remind the model to keep report.md updated.
     pub research: bool,
+    /// Research runs: check report.md's claims with the run's model (`claim_check`).
+    pub claim_check: bool,
 }
 
 const CLAIM_PHRASES: &[&str] = &[

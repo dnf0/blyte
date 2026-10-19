@@ -59,6 +59,7 @@ fn run(d: &tempfile::TempDir, gate: &str, attempts: u32) -> (Outcome, String) {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut st = State::new("g", gate);
     let (outcome, _) = r.run(&mut st);

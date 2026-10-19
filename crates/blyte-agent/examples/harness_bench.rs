@@ -236,6 +236,7 @@ fn main() {
             rollback: false,
             on_event: Some(&on_event),
             research: false,
+            claim_check: false,
         };
         let _ = runner.run(&mut State::new("benchmark", "true"));
     }

@@ -89,6 +89,7 @@ fn run(context: &dyn ContextStrategy) -> (Outcome, RunReport, Vec<Request>) {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let (outcome, report) = runner.run(&mut State::new("read the files", "true"));
     let seen = p.seen.lock().unwrap().clone();
