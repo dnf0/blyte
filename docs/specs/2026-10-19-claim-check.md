@@ -63,3 +63,13 @@ Added from the fabrication report, deterministic and cheap (Claude's recommendat
   stop already flag what is wrong.
 - Confining research `bash` reads to the read roots: a separate question (sandbox).
 - A cheaper fixed checker model: unmeasured.
+
+## Data after the `--allow-read` fix (repos session, 2026-10-19)
+
+Redispatched with the right `--allow-read` (R5b–R9b: 0 refused reads), the runs still named
+identifiers found nowhere in the three pinned trees (`grep -rF`): 1/92, 6/105, 14/116, ~16/100,
+~20/91. Most are near-misses (`asset_hazard_run_summaries` for `asset_hazard_run_summary`,
+`calculate_rp_Losses` for `add_rp_based_losses`, invented `FETCH_*` constants). So the name check is
+needed even when every path is readable. Follow-up, not built: label names seen only in an input
+file under review (a draft the run was asked to correct) as coming from the input, rather than
+letting them pass silently.
