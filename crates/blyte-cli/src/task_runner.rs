@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Fold budget for research runs, which quote code read many turns before they write it up.
-/// Twice the default; prompts stay under 200k tokens.
-pub const RESEARCH_FOLD_BUDGET: usize = 96_000;
+/// High enough that folding is only a safety net: unfolded research runs were cheaper, shorter and
+/// invented fewer names than runs folded at 96k (`docs/specs/2026-10-19-claim-check.md`, FX).
+pub const RESEARCH_FOLD_BUDGET: usize = 180_000;
 
 /// Tracks turn and gate progress across the run, for the deadline watchdog.
 #[derive(Debug, Default, Clone, Copy)]
@@ -61,6 +62,8 @@ pub struct TaskConfig {
     pub pass_env: Vec<String>,
     /// Whether this is a research run: periodically remind the model to keep report.md updated.
     pub research: bool,
+    /// Research run: check report.md's claims against their cited lines.
+    pub claim_check: bool,
     /// Whether this run is in orchestrate mode (`--orchestrate`).
     pub orchestrate: bool,
     /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool (`--dispatch-cmd`).
@@ -98,6 +101,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             allow_read: cli.allow_read.clone(),
             pass_env: cli.pass_env.clone(),
             research: cli.research,
+            claim_check: cli.claim_check,
             orchestrate: cli.orchestrate,
             dispatch_cmd: cli.dispatch_cmd.clone(),
         }
@@ -462,6 +466,7 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
         rollback: config.rollback,
         on_event: Some(&on_event),
         research: config.research,
+        claim_check: config.claim_check,
     };
 
     let (outcome, report) = runner.run(state);

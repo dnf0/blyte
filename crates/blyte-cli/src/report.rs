@@ -71,6 +71,14 @@ pub struct RunRecord {
     pub empty_turns: u32,
     #[serde(default)]
     pub truncated_turns: u32,
+    #[serde(default)]
+    pub read_loop: bool,
+    #[serde(default)]
+    pub peak_read_repeats: u32,
+    #[serde(default)]
+    pub fold_thrash: bool,
+    #[serde(default)]
+    pub big_read_turns: u32,
     pub tool_calls: u32,
     pub gate_attempts: u32,
     pub rollbacks: u32,
@@ -97,6 +105,8 @@ pub struct RunRecord {
     pub gate_seconds: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote_problems: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_check: Option<blyte_agent::claim_check::ClaimCheck>,
 }
 
 impl RunRecord {
@@ -138,6 +148,10 @@ impl RunRecord {
             turns: 0,
             empty_turns: 0,
             truncated_turns: 0,
+            read_loop: false,
+            peak_read_repeats: 0,
+            fold_thrash: false,
+            big_read_turns: 0,
             tool_calls: 0,
             gate_attempts: 0,
             rollbacks: 0,
@@ -157,6 +171,7 @@ impl RunRecord {
             tools_seconds: 0.0,
             gate_seconds: 0.0,
             quote_problems: None,
+            claim_check: None,
         }
     }
 
@@ -189,6 +204,10 @@ impl RunRecord {
             turns: report.outcome_turns,
             empty_turns: report.empty_turns,
             truncated_turns: report.truncated_turns,
+            read_loop: report.read_loop,
+            peak_read_repeats: report.peak_read_repeats,
+            fold_thrash: report.fold_thrash,
+            big_read_turns: report.big_read_turns,
             tool_calls: report.tool_calls,
             gate_attempts: report.gate_attempts,
             rollbacks: state.runtime.rollbacks,
@@ -211,6 +230,7 @@ impl RunRecord {
             tools_seconds: tools_ms as f64 / 1000.0,
             gate_seconds: gate_ms_sum as f64 / 1000.0,
             quote_problems: report.quote_problems.clone(),
+            claim_check: report.claim_check.clone(),
             ..Self::base(config, elapsed)
         }
     }

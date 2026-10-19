@@ -56,6 +56,7 @@ fn the_warning_arrives_once_ten_turns_before_the_end() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
     let mut st = State::new("g", "true");
     let (outcome, _) = r.run(&mut st);

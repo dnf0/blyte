@@ -18,10 +18,11 @@ fn read_roots_are_readable_and_never_writable() {
     let dir = code.to_string_lossy().to_string();
 
     let before = execute(&ws, &LocalShell, &LocalFs, "read", &json!({"path": file}));
-    assert!(
-        before.content.contains("escapes the workspace"),
-        "{}",
-        before.content
+    assert_eq!(
+        before.content,
+        format!(
+            "path escapes the workspace: {file}. This run can read the workspace. Do not look for another copy: if the task needs this path, say in your answer that it was not readable."
+        )
     );
 
     set_read_roots(vec![code.clone()]);
@@ -43,11 +44,7 @@ fn read_roots_are_readable_and_never_writable() {
         "write",
         &json!({"path": file, "content": "x"}),
     );
-    assert!(
-        write.content.contains("escapes the workspace"),
-        "{}",
-        write.content
-    );
+    assert_eq!(write.content, format!("path escapes the workspace: {file}"));
     assert!(std::fs::read_to_string(code.join("src/lib.rs"))
         .unwrap()
         .contains("42"));
@@ -60,10 +57,13 @@ fn read_roots_are_readable_and_never_writable() {
         "read",
         &json!({"path": outside.to_string_lossy()}),
     );
-    assert!(
-        other.content.contains("escapes the workspace"),
-        "{}",
-        other.content
+    assert_eq!(
+        other.content,
+        format!(
+            "path escapes the workspace: {}. This run can read the workspace and {}. Do not look for another copy: if the task needs this path, say in your answer that it was not readable.",
+            outside.display(),
+            code.display()
+        )
     );
     set_read_roots(vec![]);
 }

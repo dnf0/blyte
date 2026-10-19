@@ -94,7 +94,7 @@ max_turns = 300
 | `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
 
-The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other). The sandbox must then be allowed to read the shared virtualenv: `allow_read = ["$BLYTE_MAIN_CHECKOUT/.venv"]`.
+The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other). The sandbox must then be allowed to read the shared virtualenv: `allow_read = ["$BLYTE_MAIN_CHECKOUT/.venv"]`. If a dispatched task names existing absolute paths outside the repository and every `--allow-read` / `allow_read` root, `blyte dispatch --research` refuses to start (and other dispatches warn on stderr) unless `--no-path-check` is passed.
 
 When `blyte dispatch` uses the gate from `blyte.toml` (not an explicit `--gate` or `--research`),
 it checks whether any check commands run by the repository's CI workflows (`.github/workflows/*.yml`
@@ -333,13 +333,22 @@ non-empty report was written, followed by a quote check that blyte runs itself:
 - a code block with no citation fails if it is tagged with a language or its lines are numbered.
   Blocks tagged `proposed`, `diff` or `patch`, commands and output (`bash`, `sh`, `console`,
   `text`, `output`, ...) and untagged plain blocks are not checked;
-- a cited source file (`.py`, `.rs`, `.tf`, ...) must exist even when given without a directory.
+- a cited source file (`.py`, `.rs`, `.tf`, ...) must exist even when given without a directory;
+- every code-like identifier in a backticked span in prose (containing `_`, an inner capital, `.`
+  between identifiers, or followed by `(`) must appear in the task or a tool result the run saw.
 
-A failed check is a failed gate: the model gets the list of mismatches and fixes the report. If a
-run stops early without passing the gate, blyte still quote-checks `report.md` and `blyte review`
-shows the result.
-Research runs fold their context at 96K tokens instead of 48K (unless `--fold-budget` is given), so
-the code the model read is still in context when it writes the report. Paths given with
+A failed check is a failed gate: the model gets the list of mismatches and fixes the report. After
+the quote check passes, blyte also runs a model claim check on `report.md` (unless
+`--no-claim-check` is passed to `blyte dispatch`), verifying each prose claim against the file and
+lines it cites (`supported`, `contradicted`, or `not_enough_evidence`). If any claim is
+contradicted, the gate fails once so the model gets one fix round to correct the claim, cite the
+supporting lines, or remove it; any claims still contradicted after that round are kept on the
+report instead of failing the gate again. If a run stops early without passing the gate, blyte
+still runs the quote and claim checks on `report.md` and `blyte review` shows the results (including
+the `claim check: N checked, K contradicted, ...` summary, up to 5 contradicted claims with the
+checker's reason, and a `! claim check: K contradicted claims` flag under `== checks`).
+Research runs fold their context at 180K tokens instead of 48K (unless `--fold-budget` is given), so
+the code the model read is still in context when it writes the report; most research runs never fold. Paths given with
 `--allow-read` (or `[dispatch] allow_read`) are read roots too, for every dispatch. When finished, the report is copied to `.wt/<id>.report.md` (and to
 `--report-to` when given), and `blyte review <id>` displays its contents. Research runs default to
 300 turns and 30 minutes (ignoring `blyte.toml`'s budget, though explicit `--max-turns` and

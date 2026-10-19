@@ -19,12 +19,13 @@
 //! solve (EXP-059). Rollback is on by default and switchable, because it is not free -- one run
 //! reset a worker's committed feature five times (FINDINGS 13.2).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use blyte_provider::{Message, Provider, ProviderError, Request, Usage};
 
+use crate::claim_check;
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
 use crate::gate_slots;
@@ -112,6 +113,14 @@ pub struct RunReport {
     pub empty_turns: u32,
     /// Turns whose reply hit the output token limit and was cut off.
     pub truncated_turns: u32,
+    /// Whether the run stopped because it kept repeating read/grep/glob calls without changing the workspace.
+    pub read_loop: bool,
+    /// Most repeated read/grep/glob calls seen between two workspace changes (the read-loop count).
+    pub peak_read_repeats: u32,
+    /// Whether the run stopped because consecutive turns kept folding the previous turn's results.
+    pub fold_thrash: bool,
+    /// Turns whose tool output exceeded half of the fold budget.
+    pub big_read_turns: u32,
     pub tool_calls: u32,
     pub gate_attempts: u32,
     /// Transient provider failures (rate limits, overload) waited out during the run.
@@ -134,6 +143,8 @@ pub struct RunReport {
     pub final_message: Option<String>,
     /// Problems with `report.md`'s quotes (`None` when the check did not run, `Some(vec![])` when it passed).
     pub quote_problems: Option<Vec<String>>,
+    /// Model check of `report.md`'s claims against their cited lines (`None` when the check did not run).
+    pub claim_check: Option<claim_check::ClaimCheck>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -180,6 +191,9 @@ pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
 /// Tool calls an orchestrator may make before its first dispatch without getting a reminder (2026-10-15 Argon benchmark).
 pub const ORCHESTRATOR_EXPLORE_NUDGE: u32 = 8;
+
+/// Repeated read/grep/glob calls without a workspace change allowed before ending the run.
+const READ_LOOP_LIMIT: u32 = 30;
 
 fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
     call.name == "dispatch"
@@ -306,6 +320,8 @@ pub struct Runner<'a> {
     pub on_event: Option<&'a dyn Fn(Event<'_>)>,
     /// Research run: periodically remind the model to keep report.md updated.
     pub research: bool,
+    /// Research runs: check report.md's claims with the run's model (`claim_check`).
+    pub claim_check: bool,
 }
 
 const CLAIM_PHRASES: &[&str] = &[
@@ -616,8 +632,8 @@ impl<'a> Runner<'a> {
         (out.exit_code == 0).then(|| out.stdout.trim().to_string())
     }
 
-    /// Problems with report.md's quotes and line citations (see `research_check`).
-    fn check_report_quotes(&self) -> Vec<String> {
+    /// Problems with report.md's quotes, line citations and unseen names (see `research_check`).
+    fn check_report_quotes(&self, seen_names: &HashSet<String>) -> Vec<String> {
         let Ok(report) = self.fs.read(&self.root.join("report.md")) else {
             return Vec::new();
         };
@@ -637,7 +653,7 @@ impl<'a> Runner<'a> {
             }
         }
         let read = |p: &Path| self.fs.read(p);
-        research_check::check(
+        let mut problems = research_check::check(
             &report,
             &research_check::Sources {
                 workspace: &self.root,
@@ -645,7 +661,43 @@ impl<'a> Runner<'a> {
                 listing: &listing,
                 read: &read,
             },
-        )
+        );
+        problems.extend(research_check::unseen_names(&report, seen_names));
+        problems
+    }
+
+    fn run_claim_check(&self) -> Option<claim_check::ClaimCheck> {
+        if !self.claim_check {
+            return None;
+        }
+        let report = self.fs.read(&self.root.join("report.md")).ok()?;
+        if report.is_empty() {
+            return None;
+        }
+        let read_roots = tools::read_roots();
+        let mut listing = Vec::new();
+        for dir in std::iter::once(&self.root).chain(read_roots.iter()) {
+            if let Ok(o) = self.shell.exec(
+                "git -c core.quotePath=off -c core.fsmonitor=false ls-files -co --exclude-standard",
+                dir,
+                Duration::from_secs(60),
+            ) {
+                if o.exit_code == 0 {
+                    listing.extend(o.stdout.lines().map(|l| dir.join(l)));
+                }
+            }
+        }
+        let read = |p: &Path| self.fs.read(p);
+        let claims = research_check::claims(
+            &report,
+            &research_check::Sources {
+                workspace: &self.root,
+                read_roots: &read_roots,
+                listing: &listing,
+                read: &read,
+            },
+        );
+        Some(claim_check::check_claims(self.provider, &claims))
     }
 
     fn reset_to(&self, commit: &str) {
@@ -697,7 +749,22 @@ impl<'a> Runner<'a> {
         };
         let system = self.system_prompt(state, goal);
 
-        let (outcome, mut report) = self.run_loop(state, &mut history, &system, deadline);
+        let mut seen_names = HashSet::new();
+        if self.research {
+            seen_names.extend(research_check::identifiers(goal).map(str::to_owned));
+            seen_names
+                .extend(research_check::identifiers(&state.orchestrator.goal).map(str::to_owned));
+            // Tool results only: restored user messages include gate feedback that names the
+            // very identifiers the check flagged.
+            for msg in &history {
+                if let Message::ToolResult { content, .. } = msg {
+                    seen_names.extend(research_check::identifiers(content).map(str::to_owned));
+                }
+            }
+        }
+
+        let (outcome, mut report) =
+            self.run_loop(state, &mut history, &mut seen_names, &system, deadline);
         if self.research
             && outcome != Outcome::Verified
             && self
@@ -705,9 +772,16 @@ impl<'a> Runner<'a> {
                 .read(&self.root.join("report.md"))
                 .is_ok_and(|s| !s.is_empty())
         {
-            let mut problems = self.check_report_quotes();
+            let mut problems = self.check_report_quotes(&seen_names);
             problems.truncate(research_check::MAX_PROBLEMS);
             report.quote_problems = Some(problems);
+            if let Some(cc) = self.run_claim_check() {
+                report.usage.input += cc.usage.input;
+                report.usage.cached += cc.usage.cached;
+                report.usage.output += cc.usage.output;
+                report.usage.thinking += cc.usage.thinking;
+                report.claim_check = Some(cc);
+            }
         }
 
         if state.runtime.conversation.is_some() {
@@ -721,6 +795,7 @@ impl<'a> Runner<'a> {
         &self,
         state: &mut State,
         history: &mut Vec<Message>,
+        seen_names: &mut HashSet<String>,
         system: &str,
         deadline: Option<std::time::Instant>,
     ) -> (Outcome, RunReport) {
@@ -731,6 +806,9 @@ impl<'a> Runner<'a> {
         let mut last_sent: Option<Vec<Message>> = None;
         let mut last_failed: Vec<String> = Vec::new();
         let mut last_fingerprint: Option<String> = None;
+        let mut call_counts: HashMap<String, u32> = HashMap::new();
+        let mut repeats: u32 = 0;
+        let mut change_fp = self.fingerprint();
         let mut last_report = if self.research {
             self.fs.read(&self.root.join("report.md")).ok()
         } else {
@@ -739,6 +817,10 @@ impl<'a> Runner<'a> {
         let mut pre_dispatch_calls: u32 = 0;
         let mut has_dispatched = false;
         let mut explore_nudge_sent = false;
+        let mut claim_round_done = false;
+        let mut prev_turn_start: Option<usize> = None;
+        let mut thrash: u32 = 0;
+        let mut last_big_read_warn: Option<u32> = None;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -753,6 +835,7 @@ impl<'a> Runner<'a> {
                 }
             }
             report.outcome_turns = turn;
+            let turn_start = history.len();
 
             if self.budget.max_turns >= 20 && turn == self.budget.max_turns - 9 {
                 history.push(Message::User(format!(
@@ -784,6 +867,47 @@ impl<'a> Runner<'a> {
                 )));
             }
 
+            let fold_budget = self.context.fold_budget(history);
+            if let Some(prev_start) = prev_turn_start {
+                if let Some(budget) = fold_budget {
+                    let n: usize = history[prev_start..]
+                        .iter()
+                        .filter(|m| matches!(m, Message::ToolResult { .. }))
+                        .map(crate::context::approx_tokens)
+                        .sum();
+                    if n > budget / 2 {
+                        report.big_read_turns += 1;
+                        if last_big_read_warn.is_none_or(|last| turn >= last + 5) {
+                            last_big_read_warn = Some(turn);
+                            history.push(Message::User(format!(
+                                "[blyte] Your last turn's tool output was about {n} tokens, more than half of what stays in context ({budget}). Read narrower ranges so it is not dropped before you use it."
+                            )));
+                        }
+                    }
+                }
+                if self
+                    .context
+                    .folds(history)
+                    .last()
+                    .is_some_and(|&(_, b)| b + 1 > prev_start)
+                {
+                    thrash += 1;
+                    if thrash >= 5 {
+                        report.fold_thrash = true;
+                        return (Outcome::BudgetExhausted, report);
+                    }
+                    if thrash == 2 {
+                        let budget = fold_budget.unwrap_or_default();
+                        history.push(Message::User(format!(
+                            "[blyte] Your recent tool results are being dropped from your context because each turn reads more than fits (about {budget} tokens stay verbatim). Read narrower ranges (at most 200 lines), one or two files per turn, and act on what you have read before reading more."
+                        )));
+                    }
+                } else {
+                    thrash = 0;
+                }
+            }
+            prev_turn_start = Some(turn_start);
+
             let req = Request {
                 system: system.to_string(),
                 messages: self.context.build(state, history),
@@ -802,7 +926,6 @@ impl<'a> Runner<'a> {
                 }
                 _ => (false, req.messages.iter().map(message_chars).sum()),
             };
-            let fold_budget = self.context.fold_budget(history);
             last_sent = Some(req.messages.clone());
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.
@@ -909,6 +1032,12 @@ impl<'a> Runner<'a> {
                         signature: call.signature.clone(),
                     });
                 }
+                let current_fp = self.fingerprint();
+                if current_fp != change_fp {
+                    call_counts.clear();
+                    repeats = 0;
+                    change_fp = current_fp;
+                }
                 for call in &resp.tool_calls {
                     report.tool_calls += 1;
                     *report.tool_counts.entry(call.name.clone()).or_default() += 1;
@@ -918,7 +1047,7 @@ impl<'a> Runner<'a> {
                         pre_dispatch_calls += 1;
                     }
 
-                    let outcome = tools::execute(
+                    let mut outcome = tools::execute(
                         &self.root,
                         self.shell,
                         self.fs,
@@ -966,12 +1095,41 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
 
+                    if self.research {
+                        seen_names.extend(
+                            research_check::identifiers(&outcome.content).map(str::to_owned),
+                        );
+                    }
+                    if !outcome.is_error && matches!(call.name.as_str(), "edit" | "write") {
+                        call_counts.clear();
+                        repeats = 0;
+                    } else if matches!(call.name.as_str(), "read" | "grep" | "glob") {
+                        let key = format!("{}:{}", call.name, call.arguments);
+                        let n = call_counts.entry(key).or_insert(0);
+                        *n += 1;
+                        let n = *n;
+                        if n >= 2 {
+                            repeats += 1;
+                            report.peak_read_repeats = report.peak_read_repeats.max(repeats);
+                        }
+                        if n >= 3 {
+                            outcome.content.push_str(&format!(
+                                "\n\n[blyte] You have made this exact call {n} times since the workspace last changed; earlier results were dropped from your context to save space. Do not read it again: note what you need from it in your reply, read only the lines you need, and make your change."
+                            ));
+                        }
+                    }
                     history.push(Message::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         content: outcome.content,
                         is_error: outcome.is_error,
                     });
+                    if repeats >= READ_LOOP_LIMIT {
+                        report.turn_usage.last_mut().unwrap().tools_ms =
+                            tools_start.elapsed().as_millis() as u64;
+                        report.read_loop = true;
+                        return (Outcome::BudgetExhausted, report);
+                    }
                 }
                 report.turn_usage.last_mut().unwrap().tools_ms =
                     tools_start.elapsed().as_millis() as u64;
@@ -1017,13 +1175,39 @@ impl<'a> Runner<'a> {
             let (mut passed, mut output, wait_ms, failing) = self.run_gate(state, &last_failed);
             last_failed = failing;
             if passed && self.research {
-                let mut problems = self.check_report_quotes();
+                let mut problems = self.check_report_quotes(seen_names);
                 if !problems.is_empty() {
                     passed = false;
                     output = format!("exit 1\n{}", research_check::render(&problems));
                 }
                 problems.truncate(research_check::MAX_PROBLEMS);
                 report.quote_problems = Some(problems);
+                if passed {
+                    if let Some(cc) = self.run_claim_check() {
+                        report.usage.input += cc.usage.input;
+                        report.usage.cached += cc.usage.cached;
+                        report.usage.output += cc.usage.output;
+                        report.usage.thinking += cc.usage.thinking;
+                        if !cc.contradicted.is_empty() && !claim_round_done {
+                            claim_round_done = true;
+                            passed = false;
+                            let mut lines: Vec<String> = cc
+                                .contradicted
+                                .iter()
+                                .map(|f| {
+                                    let text: String = f.text.chars().take(200).collect();
+                                    format!("report.md:{}: {text}\n  checker: {}", f.line, f.reason)
+                                })
+                                .collect();
+                            lines.push(
+                                "These claims do not match the lines they cite. Fix each claim, cite the lines that support it, or remove it."
+                                    .to_string(),
+                            );
+                            output = format!("exit 1\n{}", lines.join("\n"));
+                        }
+                        report.claim_check = Some(cc);
+                    }
+                }
             }
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);

@@ -76,6 +76,7 @@ fn research_stop_check_flags_mismatched_quote_on_budget_exhausted() {
         rollback: false,
         on_event: None,
         research: true,
+        claim_check: false,
     };
 
     let mut st = State::new("research task", "test -s report.md");
@@ -116,6 +117,7 @@ fn research_stop_check_passes_matching_quote_on_budget_exhausted() {
         rollback: false,
         on_event: None,
         research: true,
+        claim_check: false,
     };
 
     let mut st = State::new("research task", "test -s report.md");
@@ -149,6 +151,7 @@ fn non_research_run_out_of_turns_has_no_quote_check() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
 
     let mut st = State::new("task", "true");
@@ -180,6 +183,7 @@ fn research_run_without_report_has_no_quote_check() {
         rollback: false,
         on_event: None,
         research: true,
+        claim_check: false,
     };
 
     let mut st = State::new("research task", "test -s report.md");
@@ -238,6 +242,7 @@ fn verified_research_run_records_empty_quote_problems() {
         rollback: false,
         on_event: None,
         research: true,
+        claim_check: false,
     };
 
     let mut st = State::new("research task", "test -s report.md");

@@ -61,6 +61,7 @@ fn transport_timeout_is_retried_and_fails_after_retry_limit() {
         rollback: false,
         on_event: None,
         research: false,
+        claim_check: false,
     };
 
     let mut st = State::new("goal", "true");

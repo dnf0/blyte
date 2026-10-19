@@ -120,6 +120,10 @@ Details that matter:
 - **Empty turns are counted.** In the harness blyte replaced, 47.6% of all input tokens went to
   turns that only waited on a background job, so the report records turns that produced neither
   text nor a tool call.
+- **Repeated reads without a workspace change are warned and then stopped.** Identical `read`,
+  `grep` or `glob` calls since the workspace last changed get a harness note from the 3rd call on,
+  and when repeats reach 30 the run stops as `budget_exhausted` with `read_loop` set to `true`;
+  `peak_read_repeats` in the run report records the highest count, to tune the limit.
 
 A run ends in one of four outcomes: `verified` (the gate passed; the only success),
 `gate_failed` (the gate failed `--max-gates` times), `budget_exhausted`, or `error` (the provider

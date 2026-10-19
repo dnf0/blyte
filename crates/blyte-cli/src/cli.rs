@@ -177,6 +177,14 @@ pub struct DispatchArgs {
     #[arg(long = "allow-read")]
     pub allow_read: Vec<PathBuf>,
 
+    /// Start even if the task names paths outside the workspace and --allow-read
+    #[arg(long = "no-path-check")]
+    pub no_path_check: bool,
+
+    /// Skip the model claim check on report.md for research runs
+    #[arg(long = "no-claim-check")]
+    pub no_claim_check: bool,
+
     /// Pass this environment variable to commands (repeatable)
     #[arg(long = "pass-env")]
     pub pass_env: Vec<String>,
@@ -456,6 +464,10 @@ pub struct Cli {
     /// Whether this is a research run: periodically remind the model to keep report.md updated
     #[arg(long)]
     pub research: bool,
+
+    /// Research run: check report.md's claims against their cited lines
+    #[arg(long = "claim-check")]
+    pub claim_check: bool,
 }
 
 /// Turn and context defaults for `--orchestrate`. A flag the user gave explicitly wins.

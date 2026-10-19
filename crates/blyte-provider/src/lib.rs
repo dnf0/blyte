@@ -248,7 +248,7 @@ pub struct ToolCall {
 /// the entire economics of a long run: EXP-081 recorded a single turn at 1,384,188 input tokens
 /// against 15,327,627 cached. A harness that cannot see both numbers cannot tell an expensive
 /// turn from a well-cached one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input: u64,
     pub cached: u64,

@@ -253,6 +253,41 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     };
 
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
+    let config_allow_read = match crate::config::expand_allow_read(
+        &dispatch_cfg.allow_read,
+        home.as_deref(),
+        &main_checkout,
+    ) {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    if !args.no_path_check {
+        let mut readable = vec![root.clone(), main_checkout.clone()];
+        readable.extend(config_allow_read.iter().cloned());
+        readable.extend(args.allow_read.iter().cloned());
+        let bad = unreadable_paths(&task_content, &readable);
+        if !bad.is_empty() {
+            let shown: Vec<String> = bad
+                .iter()
+                .take(5)
+                .map(|p| p.display().to_string())
+                .collect();
+            eprintln!(
+                "blyte: the task names paths this run cannot read: {}. Add --allow-read <dir> for each (or --no-path-check to start anyway).",
+                shown.join(", ")
+            );
+            if args.research {
+                return 2;
+            }
+        }
+    }
+
     let wt_parent = root.join(".wt");
     let worktree_dir = wt_parent.join(&args.id);
     let branch = format!("wip/{}", args.id);
@@ -503,19 +538,6 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
     cmd.arg("--sandbox").arg(&args.sandbox);
     cmd.arg("--network").arg(network);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
-    let config_allow_read = match crate::config::expand_allow_read(
-        &dispatch_cfg.allow_read,
-        home.as_deref(),
-        &main_checkout,
-    ) {
-        Ok(paths) => paths,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
     for r in &config_allow_read {
         cmd.arg("--allow-read").arg(r);
     }
@@ -533,6 +555,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         cmd.arg("--read-root").arg(&root);
         cmd.arg("--no-gate-slot");
         cmd.arg("--research");
+        if !args.no_claim_check {
+            cmd.arg("--claim-check");
+        }
     }
 
     cmd.arg("--");
@@ -968,17 +993,19 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .unwrap_or_default();
 
     let log_file = root.join(".wt").join(format!("{}.log", args.id));
-    let (hcmds, reads) = if let Ok(log_content) = std::fs::read_to_string(&log_file) {
-        let hcmds = host_commands(&log_content);
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let allowed = [root.clone(), wt.clone()];
-        let reads = outside_reads(&log_content, &allowed, &home);
-        (hcmds, reads)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let (hcmds, reads, (refused_count, refused_paths)) =
+        if let Ok(log_content) = std::fs::read_to_string(&log_file) {
+            let hcmds = host_commands(&log_content);
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/"));
+            let allowed = [root.clone(), wt.clone()];
+            let reads = outside_reads(&log_content, &allowed, &home);
+            let refused = refused_reads(&log_content);
+            (hcmds, reads, refused)
+        } else {
+            (Vec::new(), Vec::new(), (0, Vec::new()))
+        };
 
     let report_file = root.join(".wt").join(format!("{}.report.json", args.id));
     let report_val = std::fs::read_to_string(&report_file)
@@ -993,6 +1020,15 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .and_then(|v| v.get("quote_problems"))
         .and_then(|x| x.as_array())
         .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect());
+    let read_loop = report_val
+        .as_ref()
+        .and_then(|v| v.get("read_loop"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let claim_check: Option<blyte_agent::claim_check::ClaimCheck> = report_val
+        .as_ref()
+        .and_then(|v| v.get("claim_check"))
+        .and_then(|x| serde_json::from_value(x.clone()).ok());
 
     let mut checks = crate::review_checks::build(
         task_text.as_deref(),
@@ -1009,6 +1045,27 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                 problems.len()
             ));
         }
+    }
+    if read_loop {
+        checks.flags.push(
+            "read loop: the run kept re-reading the same files without changing anything and was stopped"
+                .to_string(),
+        );
+    }
+    if let Some(ref cc) = claim_check {
+        if !cc.contradicted.is_empty() {
+            checks.flags.push(format!(
+                "claim check: {} contradicted claims",
+                cc.contradicted.len()
+            ));
+        }
+    }
+    if refused_count > 0 {
+        let first_3: Vec<&str> = refused_paths.iter().take(3).map(|s| s.as_str()).collect();
+        checks.flags.push(format!(
+            "refused reads: {refused_count} (outside the workspace and --allow-read): {}",
+            first_3.join(", ")
+        ));
     }
 
     println!("== checks");
@@ -1060,6 +1117,21 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                     let cut: String = p.chars().take(200).collect();
                     println!("  {cut}");
                 }
+            }
+        }
+        if let Some(ref cc) = claim_check {
+            println!(
+                "claim check: {} checked, {} contradicted, {} not enough evidence, {} parse errors, {} unchecked",
+                cc.checked,
+                cc.contradicted.len(),
+                cc.not_enough_evidence,
+                cc.parse_errors,
+                cc.unchecked
+            );
+            for f in cc.contradicted.iter().take(5) {
+                let cut: String = f.text.chars().take(200).collect();
+                println!("  report.md:{}: {cut}", f.line);
+                println!("    {}", f.reason);
             }
         }
     }
@@ -1581,6 +1653,89 @@ pub fn run_status(id: &str, json: bool) -> i32 {
         "running" | "finished" => 0,
         _ => 1,
     }
+}
+
+pub fn unreadable_paths(text: &str, readable: &[PathBuf]) -> Vec<PathBuf> {
+    let readable_canon: Vec<PathBuf> = readable
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    let mut out = Vec::new();
+    for raw in text.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+            )
+    }) {
+        let trimmed = raw.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        if !trimmed.starts_with('/')
+            || trimmed.starts_with("//")
+            || trimmed.len() <= 1
+            || trimmed == "/dev/null"
+        {
+            continue;
+        }
+        let p = Path::new(trimmed);
+        let Ok(canon) = std::fs::canonicalize(p) else {
+            continue;
+        };
+        if readable_canon.iter().any(|r| canon.starts_with(r))
+            || is_system_path(p)
+            || is_system_path(&canon)
+        {
+            continue;
+        }
+        let pb = PathBuf::from(trimmed);
+        if !out.contains(&pb) {
+            out.push(pb);
+        }
+    }
+    out
+}
+
+/// A path no research task means as code to read: the filesystem root, a top-level directory,
+/// or anything under the system directories (`/usr/bin/env`, `/tmp`, `/dev/null`).
+fn is_system_path(p: &Path) -> bool {
+    const SYSTEM: &[&str] = &[
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/etc",
+        "/dev",
+        "/opt",
+        "/System",
+        "/Library",
+        "/Applications",
+        "/nix",
+        "/proc",
+        "/sys",
+    ];
+    p.components().count() <= 2 || SYSTEM.iter().any(|s| p.starts_with(s))
+}
+
+pub fn refused_reads(log_content: &str) -> (usize, Vec<String>) {
+    let mut count = 0;
+    let mut paths = Vec::new();
+    for line in log_content.lines() {
+        if !line.contains("path escapes the workspace") {
+            continue;
+        }
+        count += 1;
+        if let Some((_, after)) = line.split_once("path escapes the workspace:") {
+            let after = after.trim_start();
+            let after = after.split("\x1b[").next().unwrap_or(after);
+            let path = after
+                .split(". This run can read")
+                .next()
+                .unwrap_or(after)
+                .trim();
+            if !path.is_empty() && !paths.iter().any(|p| p == path) {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    (count, paths)
 }
 
 #[cfg(test)]
