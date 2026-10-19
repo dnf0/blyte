@@ -19,7 +19,7 @@
 //! solve (EXP-059). Rollback is on by default and switchable, because it is not free -- one run
 //! reset a worker's committed feature five times (FINDINGS 13.2).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -616,8 +616,8 @@ impl<'a> Runner<'a> {
         (out.exit_code == 0).then(|| out.stdout.trim().to_string())
     }
 
-    /// Problems with report.md's quotes and line citations (see `research_check`).
-    fn check_report_quotes(&self) -> Vec<String> {
+    /// Problems with report.md's quotes, line citations and unseen names (see `research_check`).
+    fn check_report_quotes(&self, seen_names: &HashSet<String>) -> Vec<String> {
         let Ok(report) = self.fs.read(&self.root.join("report.md")) else {
             return Vec::new();
         };
@@ -637,7 +637,7 @@ impl<'a> Runner<'a> {
             }
         }
         let read = |p: &Path| self.fs.read(p);
-        research_check::check(
+        let mut problems = research_check::check(
             &report,
             &research_check::Sources {
                 workspace: &self.root,
@@ -645,7 +645,9 @@ impl<'a> Runner<'a> {
                 listing: &listing,
                 read: &read,
             },
-        )
+        );
+        problems.extend(research_check::unseen_names(&report, seen_names));
+        problems
     }
 
     fn reset_to(&self, commit: &str) {
@@ -697,7 +699,20 @@ impl<'a> Runner<'a> {
         };
         let system = self.system_prompt(state, goal);
 
-        let (outcome, mut report) = self.run_loop(state, &mut history, &system, deadline);
+        let mut seen_names = HashSet::new();
+        if self.research {
+            seen_names.extend(research_check::identifiers(goal).map(str::to_owned));
+            seen_names
+                .extend(research_check::identifiers(&state.orchestrator.goal).map(str::to_owned));
+            for msg in &history {
+                if let Message::ToolResult { content, .. } | Message::User(content) = msg {
+                    seen_names.extend(research_check::identifiers(content).map(str::to_owned));
+                }
+            }
+        }
+
+        let (outcome, mut report) =
+            self.run_loop(state, &mut history, &mut seen_names, &system, deadline);
         if self.research
             && outcome != Outcome::Verified
             && self
@@ -705,7 +720,7 @@ impl<'a> Runner<'a> {
                 .read(&self.root.join("report.md"))
                 .is_ok_and(|s| !s.is_empty())
         {
-            let mut problems = self.check_report_quotes();
+            let mut problems = self.check_report_quotes(&seen_names);
             problems.truncate(research_check::MAX_PROBLEMS);
             report.quote_problems = Some(problems);
         }
@@ -721,6 +736,7 @@ impl<'a> Runner<'a> {
         &self,
         state: &mut State,
         history: &mut Vec<Message>,
+        seen_names: &mut HashSet<String>,
         system: &str,
         deadline: Option<std::time::Instant>,
     ) -> (Outcome, RunReport) {
@@ -966,6 +982,11 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
 
+                    if self.research {
+                        seen_names.extend(
+                            research_check::identifiers(&outcome.content).map(str::to_owned),
+                        );
+                    }
                     history.push(Message::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -1017,7 +1038,7 @@ impl<'a> Runner<'a> {
             let (mut passed, mut output, wait_ms, failing) = self.run_gate(state, &last_failed);
             last_failed = failing;
             if passed && self.research {
-                let mut problems = self.check_report_quotes();
+                let mut problems = self.check_report_quotes(seen_names);
                 if !problems.is_empty() {
                     passed = false;
                     output = format!("exit 1\n{}", research_check::render(&problems));

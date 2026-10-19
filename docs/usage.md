@@ -333,7 +333,9 @@ non-empty report was written, followed by a quote check that blyte runs itself:
 - a code block with no citation fails if it is tagged with a language or its lines are numbered.
   Blocks tagged `proposed`, `diff` or `patch`, commands and output (`bash`, `sh`, `console`,
   `text`, `output`, ...) and untagged plain blocks are not checked;
-- a cited source file (`.py`, `.rs`, `.tf`, ...) must exist even when given without a directory.
+- a cited source file (`.py`, `.rs`, `.tf`, ...) must exist even when given without a directory;
+- every code-like identifier in a backticked span in prose (containing `_`, an inner capital, `.`
+  between identifiers, or followed by `(`) must appear in the task or a tool result the run saw.
 
 A failed check is a failed gate: the model gets the list of mismatches and fixes the report. If a
 run stops early without passing the gate, blyte still quote-checks `report.md` and `blyte review`

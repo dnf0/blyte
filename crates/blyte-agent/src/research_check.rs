@@ -19,7 +19,7 @@
 //! - a quoted line starting with a line number (as `read` and `nl -ba` print them) must equal
 //!   that line of the file; any other quoted line must occur near the cited lines.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -876,4 +876,95 @@ pub fn claims(report: &str, src: &Sources<'_>) -> Vec<Claim> {
         &mut attach_quote_to_last,
     );
     out
+}
+
+/// Every `[A-Za-z_][A-Za-z0-9_]*` token of 3+ characters in `text`.
+pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|s| {
+            s.len() >= 3
+                && s.as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+        })
+}
+
+fn has_inner_capital(s: &str) -> bool {
+    let mut saw_lower = false;
+    for b in s.bytes() {
+        if b.is_ascii_lowercase() {
+            saw_lower = true;
+        } else if b.is_ascii_uppercase() && saw_lower {
+            return true;
+        }
+    }
+    false
+}
+
+fn inline_spans(mut s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    while let Some(pos) = s.find('`') {
+        let after = &s[pos..];
+        let ticks = after.bytes().take_while(|&b| b == b'`').count();
+        let needle = &after[..ticks];
+        let rest = &after[ticks..];
+        if let Some(end) = rest.find(needle) {
+            out.push(&rest[..end]);
+            s = &rest[end + ticks..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// Code-like identifier names in backticked prose spans of `report` that are not in `seen`.
+pub fn unseen_names(report: &str, seen: &HashSet<String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut reported: HashSet<&str> = HashSet::new();
+    let lines: Vec<&str> = report.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        let fence = if trimmed.starts_with("```") {
+            "```"
+        } else if trimmed.starts_with("~~~") {
+            "~~~"
+        } else {
+            ""
+        };
+        if !fence.is_empty() {
+            let marker_len = trimmed
+                .chars()
+                .take_while(|&c| c == fence.chars().next().unwrap())
+                .count();
+            let close = fence.chars().next().unwrap().to_string().repeat(marker_len);
+            let mut end = i + 1;
+            while end < lines.len() && !lines[end].trim_start().starts_with(&close) {
+                end += 1;
+            }
+            i = end + 1;
+            continue;
+        }
+        let line_no = i + 1;
+        for span in inline_spans(line) {
+            let bytes = span.as_bytes();
+            for tok in identifiers(span) {
+                let end = (tok.as_ptr() as usize - span.as_ptr() as usize) + tok.len();
+                let followed_by_paren = bytes.get(end) == Some(&b'(');
+                if (tok.contains('_') || has_inner_capital(tok) || followed_by_paren)
+                    && !seen.contains(tok)
+                    && reported.insert(tok)
+                {
+                    problems.push(format!(
+                        "report.md:{line_no}: `{tok}` does not appear in anything this run read \
+                         (the task, files or command output); name only what you have seen"
+                    ));
+                }
+            }
+        }
+        i += 1;
+    }
+    problems
 }

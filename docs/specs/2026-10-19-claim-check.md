@@ -4,7 +4,7 @@
 
 The quote check (`research_check::check`, 0.32.3; run on early stop since 0.33.1) proves that a
 report's quoted code and cited lines match the files. It does not check prose. A session using
-blyte for climate-x-services research found eight fabrications across four research runs; three
+blyte for multi-repo research found eight fabrications across four research runs; three
 were on 0.33.1 with gemini-4-argon (R3, R4, 2026-10-19). All four invented names were in prose:
 
 | Run | Invented | Caught by the quote check |
