@@ -297,6 +297,7 @@ The default branch is `origin/HEAD`'s target, else `main`, else `master`. In all
 5. **Git cherry** (explicit clean only): every commit `git cherry <default> <branch>` (and `origin/<default>`) lists is marked `-` (`merged`).
 6. **Merge tree** (explicit clean only): merging it would change nothing—`git merge-tree --write-tree <default> <branch>` exits 0 and the tree id matches the target tree (`merged`).
 7. **History walk** (explicit clean only): walks first-parent commits on the default branch, `origin/<default>`, and base branches (up to 20 commits touching the modified files since the run started), testing with `git merge-tree` whether the run's diff was merged into history (`merged` or `merged into <base>`).
+8. **Squash-merge subjects** (explicit clean only): every commit's subject on `<branch>` appears as a whole line in the messages of `<default>`'s (or `origin/<default>`'s, or base branch's) commits since the branch forked (`merged` or `merged into <base>`).
 
 Branches are deleted only when merged; `--older-than` never deletes a branch.
 

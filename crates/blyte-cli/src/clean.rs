@@ -957,6 +957,23 @@ impl<'a> CleanContext<'a> {
                     }
                 }
             }
+
+            // 8. squash-merge subject match (explicit blyte clean only)
+            if is_squash_merged_into_target(self.root, tip_sha, &self.default_branch) {
+                return Some(RemovalReason::Merged);
+            }
+            if let Some(ref origin_def) = self.origin_default {
+                if is_squash_merged_into_target(self.root, tip_sha, origin_def) {
+                    return Some(RemovalReason::Merged);
+                }
+            }
+            if let Some((ref display_name, ref targets)) = base_targets {
+                for target in targets {
+                    if is_squash_merged_into_target(self.root, tip_sha, target) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                    }
+                }
+            }
         }
 
         None
@@ -1255,7 +1272,8 @@ pub fn get_branch_tip(root: &Path, branch_name: &str) -> Option<String> {
 /// - `git merge-base --is-ancestor <tip> <default>` succeeds;
 /// - every commit `git cherry <default> <branch>` lists is marked `-`;
 /// - merging it would change nothing: `git merge-tree --write-tree <default> <branch>` exits 0
-///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`.
+///   and the tree id it prints (first line) equals `git rev-parse <default>^{tree}`;
+/// - every commit's subject on <branch> appears as a whole line in the messages of <default>'s commits since the branch forked (a GitHub squash merge lists them).
 pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
     let mut ctx = CleanContext::new(root);
     if let Some(id) = branch_name.strip_prefix("wip/") {
@@ -1388,7 +1406,82 @@ fn merged_into(root: &Path, commit_sha: &str, default_branch: &str) -> bool {
         }
     }
 
-    false
+    // 4. every commit's subject on <commit> appears as a whole line in the messages of <default>'s
+    // commits since the branch forked
+    is_squash_merged_into_target(root, commit_sha, default_branch)
+}
+
+fn is_squash_merged_into_target(root: &Path, commit_sha: &str, target: &str) -> bool {
+    let mb_out = std::process::Command::new("git")
+        .args(["merge-base", target, commit_sha])
+        .current_dir(root)
+        .output();
+    let Ok(mb_o) = mb_out else {
+        return false;
+    };
+    if !mb_o.status.success() {
+        return false;
+    }
+    let base = String::from_utf8_lossy(&mb_o.stdout).trim().to_string();
+    if base.is_empty() {
+        return false;
+    }
+
+    let subj_out = std::process::Command::new("git")
+        .args([
+            "log",
+            "--no-merges",
+            "--format=%s",
+            &format!("{target}..{commit_sha}"),
+        ])
+        .current_dir(root)
+        .output();
+    let Ok(subj_o) = subj_out else {
+        return false;
+    };
+    if !subj_o.status.success() {
+        return false;
+    }
+    let subj_stdout = String::from_utf8_lossy(&subj_o.stdout);
+    let subjects: Vec<&str> = subj_stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if subjects.is_empty() {
+        return false;
+    }
+
+    let hay_out = std::process::Command::new("git")
+        .args(["log", "--format=%B", &format!("{base}..{target}")])
+        .current_dir(root)
+        .output();
+    let Ok(hay_o) = hay_out else {
+        return false;
+    };
+    if !hay_o.status.success() {
+        return false;
+    }
+    let hay_stdout = String::from_utf8_lossy(&hay_o.stdout);
+    let mut haystack_lines = HashSet::new();
+    for line in hay_stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        haystack_lines.insert(trimmed.to_string());
+        if let Some(stripped) = trimmed
+            .strip_prefix("* ")
+            .or_else(|| trimmed.strip_prefix("- "))
+        {
+            let stripped = stripped.trim();
+            if !stripped.is_empty() {
+                haystack_lines.insert(stripped.to_string());
+            }
+        }
+    }
+
+    subjects.iter().all(|s| haystack_lines.contains(*s))
 }
 
 /// Lists all run IDs that have a corresponding `.wt/<id>.start.json`.
