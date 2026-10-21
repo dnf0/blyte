@@ -768,3 +768,53 @@ pub fn format_gate_drift_warning(missing: &[String]) -> Option<String> {
         ))
     }
 }
+
+/// Extract `(command, reason)` pairs for steps or setup commands documented as left out
+/// or failed on HEAD in `blyte.toml` comments.
+pub fn left_out_steps(blyte_toml_content: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in blyte_toml_content.lines() {
+        let trimmed = line.trim();
+        let Some(after_hash) = trimmed.strip_prefix('#') else {
+            continue;
+        };
+        let comment = after_hash.trim();
+
+        if let Some(rest) = comment.strip_prefix("setup") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim_start();
+                if let Some((cmd_part, reason_part)) = rest.split_once("# left out:") {
+                    let cmd_part = cmd_part.trim();
+                    if cmd_part.starts_with('"') && cmd_part.ends_with('"') && cmd_part.len() >= 2 {
+                        let cmd = cmd_part[1..cmd_part.len() - 1]
+                            .replace("\\\"", "\"")
+                            .replace("\\\\", "\\");
+                        let reason = reason_part.trim().to_string();
+                        out.push((format!("setup: {cmd}"), reason));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if let Some((command, after_from)) = comment.rsplit_once(": from ") {
+            let command = command.trim();
+            if command.is_empty() {
+                continue;
+            }
+            if let Some((file, rest)) = after_from.split_once(", ") {
+                if file.trim().is_empty() {
+                    continue;
+                }
+                let rest = rest.trim();
+                if let Some(reason) = rest.strip_prefix("left out: ") {
+                    out.push((command.to_string(), reason.trim().to_string()));
+                } else if rest.starts_with("failed on HEAD") {
+                    out.push((command.to_string(), "failed on HEAD".to_string()));
+                }
+            }
+        }
+    }
+    out
+}
