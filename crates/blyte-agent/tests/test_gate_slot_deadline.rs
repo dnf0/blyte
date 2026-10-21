@@ -3,8 +3,11 @@
 
 use blyte_agent::gate_slots;
 
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn the_default_is_a_quarter_of_the_cores_and_at_least_two() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::remove_var("BLYTE_GATE_SLOTS");
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -40,7 +43,11 @@ impl Provider for Stopper {
 
 #[test]
 fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
-    std::thread::sleep(Duration::from_millis(100));
+    // The hold is longer than the budget so the gate waits past max_duration, and the budget is large so slow runners finish the non-waiting work inside it.
+    const BUDGET: Duration = Duration::from_secs(3);
+    const HOLD: Duration = Duration::from_secs(4);
+
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let prev_in_gate = std::env::var_os(gate_slots::IN_GATE_ENV);
     std::env::remove_var(gate_slots::IN_GATE_ENV);
@@ -74,7 +81,7 @@ fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
         budget: Budget {
             max_turns: 3,
             max_gate_attempts: 1,
-            max_duration: Some(Duration::from_millis(600)),
+            max_duration: Some(BUDGET),
         },
         rollback: false,
         on_event: None,
@@ -84,7 +91,7 @@ fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
     let mut st = State::new("g", "true");
 
     let releaser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(800));
+        std::thread::sleep(HOLD);
         drop(held_slot);
     });
 
@@ -106,12 +113,12 @@ fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
 
     assert_eq!(outcome, Outcome::Verified);
     assert!(
-        start.elapsed() >= Duration::from_millis(300),
+        start.elapsed() >= BUDGET,
         "run waited for the slot: {:?}",
         start.elapsed()
     );
     assert!(
-        !report.gate_wait_ms.is_empty() && report.gate_wait_ms[0] >= 300,
+        !report.gate_wait_ms.is_empty() && report.gate_wait_ms[0] >= 3000,
         "recorded gate wait ms: {:?}",
         report.gate_wait_ms
     );
