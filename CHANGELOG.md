@@ -1,3 +1,9 @@
+## v0.35.1 (2026-10-21)
+
+### Fix
+
+- **clean**: recognise wip branches merged through a GitHub squash merge (#299)
+
 ## v0.35.0 (2026-10-21)
 
 ### Feat
