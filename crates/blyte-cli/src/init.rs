@@ -38,10 +38,26 @@ pub fn detect_ci_with_sources(root: &Path) -> Vec<(String, String)> {
     let mut seen = HashSet::new();
 
     for (file_name, content) in read_workflow_files(root) {
-        let (cmds, _) = parse_workflow(&content);
+        let (cmds, _, _) = parse_workflow(&content);
         for cmd in cmds {
             if seen.insert(cmd.clone()) {
                 result.push((cmd, file_name.clone()));
+            }
+        }
+    }
+    result
+}
+
+/// Detect per-directory `uv sync` setup commands from `.github/workflows/*.yml` and `*.yaml`.
+pub fn detect_ci_setup(root: &Path) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (_, content) in read_workflow_files(root) {
+        let (_, setup_cmds, _) = parse_workflow(&content);
+        for cmd in setup_cmds {
+            if seen.insert(cmd.clone()) {
+                result.push(cmd);
             }
         }
     }
@@ -54,7 +70,7 @@ pub fn detect_ci_left_out(root: &Path) -> Vec<(String, String, String)> {
     let mut seen = HashSet::new();
 
     for (file_name, content) in read_workflow_files(root) {
-        let (_, left_out) = parse_workflow(&content);
+        let (_, _, left_out) = parse_workflow(&content);
         for (cmd, reason) in left_out {
             if seen.insert(cmd.clone()) {
                 result.push((cmd, file_name.clone(), reason));
@@ -283,7 +299,7 @@ enum DefaultsScope {
     Job,
 }
 
-fn parse_workflow(content: &str) -> (Vec<String>, Vec<(String, String)>) {
+fn parse_workflow(content: &str) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     let mut in_jobs = false;
@@ -672,6 +688,8 @@ fn parse_workflow(content: &str) -> (Vec<String>, Vec<(String, String)>) {
 
     let mut result = Vec::new();
     let mut seen = HashSet::new();
+    let mut setup_cmds = Vec::new();
+    let mut seen_setup = HashSet::new();
     let mut left_out = Vec::new();
     let mut seen_left_out = HashSet::new();
 
@@ -699,6 +717,26 @@ fn parse_workflow(content: &str) -> (Vec<String>, Vec<(String, String)>) {
                 expand_step_combinations(raw_cmd, effective_wd.as_deref(), &effective_env, matrix);
             for (exp_cmd, exp_wd, exp_env) in combos {
                 for part in split_chain(&exp_cmd) {
+                    if let Some(uv_sync) = filter_uv_sync_command(&part) {
+                        if is_non_root_wd(exp_wd.as_deref()) {
+                            if let Some(reason) =
+                                check_left_out_reason(&uv_sync, exp_wd.as_deref(), &exp_env, matrix)
+                            {
+                                if seen_left_out.insert(uv_sync.clone()) {
+                                    left_out.push((uv_sync, reason));
+                                }
+                            } else {
+                                let rendered = format!(
+                                    "({})",
+                                    render_step_command(&uv_sync, exp_wd.as_deref(), &exp_env)
+                                );
+                                if seen_setup.insert(rendered.clone()) {
+                                    setup_cmds.push(rendered);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let Some(kept) = filter_and_clean_command(&part) else {
                         continue;
                     };
@@ -719,7 +757,7 @@ fn parse_workflow(content: &str) -> (Vec<String>, Vec<(String, String)>) {
         }
     }
 
-    (result, left_out)
+    (result, setup_cmds, left_out)
 }
 
 fn strip_yaml_comment(s: &str) -> &str {
@@ -995,10 +1033,25 @@ fn shell_quote_if_needed(s: &str) -> String {
     }
 }
 
+fn is_non_root_wd(wd: Option<&str>) -> bool {
+    wd.is_some_and(|dir| !dir.is_empty() && dir != "." && dir != "./")
+}
+
+fn filter_uv_sync_command(cmd: &str) -> Option<String> {
+    let tokens = tokenize(cmd.trim());
+    if tokens.first().map(String::as_str) == Some("uv")
+        && tokens.get(1).map(String::as_str) == Some("sync")
+    {
+        Some(tokens.join(" "))
+    } else {
+        None
+    }
+}
+
 fn render_step_command(cmd: &str, wd: Option<&str>, env: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     if let Some(dir) = wd {
-        if !dir.is_empty() && dir != "." && dir != "./" {
+        if is_non_root_wd(Some(dir)) {
             out.push_str("cd ");
             out.push_str(&shell_quote_if_needed(dir));
             out.push_str(" && ");
@@ -1417,12 +1470,13 @@ pub fn render_verified(
 
     out.push_str("[dispatch]\n");
     if let Some(s) = setup {
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
         if setup_passed {
             out.push_str("# prepares each new worktree before the implementer starts\n");
-            out.push_str(&format!("setup = \"{s}\"\n"));
+            out.push_str(&format!("setup = \"{escaped}\"\n"));
         } else {
             out.push_str(&format!(
-                "# setup = \"{s}\"   # left out: failed in a fresh worktree\n"
+                "# setup = \"{escaped}\"   # left out: failed in a fresh worktree\n"
             ));
         }
     }
@@ -1721,7 +1775,16 @@ pub fn run(args: &InitArgs) -> i32 {
     }
 
     let env = detect_env(&root);
-    let setup = detect_setup(&root);
+    let mut setup_parts = Vec::new();
+    if let Some(root_setup) = detect_setup(&root) {
+        setup_parts.push(root_setup);
+    }
+    setup_parts.extend(detect_ci_setup(&root));
+    let setup = if setup_parts.is_empty() {
+        None
+    } else {
+        Some(setup_parts.join(" && "))
+    };
 
     let (mut verified_steps, mut setup_passed) = if !args.no_verify && !steps.is_empty() {
         verify_steps(
