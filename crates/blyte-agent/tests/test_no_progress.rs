@@ -316,7 +316,9 @@ fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider = AlwaysBash {
         requests: requests.clone(),
-        sleep: Some(Duration::from_millis(100)),
+        // The model sleep dominates each turn, so CI runners whose git and shell calls are several
+        // times slower still reach the stop well before the deadline.
+        sleep: Some(Duration::from_millis(400)),
     };
     let runner = Runner {
         provider: &provider,
@@ -327,7 +329,7 @@ fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
         budget: Budget {
             max_turns: 200,
             max_gate_attempts: 1,
-            max_duration: Some(Duration::from_secs(3)),
+            max_duration: Some(Duration::from_secs(12)),
         },
         rollback: false,
         on_event: None,
