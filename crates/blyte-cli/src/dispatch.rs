@@ -174,6 +174,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
     let dispatch_cfg = repo_config.map(|c| c.dispatch).unwrap_or_default();
 
+    let mut left_out: Vec<(String, String)> = Vec::new();
     let (gate, gate_source) = if args.research {
         ("test -s report.md".to_string(), "research")
     } else if let Some(ref g) = args.gate {
@@ -187,9 +188,29 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             root.join("blyte.toml")
         };
         let toml_content = std::fs::read_to_string(&toml_path).unwrap_or_default();
+        left_out = crate::gate_drift::left_out_steps(&toml_content);
+        if g.trim().is_empty() {
+            eprintln!(
+                "error: the gate in blyte.toml is empty; every step was left out. Fix the steps blyte init named, or pass --gate."
+            );
+            for (cmd, reason) in &left_out {
+                eprintln!("  {cmd}: {reason}");
+            }
+            return 2;
+        }
         let missing = crate::gate_drift::missing_ci_steps(&root, g, &toml_content);
         if let Some(warning) = crate::gate_drift::format_gate_drift_warning(&missing) {
             eprintln!("{warning}");
+        }
+        if !left_out.is_empty() {
+            let formatted: Vec<String> = left_out
+                .iter()
+                .map(|(cmd, reason)| format!("{cmd} ({reason})"))
+                .collect();
+            eprintln!(
+                "blyte: the gate is partial; left out: {}",
+                formatted.join("; ")
+            );
         }
         let source = if from_main {
             "blyte.toml (main checkout)"
@@ -641,12 +662,36 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if args.research {
         start_json["research"] = serde_json::json!(true);
     }
+    if !left_out.is_empty() {
+        start_json["gate_left_out"] = serde_json::json!(left_out
+            .iter()
+            .map(|(command, reason)| serde_json::json!({
+                "command": command,
+                "reason": reason,
+            }))
+            .collect::<Vec<_>>());
+    }
     let start_path = wt_parent.join(format!("{}.start.json", args.id));
     if let Ok(json_str) = serde_json::to_string_pretty(&start_json) {
         let _ = std::fs::write(&start_path, json_str + "\n");
     }
 
     let _ = child.wait();
+
+    if !left_out.is_empty() {
+        if let Ok(report_str) = std::fs::read_to_string(&report_path) {
+            if let Ok(mut report_val) = serde_json::from_str::<serde_json::Value>(&report_str) {
+                let formatted: Vec<String> = left_out
+                    .iter()
+                    .map(|(cmd, reason)| format!("{cmd} ({reason})"))
+                    .collect();
+                report_val["gate_left_out"] = serde_json::json!(formatted);
+                if let Ok(updated) = serde_json::to_string_pretty(&report_val) {
+                    let _ = std::fs::write(&report_path, updated + "\n");
+                }
+            }
+        }
+    }
 
     let scratch_report = worktree_dir.join("report.md");
     if args.research {
@@ -1052,6 +1097,32 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .and_then(|v| v.get("read_loop"))
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
+    let gate_left_out: Vec<String> = report_val
+        .as_ref()
+        .and_then(|v| v.get("gate_left_out"))
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            let start_file = root.join(".wt").join(format!("{}.start.json", args.id));
+            let content = std::fs::read_to_string(&start_file).ok()?;
+            let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+            let arr = val.get("gate_left_out")?.as_array()?;
+            Some(
+                arr.iter()
+                    .filter_map(|item| {
+                        let cmd = item.get("command")?.as_str()?;
+                        let reason = item.get("reason")?.as_str()?;
+                        Some(format!("{cmd} ({reason})"))
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
     let claim_check: Option<blyte_agent::claim_check::ClaimCheck> = report_val
         .as_ref()
         .and_then(|v| v.get("claim_check"))
@@ -1078,6 +1149,11 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             "read loop: the run kept re-reading the same files without changing anything and was stopped"
                 .to_string(),
         );
+    }
+    if !gate_left_out.is_empty() {
+        checks
+            .flags
+            .push(format!("gate left out: {}", gate_left_out.join("; ")));
     }
     if let Some(ref cc) = claim_check {
         if !cc.contradicted.is_empty() {

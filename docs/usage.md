@@ -105,7 +105,7 @@ in `blyte.toml` comments as deliberately left out), it warns on stderr before th
 blyte: the gate is missing CI steps: make typecheck, make validate (run blyte init --force to refresh blyte.toml)
 ```
 
-and continues the dispatch normally without modifying `blyte.toml`.
+and continues the dispatch normally without modifying `blyte.toml`. When `blyte.toml` comments record steps or `setup` left out by `blyte init` (or failed on `HEAD`), `blyte dispatch` prints `blyte: the gate is partial; left out: <command> (<reason>); ...` on stderr, records `gate_left_out` in `.wt/<id>.start.json` and `.wt/<id>.report.json`, and `blyte review` flags `! gate left out: ...` under `== checks` (or refuses with exit code 2 if the gate in `blyte.toml` is empty).
 
 ## Dashboard
 
