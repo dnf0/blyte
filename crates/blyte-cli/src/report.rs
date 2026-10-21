@@ -80,6 +80,8 @@ pub struct RunRecord {
     #[serde(default)]
     pub fold_thrash: bool,
     #[serde(default)]
+    pub stalled: bool,
+    #[serde(default)]
     pub big_read_turns: u32,
     pub tool_calls: u32,
     pub gate_attempts: u32,
@@ -159,6 +161,7 @@ impl RunRecord {
             read_loop: false,
             peak_read_repeats: 0,
             fold_thrash: false,
+            stalled: false,
             big_read_turns: 0,
             tool_calls: 0,
             gate_attempts: 0,
@@ -215,6 +218,7 @@ impl RunRecord {
             read_loop: report.read_loop,
             peak_read_repeats: report.peak_read_repeats,
             fold_thrash: report.fold_thrash,
+            stalled: report.stalled,
             big_read_turns: report.big_read_turns,
             tool_calls: report.tool_calls,
             gate_attempts: report.gate_attempts,
