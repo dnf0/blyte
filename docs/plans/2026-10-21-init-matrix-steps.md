@@ -1,7 +1,7 @@
 # blyte init: expand CI matrix steps and recognise `make -C <dir> <target>`
 
-**Context (2026-10-21):** reliability-orchestrator now runs `blyte init --print` on repositories without a
-`blyte.toml` and uses the gate it derives. On spatial-service, a uv workspace, CI runs the unit tests once per service
+**Context (2026-10-21):** the orchestrator now runs `blyte init --print` on repositories without a
+`blyte.toml` and uses the gate it derives. On `api-service`, a uv workspace, CI runs the unit tests once per service
 through a matrix:
 
 ```yaml
@@ -9,7 +9,7 @@ jobs:
   test-unit:
     strategy:
       matrix:
-        service: [spatial-service, shared-utils, portfolio-splitter, raster-reader, premise-reader]
+        service: [api-service, shared-utils, portfolio-splitter, raster-reader, premise-reader]
     steps:
       - name: Run tests with coverage
         run: |
@@ -57,7 +57,7 @@ directory flags and test-style targets, so `blyte init` derives per-service chec
 **Tests** (new file `crates/blyte-cli/tests/test_init_matrix.rs`, in the style of `tests/test_init_real_ci.rs`,
 calling `blyte_cli::init::detect_ci` on a tempdir with a workflow file; run with
 `cargo test -p blyte-cli --test test_init_matrix`):
-- `matrix_make_step_expands_per_service`: the spatial-service shape above (include the `strategy:` block with
+- `matrix_make_step_expands_per_service`: the five-service shape above (include the `strategy:` block with
   `fail-fast: false`, other steps such as `uses: actions/checkout@v4`, a `run: |` block of `sudo apt-get` setup, a
   `run: | uv sync` step, and a step `ls -la ${{ matrix.service }}/tests/coverage/`): `detect_ci` returns exactly the
   five `make -C <service> test-coverage` commands, in matrix order.

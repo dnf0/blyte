@@ -234,11 +234,118 @@ pub fn drop_overlapping(steps: Vec<String>) -> Vec<String> {
 fn parse_workflow_commands(content: &str) -> Vec<String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
-    let mut candidate_commands = Vec::new();
+    let mut in_jobs = false;
+    let mut job_indent: Option<usize> = None;
+    let mut current_job: usize = 0;
+    let mut job_matrices: Vec<Vec<(String, Vec<String>)>> = vec![Vec::new()];
+    let mut matrix_indent: Option<usize> = None;
+    let mut matrix_key_indent: Option<usize> = None;
+    let mut current_block_key: Option<String> = None;
+    let mut candidate_commands: Vec<(usize, String)> = Vec::new();
 
     while i < lines.len() {
         let line = lines[i];
         let trimmed_start = line.trim_start();
+        if trimmed_start.is_empty() || trimmed_start.starts_with('#') {
+            i += 1;
+            continue;
+        }
+        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+        let clean_line = strip_yaml_comment(trimmed_start);
+
+        if indent == 0 {
+            matrix_indent = None;
+            matrix_key_indent = None;
+            current_block_key = None;
+            if clean_line == "jobs:" {
+                in_jobs = true;
+                job_indent = None;
+                i += 1;
+                continue;
+            } else {
+                in_jobs = false;
+                job_indent = None;
+            }
+        } else if in_jobs {
+            if job_indent.is_none() && !clean_line.starts_with('-') && clean_line.contains(':') {
+                job_indent = Some(indent);
+            }
+            if Some(indent) == job_indent
+                && !clean_line.starts_with('-')
+                && clean_line.contains(':')
+            {
+                current_job += 1;
+                job_matrices.push(Vec::new());
+                matrix_indent = None;
+                matrix_key_indent = None;
+                current_block_key = None;
+                i += 1;
+                continue;
+            }
+        }
+
+        if let Some(m_indent) = matrix_indent {
+            if indent <= m_indent {
+                matrix_indent = None;
+                matrix_key_indent = None;
+                current_block_key = None;
+            } else {
+                if matrix_key_indent.is_none()
+                    && !clean_line.starts_with('-')
+                    && clean_line.contains(':')
+                {
+                    matrix_key_indent = Some(indent);
+                }
+                if Some(indent) == matrix_key_indent && !clean_line.starts_with('-') {
+                    current_block_key = None;
+                    if let Some((raw_key, raw_val)) = clean_line.split_once(':') {
+                        let key = raw_key.trim();
+                        let val = raw_val.trim();
+                        if key != "include" && key != "exclude" && !key.is_empty() {
+                            if val.starts_with('[') && val.ends_with(']') {
+                                let items = parse_flow_list(&val[1..val.len() - 1]);
+                                set_matrix_key(&mut job_matrices[current_job], key, items);
+                            } else if val.is_empty() {
+                                set_matrix_key(&mut job_matrices[current_job], key, Vec::new());
+                                current_block_key = Some(key.to_string());
+                            } else {
+                                set_matrix_key(&mut job_matrices[current_job], key, Vec::new());
+                            }
+                        }
+                    }
+                    i += 1;
+                    continue;
+                } else if let Some(k_indent) = matrix_key_indent {
+                    if indent >= k_indent {
+                        if let Some(ref key) = current_block_key {
+                            if let Some(item_str) = clean_line.strip_prefix('-') {
+                                let item = item_str.trim();
+                                if !item.is_empty() && !is_yaml_mapping_or_expr(item) {
+                                    let val = unquote(item).to_string();
+                                    push_matrix_val(&mut job_matrices[current_job], key, val);
+                                } else {
+                                    set_matrix_key(&mut job_matrices[current_job], key, Vec::new());
+                                    current_block_key = None;
+                                }
+                            } else {
+                                set_matrix_key(&mut job_matrices[current_job], key, Vec::new());
+                                current_block_key = None;
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if matrix_indent.is_none() && in_jobs && clean_line == "matrix:" {
+            matrix_indent = Some(indent);
+            matrix_key_indent = None;
+            current_block_key = None;
+            i += 1;
+            continue;
+        }
 
         let is_run_key = if let Some(rest) = trimmed_start.strip_prefix("- ") {
             rest.trim_start().starts_with("run:")
@@ -252,7 +359,7 @@ fn parse_workflow_commands(content: &str) -> Vec<String> {
             .unwrap_or(trimmed_start)
             .trim_start();
         if uses.starts_with("uses: pre-commit/action@") {
-            candidate_commands.push("pre-commit run --all-files".to_string());
+            candidate_commands.push((current_job, "pre-commit run --all-files".to_string()));
         }
 
         if is_run_key {
@@ -286,17 +393,12 @@ fn parse_workflow_commands(content: &str) -> Vec<String> {
 
                 let joined = join_continuation_lines(&block_lines);
                 for cmd in joined {
-                    candidate_commands.push(cmd);
+                    candidate_commands.push((current_job, cmd));
                 }
                 continue;
             } else if !after_run_clean.is_empty() {
-                let mut cmd_str = after_run_clean;
-                if (cmd_str.starts_with('"') && cmd_str.ends_with('"'))
-                    || (cmd_str.starts_with('\'') && cmd_str.ends_with('\''))
-                {
-                    cmd_str = &cmd_str[1..cmd_str.len() - 1];
-                }
-                candidate_commands.push(cmd_str.to_string());
+                let cmd_str = unquote(after_run_clean);
+                candidate_commands.push((current_job, cmd_str.to_string()));
             }
         }
         i += 1;
@@ -305,14 +407,189 @@ fn parse_workflow_commands(content: &str) -> Vec<String> {
     // A CI line often chains setup and the check (`mkdir -p out && uv run pytest`): each part
     // is judged on its own.
     let mut result = Vec::new();
-    for cmd in candidate_commands {
-        for part in split_chain(&cmd) {
-            if let Some(kept) = filter_and_clean_command(&part) {
-                result.push(kept);
+    let mut seen = HashSet::new();
+    for (job_id, cmd) in candidate_commands {
+        let matrix = &job_matrices[job_id];
+        for expanded in expand_matrix_command(&cmd, matrix) {
+            for part in split_chain(&expanded) {
+                if let Some(kept) = filter_and_clean_command(&part) {
+                    if seen.insert(kept.clone()) {
+                        result.push(kept);
+                    }
+                }
             }
         }
     }
     result
+}
+
+fn strip_yaml_comment(s: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev_ws = true;
+    for (idx, c) in s.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+        } else if c == '#' && prev_ws {
+            return s[..idx].trim_end();
+        }
+        prev_ws = c.is_whitespace();
+    }
+    s.trim_end()
+}
+
+fn unquote(s: &str) -> &str {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+fn is_yaml_mapping_or_expr(s: &str) -> bool {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        return false;
+    }
+    s.starts_with('{')
+        || s.starts_with('[')
+        || s.starts_with("${{")
+        || s.ends_with(':')
+        || s.contains(": ")
+}
+
+fn parse_flow_list(inner: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        if let Some(q) = quote {
+            current.push(c);
+            if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+            current.push(c);
+        } else if c == ',' {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                if is_yaml_mapping_or_expr(trimmed) {
+                    return Vec::new();
+                }
+                items.push(unquote(trimmed).to_string());
+            }
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        if is_yaml_mapping_or_expr(trimmed) {
+            return Vec::new();
+        }
+        items.push(unquote(trimmed).to_string());
+    }
+    items
+}
+
+fn set_matrix_key(matrix: &mut Vec<(String, Vec<String>)>, key: &str, values: Vec<String>) {
+    if let Some(entry) = matrix.iter_mut().find(|(k, _)| k == key) {
+        entry.1 = values;
+    } else {
+        matrix.push((key.to_string(), values));
+    }
+}
+
+fn push_matrix_val(matrix: &mut Vec<(String, Vec<String>)>, key: &str, val: String) {
+    if let Some(entry) = matrix.iter_mut().find(|(k, _)| k == key) {
+        entry.1.push(val);
+    } else {
+        matrix.push((key.to_string(), vec![val]));
+    }
+}
+
+fn expand_matrix_command(cmd: &str, matrix: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut expanded = vec![cmd.to_string()];
+    for (key, values) in matrix {
+        if values.is_empty() {
+            continue;
+        }
+        if expanded
+            .iter()
+            .any(|c| replace_matrix_key(c, key, "").is_some())
+        {
+            let mut next = Vec::new();
+            for c in &expanded {
+                if replace_matrix_key(c, key, "").is_some() {
+                    for v in values {
+                        if let Some(replaced) = replace_matrix_key(c, key, v) {
+                            next.push(replaced);
+                        }
+                    }
+                } else {
+                    next.push(c.clone());
+                }
+            }
+            expanded = next;
+        }
+    }
+    expanded.retain(|c| !contains_unexpanded_matrix(c));
+    expanded
+}
+
+fn replace_matrix_key(s: &str, target_key: &str, val: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut cursor = 0;
+    let mut replaced = false;
+    while cursor < s.len() {
+        let rest = &s[cursor..];
+        let Some(rel_start) = rest.find("${{") else {
+            out.push_str(rest);
+            break;
+        };
+        let start = cursor + rel_start;
+        let after_open = &s[start + 3..];
+        let Some(rel_end) = after_open.find("}}") else {
+            out.push_str(rest);
+            break;
+        };
+        let end = start + 3 + rel_end + 2;
+        let inner = after_open[..rel_end].trim();
+        if inner.strip_prefix("matrix.") == Some(target_key) {
+            out.push_str(&s[cursor..start]);
+            out.push_str(val);
+            replaced = true;
+            cursor = end;
+        } else {
+            out.push_str(&s[cursor..start + 3]);
+            cursor = start + 3;
+        }
+    }
+    if replaced {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn contains_unexpanded_matrix(s: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(rel) = s[cursor..].find("${{") {
+        let after = s[cursor + rel + 3..].trim_start();
+        if after.starts_with("matrix.") {
+            return true;
+        }
+        cursor += rel + 3;
+    }
+    false
 }
 
 /// Split a shell line on `&&`, `||` and `;` outside quotes.
@@ -399,10 +676,30 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         "bunx ",
     ];
     let mut stripped = trimmed;
+    let mut had_prefix = false;
     for p in &prefixes {
         if stripped.starts_with(p) {
-            stripped = &stripped[p.len()..];
+            stripped = stripped[p.len()..].trim_start();
+            had_prefix = true;
             break;
+        }
+    }
+    if had_prefix {
+        while stripped.starts_with('-') {
+            let Some((flag, rest)) = stripped.split_once(char::is_whitespace) else {
+                break;
+            };
+            stripped = rest.trim_start();
+            if matches!(
+                flag,
+                "--python" | "-p" | "--package" | "--directory" | "--group" | "--extra" | "--with"
+            ) {
+                if let Some((_, after_val)) = stripped.split_once(char::is_whitespace) {
+                    stripped = after_val.trim_start();
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -444,6 +741,12 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         "tsc",
     ];
 
+    let text = if let Some(idx) = trimmed.find("| tee") {
+        &trimmed[..idx]
+    } else {
+        trimmed
+    };
+
     let is_check = check_cmds.iter().any(|&c| {
         if stripped == c {
             true
@@ -452,17 +755,11 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         } else {
             false
         }
-    });
+    }) || is_make_check(text);
 
     if !is_check {
         return None;
     }
-
-    let text = if let Some(idx) = trimmed.find("| tee") {
-        &trimmed[..idx]
-    } else {
-        trimmed
-    };
 
     // Reporting options go, with their value when it is a separate word (`--cov-report xml:out`).
     let tokens = tokenize(text);
@@ -485,6 +782,41 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
     }
 
     Some(kept_tokens.join(" "))
+}
+
+fn is_make_check(cmd: &str) -> bool {
+    let tokens = tokenize(cmd);
+    if tokens.first().map(String::as_str) != Some("make") {
+        return false;
+    }
+    let mut targets = Vec::new();
+    let mut i = 1;
+    while i < tokens.len() {
+        let tok = tokens[i].as_str();
+        if tok == "-C" || tok == "--directory" {
+            if i + 1 >= tokens.len() || tokens[i + 1].is_empty() {
+                return false;
+            }
+            i += 2;
+        } else if (tok.starts_with("-C") && tok.len() > 2)
+            || (tok.starts_with("--directory=") && tok.len() > "--directory=".len())
+            || matches!(tok, "-s" | "--no-print-directory" | "-k")
+        {
+            i += 1;
+        } else if tok.starts_with('-') || tok.contains('=') {
+            return false;
+        } else {
+            targets.push(tok);
+            i += 1;
+        }
+    }
+    if targets.len() != 1 {
+        return false;
+    }
+    let target = targets[0];
+    matches!(target, "check" | "lint" | "test" | "typecheck" | "validate")
+        || target.starts_with("test-")
+        || target.starts_with("test_")
 }
 
 fn tokenize(s: &str) -> Vec<String> {
