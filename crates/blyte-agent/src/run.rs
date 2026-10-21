@@ -119,6 +119,8 @@ pub struct RunReport {
     pub peak_read_repeats: u32,
     /// Whether the run stopped because consecutive turns kept folding the previous turn's results.
     pub fold_thrash: bool,
+    /// Run stopped because a fix run made no change and kept calling tools after the last call.
+    pub stalled: bool,
     /// Turns whose tool output exceeded half of the fold budget.
     pub big_read_turns: u32,
     pub tool_calls: u32,
@@ -191,6 +193,17 @@ pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
 /// Tool calls an orchestrator may make before its first dispatch without getting a reminder (2026-10-15 Argon benchmark).
 pub const ORCHESTRATOR_EXPLORE_NUDGE: u32 = 8;
+
+/// Turns a fix run may spend without changing a file or running the gate before getting a nudge.
+pub const NO_PROGRESS_TURNS: u32 = 20;
+/// Minimum turns before the time-based no-progress nudge may fire.
+pub const NO_PROGRESS_MIN_TURNS: u32 = 8;
+/// Fraction of `max_duration` after which the no-progress nudge may fire (past `NO_PROGRESS_MIN_TURNS`).
+pub const NO_PROGRESS_TIME_FRACTION: f64 = 0.25;
+/// Turns after the no-progress nudge before the last call is sent.
+pub const LAST_CALL_TURNS: u32 = 10;
+/// Fraction of `max_duration` after which the last call may fire (once nudged).
+pub const LAST_CALL_TIME_FRACTION: f64 = 0.5;
 
 /// Repeated read/grep/glob calls without a workspace change allowed before ending the run.
 const READ_LOOP_LIMIT: u32 = 30;
@@ -708,6 +721,13 @@ impl<'a> Runner<'a> {
         );
     }
 
+    fn elapsed_fraction(&self, deadline: Option<std::time::Instant>) -> Option<f64> {
+        let max_duration = self.budget.max_duration?;
+        let deadline = deadline?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        Some(max_duration.saturating_sub(remaining).as_secs_f64() / max_duration.as_secs_f64())
+    }
+
     pub fn run(&self, state: &mut State) -> (Outcome, RunReport) {
         let deadline = self
             .budget
@@ -808,7 +828,12 @@ impl<'a> Runner<'a> {
         let mut last_fingerprint: Option<String> = None;
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut repeats: u32 = 0;
-        let mut change_fp = self.fingerprint();
+        let start_fp = self.fingerprint();
+        let mut change_fp = start_fp.clone();
+        let mut progressed = false;
+        let mut nudge_turn: Option<u32> = None;
+        let mut last_call_sent = false;
+        let mut last_turn_called_tools = false;
         let mut last_report = if self.research {
             self.fs.read(&self.root.join("report.md")).ok()
         } else {
@@ -821,6 +846,7 @@ impl<'a> Runner<'a> {
         let mut prev_turn_start: Option<usize> = None;
         let mut thrash: u32 = 0;
         let mut last_big_read_warn: Option<u32> = None;
+        let mut wrap_up_sent = false;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -837,11 +863,26 @@ impl<'a> Runner<'a> {
             report.outcome_turns = turn;
             let turn_start = history.len();
 
-            if self.budget.max_turns >= 20 && turn == self.budget.max_turns - 9 {
-                history.push(Message::User(format!(
-                    "You have 10 turns left of {}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools.",
-                    self.budget.max_turns
-                )));
+            if !wrap_up_sent {
+                if self.budget.max_turns >= 20 && turn == self.budget.max_turns - 9 {
+                    wrap_up_sent = true;
+                    history.push(Message::User(format!(
+                        "You have 10 turns left of {}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools.",
+                        self.budget.max_turns
+                    )));
+                } else if let (Some(max_duration), Some(deadline)) =
+                    (self.budget.max_duration, deadline)
+                {
+                    let time_left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if time_left.as_secs_f64() < max_duration.as_secs_f64() * 0.1 {
+                        wrap_up_sent = true;
+                        let m = ((time_left.as_secs_f64() / 60.0).ceil() as u64).max(1);
+                        let total = ((max_duration.as_secs_f64() / 60.0).ceil() as u64).max(1);
+                        history.push(Message::User(format!(
+                            "You have about {m} minutes left of {total}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools."
+                        )));
+                    }
+                }
             }
 
             if self.research && turn % 30 == 0 {
@@ -865,6 +906,51 @@ impl<'a> Runner<'a> {
                 history.push(Message::User(format!(
                     "You have made {pre_dispatch_calls} tool calls without dispatching. Dispatch the work now from what you know; the implementer reads the code it changes. Keep reading only if you cannot yet say which files the task is about."
                 )));
+            }
+
+            if !self.research
+                && state.orchestrator.instructions.is_none()
+                && state.runtime.conversation.is_none()
+                && !progressed
+            {
+                let elapsed = self.elapsed_fraction(deadline);
+                if nudge_turn.is_none()
+                    && (turn > NO_PROGRESS_TURNS
+                        || (turn > NO_PROGRESS_MIN_TURNS
+                            && elapsed.is_some_and(|f| f >= NO_PROGRESS_TIME_FRACTION)))
+                {
+                    if self.fingerprint() != start_fp {
+                        progressed = true;
+                    } else {
+                        let n = turn - 1;
+                        history.push(Message::User(format!(
+                            "[blyte] You have spent {n} turns without changing any file or running the gate. Stop exploring and decide now: make the change the task asks for, or, if the task needs no code change or the problem cannot be reproduced, stop calling tools and explain why in your reply."
+                        )));
+                        nudge_turn = Some(turn);
+                    }
+                } else if let Some(t) = nudge_turn {
+                    if !last_call_sent
+                        && (turn >= t + LAST_CALL_TURNS
+                            || elapsed.is_some_and(|f| f >= LAST_CALL_TIME_FRACTION))
+                    {
+                        if self.fingerprint() != start_fp {
+                            progressed = true;
+                        } else {
+                            history.push(Message::User(
+                                "[blyte] Still no change after the last reminder. Reply now with your conclusion and why, and do not call any tools: the run stops if this reply calls a tool without changing anything."
+                                    .to_string(),
+                            ));
+                            last_call_sent = true;
+                        }
+                    } else if last_call_sent && last_turn_called_tools {
+                        if self.fingerprint() != start_fp {
+                            progressed = true;
+                        } else {
+                            report.stalled = true;
+                            return (Outcome::BudgetExhausted, report);
+                        }
+                    }
+                }
             }
 
             let fold_budget = self.context.fold_budget(history);
@@ -1003,6 +1089,7 @@ impl<'a> Runner<'a> {
                 usage: resp.usage,
             });
             if truncated(resp.finish_reason.as_deref()) {
+                last_turn_called_tools = false;
                 report.truncated_turns += 1;
                 history.push(Message::User(
                     "Your last reply hit the output token limit and was cut off, so none of it was used. Reply again more briefly: make one tool call at a time and keep edits small.".to_string(),
@@ -1019,6 +1106,7 @@ impl<'a> Runner<'a> {
 
             // --- the model is still working -------------------------------------------------
             if !resp.tool_calls.is_empty() {
+                last_turn_called_tools = true;
                 let tools_start = std::time::Instant::now();
                 // A turn's calls are recorded together, then its results together, in call
                 // order. Providers encode one model turn carrying several calls and one reply
@@ -1033,6 +1121,9 @@ impl<'a> Runner<'a> {
                     });
                 }
                 let current_fp = self.fingerprint();
+                if current_fp != start_fp {
+                    progressed = true;
+                }
                 if current_fp != change_fp {
                     call_counts.clear();
                     repeats = 0;
@@ -1101,6 +1192,7 @@ impl<'a> Runner<'a> {
                         );
                     }
                     if !outcome.is_error && matches!(call.name.as_str(), "edit" | "write") {
+                        progressed = true;
                         call_counts.clear();
                         repeats = 0;
                     } else if matches!(call.name.as_str(), "read" | "grep" | "glob") {
@@ -1137,6 +1229,7 @@ impl<'a> Runner<'a> {
             }
 
             // --- the model stopped calling tools: the runtime decides -----------------------
+            last_turn_called_tools = false;
             if report.gate_attempts > 0
                 && CLAIM_PHRASES
                     .iter()
@@ -1166,6 +1259,7 @@ impl<'a> Runner<'a> {
                 return (Outcome::Verified, report);
             }
 
+            progressed = true;
             report.gate_attempts += 1;
             report.gate_turns.push(turn);
             self.emit(Event::GateStart {
@@ -1225,6 +1319,9 @@ impl<'a> Runner<'a> {
             report.gate_failures.push(cut_gate_output(&output));
 
             last_fingerprint = self.fingerprint();
+            if last_fingerprint != start_fp {
+                progressed = true;
+            }
 
             if self.rollback {
                 if let Some(base) = &baseline {
