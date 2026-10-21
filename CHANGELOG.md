@@ -1,3 +1,9 @@
+## v0.35.0 (2026-10-21)
+
+### Feat
+
+- **init**: derive gates from CI matrix steps, step context and per-directory setup (#297)
+
 ## v0.34.0 (2026-10-19)
 
 ### Feat
