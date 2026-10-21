@@ -2,7 +2,7 @@
 
 ## Why
 
-Reported by the climate-x-data-platform session (2026-10-21): `blyte clean --dry-run` kept 11
+Reported by a data-platform session (2026-10-21): `blyte clean --dry-run` kept 11
 worktrees as "not merged yet", and 28 `wip/*` branches had all their work in main, yet blyte
 detected none. `blyte dispatch A1` then failed with `fatal: a branch named 'wip/A1' already exists`
 for a task merged two weeks earlier. The workflow that causes it: `git merge --ff-only wip/<id>`

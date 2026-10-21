@@ -127,6 +127,18 @@ fn finish_summary(summary: &DispatchSummary, wt_parent: &Path) -> i32 {
     summary.exit
 }
 
+pub fn branch_exists_message(root: &Path, branch: &str, id: &str) -> String {
+    if crate::clean::is_branch_merged(root, branch) {
+        format!(
+            "error: branch {branch} already exists from an earlier run, and its work is already merged. Run `blyte clean` to remove it, or dispatch with a new ID."
+        )
+    } else {
+        format!(
+            "error: branch {branch} already exists from an earlier run and is not merged. Review it with `blyte review {id}`, delete it (`git branch -D {branch}`) if it is not needed, or dispatch with a new ID."
+        )
+    }
+}
+
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if let Ok(home) = crate::skill::home_dir() {
         if let Ok(Some(path)) = crate::skill::ensure_context_block(&home) {
@@ -358,6 +370,21 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             }
         }
     } else if !worktree_dir.exists() {
+        let branch_exists = Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .current_dir(&root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if branch_exists {
+            eprintln!("{}", branch_exists_message(&root, &branch, &args.id));
+            return 2;
+        }
         let add_out = Command::new("git")
             .args([
                 "worktree",
