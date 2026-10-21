@@ -846,6 +846,7 @@ impl<'a> Runner<'a> {
         let mut prev_turn_start: Option<usize> = None;
         let mut thrash: u32 = 0;
         let mut last_big_read_warn: Option<u32> = None;
+        let mut wrap_up_sent = false;
 
         for turn in 1..=self.budget.max_turns {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -862,11 +863,26 @@ impl<'a> Runner<'a> {
             report.outcome_turns = turn;
             let turn_start = history.len();
 
-            if self.budget.max_turns >= 20 && turn == self.budget.max_turns - 9 {
-                history.push(Message::User(format!(
-                    "You have 10 turns left of {}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools.",
-                    self.budget.max_turns
-                )));
+            if !wrap_up_sent {
+                if self.budget.max_turns >= 20 && turn == self.budget.max_turns - 9 {
+                    wrap_up_sent = true;
+                    history.push(Message::User(format!(
+                        "You have 10 turns left of {}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools.",
+                        self.budget.max_turns
+                    )));
+                } else if let (Some(max_duration), Some(deadline)) =
+                    (self.budget.max_duration, deadline)
+                {
+                    let time_left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if time_left.as_secs_f64() < max_duration.as_secs_f64() * 0.1 {
+                        wrap_up_sent = true;
+                        let m = ((time_left.as_secs_f64() / 60.0).ceil() as u64).max(1);
+                        let total = ((max_duration.as_secs_f64() / 60.0).ceil() as u64).max(1);
+                        history.push(Message::User(format!(
+                            "You have about {m} minutes left of {total}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools."
+                        )));
+                    }
+                }
             }
 
             if self.research && turn % 30 == 0 {
