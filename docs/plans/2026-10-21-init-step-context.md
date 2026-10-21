@@ -3,7 +3,7 @@
 **Context (2026-10-21):** after MX1 (matrix expansion), `blyte init --print` on a uv workspace derived the right
 per-service test commands, but two failed on HEAD for reasons that are not test failures:
 
-- A workflow with `defaults: run: working-directory: hazard-service` runs `uv run pytest` inside that directory; init
+- A workflow with `defaults: run: working-directory: worker-service` runs `uv run pytest` inside that directory; init
   ran it at the repository root.
 - A step with
   ```yaml
