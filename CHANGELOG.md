@@ -1,3 +1,9 @@
+## v0.36.0 (2026-10-21)
+
+### Feat
+
+- **agent**: nudge, then stop, fix runs that make no progress (#304)
+
 ## v0.35.2 (2026-10-21)
 
 ### Fix
