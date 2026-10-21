@@ -34,6 +34,53 @@ pub fn detect_ci(root: &Path) -> Vec<String> {
 
 /// Detect check commands and keep the file name of the workflow where each was first found.
 pub fn detect_ci_with_sources(root: &Path) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (file_name, content) in read_workflow_files(root) {
+        let (cmds, _, _) = parse_workflow(&content);
+        for cmd in cmds {
+            if seen.insert(cmd.clone()) {
+                result.push((cmd, file_name.clone()));
+            }
+        }
+    }
+    result
+}
+
+/// Detect per-directory `uv sync` setup commands from `.github/workflows/*.yml` and `*.yaml`.
+pub fn detect_ci_setup(root: &Path) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (_, content) in read_workflow_files(root) {
+        let (_, setup_cmds, _) = parse_workflow(&content);
+        for cmd in setup_cmds {
+            if seen.insert(cmd.clone()) {
+                result.push(cmd);
+            }
+        }
+    }
+    result
+}
+
+/// Detect check commands that were left out because they depend on CI expressions or unknown matrix keys.
+pub fn detect_ci_left_out(root: &Path) -> Vec<(String, String, String)> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (file_name, content) in read_workflow_files(root) {
+        let (_, _, left_out) = parse_workflow(&content);
+        for (cmd, reason) in left_out {
+            if seen.insert(cmd.clone()) {
+                result.push((cmd, file_name.clone(), reason));
+            }
+        }
+    }
+    result
+}
+
+fn read_workflow_files(root: &Path) -> Vec<(String, String)> {
     let workflows_dir = root.join(".github").join("workflows");
     if !workflows_dir.is_dir() {
         return Vec::new();
@@ -53,9 +100,7 @@ pub fn detect_ci_with_sources(root: &Path) -> Vec<(String, String)> {
     }
     files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
-
+    let mut out = Vec::new();
     for file in files {
         let file_name = file
             .file_name()
@@ -63,15 +108,10 @@ pub fn detect_ci_with_sources(root: &Path) -> Vec<(String, String)> {
             .unwrap_or_default()
             .to_string();
         if let Ok(content) = std::fs::read_to_string(&file) {
-            let cmds = parse_workflow_commands(&content);
-            for cmd in cmds {
-                if seen.insert(cmd.clone()) {
-                    result.push((cmd, file_name.clone()));
-                }
-            }
+            out.push((file_name, content));
         }
     }
-    result
+    out
 }
 
 #[derive(Debug)]
@@ -231,14 +271,336 @@ pub fn drop_overlapping(steps: Vec<String>) -> Vec<String> {
     result_slots.into_iter().flatten().collect()
 }
 
-fn parse_workflow_commands(content: &str) -> Vec<String> {
+#[derive(Default)]
+struct JobContext {
+    matrix: Vec<(String, Vec<String>)>,
+    working_dir: Option<String>,
+    env: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct StepCandidate {
+    job_id: usize,
+    working_dir: Option<String>,
+    env: BTreeMap<String, String>,
+    commands: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnvScope {
+    Workflow,
+    Job,
+    Step,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefaultsScope {
+    Workflow,
+    Job,
+}
+
+fn parse_workflow(content: &str) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
-    let mut candidate_commands = Vec::new();
+    let mut in_jobs = false;
+    let mut job_indent: Option<usize> = None;
+    let mut job_sub_indent: Option<usize> = None;
+    let mut current_job: usize = 0;
+    let mut jobs: Vec<JobContext> = vec![JobContext::default()];
+    let mut workflow_working_dir: Option<String> = None;
+    let mut workflow_env: BTreeMap<String, String> = BTreeMap::new();
+
+    let mut matrix_indent: Option<usize> = None;
+    let mut matrix_key_indent: Option<usize> = None;
+    let mut current_block_key: Option<String> = None;
+
+    let mut steps_indent: Option<usize> = None;
+    let mut current_step_indent: Option<usize> = None;
+    let mut current_step: Option<StepCandidate> = None;
+    let mut candidates: Vec<StepCandidate> = Vec::new();
+
+    let mut env_ctx: Option<(usize, EnvScope)> = None;
+    let mut defaults_ctx: Option<(usize, DefaultsScope, Option<usize>)> = None;
 
     while i < lines.len() {
         let line = lines[i];
         let trimmed_start = line.trim_start();
+        if trimmed_start.is_empty() || trimmed_start.starts_with('#') {
+            i += 1;
+            continue;
+        }
+        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+        let clean_line = strip_yaml_comment(trimmed_start);
+
+        if let Some((e_indent, _)) = env_ctx {
+            if indent <= e_indent {
+                env_ctx = None;
+            }
+        }
+        if let Some((d_indent, scope, r_indent)) = defaults_ctx {
+            if indent <= d_indent {
+                defaults_ctx = None;
+            } else if let Some(ri) = r_indent {
+                if indent <= ri {
+                    defaults_ctx = Some((d_indent, scope, None));
+                }
+            }
+        }
+        if let Some(s_indent) = steps_indent {
+            if indent < s_indent || (indent == s_indent && !clean_line.starts_with('-')) {
+                if let Some(step) = current_step.take() {
+                    candidates.push(step);
+                }
+                current_step_indent = None;
+                steps_indent = None;
+            }
+        }
+        if let Some(cs_indent) = current_step_indent {
+            if indent < cs_indent || (indent == cs_indent && clean_line.starts_with('-')) {
+                if let Some(step) = current_step.take() {
+                    candidates.push(step);
+                }
+                current_step_indent = None;
+            }
+        }
+
+        if indent == 0 {
+            matrix_indent = None;
+            matrix_key_indent = None;
+            current_block_key = None;
+            if clean_line == "jobs:" {
+                in_jobs = true;
+                job_indent = None;
+                job_sub_indent = None;
+                i += 1;
+                continue;
+            } else {
+                in_jobs = false;
+                job_indent = None;
+                job_sub_indent = None;
+                if let Some(rest) = clean_line.strip_prefix("env:") {
+                    let rest = rest.trim();
+                    if rest.is_empty() {
+                        env_ctx = Some((indent, EnvScope::Workflow));
+                    } else if rest.starts_with('{') && rest.ends_with('}') {
+                        parse_flow_map(&rest[1..rest.len() - 1], &mut workflow_env);
+                    }
+                    i += 1;
+                    continue;
+                } else if clean_line == "defaults:" {
+                    defaults_ctx = Some((indent, DefaultsScope::Workflow, None));
+                    i += 1;
+                    continue;
+                }
+            }
+        } else if in_jobs {
+            if job_indent.is_none() && !clean_line.starts_with('-') && clean_line.contains(':') {
+                job_indent = Some(indent);
+            }
+            if Some(indent) == job_indent
+                && !clean_line.starts_with('-')
+                && clean_line.contains(':')
+            {
+                if let Some(step) = current_step.take() {
+                    candidates.push(step);
+                }
+                current_step_indent = None;
+                steps_indent = None;
+                job_sub_indent = None;
+                current_job += 1;
+                jobs.push(JobContext::default());
+                matrix_indent = None;
+                matrix_key_indent = None;
+                current_block_key = None;
+                i += 1;
+                continue;
+            }
+            if let Some(j_indent) = job_indent {
+                if indent > j_indent
+                    && job_sub_indent.is_none()
+                    && !clean_line.starts_with('-')
+                    && clean_line.contains(':')
+                {
+                    job_sub_indent = Some(indent);
+                }
+            }
+        }
+
+        if let Some((d_indent, scope, r_indent)) = defaults_ctx {
+            if indent > d_indent {
+                if r_indent.is_none() && clean_line == "run:" {
+                    defaults_ctx = Some((d_indent, scope, Some(indent)));
+                } else if let Some(ri) = r_indent {
+                    if indent > ri {
+                        if let Some((k, v)) = clean_line.split_once(':') {
+                            if k.trim() == "working-directory" {
+                                let wd = unquote(v.trim()).to_string();
+                                match scope {
+                                    DefaultsScope::Workflow => workflow_working_dir = Some(wd),
+                                    DefaultsScope::Job => jobs[current_job].working_dir = Some(wd),
+                                }
+                            }
+                        }
+                    }
+                }
+                i += 1;
+                continue;
+            }
+        }
+
+        if let Some((e_indent, scope)) = env_ctx {
+            if indent > e_indent {
+                if !clean_line.starts_with('-') {
+                    if let Some((k, v)) = clean_line.split_once(':') {
+                        let key = k.trim();
+                        let val = unquote(v.trim()).to_string();
+                        if !key.is_empty() {
+                            match scope {
+                                EnvScope::Workflow => {
+                                    workflow_env.insert(key.to_string(), val);
+                                }
+                                EnvScope::Job => {
+                                    jobs[current_job].env.insert(key.to_string(), val);
+                                }
+                                EnvScope::Step => {
+                                    if let Some(ref mut step) = current_step {
+                                        step.env.insert(key.to_string(), val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                i += 1;
+                continue;
+            }
+        }
+
+        if let Some(m_indent) = matrix_indent {
+            if indent <= m_indent {
+                matrix_indent = None;
+                matrix_key_indent = None;
+                current_block_key = None;
+            } else {
+                if matrix_key_indent.is_none()
+                    && !clean_line.starts_with('-')
+                    && clean_line.contains(':')
+                {
+                    matrix_key_indent = Some(indent);
+                }
+                if Some(indent) == matrix_key_indent && !clean_line.starts_with('-') {
+                    current_block_key = None;
+                    if let Some((raw_key, raw_val)) = clean_line.split_once(':') {
+                        let key = raw_key.trim();
+                        let val = raw_val.trim();
+                        if key != "include" && key != "exclude" && !key.is_empty() {
+                            if val.starts_with('[') && val.ends_with(']') {
+                                let items = parse_flow_list(&val[1..val.len() - 1]);
+                                set_matrix_key(&mut jobs[current_job].matrix, key, items);
+                            } else if val.is_empty() {
+                                set_matrix_key(&mut jobs[current_job].matrix, key, Vec::new());
+                                current_block_key = Some(key.to_string());
+                            } else {
+                                set_matrix_key(&mut jobs[current_job].matrix, key, Vec::new());
+                            }
+                        }
+                    }
+                    i += 1;
+                    continue;
+                } else if let Some(k_indent) = matrix_key_indent {
+                    if indent >= k_indent {
+                        if let Some(ref key) = current_block_key {
+                            if let Some(item_str) = clean_line.strip_prefix('-') {
+                                let item = item_str.trim();
+                                if !item.is_empty() && !is_yaml_mapping_or_expr(item) {
+                                    let val = unquote(item).to_string();
+                                    push_matrix_val(&mut jobs[current_job].matrix, key, val);
+                                } else {
+                                    set_matrix_key(&mut jobs[current_job].matrix, key, Vec::new());
+                                    current_block_key = None;
+                                }
+                            } else {
+                                set_matrix_key(&mut jobs[current_job].matrix, key, Vec::new());
+                                current_block_key = None;
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if in_jobs && Some(indent) == job_sub_indent {
+            if let Some(rest) = clean_line.strip_prefix("env:") {
+                let rest = rest.trim();
+                if rest.is_empty() {
+                    env_ctx = Some((indent, EnvScope::Job));
+                } else if rest.starts_with('{') && rest.ends_with('}') {
+                    parse_flow_map(&rest[1..rest.len() - 1], &mut jobs[current_job].env);
+                }
+                i += 1;
+                continue;
+            } else if clean_line == "defaults:" {
+                defaults_ctx = Some((indent, DefaultsScope::Job, None));
+                i += 1;
+                continue;
+            } else if clean_line == "steps:" {
+                steps_indent = Some(indent);
+                i += 1;
+                continue;
+            }
+        }
+
+        if matrix_indent.is_none() && in_jobs && clean_line == "matrix:" {
+            matrix_indent = Some(indent);
+            matrix_key_indent = None;
+            current_block_key = None;
+            i += 1;
+            continue;
+        }
+
+        if steps_indent.is_some() && clean_line.starts_with('-') {
+            let after_dash = clean_line[1..].trim_start();
+            let dash_offset = clean_line.len() - after_dash.len();
+            let step_key_indent = indent + dash_offset;
+            current_step_indent = Some(step_key_indent);
+            current_step = Some(StepCandidate {
+                job_id: current_job,
+                ..Default::default()
+            });
+        }
+
+        let step_clean = if Some(indent) == current_step_indent {
+            Some(clean_line)
+        } else if current_step_indent.is_some() && clean_line.starts_with('-') {
+            let after_dash = clean_line[1..].trim_start();
+            Some(after_dash)
+        } else {
+            None
+        };
+
+        if let Some(sc) = step_clean {
+            if let Some(rest) = sc.strip_prefix("working-directory:") {
+                if let Some(ref mut step) = current_step {
+                    step.working_dir = Some(unquote(rest.trim()).to_string());
+                }
+                i += 1;
+                continue;
+            } else if let Some(rest) = sc.strip_prefix("env:") {
+                let rest = rest.trim();
+                let key_indent = current_step_indent.unwrap_or(indent);
+                if rest.is_empty() {
+                    env_ctx = Some((key_indent, EnvScope::Step));
+                } else if rest.starts_with('{') && rest.ends_with('}') {
+                    if let Some(ref mut step) = current_step {
+                        parse_flow_map(&rest[1..rest.len() - 1], &mut step.env);
+                    }
+                }
+                i += 1;
+                continue;
+            }
+        }
 
         let is_run_key = if let Some(rest) = trimmed_start.strip_prefix("- ") {
             rest.trim_start().starts_with("run:")
@@ -252,7 +614,16 @@ fn parse_workflow_commands(content: &str) -> Vec<String> {
             .unwrap_or(trimmed_start)
             .trim_start();
         if uses.starts_with("uses: pre-commit/action@") {
-            candidate_commands.push("pre-commit run --all-files".to_string());
+            let cmd = "pre-commit run --all-files".to_string();
+            if let Some(ref mut step) = current_step {
+                step.commands.push(cmd);
+            } else {
+                candidates.push(StepCandidate {
+                    job_id: current_job,
+                    commands: vec![cmd],
+                    ..Default::default()
+                });
+            }
         }
 
         if is_run_key {
@@ -285,34 +656,418 @@ fn parse_workflow_commands(content: &str) -> Vec<String> {
                 }
 
                 let joined = join_continuation_lines(&block_lines);
-                for cmd in joined {
-                    candidate_commands.push(cmd);
+                if let Some(ref mut step) = current_step {
+                    step.commands.extend(joined);
+                } else {
+                    candidates.push(StepCandidate {
+                        job_id: current_job,
+                        commands: joined,
+                        ..Default::default()
+                    });
                 }
                 continue;
             } else if !after_run_clean.is_empty() {
-                let mut cmd_str = after_run_clean;
-                if (cmd_str.starts_with('"') && cmd_str.ends_with('"'))
-                    || (cmd_str.starts_with('\'') && cmd_str.ends_with('\''))
-                {
-                    cmd_str = &cmd_str[1..cmd_str.len() - 1];
+                let cmd_str = unquote(after_run_clean).to_string();
+                if let Some(ref mut step) = current_step {
+                    step.commands.push(cmd_str);
+                } else {
+                    candidates.push(StepCandidate {
+                        job_id: current_job,
+                        commands: vec![cmd_str],
+                        ..Default::default()
+                    });
                 }
-                candidate_commands.push(cmd_str.to_string());
             }
         }
         i += 1;
     }
 
-    // A CI line often chains setup and the check (`mkdir -p out && uv run pytest`): each part
-    // is judged on its own.
+    if let Some(step) = current_step.take() {
+        candidates.push(step);
+    }
+
     let mut result = Vec::new();
-    for cmd in candidate_commands {
-        for part in split_chain(&cmd) {
-            if let Some(kept) = filter_and_clean_command(&part) {
-                result.push(kept);
+    let mut seen = HashSet::new();
+    let mut setup_cmds = Vec::new();
+    let mut seen_setup = HashSet::new();
+    let mut left_out = Vec::new();
+    let mut seen_left_out = HashSet::new();
+
+    for cand in candidates {
+        let job = &jobs[cand.job_id];
+        let matrix = &job.matrix;
+
+        let effective_wd = cand
+            .working_dir
+            .as_ref()
+            .or(job.working_dir.as_ref())
+            .or(workflow_working_dir.as_ref())
+            .cloned();
+
+        let mut effective_env = workflow_env.clone();
+        for (k, v) in &job.env {
+            effective_env.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &cand.env {
+            effective_env.insert(k.clone(), v.clone());
+        }
+
+        for raw_cmd in &cand.commands {
+            let combos =
+                expand_step_combinations(raw_cmd, effective_wd.as_deref(), &effective_env, matrix);
+            for (exp_cmd, exp_wd, exp_env) in combos {
+                for part in split_chain(&exp_cmd) {
+                    if let Some(uv_sync) = filter_uv_sync_command(&part) {
+                        if is_non_root_wd(exp_wd.as_deref()) {
+                            if let Some(reason) =
+                                check_left_out_reason(&uv_sync, exp_wd.as_deref(), &exp_env, matrix)
+                            {
+                                if seen_left_out.insert(uv_sync.clone()) {
+                                    left_out.push((uv_sync, reason));
+                                }
+                            } else {
+                                let rendered = format!(
+                                    "({})",
+                                    render_step_command(&uv_sync, exp_wd.as_deref(), &exp_env)
+                                );
+                                if seen_setup.insert(rendered.clone()) {
+                                    setup_cmds.push(rendered);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    let Some(kept) = filter_and_clean_command(&part) else {
+                        continue;
+                    };
+                    if let Some(reason) =
+                        check_left_out_reason(&kept, exp_wd.as_deref(), &exp_env, matrix)
+                    {
+                        if seen_left_out.insert(kept.clone()) {
+                            left_out.push((kept, reason));
+                        }
+                    } else {
+                        let rendered = render_step_command(&kept, exp_wd.as_deref(), &exp_env);
+                        if seen.insert(rendered.clone()) {
+                            result.push(rendered);
+                        }
+                    }
+                }
             }
         }
     }
-    result
+
+    (result, setup_cmds, left_out)
+}
+
+fn strip_yaml_comment(s: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev_ws = true;
+    for (idx, c) in s.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+        } else if c == '#' && prev_ws {
+            return s[..idx].trim_end();
+        }
+        prev_ws = c.is_whitespace();
+    }
+    s.trim_end()
+}
+
+fn unquote(s: &str) -> &str {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+fn is_yaml_mapping_or_expr(s: &str) -> bool {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        return false;
+    }
+    s.starts_with('{')
+        || s.starts_with('[')
+        || s.starts_with("${{")
+        || s.ends_with(':')
+        || s.contains(": ")
+}
+
+fn parse_flow_list(inner: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        if let Some(q) = quote {
+            current.push(c);
+            if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+            current.push(c);
+        } else if c == ',' {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                if is_yaml_mapping_or_expr(trimmed) {
+                    return Vec::new();
+                }
+                items.push(unquote(trimmed).to_string());
+            }
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        if is_yaml_mapping_or_expr(trimmed) {
+            return Vec::new();
+        }
+        items.push(unquote(trimmed).to_string());
+    }
+    items
+}
+
+fn parse_flow_map(inner: &str, out: &mut BTreeMap<String, String>) {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut brace_depth: usize = 0;
+    for c in inner.chars() {
+        if let Some(q) = quote {
+            current.push(c);
+            if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+            current.push(c);
+        } else if c == '{' {
+            brace_depth += 1;
+            current.push(c);
+        } else if c == '}' {
+            brace_depth = brace_depth.saturating_sub(1);
+            current.push(c);
+        } else if c == ',' && brace_depth == 0 {
+            entries.push(std::mem::take(&mut current));
+        } else {
+            current.push(c);
+        }
+    }
+    entries.push(current);
+    for entry in entries {
+        let trimmed = entry.trim();
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let key = k.trim();
+            let val = unquote(v.trim()).to_string();
+            if !key.is_empty() {
+                out.insert(key.to_string(), val);
+            }
+        }
+    }
+}
+
+fn set_matrix_key(matrix: &mut Vec<(String, Vec<String>)>, key: &str, values: Vec<String>) {
+    if let Some(entry) = matrix.iter_mut().find(|(k, _)| k == key) {
+        entry.1 = values;
+    } else {
+        matrix.push((key.to_string(), values));
+    }
+}
+
+fn push_matrix_val(matrix: &mut Vec<(String, Vec<String>)>, key: &str, val: String) {
+    if let Some(entry) = matrix.iter_mut().find(|(k, _)| k == key) {
+        entry.1.push(val);
+    } else {
+        matrix.push((key.to_string(), vec![val]));
+    }
+}
+
+fn expand_step_combinations(
+    cmd: &str,
+    wd: Option<&str>,
+    env: &BTreeMap<String, String>,
+    matrix: &[(String, Vec<String>)],
+) -> Vec<(String, Option<String>, BTreeMap<String, String>)> {
+    let mut expanded = vec![(cmd.to_string(), wd.map(String::from), env.clone())];
+    for (key, values) in matrix {
+        if values.is_empty() {
+            continue;
+        }
+        let mut next = Vec::new();
+        for (c, w, e) in &expanded {
+            let uses_key = replace_matrix_key(c, key, "").is_some()
+                || w.as_deref()
+                    .is_some_and(|ws| replace_matrix_key(ws, key, "").is_some())
+                || e.values()
+                    .any(|ev| replace_matrix_key(ev, key, "").is_some());
+            if uses_key {
+                for v in values {
+                    let nc = replace_matrix_key(c, key, v).unwrap_or_else(|| c.clone());
+                    let nw = w
+                        .as_ref()
+                        .map(|ws| replace_matrix_key(ws, key, v).unwrap_or_else(|| ws.clone()));
+                    let ne = e
+                        .iter()
+                        .map(|(ek, ev)| {
+                            (
+                                ek.clone(),
+                                replace_matrix_key(ev, key, v).unwrap_or_else(|| ev.clone()),
+                            )
+                        })
+                        .collect();
+                    next.push((nc, nw, ne));
+                }
+            } else {
+                next.push((c.clone(), w.clone(), e.clone()));
+            }
+        }
+        expanded = next;
+    }
+    expanded
+}
+
+fn replace_matrix_key(s: &str, target_key: &str, val: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut cursor = 0;
+    let mut replaced = false;
+    while cursor < s.len() {
+        let rest = &s[cursor..];
+        let Some(rel_start) = rest.find("${{") else {
+            out.push_str(rest);
+            break;
+        };
+        let start = cursor + rel_start;
+        let after_open = &s[start + 3..];
+        let Some(rel_end) = after_open.find("}}") else {
+            out.push_str(rest);
+            break;
+        };
+        let end = start + 3 + rel_end + 2;
+        let inner = after_open[..rel_end].trim();
+        if inner.strip_prefix("matrix.") == Some(target_key) {
+            out.push_str(&s[cursor..start]);
+            out.push_str(val);
+            replaced = true;
+            cursor = end;
+        } else {
+            out.push_str(&s[cursor..start + 3]);
+            cursor = start + 3;
+        }
+    }
+    if replaced {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn first_unexpanded_matrix_key(s: &str) -> Option<String> {
+    let mut cursor = 0;
+    while let Some(rel) = s[cursor..].find("${{") {
+        let start = cursor + rel + 3;
+        let after = &s[start..];
+        if let Some(rel_end) = after.find("}}") {
+            let inner = after[..rel_end].trim();
+            if let Some(key) = inner.strip_prefix("matrix.") {
+                return Some(key.trim().to_string());
+            }
+            cursor = start + rel_end + 2;
+        } else {
+            let inner = after.trim_start();
+            if let Some(rest) = inner.strip_prefix("matrix.") {
+                let key = rest.split_whitespace().next().unwrap_or("");
+                return Some(key.to_string());
+            }
+            break;
+        }
+    }
+    None
+}
+
+fn check_left_out_reason(
+    cmd: &str,
+    wd: Option<&str>,
+    env: &BTreeMap<String, String>,
+    matrix: &[(String, Vec<String>)],
+) -> Option<String> {
+    if let Some(key) = first_unexpanded_matrix_key(cmd) {
+        if matrix.iter().any(|(k, _)| k == &key) {
+            return Some(format!("matrix key {key} has no plain values"));
+        } else {
+            return Some(format!("unknown matrix key {key}"));
+        }
+    }
+    for (k, v) in env {
+        if v.contains("${{") {
+            return Some(format!("env {k} is set from a CI expression"));
+        }
+    }
+    if let Some(w) = wd {
+        if w.contains("${{") {
+            return Some("working-directory is a CI expression".to_string());
+        }
+    }
+    None
+}
+
+fn shell_quote_if_needed(s: &str) -> String {
+    let is_safe = !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '.' | '/' | ',' | ':' | '@' | '%' | '+' | '=' | '-')
+        });
+    if is_safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+fn is_non_root_wd(wd: Option<&str>) -> bool {
+    wd.is_some_and(|dir| !dir.is_empty() && dir != "." && dir != "./")
+}
+
+fn filter_uv_sync_command(cmd: &str) -> Option<String> {
+    let tokens = tokenize(cmd.trim());
+    if tokens.first().map(String::as_str) == Some("uv")
+        && tokens.get(1).map(String::as_str) == Some("sync")
+    {
+        Some(tokens.join(" "))
+    } else {
+        None
+    }
+}
+
+fn render_step_command(cmd: &str, wd: Option<&str>, env: &BTreeMap<String, String>) -> String {
+    let mut out = String::new();
+    if let Some(dir) = wd {
+        if is_non_root_wd(Some(dir)) {
+            out.push_str("cd ");
+            out.push_str(&shell_quote_if_needed(dir));
+            out.push_str(" && ");
+        }
+    }
+    if !env.is_empty() {
+        out.push_str("env ");
+        for (k, v) in env {
+            out.push_str(k);
+            out.push('=');
+            out.push_str(&shell_quote_if_needed(v));
+            out.push(' ');
+        }
+    }
+    out.push_str(cmd);
+    out
 }
 
 /// Split a shell line on `&&`, `||` and `;` outside quotes.
@@ -399,10 +1154,30 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         "bunx ",
     ];
     let mut stripped = trimmed;
+    let mut had_prefix = false;
     for p in &prefixes {
         if stripped.starts_with(p) {
-            stripped = &stripped[p.len()..];
+            stripped = stripped[p.len()..].trim_start();
+            had_prefix = true;
             break;
+        }
+    }
+    if had_prefix {
+        while stripped.starts_with('-') {
+            let Some((flag, rest)) = stripped.split_once(char::is_whitespace) else {
+                break;
+            };
+            stripped = rest.trim_start();
+            if matches!(
+                flag,
+                "--python" | "-p" | "--package" | "--directory" | "--group" | "--extra" | "--with"
+            ) {
+                if let Some((_, after_val)) = stripped.split_once(char::is_whitespace) {
+                    stripped = after_val.trim_start();
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -444,6 +1219,12 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         "tsc",
     ];
 
+    let text = if let Some(idx) = trimmed.find("| tee") {
+        &trimmed[..idx]
+    } else {
+        trimmed
+    };
+
     let is_check = check_cmds.iter().any(|&c| {
         if stripped == c {
             true
@@ -452,17 +1233,11 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
         } else {
             false
         }
-    });
+    }) || is_make_check(text);
 
     if !is_check {
         return None;
     }
-
-    let text = if let Some(idx) = trimmed.find("| tee") {
-        &trimmed[..idx]
-    } else {
-        trimmed
-    };
 
     // Reporting options go, with their value when it is a separate word (`--cov-report xml:out`).
     let tokens = tokenize(text);
@@ -487,30 +1262,84 @@ fn filter_and_clean_command(cmd: &str) -> Option<String> {
     Some(kept_tokens.join(" "))
 }
 
+fn is_make_check(cmd: &str) -> bool {
+    let tokens = tokenize(cmd);
+    if tokens.first().map(String::as_str) != Some("make") {
+        return false;
+    }
+    let mut targets = Vec::new();
+    let mut i = 1;
+    while i < tokens.len() {
+        let tok = tokens[i].as_str();
+        if tok == "-C" || tok == "--directory" {
+            if i + 1 >= tokens.len() || tokens[i + 1].is_empty() {
+                return false;
+            }
+            i += 2;
+        } else if (tok.starts_with("-C") && tok.len() > 2)
+            || (tok.starts_with("--directory=") && tok.len() > "--directory=".len())
+            || matches!(tok, "-s" | "--no-print-directory" | "-k")
+        {
+            i += 1;
+        } else if tok.starts_with('-') || tok.contains('=') {
+            return false;
+        } else {
+            targets.push(tok);
+            i += 1;
+        }
+    }
+    if targets.len() != 1 {
+        return false;
+    }
+    let target = targets[0];
+    matches!(target, "check" | "lint" | "test" | "typecheck" | "validate")
+        || target.starts_with("test-")
+        || target.starts_with("test_")
+}
+
 fn tokenize(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_quote = None;
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
 
-    for ch in s.chars() {
+    while i < chars.len() {
+        let ch = chars[i];
         match in_quote {
             Some(q) => {
                 current.push(ch);
                 if ch == q {
                     in_quote = None;
                 }
+                i += 1;
             }
             None => {
-                if ch == '"' || ch == '\'' {
+                if ch == '$' && chars.get(i + 1) == Some(&'{') && chars.get(i + 2) == Some(&'{') {
+                    current.push_str("${{");
+                    i += 3;
+                    while i < chars.len() {
+                        if chars[i] == '}' && chars.get(i + 1) == Some(&'}') {
+                            current.push_str("}}");
+                            i += 2;
+                            break;
+                        }
+                        current.push(chars[i]);
+                        i += 1;
+                    }
+                } else if ch == '"' || ch == '\'' {
                     in_quote = Some(ch);
                     current.push(ch);
+                    i += 1;
                 } else if ch.is_whitespace() {
                     if !current.is_empty() {
                         tokens.push(current);
                         current = String::new();
                     }
+                    i += 1;
                 } else {
                     current.push(ch);
+                    i += 1;
                 }
             }
         }
@@ -641,12 +1470,13 @@ pub fn render_verified(
 
     out.push_str("[dispatch]\n");
     if let Some(s) = setup {
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
         if setup_passed {
             out.push_str("# prepares each new worktree before the implementer starts\n");
-            out.push_str(&format!("setup = \"{s}\"\n"));
+            out.push_str(&format!("setup = \"{escaped}\"\n"));
         } else {
             out.push_str(&format!(
-                "# setup = \"{s}\"   # left out: failed in a fresh worktree\n"
+                "# setup = \"{escaped}\"   # left out: failed in a fresh worktree\n"
             ));
         }
     }
@@ -889,6 +1719,19 @@ pub fn run(args: &InitArgs) -> i32 {
     }
 
     let ci_steps = detect_ci_with_sources(&root);
+    let ci_left_out = detect_ci_left_out(&root);
+    for (cmd, _, reason) in &ci_left_out {
+        eprintln!("init: {cmd} ... left out: {reason}");
+    }
+    let left_out_init_steps: Vec<InitStep> = ci_left_out
+        .into_iter()
+        .map(|(cmd, src, reason)| InitStep {
+            command: cmd,
+            source: src,
+            verdict: Some(Verdict::Environment(reason)),
+        })
+        .collect();
+
     let (steps, from_ci) = if !ci_steps.is_empty() {
         let commands: Vec<String> = ci_steps.iter().map(|(cmd, _)| cmd.clone()).collect();
         let kept = drop_overlapping(commands);
@@ -924,7 +1767,7 @@ pub fn run(args: &InitArgs) -> i32 {
         )
     };
 
-    if steps.is_empty() {
+    if steps.is_empty() && left_out_init_steps.is_empty() {
         eprintln!(
             "no toolchain detected: write blyte.toml by hand (see blyte init --print for the format)"
         );
@@ -932,9 +1775,18 @@ pub fn run(args: &InitArgs) -> i32 {
     }
 
     let env = detect_env(&root);
-    let setup = detect_setup(&root);
+    let mut setup_parts = Vec::new();
+    if let Some(root_setup) = detect_setup(&root) {
+        setup_parts.push(root_setup);
+    }
+    setup_parts.extend(detect_ci_setup(&root));
+    let setup = if setup_parts.is_empty() {
+        None
+    } else {
+        Some(setup_parts.join(" && "))
+    };
 
-    let (mut verified_steps, mut setup_passed) = if !args.no_verify {
+    let (mut verified_steps, mut setup_passed) = if !args.no_verify && !steps.is_empty() {
         verify_steps(
             &root,
             steps,
@@ -987,6 +1839,8 @@ pub fn run(args: &InitArgs) -> i32 {
             }
         }
     }
+
+    verified_steps.extend(left_out_init_steps);
 
     let kept_count = verified_steps
         .iter()
