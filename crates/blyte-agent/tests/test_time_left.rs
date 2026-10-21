@@ -56,7 +56,9 @@ fn time_warning_arrives_once_under_ten_percent_of_max_duration() {
     let d = tempfile::tempdir().unwrap();
     let p = Busy {
         requests: Mutex::new(Vec::new()),
-        sleep: Some(Duration::from_millis(100)),
+        // The warning window (the last 10%, 1.2 s) must be several turns wide, or a slow CI runner
+        // can step over it without starting a turn inside it.
+        sleep: Some(Duration::from_millis(250)),
     };
     let r = Runner {
         provider: &p,
@@ -67,7 +69,7 @@ fn time_warning_arrives_once_under_ten_percent_of_max_duration() {
         budget: Budget {
             max_turns: 300,
             max_gate_attempts: 1,
-            max_duration: Some(Duration::from_secs(2)),
+            max_duration: Some(Duration::from_secs(12)),
         },
         rollback: false,
         on_event: None,
