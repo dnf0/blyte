@@ -1,3 +1,9 @@
+## v0.35.2 (2026-10-21)
+
+### Fix
+
+- **dispatch**: say when the gate leaves CI steps out, and record them for review (#301)
+
 ## v0.35.1 (2026-10-21)
 
 ### Fix
