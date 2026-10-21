@@ -52,6 +52,8 @@ pub struct RunRecord {
     pub gated: bool,
     /// Where the gate came from: `none` (ungated) or `user` (`--gate`).
     pub gate_source: String,
+    #[serde(default)]
+    pub gate_left_out: Vec<String>,
     pub container: Option<String>,
     pub container_workdir: String,
     /// Whether local shell commands ran under macOS seatbelt sandbox isolation.
@@ -120,6 +122,11 @@ impl RunRecord {
         } else {
             blyte_agent::shell::withheld_env()
         };
+        let gate_left_out = config
+            .report
+            .as_deref()
+            .and_then(read_gate_left_out_from_start)
+            .unwrap_or_default();
         Self {
             schema_version: SCHEMA_VERSION,
             harness_build: env!("BLYTE_BUILD").into(),
@@ -132,6 +139,7 @@ impl RunRecord {
             context: config.context_strategy.clone(),
             gated,
             gate_source: if gated { "user" } else { "none" }.into(),
+            gate_left_out,
             container: config.container.clone(),
             container_workdir: config.container_workdir.clone(),
             sandboxed,
@@ -241,6 +249,27 @@ pub fn write(path: &Path, record: &RunRecord) -> Result<(), String> {
         .map_err(|e| format!("report serialisation failed: {e}"))?;
     std::fs::write(path, json + "\n")
         .map_err(|e| format!("cannot write report {}: {e}", path.display()))
+}
+
+fn read_gate_left_out_from_start(report_path: &Path) -> Option<Vec<String>> {
+    let file_name = report_path.file_name()?.to_str()?;
+    let id = file_name.strip_suffix(".report.json")?;
+    let start_path = report_path.with_file_name(format!("{id}.start.json"));
+    let content = std::fs::read_to_string(start_path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let arr = val.get("gate_left_out")?.as_array()?;
+    let mut out = Vec::new();
+    for item in arr {
+        if let (Some(cmd), Some(reason)) = (
+            item.get("command").and_then(|v| v.as_str()),
+            item.get("reason").and_then(|v| v.as_str()),
+        ) {
+            out.push(format!("{cmd} ({reason})"));
+        } else if let Some(s) = item.as_str() {
+            out.push(s.to_string());
+        }
+    }
+    Some(out)
 }
 
 /// Returns the name of the sandbox mechanism active for the task configuration.
