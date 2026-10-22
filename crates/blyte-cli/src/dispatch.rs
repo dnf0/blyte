@@ -329,6 +329,67 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         recorded_task_file.unwrap_or_else(|| task_md_path.display().to_string());
 
     if !args.research {
+        let start_path = wt_parent.join(format!("{}.start.json", args.id));
+        if start_path.exists() {
+            let start_str = match std::fs::read_to_string(&start_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error reading {}: {e}", start_path.display());
+                    return 2;
+                }
+            };
+            let start_val: serde_json::Value = match serde_json::from_str(&start_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error parsing {}: {e}", start_path.display());
+                    return 2;
+                }
+            };
+            let Some(pid) = start_val.get("pid").and_then(|v| v.as_i64()) else {
+                eprintln!("error: missing pid in {}", start_path.display());
+                return 2;
+            };
+            let Some(started_at) = start_val.get("started_at").and_then(|v| v.as_u64()) else {
+                eprintln!("error: missing started_at in {}", start_path.display());
+                return 2;
+            };
+            if crate::clean::is_pid_alive(pid) {
+                let summary_path = wt_parent.join(format!("{}.json", args.id));
+                let finished_since_start = if summary_path.exists() {
+                    let meta = match std::fs::metadata(&summary_path) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("error reading metadata of {}: {e}", summary_path.display());
+                            return 2;
+                        }
+                    };
+                    let mtime = match meta.modified() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("error reading mtime of {}: {e}", summary_path.display());
+                            return 2;
+                        }
+                    };
+                    let mtime_secs = match mtime.duration_since(std::time::UNIX_EPOCH) {
+                        Ok(d) => d.as_secs(),
+                        Err(e) => {
+                            eprintln!("error reading timestamp of {}: {e}", summary_path.display());
+                            return 2;
+                        }
+                    };
+                    mtime_secs >= started_at
+                } else {
+                    false
+                };
+                if !finished_since_start {
+                    eprintln!(
+                        "error: run {} is still running (pid {pid}). Wait for it to finish, or dispatch with a new ID.",
+                        args.id
+                    );
+                    return 2;
+                }
+            }
+        }
         crate::clean::clean_quiet(&root, Some(&args.id));
     }
 
@@ -431,6 +492,82 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             }
         }
+    } else {
+        let base_commit = match Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                &format!("{}^{{commit}}", args.base),
+            ])
+            .current_dir(&root)
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) => {
+                eprintln!(
+                    "error: git rev-parse {} failed: {}",
+                    args.base,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: failed to execute git rev-parse: {e}");
+                return 2;
+            }
+        };
+        let wt_head = match Command::new("git")
+            .args([
+                "-C",
+                worktree_dir.to_str().unwrap(),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) => {
+                eprintln!(
+                    "error: git -C {} rev-parse HEAD failed: {}",
+                    worktree_dir.display(),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: failed to execute git rev-parse: {e}");
+                return 2;
+            }
+        };
+        let ancestor_out = Command::new("git")
+            .args(["merge-base", "--is-ancestor", &base_commit, &wt_head])
+            .current_dir(&root)
+            .output();
+        match ancestor_out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) if o.status.code() == Some(1) => {
+                let short_wt_head = &wt_head[..wt_head.len().min(7)];
+                let short_base = &base_commit[..base_commit.len().min(7)];
+                eprintln!(
+                    "error: .wt/{id} is from an earlier run based on {short_wt_head}, which does not contain {short_base} ({base_name}). Run `blyte clean`, remove it with `git worktree remove .wt/{id}` and `git branch -D wip/{id}` if it is not needed, or dispatch with a new ID.",
+                    id = args.id,
+                    base_name = args.base,
+                );
+                return 2;
+            }
+            Ok(o) => {
+                eprintln!(
+                    "error: git merge-base --is-ancestor failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: failed to execute git merge-base --is-ancestor: {e}");
+                return 2;
+            }
+        }
     }
 
     // 2. Ensure .wt/ is in info/exclude
@@ -527,6 +664,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     let log_path = wt_parent.join(format!("{}.log", args.id));
+    let summary_path = wt_parent.join(format!("{}.json", args.id));
+    if summary_path.exists() {
+        let _ = std::fs::remove_file(&summary_path);
+    }
     let report_path = wt_parent.join(format!("{}.report.json", args.id));
     if report_path.exists() {
         let _ = std::fs::remove_file(&report_path);

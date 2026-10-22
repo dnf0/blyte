@@ -4,7 +4,7 @@ Date: 2026-10-22.
 
 ## Problem
 
-Two failures seen in reliability-orchestrator on 2026-10-22, both from dispatching an ID that an
+Two failures seen on 2026-10-22, both from dispatching an ID that an
 earlier run had used:
 
 1. **A stale worktree is reused.** `blyte dispatch S1` found `.wt/S1` from a run on 2026-10-20,
