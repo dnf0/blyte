@@ -2,7 +2,7 @@
 
 ## Why
 
-Reported by the reliability-orchestrator session (blyte 0.37.1). About 30 seconds after
+Reported by the orchestrator session (blyte 0.37.1). About 30 seconds after
 `blyte dispatch CL6 ...`, `blyte plan` printed `CL6  merged`, while `blyte status CL6` said
 `state: running`, turn 2.
 

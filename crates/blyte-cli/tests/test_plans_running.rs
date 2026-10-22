@@ -280,3 +280,122 @@ fn index_html_polls_running_plans_and_does_not_use_set_interval_for_fetches() {
         "index.html should schedule fetchJobs via setTimeout"
     );
 }
+
+#[test]
+fn plan_cmd_running_and_no_commits_are_not_merged() {
+    let t = tempfile::tempdir().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let plan_rel = "docs/plans/plan1.md";
+    let plan_text = "# Plan 1\n\n### Task 1.1: Work\nDo work.\n";
+
+    let r1 = t.path().join("r1");
+    std::fs::create_dir_all(&r1).unwrap();
+    git(&r1, &["init", "-q", "-b", "main"]);
+    write(&r1.join(plan_rel), plan_text);
+    git(&r1, &["add", "."]);
+    git(&r1, &["commit", "-qm", "init", "--no-gpg-sign"]);
+    git(&r1, &["branch", "wip/job-1"]);
+
+    let wt = r1.join(".wt");
+
+    // 1. Still running: live pid, wip/job-1 at HEAD with no commits beyond it, no summary.
+    write(
+        &wt.join("job-1.start.json"),
+        &serde_json::json!({
+            "id": "job-1",
+            "pid": std::process::id(),
+            "started_at": now - 300,
+            "plan": plan_rel,
+            "plan_task": "Task 1.1",
+            "gate": "true",
+            "task_file": "/nonexistent",
+        })
+        .to_string(),
+    );
+
+    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text);
+    assert_eq!(rows[0].state, "running");
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["plan", plan_rel])
+        .current_dir(&r1)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("running") && !stdout.contains("merged"),
+        "expected running, not merged, got:\n{stdout}"
+    );
+
+    // 2. No commits: dead pid, summary with outcome: "no_changes" and commits: [].
+    write(
+        &wt.join("job-1.start.json"),
+        &serde_json::json!({
+            "id": "job-1",
+            "pid": 999999,
+            "started_at": now - 300,
+            "plan": plan_rel,
+            "plan_task": "Task 1.1",
+            "gate": "true",
+            "task_file": "/nonexistent",
+        })
+        .to_string(),
+    );
+    write(
+        &wt.join("job-1.json"),
+        &serde_json::json!({
+            "id": "job-1",
+            "outcome": "no_changes",
+            "commits": [],
+        })
+        .to_string(),
+    );
+
+    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text);
+    assert_eq!(rows[0].state, "review");
+    assert_eq!(rows[0].outcome.as_deref(), Some("no_changes"));
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["plan", plan_rel])
+        .current_dir(&r1)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("review") && !stdout.contains("merged"),
+        "expected review, not merged, got:\n{stdout}"
+    );
+
+    // 3. Merged: summary with one commit, and wip/job-1 merged into HEAD.
+    git(&r1, &["checkout", "-q", "wip/job-1"]);
+    write(&r1.join("work.txt"), "done\n");
+    git(&r1, &["add", "work.txt"]);
+    git(&r1, &["commit", "-qm", "do work", "--no-gpg-sign"]);
+    let sha = git(&r1, &["rev-parse", "HEAD"]);
+    git(&r1, &["checkout", "-q", "main"]);
+    git(&r1, &["merge", "-q", "--ff-only", "wip/job-1"]);
+    write(
+        &wt.join("job-1.json"),
+        &serde_json::json!({
+            "id": "job-1",
+            "outcome": "verified",
+            "commits": [{"sha": sha, "subject": "do work"}],
+        })
+        .to_string(),
+    );
+
+    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text);
+    assert_eq!(rows[0].state, "merged");
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["plan", plan_rel])
+        .current_dir(&r1)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("merged"), "expected merged, got:\n{stdout}");
+}
