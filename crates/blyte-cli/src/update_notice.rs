@@ -147,10 +147,13 @@ pub fn print_notice() {
         return;
     };
     let version = env!("CARGO_PKG_VERSION");
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            eprintln!("blyte: could not check for a newer release: system clock: {e}");
+            return;
+        }
+    };
     let lines = check(&state_dir, version, now, || fetch_latest_release(version));
     for line in lines {
         eprintln!("{line}");
