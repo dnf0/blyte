@@ -76,6 +76,7 @@ fn a_repository_registered_later_appears_on_the_next_poll() {
         .current_dir(&repo)
         .env("HOME", &home)
         .env("BLYTE_STATE_DIR", &state)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")

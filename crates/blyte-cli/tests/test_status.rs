@@ -40,6 +40,7 @@ fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(args)
         .current_dir(dir)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")

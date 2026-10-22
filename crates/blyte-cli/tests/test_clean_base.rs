@@ -446,6 +446,7 @@ fn test_dispatch_records_base_in_start_file() {
         ])
         .current_dir(root)
         .env("BLYTE_STATE_DIR", root.join(".state"))
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")

@@ -20,5 +20,6 @@ pub mod skill;
 pub mod statusline;
 pub mod task_runner;
 pub mod update;
+pub mod update_notice;
 pub mod usage_log;
 pub mod wait;

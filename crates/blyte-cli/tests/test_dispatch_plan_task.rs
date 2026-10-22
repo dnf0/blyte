@@ -39,6 +39,7 @@ fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("BLYTE_STATE_DIR", dir.join(".state"))
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")

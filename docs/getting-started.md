@@ -22,7 +22,9 @@ chmod +x ~/.local/bin/blyte
 ```
 
 To update later, `blyte update` installs the latest release in place (`--check` only shows the
-versions; `--rollback` restores the previous build, kept as `blyte.prev`).
+versions; `--rollback` restores the previous build, kept as `blyte.prev`). `blyte dispatch` and
+`blyte review` check for a newer release once a day and print one line when there is one. Set
+`BLYTE_NO_UPDATE_CHECK=1` to turn this off.
 
 ## 2. Give it a model
 
