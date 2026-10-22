@@ -297,7 +297,7 @@ The default branch is `origin/HEAD`'s target, else `main`, else `master`. In all
 5. **Git cherry** (explicit clean only): every commit `git cherry <default> <branch>` (and `origin/<default>`) lists is marked `-` (`merged`).
 6. **Merge tree** (explicit clean only): merging it would change nothing—`git merge-tree --write-tree <default> <branch>` exits 0 and the tree id matches the target tree (`merged`).
 7. **History walk** (explicit clean only): walks first-parent commits on the default branch, `origin/<default>`, and base branches (up to 20 commits touching the modified files since the run started), testing with `git merge-tree` whether the run's diff was merged into history (`merged` or `merged into <base>`).
-8. **Squash-merge subjects** (explicit clean only): every commit's subject on `<branch>` appears as a whole line in the messages of `<default>`'s (or `origin/<default>`'s, or base branch's) commits since the branch forked (`merged` or `merged into <base>`).
+8. **Squash-merge subjects**: every commit's subject on `<branch>` appears as a whole line in the messages of `<default>`'s (or `origin/<default>`'s, or base branch's) commits since the branch forked (`merged` or `merged into <base>`).
 
 Branches are deleted only when merged; `--older-than` never deletes a branch.
 
@@ -307,7 +307,7 @@ Branches are deleted only when merged; `--older-than` never deletes a branch.
 
 `blyte clean` also reports other worktrees (such as sessions' sibling worktrees) whose work is merged and working tree is clean, listing the `git worktree remove` commands to delete them without removing them itself.
 
-Before creating a new worktree, `blyte dispatch` (except for `--research`) quietly cleans the repository. To avoid delaying dispatches, this clean uses only the cheap checks (ancestor check, cherry-pick record, follow-ups through those, and the redone, no changes, research report, and age rules; no `merge-tree` or history walk) and stops after 1 s. It prints `blyte: removed N finished worktrees (X GB)` on stderr only if worktrees were removed.
+Before creating a new worktree, `blyte dispatch` (except for `--research`) quietly cleans the repository. To avoid delaying dispatches, this clean uses only the cheap checks (ancestor check, cherry-pick record, squash-merge subjects, follow-ups through those, and the redone, no changes, research report, and age rules; no `merge-tree` or history walk) and stops after 1 s. It prints `blyte: removed N finished worktrees (X GB)` on stderr only if worktrees were removed. `blyte review --verdict` runs the same quick clean over the repository after handling the reviewed run. A squash merge on GitHub is seen once the default branch has been fetched or pulled.
 
 ## Research
 
