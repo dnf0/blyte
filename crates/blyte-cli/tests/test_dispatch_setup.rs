@@ -180,6 +180,7 @@ fn test_6_end_to_end_setup_failure_blocks_dispatch() {
         .args(["dispatch", "S1x", "task.md"])
         .current_dir(r)
         .env("BLYTE_USAGE_LOG", "off")
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
 

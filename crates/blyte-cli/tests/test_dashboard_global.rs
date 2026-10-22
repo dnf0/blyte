@@ -21,6 +21,7 @@ fn blyte(dir: &Path, home: &Path, state: &Path) -> Command {
     c.current_dir(dir)
         .env("HOME", home)
         .env("BLYTE_STATE_DIR", state)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("XDG_STATE_HOME")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")

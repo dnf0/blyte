@@ -39,9 +39,11 @@ fn main() {
                 std::process::exit(blyte_cli::dashboard::run(&args));
             }
             blyte_cli::cli::Command::Dispatch(args) => {
+                blyte_cli::update_notice::print_notice();
                 std::process::exit(blyte_cli::dispatch::run_dispatch(&args));
             }
             blyte_cli::cli::Command::Review(args) => {
+                blyte_cli::update_notice::print_notice();
                 std::process::exit(blyte_cli::dispatch::run_review(&args));
             }
             blyte_cli::cli::Command::Clean(args) => {

@@ -19,6 +19,7 @@ fn start(r: &Path, args: &[&str], id: &str) -> serde_json::Value {
         .args(args)
         .current_dir(r)
         .env("BLYTE_STATE_DIR", r.join(".state"))
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")

@@ -77,6 +77,7 @@ fn dispatch_saves_its_summary_and_records_env_names() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["dispatch", "E1", "task.md", "--sandbox", "off"])
         .current_dir(r)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")

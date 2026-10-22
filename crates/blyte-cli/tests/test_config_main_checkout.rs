@@ -57,6 +57,7 @@ fn a_linked_worktree_falls_back_to_the_main_checkout() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["dispatch", "L1", "task.md", "--sandbox", "off"])
         .current_dir(&linked)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")
