@@ -1,3 +1,9 @@
+## v0.37.0 (2026-10-22)
+
+### Feat
+
+- **cli**: tell users when a newer blyte is out, and clean squash-merged runs automatically (#306)
+
 ## v0.36.0 (2026-10-21)
 
 ### Feat
