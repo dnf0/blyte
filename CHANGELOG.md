@@ -1,3 +1,9 @@
+## v0.37.1 (2026-10-22)
+
+### Fix
+
+- keep running runs and refuse stale worktrees when a run ID is reused (#308)
+
 ## v0.37.0 (2026-10-22)
 
 ### Feat
