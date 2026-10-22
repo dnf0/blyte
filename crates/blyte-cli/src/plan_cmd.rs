@@ -147,14 +147,18 @@ fn read_verdict(root: &Path, run_id: &str) -> Option<String> {
         .and_then(|v| v.get("verdict").and_then(|x| x.as_str()).map(String::from))
 }
 
-fn read_summary(root: &Path, run_id: &str) -> Option<(bool, Option<String>)> {
+fn read_summary(root: &Path, run_id: &str) -> Option<(Option<String>, bool)> {
     let summary_file = root.join(".wt").join(format!("{run_id}.json"));
     std::fs::read_to_string(&summary_file)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .map(|v| {
             let outcome = v.get("outcome").and_then(|x| x.as_str()).map(String::from);
-            (true, outcome)
+            let has_commits = v
+                .get("commits")
+                .and_then(|x| x.as_array())
+                .is_some_and(|a| !a.is_empty());
+            (outcome, has_commits)
         })
 }
 
@@ -216,28 +220,29 @@ pub fn statuses(root: &Path, plan_rel: &str, text: &str) -> Vec<TaskStatus> {
             let branch_exists = check_branch_exists(root, &run.run_id);
             let verdict_opt = read_verdict(root, &run.run_id);
             let summary = read_summary(root, &run.run_id);
-
-            // Rule 1: merged
-            let is_merged = is_ancestor
+            let has_commits = summary.as_ref().is_some_and(|(_, c)| *c);
+            let is_merged = (has_commits && is_ancestor)
                 || (!branch_exists && matches!(verdict_opt.as_deref(), Some("accepted" | "fixed")));
-            if is_merged {
+
+            if summary.is_none() && run.pid.map(is_pid_alive).unwrap_or(false) {
+                // Rule 1: running
+                state = Some("running".to_string());
+                run_out = Some(run.run_id.clone());
+                verdict_out = verdict_opt;
+            } else if is_merged {
+                // Rule 2: merged
                 state = Some("merged".to_string());
                 run_out = Some(run.run_id.clone());
-                outcome_out = summary.and_then(|(_, o)| o);
+                outcome_out = summary.and_then(|(o, _)| o);
                 verdict_out = verdict_opt;
             } else if verdict_opt.as_deref() == Some("redone") {
-                // Rule 2: A run with verdict redone is not review: treat the task as if no run matched (go on to rule 5).
+                // Rule 3: A run with verdict redone is not review: treat the task as if no run matched (go on to rule 5).
                 // Leave state as None, run_out as None
-            } else if let Some((_, outcome)) = summary {
-                // Rule 2: review
+            } else if let Some((outcome, _)) = summary {
+                // Rule 3: review
                 state = Some("review".to_string());
                 run_out = Some(run.run_id.clone());
                 outcome_out = outcome;
-                verdict_out = verdict_opt;
-            } else if run.pid.map(is_pid_alive).unwrap_or(false) {
-                // Rule 3: running
-                state = Some("running".to_string());
-                run_out = Some(run.run_id.clone());
                 verdict_out = verdict_opt;
             } else {
                 // Rule 4: dead
@@ -639,6 +644,11 @@ Do task B.
         let repo = setup_test_repo();
         git(repo.path(), &["branch", "wip/A1"]);
         write_start_json(repo.path(), "A1", "docs/p.md", "Task A", 999999, 100);
+        fs::write(
+            repo.path().join(".wt/A1.json"),
+            r#"{"id":"A1","outcome":"verified","commits":[{"sha":"abc","subject":"work"}]}"#,
+        )
+        .unwrap();
 
         let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
         assert_eq!(rows[0].id, "A");
