@@ -1017,11 +1017,22 @@ impl<'a> CleanContext<'a> {
         let start_json = self.start_files.get(id);
         let summary_exists = summary_path.is_file();
 
-        // Check if run is finished: no live process (pid not running) or summary exists.
-        if !summary_exists {
-            if let Some(start) = start_json {
-                if let Some(pid) = start.get("pid").and_then(|p| p.as_i64()) {
-                    if is_pid_alive(pid) {
+        // Check if run is finished: no live process (pid not running) or a summary from this run exists.
+        if let Some(start) = start_json {
+            if let Some(pid) = start.get("pid").and_then(|p| p.as_i64()) {
+                if is_pid_alive(pid) {
+                    if !summary_exists {
+                        return Err(KeptReason::Running);
+                    }
+                    let Some(started_at) = parse_started_at(start) else {
+                        return Err(KeptReason::Running);
+                    };
+                    let summary_mtime = std::fs::metadata(&summary_path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    if summary_mtime.is_none_or(|mtime| mtime < started_at) {
                         return Err(KeptReason::Running);
                     }
                 }
