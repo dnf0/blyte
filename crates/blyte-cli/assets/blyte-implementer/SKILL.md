@@ -160,6 +160,7 @@ blyte review T1
 It starts with `== checks`: files the task does not name, commit messages not in the task, a run that
 did not pass, host commands and reads outside the repository. Add `--diff` for the full diff when
 something is flagged or surprising; otherwise the summary is usually enough, and it keeps your context small.
+If blyte review prints "blyte: <version> is out", tell the user, with that line.
 
 **When the gate passed (`verified`)**, a light check is enough:
 

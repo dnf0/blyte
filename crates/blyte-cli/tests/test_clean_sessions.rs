@@ -231,6 +231,7 @@ fn test_dispatch_quiet_clean_prints_nothing_about_sibling_worktrees() {
             "off",
         ])
         .current_dir(&root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")

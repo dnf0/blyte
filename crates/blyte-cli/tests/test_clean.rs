@@ -565,6 +565,7 @@ fn test_review_verdict_accepted_unmerged_worktree_kept() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", "T6", "--verdict", "accepted"])
         .current_dir(root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
 
@@ -622,6 +623,7 @@ fn test_review_verdict_redone_removes_worktree_keeps_branch() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", "T7", "--verdict", "redone"])
         .current_dir(root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
 
@@ -685,6 +687,7 @@ fn test_review_verdict_accepted_merged_removes_worktree_deletes_branch() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", "T8", "--verdict", "accepted"])
         .current_dir(root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
 
@@ -817,6 +820,7 @@ fn test_dispatch_cleans_quietly() {
             "off",
         ])
         .current_dir(root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")

@@ -116,6 +116,7 @@ fn test_dispatch_passes_allow_read_from_toml_and_cli() {
             "/abs/cli",
         ])
         .current_dir(r)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")

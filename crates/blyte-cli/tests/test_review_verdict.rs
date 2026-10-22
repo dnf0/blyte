@@ -30,6 +30,7 @@ fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(args)
         .current_dir(dir)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap()
 }
@@ -174,6 +175,7 @@ fn model_review_skipped_when_no_api_key() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", "T4", "--model-review"])
         .current_dir(r.path())
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")

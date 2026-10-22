@@ -818,6 +818,7 @@ fn test_review_followup_merged_removes_worktree_deletes_branch() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", "T1", "--verdict", "accepted"])
         .current_dir(root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
 
