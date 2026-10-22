@@ -898,10 +898,13 @@ impl<'a> CleanContext<'a> {
             }
         }
 
-        // clean_quiet uses only: ancestor, cherry-pick record, follow-ups through those,
-        // and the redone / no_changes / research / age rules.
+        // clean_quiet uses only: ancestor, cherry-pick record, squash-merge subject match,
+        // follow-ups through those, and the redone / no_changes / research / age rules.
         // No merge-tree, no history walk, no other-worktrees report.
         if self.quiet {
+            if let Some(tip_sha) = tip_sha {
+                return self.squash_merged_reason(tip_sha, &base_targets);
+            }
             return None;
         }
 
@@ -958,24 +961,35 @@ impl<'a> CleanContext<'a> {
                 }
             }
 
-            // 8. squash-merge subject match (explicit blyte clean only)
-            if is_squash_merged_into_target(self.root, tip_sha, &self.default_branch) {
-                return Some(RemovalReason::Merged);
-            }
-            if let Some(ref origin_def) = self.origin_default {
-                if is_squash_merged_into_target(self.root, tip_sha, origin_def) {
-                    return Some(RemovalReason::Merged);
-                }
-            }
-            if let Some((ref display_name, ref targets)) = base_targets {
-                for target in targets {
-                    if is_squash_merged_into_target(self.root, tip_sha, target) {
-                        return Some(RemovalReason::MergedInto(display_name.clone()));
-                    }
-                }
+            // 8. squash-merge subject match
+            if let Some(reason) = self.squash_merged_reason(tip_sha, &base_targets) {
+                return Some(reason);
             }
         }
 
+        None
+    }
+
+    fn squash_merged_reason(
+        &self,
+        tip_sha: &str,
+        base_targets: &Option<(String, Vec<String>)>,
+    ) -> Option<RemovalReason> {
+        if is_squash_merged_into_target(self.root, tip_sha, &self.default_branch) {
+            return Some(RemovalReason::Merged);
+        }
+        if let Some(ref origin_def) = self.origin_default {
+            if is_squash_merged_into_target(self.root, tip_sha, origin_def) {
+                return Some(RemovalReason::Merged);
+            }
+        }
+        if let Some((ref display_name, ref targets)) = base_targets {
+            for target in targets {
+                if is_squash_merged_into_target(self.root, tip_sha, target) {
+                    return Some(RemovalReason::MergedInto(display_name.clone()));
+                }
+            }
+        }
         None
     }
 
@@ -1986,6 +2000,7 @@ pub fn clean_quiet(root: &Path, skip_id: Option<&str>) {
 pub fn clean_on_review(root: &Path, id: &str) {
     let wt_path = root.join(".wt").join(id);
     if !wt_path.exists() {
+        clean_quiet(root, Some(id));
         return;
     }
 
@@ -2014,6 +2029,7 @@ pub fn clean_on_review(root: &Path, id: &str) {
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
+        clean_quiet(root, Some(id));
         return;
     }
 
@@ -2035,6 +2051,7 @@ pub fn clean_on_review(root: &Path, id: &str) {
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
+        clean_quiet(root, Some(id));
         return;
     }
 
@@ -2057,4 +2074,6 @@ pub fn clean_on_review(root: &Path, id: &str) {
     } else {
         println!("removed .wt/{id}");
     }
+
+    clean_quiet(root, Some(id));
 }
