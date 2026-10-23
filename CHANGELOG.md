@@ -1,3 +1,9 @@
+## v0.37.3 (2026-10-23)
+
+### Fix
+
+- **review**: review a run against the commit it started from (#312)
+
 ## v0.37.2 (2026-10-23)
 
 ### Fix
