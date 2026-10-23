@@ -1,32 +1,66 @@
 //! Time-limited runs are warned once when under 10% of `max_duration` remains; the turn-based and
 //! time-based warnings share a single `wrap_up_sent` guard so at most one fires per run.
 
+use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
 
+struct FastShell;
+
+impl Shell for FastShell {
+    fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+}
+
 struct Busy {
     requests: Mutex<Vec<Vec<Message>>>,
-    sleep: Option<Duration>,
+    start: Instant,
+    step_at: Option<(usize, Duration)>,
+    end_at: Option<(usize, Duration)>,
 }
 
 impl Provider for Busy {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        if let Some(d) = self.sleep {
-            std::thread::sleep(d);
-        }
         let mut reqs = self.requests.lock().unwrap();
         reqs.push(req.messages.clone());
+        let call = reqs.len();
+        drop(reqs);
+
+        if let Some((target_call, target_elapsed)) = self.step_at {
+            if call == target_call {
+                if let Some(rem) = target_elapsed.checked_sub(self.start.elapsed()) {
+                    std::thread::sleep(rem);
+                }
+            }
+        }
+        if let Some((target_call, target_elapsed)) = self.end_at {
+            if call >= target_call {
+                if let Some(rem) = target_elapsed.checked_sub(self.start.elapsed()) {
+                    std::thread::sleep(rem);
+                }
+            }
+        }
+
         Ok(Response {
             tool_calls: vec![ToolCall {
-                id: format!("c{}", reqs.len()),
+                id: format!("c{call}"),
                 name: "bash".into(),
                 arguments: json!({"command": "true"}),
                 signature: None,
@@ -53,23 +87,26 @@ fn ended_with_user_message(messages: &[Message], needle: &str) -> bool {
 
 #[test]
 fn time_warning_arrives_once_under_ten_percent_of_max_duration() {
+    const BUDGET: Duration = Duration::from_secs(5);
     let d = tempfile::tempdir().unwrap();
     let p = Busy {
         requests: Mutex::new(Vec::new()),
-        // The warning window (the last 10%, 1.2 s) must be several turns wide, or a slow CI runner
-        // can step over it without starting a turn inside it.
-        sleep: Some(Duration::from_millis(250)),
+        start: Instant::now(),
+        // Step into the final 10% window (4.5 s..5.0 s) on call 2, and past the deadline on call 4,
+        // while FastShell avoids spawning OS processes per turn.
+        step_at: Some((2, Duration::from_millis(4550))),
+        end_at: Some((4, BUDGET)),
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &FastShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
         budget: Budget {
             max_turns: 300,
             max_gate_attempts: 1,
-            max_duration: Some(Duration::from_secs(12)),
+            max_duration: Some(BUDGET),
         },
         rollback: false,
         on_event: None,
@@ -113,11 +150,13 @@ fn without_time_limit_only_turn_warning_appears_at_turn_21() {
     let d = tempfile::tempdir().unwrap();
     let p = Busy {
         requests: Mutex::new(Vec::new()),
-        sleep: None,
+        start: Instant::now(),
+        step_at: None,
+        end_at: None,
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &FastShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -162,11 +201,13 @@ fn long_time_limit_with_fast_provider_sends_only_turn_warning_once() {
     let d = tempfile::tempdir().unwrap();
     let p = Busy {
         requests: Mutex::new(Vec::new()),
-        sleep: None,
+        start: Instant::now(),
+        step_at: None,
+        end_at: None,
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &FastShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
