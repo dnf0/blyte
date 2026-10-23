@@ -475,10 +475,14 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 &format!("{}^{{commit}}", args.base),
             ])
             .current_dir(&root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            .output();
+        let base_commit = match base_commit {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => {
+                eprintln!("error: base {} is not a commit", args.base);
+                return 2;
+            }
+        };
         let add_out = Command::new("git")
             .args([
                 "worktree",
@@ -504,7 +508,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             }
         }
-        base_commit
+        Some(base_commit)
     } else {
         let base_commit = match Command::new("git")
             .args([
@@ -1098,17 +1102,28 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         return 2;
     }
 
-    let start_base_sha: Option<String> =
-        std::fs::read_to_string(root.join(".wt").join(format!("{}.start.json", args.id)))
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            .and_then(|v| {
-                v.get("base_sha")?
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-            });
+    // Runs dispatched before base_sha was recorded have no start record field; a record that
+    // exists but cannot be read is an error, not a reason to guess the base.
+    let start_path = root.join(".wt").join(format!("{}.start.json", args.id));
+    let start_base_sha: Option<String> = match std::fs::read_to_string(&start_path) {
+        Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
+            Ok(v) => v
+                .get("base_sha")
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            Err(e) => {
+                eprintln!("error: cannot parse {}: {e}", start_path.display());
+                return 2;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", start_path.display());
+            return 2;
+        }
+    };
 
     let base = if let Some(sha) = start_base_sha {
         let has_base = Command::new("git")
