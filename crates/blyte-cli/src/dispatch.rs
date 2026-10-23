@@ -393,7 +393,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         crate::clean::clean_quiet(&root, Some(&args.id));
     }
 
-    if args.research {
+    let base_commit: Option<String> = if args.research {
         if worktree_dir.exists() {
             eprintln!("error: {} already exists", worktree_dir.display());
             return 2;
@@ -451,6 +451,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             }
         }
+        None
     } else if !worktree_dir.exists() {
         let branch_exists = Command::new("git")
             .args([
@@ -467,6 +468,17 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             eprintln!("{}", branch_exists_message(&root, &branch, &args.id));
             return 2;
         }
+        let base_commit = Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                &format!("{}^{{commit}}", args.base),
+            ])
+            .current_dir(&root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
         let add_out = Command::new("git")
             .args([
                 "worktree",
@@ -492,6 +504,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             }
         }
+        base_commit
     } else {
         let base_commit = match Command::new("git")
             .args([
@@ -568,7 +581,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             }
         }
-    }
+        Some(base_commit)
+    };
 
     // 2. Ensure .wt/ is in info/exclude
     let common_dir_raw = Command::new("git")
@@ -793,6 +807,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "plan": args.plan,
         "plan_task": args.plan_task,
         "base": args.base,
+        "base_sha": base_commit,
     });
     if let Some(session) = crate::usage_log::session_from(
         std::env::var("BLYTE_SESSION").ok(),
@@ -1083,50 +1098,58 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         return 2;
     }
 
-    let root_head = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&root)
-        .output();
-    let root_head_sha = match root_head {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => {
-            eprintln!("error: could not resolve root HEAD");
+    let start_base_sha: Option<String> =
+        std::fs::read_to_string(root.join(".wt").join(format!("{}.start.json", args.id)))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|v| {
+                v.get("base_sha")?
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            });
+
+    let base = if let Some(sha) = start_base_sha {
+        let has_base = Command::new("git")
+            .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+            .current_dir(&wt)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_base {
+            eprintln!(
+                "error: run {} started from {sha}, which is not in this repository",
+                args.id
+            );
             return 2;
         }
-    };
+        sha
+    } else {
+        let root_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output();
+        let root_head_sha = match root_head {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => {
+                eprintln!("error: could not resolve root HEAD");
+                return 2;
+            }
+        };
 
-    let mb_out = Command::new("git")
-        .args(["merge-base", "HEAD", &root_head_sha])
-        .current_dir(&wt)
-        .output();
-    let base = match mb_out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => {
-            let has_root_head = Command::new("git")
-                .args(["cat-file", "-e", &format!("{root_head_sha}^{{commit}}")])
-                .current_dir(&wt)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if has_root_head {
-                root_head_sha
-            } else {
-                Command::new("git")
-                    .args(["rev-list", "--max-parents=0", "HEAD"])
-                    .current_dir(&wt)
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| {
-                        String::from_utf8_lossy(&o.stdout)
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string()
-                    })
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(root_head_sha)
+        let mb_out = Command::new("git")
+            .args(["merge-base", "HEAD", &root_head_sha])
+            .current_dir(&wt)
+            .output();
+        match mb_out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => {
+                eprintln!(
+                    "error: cannot find where run {} started; its start record has no base_sha and the worktree shares no history with {root_head_sha}",
+                    args.id
+                );
+                return 2;
             }
         }
     };
