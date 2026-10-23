@@ -1,3 +1,9 @@
+## v0.37.2 (2026-10-23)
+
+### Fix
+
+- **plan**: show a running or commit-less run as running or review, not merged (#310)
+
 ## v0.37.1 (2026-10-22)
 
 ### Fix
