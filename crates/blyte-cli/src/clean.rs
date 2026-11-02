@@ -405,7 +405,6 @@ pub struct CleanContext<'a> {
     pub wip_contains_cache: HashMap<String, Vec<String>>,
     pub merged_cache: HashMap<String, Option<RemovalReason>>,
     pub branch_contains_calls: usize,
-    pub quiet: bool,
     pub cherry_pick_set: Option<HashSet<String>>,
     pub rev_list_cache: HashMap<String, Vec<String>>,
     pub ancestor_cache: HashMap<(String, String), bool>,
@@ -481,15 +480,10 @@ impl<'a> CleanContext<'a> {
             wip_contains_cache: HashMap::new(),
             merged_cache: HashMap::new(),
             branch_contains_calls: 0,
-            quiet: false,
             cherry_pick_set: None,
             rev_list_cache: HashMap::new(),
             ancestor_cache: HashMap::new(),
         }
-    }
-
-    pub fn set_quiet(&mut self, quiet: bool) {
-        self.quiet = quiet;
     }
 
     fn compute_cherry_pick_set(&self) -> HashSet<String> {
@@ -875,13 +869,11 @@ impl<'a> CleanContext<'a> {
                     if self.is_ancestor_of_target(tip_sha, target) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
-                    if !self.quiet {
-                        if is_cherry_merged_into_target(self.root, tip_sha, target) {
-                            return Some(RemovalReason::MergedInto(display_name.clone()));
-                        }
-                        if is_merge_tree_merged_into_target(self.root, tip_sha, target, None) {
-                            return Some(RemovalReason::MergedInto(display_name.clone()));
-                        }
+                    if is_cherry_merged_into_target(self.root, tip_sha, target) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                    }
+                    if is_merge_tree_merged_into_target(self.root, tip_sha, target, None) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
                 }
             }
@@ -896,16 +888,6 @@ impl<'a> CleanContext<'a> {
             if self.is_child_run_merged(&child, visited) {
                 return Some(RemovalReason::MergedThrough(child));
             }
-        }
-
-        // clean_quiet uses only: ancestor, cherry-pick record, squash-merge subject match,
-        // follow-ups through those, and the redone / no_changes / research / age rules.
-        // No merge-tree, no history walk, no other-worktrees report.
-        if self.quiet {
-            if let Some(tip_sha) = tip_sha {
-                return self.squash_merged_reason(tip_sha, &base_targets);
-            }
-            return None;
         }
 
         if let Some(tip_sha) = tip_sha {
@@ -1568,21 +1550,13 @@ pub fn clean_repo(
     dry_run: bool,
     skip_id: Option<&str>,
     quiet: bool,
-    time_budget: Option<std::time::Duration>,
 ) -> CleanRepoStats {
     let mut removed_worktrees = 0;
     let mut freed_bytes = 0;
 
     let mut ctx = CleanContext::new(root);
-    ctx.set_quiet(time_budget.is_some());
-    let start_time = std::time::Instant::now();
     let ids = find_blyte_worktrees(root);
     for id in ids {
-        if let Some(budget) = time_budget {
-            if start_time.elapsed() >= budget {
-                break;
-            }
-        }
         if skip_id == Some(&id) {
             continue;
         }
@@ -2089,7 +2063,6 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
             args.dry_run,
             args.skip.as_deref(),
             args.quiet,
-            None,
         );
         total_freed += stats.freed_bytes;
     }
@@ -2179,28 +2152,6 @@ pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, Stri
     }
 
     Ok(None)
-}
-
-/// Quiet cleanup at dispatch start: no output unless something was removed,
-/// then one line `blyte: removed N finished worktrees (X GB)` on stderr.
-/// Never fails the dispatch: logs errors to stderr and goes on.
-pub fn clean_quiet(root: &Path, skip_id: Option<&str>) {
-    clean_quiet_with_budget(root, skip_id, std::time::Duration::from_secs(1));
-}
-
-pub fn clean_quiet_with_budget(
-    root: &Path,
-    skip_id: Option<&str>,
-    time_budget: std::time::Duration,
-) {
-    let stats = clean_repo(root, 14, false, skip_id, true, Some(time_budget));
-    if stats.removed_worktrees > 0 {
-        eprintln!(
-            "blyte: removed {} finished worktrees ({})",
-            stats.removed_worktrees,
-            format_size(stats.freed_bytes)
-        );
-    }
 }
 
 /// Starts `blyte clean --quiet [--skip <ID>]` in the background without waiting for it.
