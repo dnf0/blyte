@@ -23,6 +23,7 @@ fn req(messages: Vec<Message>) -> Request {
         messages,
         tools: vec![tool("read"), tool("bash")],
         max_output_tokens: None,
+        timeout: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn an_empty_conversation_still_marks_the_tools() {
         messages: vec![],
         tools: vec![tool("read")],
         max_output_tokens: None,
+        timeout: None,
     });
     assert_eq!(b["tools"][0]["cache_control"]["type"], EPHEMERAL);
 }

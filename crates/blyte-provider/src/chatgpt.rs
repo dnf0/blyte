@@ -14,11 +14,14 @@ use std::path::Path;
 
 use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
 
+const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+
 /// ChatGPT-login provider adapter reusing Codex CLI authentication.
 #[derive(Debug, Clone)]
 pub struct ChatGpt {
     access_token: String,
     account_id: String,
+    base_url: String,
     model: String,
 }
 
@@ -99,6 +102,7 @@ impl ChatGpt {
         Ok(Self {
             access_token: access_token.to_string(),
             account_id,
+            base_url: DEFAULT_BASE_URL.to_string(),
             model: "gpt-5.5".to_string(),
         })
     }
@@ -143,6 +147,12 @@ impl ChatGpt {
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         let m = model.into();
         self.model = m.strip_prefix("chatgpt/").unwrap_or(&m).to_string();
+        self
+    }
+
+    /// Overrides the base URL (e.g. for local testing).
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into().trim_end_matches('/').to_string();
         self
     }
 
@@ -414,12 +424,13 @@ impl ChatGpt {
 impl Provider for ChatGpt {
     /// Executes a synchronous streaming Responses API request and aggregates the SSE body.
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        let url = "https://chatgpt.com/backend-api/codex/responses";
-        let agent = crate::http_client();
+        let url = format!("{}/responses", self.base_url);
+        let agent = crate::http_client_for(req.timeout);
+        let started = std::time::Instant::now();
         let user_agent = format!("blyte/{}", env!("CARGO_PKG_VERSION"));
 
         let resp = agent
-            .post(url)
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", self.access_token))
             .set("ChatGPT-Account-ID", &self.account_id)
             .set("Accept", "text/event-stream")
@@ -432,14 +443,18 @@ impl Provider for ChatGpt {
             Ok(r) => {
                 let text = r
                     .into_string()
-                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
+                    .map_err(|e| crate::body_read_error(e, req.timeout, started))?;
                 Self::parse_sse(&text)
             }
             Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
                 status,
                 body: r.into_string().unwrap_or_default(),
             }),
-            Err(e) => Err(ProviderError::Transport(e.to_string())),
+            Err(e) => Err(crate::with_request_timeout_message(
+                ProviderError::Transport(e.to_string()),
+                req.timeout,
+                started,
+            )),
         }
     }
 
