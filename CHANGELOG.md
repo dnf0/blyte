@@ -1,3 +1,9 @@
+## v0.37.4 (2026-11-02)
+
+### Fix
+
+- stop at the deadline with a full report instead of being killed by the watchdog (#315)
+
 ## v0.37.3 (2026-10-23)
 
 ### Fix
