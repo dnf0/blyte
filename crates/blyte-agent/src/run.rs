@@ -147,6 +147,8 @@ pub struct RunReport {
     pub quote_problems: Option<Vec<String>>,
     /// Model check of `report.md`'s claims against their cited lines (`None` when the check did not run).
     pub claim_check: Option<claim_check::ClaimCheck>,
+    /// Reason the claim check did not run or stopped early (for example, out of time).
+    pub claim_check_skipped: Option<String>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -435,13 +437,21 @@ impl<'a> Runner<'a> {
     /// A gate of several lines is several steps. On the first attempt, every step runs and all
     /// failures come back in one message. On retries, previously failing steps run first, and if
     /// any of them still fails, the attempt stops without re-running the passing steps.
-    fn run_gate(&self, state: &State, last_failed: &[String]) -> (bool, String, u64, Vec<String>) {
+    fn run_gate(
+        &self,
+        state: &State,
+        last_failed: &[String],
+        deadline: &mut Option<std::time::Instant>,
+    ) -> (bool, String, u64, Vec<String>) {
         let (_guard, wait_ms) = if gate_slots::enabled() && !gate_slots::nested() {
             let max_slots = gate_slots::slots();
             let slot_dir = gate_slots::slot_dir();
             match gate_slots::acquire(max_slots, &slot_dir, Duration::from_millis(500)) {
                 Ok((guard, waited)) => {
                     let wait_ms = waited.as_millis() as u64;
+                    if let Some(d) = deadline.as_mut() {
+                        *d += waited;
+                    }
                     if wait_ms > 0 {
                         eprintln!(
                             "gate: waited {}s for a gate slot ({max_slots} in use)",
@@ -462,7 +472,7 @@ impl<'a> Runner<'a> {
 
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         if steps.len() <= 1 {
-            let (passed, output) = self.run_step(&state.orchestrator.verification_cmd);
+            let (passed, output) = self.run_step(&state.orchestrator.verification_cmd, *deadline);
             let failed = if passed {
                 Vec::new()
             } else {
@@ -481,10 +491,13 @@ impl<'a> Runner<'a> {
         let mut failures = Vec::new();
         let mut failed_steps = Vec::new();
         for &step in &first_group {
-            let (passed, output) = self.run_step(step);
+            let (passed, output) = self.run_step(step, *deadline);
             if !passed {
                 failed_steps.push(step.to_string());
                 failures.push(format!("$ {step}\n{output}"));
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    break;
+                }
             }
         }
         if !failures.is_empty() {
@@ -511,10 +524,13 @@ impl<'a> Runner<'a> {
             );
         }
         for &step in &second_group {
-            let (passed, output) = self.run_step(step);
+            let (passed, output) = self.run_step(step, *deadline);
             if !passed {
                 failed_steps.push(step.to_string());
                 failures.push(format!("$ {step}\n{output}"));
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    break;
+                }
             }
         }
         if failures.is_empty() {
@@ -535,20 +551,49 @@ impl<'a> Runner<'a> {
     }
 
     /// Run one gate command: exit status and its bounded output.
-    fn run_step(&self, cmd: &str) -> (bool, String) {
-        self.run_step_in(cmd, &self.root)
+    fn run_step(&self, cmd: &str, deadline: Option<std::time::Instant>) -> (bool, String) {
+        self.run_step_in(cmd, &self.root, deadline)
     }
 
-    fn run_step_in(&self, cmd: &str, dir: &Path) -> (bool, String) {
+    fn run_step_in(
+        &self,
+        cmd: &str,
+        dir: &Path,
+        deadline: Option<std::time::Instant>,
+    ) -> (bool, String) {
+        let timeout = match deadline {
+            Some(d) => {
+                let left = d.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return (false, "exit 124\ngate ran out of time".into());
+                }
+                Duration::from_secs(1800).min(left)
+            }
+            None => Duration::from_secs(1800),
+        };
         let wrapped = format!("(export {}=1\n{cmd}\n)", gate_slots::IN_GATE_ENV);
-        match self.shell.exec(&wrapped, dir, Duration::from_secs(1800)) {
+        match self.shell.exec(&wrapped, dir, timeout) {
             Ok(o) => {
                 let body = tools::bound_output(o.merged().trim_end());
+                if o.exit_code != 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    if body.is_empty() {
+                        return (false, format!("exit {}\ngate ran out of time", o.exit_code));
+                    }
+                    return (
+                        false,
+                        format!("exit {}\ngate ran out of time\n{body}", o.exit_code),
+                    );
+                }
                 (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
             }
             // A gate that cannot execute has not passed. Treating an error as success is how
             // an ungated run gets mistaken for a verified one.
-            Err(e) => (false, format!("verification command could not run: {e}")),
+            Err(e) => {
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    return (false, format!("gate ran out of time: {e}"));
+                }
+                (false, format!("verification command could not run: {e}"))
+            }
         }
     }
 
@@ -629,7 +674,7 @@ impl<'a> Runner<'a> {
 
         let mut all_failed = true;
         for step in failing_steps {
-            let (passed, _) = self.run_step_in(step, &wt_path);
+            let (passed, _) = self.run_step_in(step, &wt_path, None);
             if passed {
                 all_failed = false;
             }
@@ -679,7 +724,10 @@ impl<'a> Runner<'a> {
         problems
     }
 
-    fn run_claim_check(&self) -> Option<claim_check::ClaimCheck> {
+    fn run_claim_check(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<claim_check::ClaimCheck> {
         if !self.claim_check {
             return None;
         }
@@ -710,7 +758,7 @@ impl<'a> Runner<'a> {
                 read: &read,
             },
         );
-        Some(claim_check::check_claims(self.provider, &claims))
+        Some(claim_check::check_claims(self.provider, &claims, deadline))
     }
 
     fn reset_to(&self, commit: &str) {
@@ -792,15 +840,22 @@ impl<'a> Runner<'a> {
                 .read(&self.root.join("report.md"))
                 .is_ok_and(|s| !s.is_empty())
         {
-            let mut problems = self.check_report_quotes(&seen_names);
-            problems.truncate(research_check::MAX_PROBLEMS);
-            report.quote_problems = Some(problems);
-            if let Some(cc) = self.run_claim_check() {
-                report.usage.input += cc.usage.input;
-                report.usage.cached += cc.usage.cached;
-                report.usage.output += cc.usage.output;
-                report.usage.thinking += cc.usage.thinking;
-                report.claim_check = Some(cc);
+            if report.quote_problems.is_none() {
+                let mut problems = self.check_report_quotes(&seen_names);
+                problems.truncate(research_check::MAX_PROBLEMS);
+                report.quote_problems = Some(problems);
+            }
+            if report.claim_check.is_none() && report.claim_check_skipped.is_none() {
+                if let Some(cc) = self.run_claim_check(deadline) {
+                    report.usage.input += cc.usage.input;
+                    report.usage.cached += cc.usage.cached;
+                    report.usage.output += cc.usage.output;
+                    report.usage.thinking += cc.usage.thinking;
+                    report.claim_check_skipped = cc.skipped.clone();
+                    if cc.calls > 0 || cc.skipped.is_none() {
+                        report.claim_check = Some(cc);
+                    }
+                }
             }
         }
 
@@ -994,7 +1049,7 @@ impl<'a> Runner<'a> {
             }
             prev_turn_start = Some(turn_start);
 
-            let req = Request {
+            let mut req = Request {
                 system: system.to_string(),
                 messages: self.context.build(state, history),
                 tools: specs.clone(),
@@ -1019,15 +1074,45 @@ impl<'a> Runner<'a> {
             let model_start = std::time::Instant::now();
             let mut attempt = 0;
             let resp = loop {
+                if let Some(d) = deadline {
+                    let time_left = d.saturating_duration_since(std::time::Instant::now());
+                    if time_left.is_zero() {
+                        return (Outcome::BudgetExhausted, report);
+                    }
+                    req.timeout = Some(time_left);
+                }
                 let call_start = std::time::Instant::now();
                 match self.provider.complete(&req) {
                     Ok(r) => break r,
                     Err(e) => {
-                        if let ProviderError::NoAnswer { usage, .. } = &e {
-                            report.usage.input += usage.input;
-                            report.usage.cached += usage.cached;
-                            report.usage.output += usage.output;
-                            report.usage.thinking += usage.thinking;
+                        let (u_in, u_cached, u_out, u_think) = match &e {
+                            ProviderError::NoAnswer { usage, .. } => {
+                                report.usage.input += usage.input;
+                                report.usage.cached += usage.cached;
+                                report.usage.output += usage.output;
+                                report.usage.thinking += usage.thinking;
+                                (usage.input, usage.cached, usage.output, usage.thinking)
+                            }
+                            _ => (0, 0, 0, 0),
+                        };
+                        let push_deadline_turn = |report: &mut RunReport| {
+                            report.turn_usage.push(TurnUsage {
+                                turn,
+                                input: u_in,
+                                cached: u_cached,
+                                output: u_out,
+                                thinking: u_think,
+                                prompt_messages: req.messages.len(),
+                                appended,
+                                new_chars,
+                                fold_budget,
+                                model_ms: model_start.elapsed().as_millis() as u64,
+                                tools_ms: 0,
+                            });
+                        };
+                        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                            push_deadline_turn(&mut report);
+                            return (Outcome::BudgetExhausted, report);
                         }
                         let max_retries = max_retries_for(&e);
                         if is_transient(&e) && attempt < max_retries {
@@ -1040,7 +1125,8 @@ impl<'a> Runner<'a> {
                             attempt += 1;
                             let wait = retry_wait(&e, attempt);
                             if deadline.is_some_and(|d| std::time::Instant::now() + wait >= d) {
-                                return (Outcome::Error(e.to_string()), report);
+                                push_deadline_turn(&mut report);
+                                return (Outcome::BudgetExhausted, report);
                             }
                             report.provider_retries += 1;
                             if e.is_timeout() {
@@ -1131,6 +1217,11 @@ impl<'a> Runner<'a> {
                     change_fp = current_fp;
                 }
                 for call in &resp.tool_calls {
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        report.turn_usage.last_mut().unwrap().tools_ms =
+                            tools_start.elapsed().as_millis() as u64;
+                        return (Outcome::BudgetExhausted, report);
+                    }
                     report.tool_calls += 1;
                     *report.tool_counts.entry(call.name.clone()).or_default() += 1;
                     if is_dispatch_call(call) {
@@ -1139,12 +1230,13 @@ impl<'a> Runner<'a> {
                         pre_dispatch_calls += 1;
                     }
 
-                    let mut outcome = tools::execute(
+                    let mut outcome = tools::execute_with_deadline(
                         &self.root,
                         self.shell,
                         self.fs,
                         &call.name,
                         &call.arguments,
+                        deadline,
                     );
 
                     let summary = outcome
@@ -1267,7 +1359,8 @@ impl<'a> Runner<'a> {
                 attempt: report.gate_attempts,
             });
             let gate_start = std::time::Instant::now();
-            let (mut passed, mut output, wait_ms, failing) = self.run_gate(state, &last_failed);
+            let (mut passed, mut output, wait_ms, failing) =
+                self.run_gate(state, &last_failed, &mut deadline);
             last_failed = failing;
             if passed && self.research {
                 let mut problems = self.check_report_quotes(seen_names);
@@ -1278,11 +1371,12 @@ impl<'a> Runner<'a> {
                 problems.truncate(research_check::MAX_PROBLEMS);
                 report.quote_problems = Some(problems);
                 if passed {
-                    if let Some(cc) = self.run_claim_check() {
+                    if let Some(cc) = self.run_claim_check(deadline) {
                         report.usage.input += cc.usage.input;
                         report.usage.cached += cc.usage.cached;
                         report.usage.output += cc.usage.output;
                         report.usage.thinking += cc.usage.thinking;
+                        report.claim_check_skipped = cc.skipped.clone();
                         if !cc.contradicted.is_empty() && !claim_round_done {
                             claim_round_done = true;
                             passed = false;
@@ -1300,15 +1394,14 @@ impl<'a> Runner<'a> {
                             );
                             output = format!("exit 1\n{}", lines.join("\n"));
                         }
-                        report.claim_check = Some(cc);
+                        if cc.calls > 0 || cc.skipped.is_none() {
+                            report.claim_check = Some(cc);
+                        }
                     }
                 }
             }
             report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);
-            if let Some(d) = deadline.as_mut() {
-                *d += Duration::from_millis(wait_ms);
-            }
             self.emit(Event::Gate {
                 attempt: report.gate_attempts,
                 passed,
@@ -1318,6 +1411,9 @@ impl<'a> Runner<'a> {
                 return (Outcome::Verified, report);
             }
             report.gate_failures.push(cut_gate_output(&output));
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return (Outcome::BudgetExhausted, report);
+            }
 
             last_fingerprint = self.fingerprint();
             if last_fingerprint != start_fp {

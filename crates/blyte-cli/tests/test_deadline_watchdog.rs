@@ -61,8 +61,8 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
 
     assert!(took < Duration::from_secs(10), "ran {took:?}");
     assert!(
-        took >= Duration::from_secs(2),
-        "ended before the watchdog: {took:?}"
+        took >= Duration::from_secs(1),
+        "ended before the deadline: {took:?}"
     );
     assert_eq!(
         out.status.code(),
@@ -71,11 +71,13 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
         String::from_utf8_lossy(&out.stderr)
     );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("stopped 1 s past --max-seconds 2"), "{err}");
+    assert!(
+        err.contains("Task finished with outcome: BudgetExhausted"),
+        "{err}"
+    );
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).expect("a report")).unwrap();
-    assert!(
-        v["error"].as_str().unwrap().contains("never returned"),
-        "{v}"
-    );
+    assert_eq!(v["outcome"].as_str(), Some("budget_exhausted"), "{v}");
+    assert_eq!(v["turns"], 1, "{v}");
+    assert_eq!(v["turn_usage"].as_array().map(|a| a.len()), Some(1), "{v}");
 }

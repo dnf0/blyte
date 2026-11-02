@@ -1306,6 +1306,11 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .as_ref()
         .and_then(|v| v.get("claim_check"))
         .and_then(|x| serde_json::from_value(x.clone()).ok());
+    let claim_check_skipped: Option<String> = report_val
+        .as_ref()
+        .and_then(|v| v.get("claim_check_skipped"))
+        .and_then(|x| x.as_str())
+        .map(String::from);
 
     let mut checks = crate::review_checks::build(
         task_text.as_deref(),
@@ -1341,6 +1346,9 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                 cc.contradicted.len()
             ));
         }
+    }
+    if let Some(ref skipped) = claim_check_skipped {
+        checks.flags.push(format!("claim check skipped: {skipped}"));
     }
     if refused_count > 0 {
         let first_3: Vec<&str> = refused_paths.iter().take(3).map(|s| s.as_str()).collect();
@@ -1415,6 +1423,9 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                 println!("  report.md:{}: {cut}", f.line);
                 println!("    {}", f.reason);
             }
+        }
+        if let Some(ref skipped) = claim_check_skipped {
+            println!("claim check skipped: {skipped}");
         }
     }
 

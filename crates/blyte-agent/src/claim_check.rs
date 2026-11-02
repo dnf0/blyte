@@ -33,6 +33,8 @@ pub struct ClaimCheck {
     pub parse_errors: usize,
     pub calls: u32,
     pub usage: Usage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 pub fn format_evidence(evidence: &[Evidence]) -> String {
@@ -158,24 +160,45 @@ fn add_usage(dst: &mut Usage, src: &Usage) {
 }
 
 /// Check up to [`MAX_CLAIMS`] claims in batches of [`BATCH_SIZE`] using `provider`.
-pub fn check_claims(provider: &dyn Provider, claims: &[Claim]) -> ClaimCheck {
-    let checked = claims.len().min(MAX_CLAIMS);
-    let unchecked = claims.len().saturating_sub(MAX_CLAIMS);
-    let to_check = &claims[..checked];
+pub fn check_claims(
+    provider: &dyn Provider,
+    claims: &[Claim],
+    deadline: Option<std::time::Instant>,
+) -> ClaimCheck {
+    let capped = claims.len().min(MAX_CLAIMS);
+    let to_check = &claims[..capped];
+    let batches: Vec<&[Claim]> = to_check.chunks(BATCH_SIZE).collect();
+    let total_batches = batches.len();
 
     let mut out = ClaimCheck {
-        checked,
-        unchecked,
+        checked: 0,
+        unchecked: claims.len(),
         ..Default::default()
     };
 
-    for batch in to_check.chunks(BATCH_SIZE) {
+    if total_batches == 0 {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            out.skipped = Some("out of time after 0 of 0 batches".to_string());
+        }
+        return out;
+    }
+
+    for (batch_idx, batch) in batches.iter().enumerate() {
         let pairs: Vec<(usize, &Claim)> =
             batch.iter().enumerate().map(|(i, c)| (i + 1, c)).collect();
-        let req = build_check_request(&pairs);
+        let mut req = build_check_request(&pairs);
 
         let mut parsed: Option<Vec<VerdictItem>> = None;
+        let mut out_of_time = false;
         for _attempt in 0..2 {
+            if let Some(d) = deadline {
+                let time_left = d.saturating_duration_since(std::time::Instant::now());
+                if time_left.is_zero() {
+                    out_of_time = true;
+                    break;
+                }
+                req.timeout = Some(time_left);
+            }
             out.calls += 1;
             match provider.complete(&req) {
                 Ok(resp) => {
@@ -189,9 +212,23 @@ pub fn check_claims(provider: &dyn Provider, claims: &[Claim]) -> ClaimCheck {
                     if let ProviderError::NoAnswer { usage, .. } = &e {
                         add_usage(&mut out.usage, usage);
                     }
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        out_of_time = true;
+                        break;
+                    }
                 }
             }
         }
+
+        if out_of_time && parsed.is_none() {
+            out.skipped = Some(format!(
+                "out of time after {batch_idx} of {total_batches} batches"
+            ));
+            break;
+        }
+
+        out.checked += batch.len();
+        out.unchecked = claims.len().saturating_sub(out.checked);
 
         match parsed {
             Some(items) => {
@@ -302,7 +339,7 @@ mod tests {
     fn seventeen_claims_batched_into_8_8_1() {
         let provider = ScriptedProvider::new(Vec::new());
         let claims = make_claims(17);
-        let res = check_claims(&provider, &claims);
+        let res = check_claims(&provider, &claims, None);
         assert_eq!(res.checked, 17);
         assert_eq!(res.unchecked, 0);
         assert_eq!(res.calls, 3);
@@ -314,7 +351,7 @@ mod tests {
     fn seventy_claims_caps_at_64_checked_and_6_unchecked() {
         let provider = ScriptedProvider::new(Vec::new());
         let claims = make_claims(70);
-        let res = check_claims(&provider, &claims);
+        let res = check_claims(&provider, &claims, None);
         assert_eq!(res.checked, 64);
         assert_eq!(res.unchecked, 6);
         assert_eq!(res.calls, 8);
@@ -346,7 +383,7 @@ mod tests {
             }),
         ]);
         let claims = make_claims(2);
-        let res = check_claims(&provider, &claims);
+        let res = check_claims(&provider, &claims, None);
         assert_eq!(res.calls, 2);
         assert_eq!(res.parse_errors, 0);
         assert_eq!(res.not_enough_evidence, 1);
@@ -386,7 +423,7 @@ mod tests {
             }),
         ]);
         let claims = make_claims(3);
-        let res = check_claims(&provider, &claims);
+        let res = check_claims(&provider, &claims, None);
         assert_eq!(res.calls, 2);
         assert_eq!(res.parse_errors, 3);
         assert_eq!(
@@ -411,7 +448,7 @@ mod tests {
             ..Default::default()
         })]);
         let claims = make_claims(2);
-        let res = check_claims(&provider, &claims);
+        let res = check_claims(&provider, &claims, None);
         assert_eq!(res.calls, 1);
         assert_eq!(res.parse_errors, 0);
         assert_eq!(
@@ -422,5 +459,59 @@ mod tests {
                 reason: "line 2 says 5, not 10".into(),
             }]
         );
+    }
+
+    #[test]
+    fn stops_between_batches_when_deadline_passes() {
+        use std::time::{Duration, Instant};
+
+        struct SlowBatchProvider {
+            calls: Mutex<u32>,
+            timeouts: Mutex<Vec<Option<Duration>>>,
+        }
+        impl Provider for SlowBatchProvider {
+            fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+                self.timeouts.lock().unwrap().push(req.timeout);
+                let mut c = self.calls.lock().unwrap();
+                *c += 1;
+                if *c == 1 {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                let items: Vec<serde_json::Value> = (1..=BATCH_SIZE)
+                    .map(|id| {
+                        serde_json::json!({
+                            "id": id,
+                            "verdict": "supported",
+                            "reason": "ok"
+                        })
+                    })
+                    .collect();
+                Ok(Response {
+                    text: serde_json::to_string(&items).unwrap(),
+                    ..Default::default()
+                })
+            }
+            fn model_id(&self) -> String {
+                "slow-batch".into()
+            }
+        }
+
+        let provider = SlowBatchProvider {
+            calls: Mutex::new(0),
+            timeouts: Mutex::new(Vec::new()),
+        };
+        let claims = make_claims(17); // 3 batches (8, 8, 1)
+        let deadline = Some(Instant::now() + Duration::from_millis(200));
+        let res = check_claims(&provider, &claims, deadline);
+        assert_eq!(res.calls, 1);
+        assert_eq!(res.checked, 8);
+        assert_eq!(res.unchecked, 9);
+        assert_eq!(
+            res.skipped.as_deref(),
+            Some("out of time after 1 of 3 batches")
+        );
+        let seen = provider.timeouts.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].is_some_and(|t| t <= Duration::from_millis(200)));
     }
 }
