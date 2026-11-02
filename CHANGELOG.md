@@ -1,3 +1,9 @@
+## v0.37.5 (2026-11-02)
+
+### Fix
+
+- reusing a merged run's ID replaces that run, and clean runs in full in the background (#317)
+
 ## v0.37.4 (2026-11-02)
 
 ### Fix
