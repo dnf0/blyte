@@ -109,3 +109,26 @@ No fallbacks.
      clean runs in the background).
 
 Gate: the repository checks. Commit: `fix(clean): run the full clean in the background at dispatch and review`
+
+### Task RU3: remove the 1 s quick clean (after RU2)
+
+Why: after RU2, nothing outside tests calls `clean_quiet` or `clean_quiet_with_budget`; dispatch and review start the full
+clean in the background. The budget's timing test (`tests/test_clean_quiet.rs`, "< 2 s") failed under a loaded full test
+run (2.47 s).
+
+Files: `crates/blyte-cli/src/clean.rs`; the tests that call `clean_quiet`/`clean_quiet_with_budget` (`git grep -n
+clean_quiet -- crates`). Grep first; never read `clean.rs` whole.
+
+No fallbacks.
+
+1. Remove `clean_quiet`, `clean_quiet_with_budget`, the `time_budget` parameter of `clean_repo`, and the cheaper
+   merge-check mode used only under the budget (`CleanContext::set_quiet` / the `quiet` checks around `clean.rs:901`, if
+   nothing else uses them). `clean_repo`'s `quiet` flag that silences output stays (the background clean uses it).
+2. Tests:
+   - Delete `tests/test_clean_quiet.rs` (it only tests the budget's timing and cheap checks).
+   - Delete the `Duration::ZERO` budget test in `tests/test_clean.rs`.
+   - Every other test that called `clean_quiet(root, None)` or `clean_quiet_with_budget(root, None, ..)` calls
+     `clean_repo(root, 14, false, None, true)` instead, with the same assertions (squash-merged runs removed, running
+     runs kept).
+
+Gate: the repository checks. Commit: `refactor(clean): remove the 1 s quick clean that the background clean replaced`
