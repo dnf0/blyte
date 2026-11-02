@@ -618,7 +618,18 @@ pub fn execute(
     name: &str,
     args: &Value,
 ) -> ToolOutcome {
-    let mut outcome = execute_unbounded(root, shell, fs, name, args);
+    execute_with_deadline(root, shell, fs, name, args, None)
+}
+
+pub fn execute_with_deadline(
+    root: &Path,
+    shell: &dyn Shell,
+    fs: &dyn Fs,
+    name: &str,
+    args: &Value,
+    deadline: Option<std::time::Instant>,
+) -> ToolOutcome {
+    let mut outcome = execute_unbounded(root, shell, fs, name, args, deadline);
     outcome.content = if name == "read" {
         bound_output_with(&outcome.content, READ_LINE_BUDGET, READ_LINE_CHARS)
     } else if name == "grep" {
@@ -636,7 +647,12 @@ fn execute_unbounded(
     fs: &dyn Fs,
     name: &str,
     args: &Value,
+    deadline: Option<std::time::Instant>,
 ) -> ToolOutcome {
+    let command_timeout = match deadline {
+        Some(d) => COMMAND_TIMEOUT.min(d.saturating_duration_since(std::time::Instant::now())),
+        None => COMMAND_TIMEOUT,
+    };
     let s = |k: &str| {
         args.get(k)
             .and_then(|v| v.as_str())
@@ -728,7 +744,7 @@ fn execute_unbounded(
                 },
             }
         }
-        "bash" => match shell.exec_user(&s("command"), root, COMMAND_TIMEOUT) {
+        "bash" => match shell.exec_user(&s("command"), root, command_timeout) {
             Ok(o) => {
                 let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
                 // Exit code always stated: a non-zero exit with quiet output reads as success.
@@ -774,7 +790,7 @@ fn execute_unbounded(
                  git -c core.quotePath=off -c core.fsmonitor=false ls-files -co --exclude-standard; \
                  else echo __BLYTE_NO_GIT__; fi",
                 &dir,
-                COMMAND_TIMEOUT,
+                command_timeout,
             ) {
                 if o.exit_code == 0 && !o.stdout.starts_with("__BLYTE_NO_GIT__") {
                     if let Some(hits) = crate::search::glob_filter(&o.stdout, &pattern, MAX_MATCHES)
@@ -798,7 +814,7 @@ fn execute_unbounded(
                      printf '%s\\n' {pattern}; \
                  fi | head -n {MAX_MATCHES}"
             );
-            match shell.exec(&cmd, &dir, COMMAND_TIMEOUT) {
+            match shell.exec(&cmd, &dir, command_timeout) {
                 Ok(o) => {
                     let hits: Vec<String> = o
                         .stdout
@@ -838,7 +854,7 @@ fn execute_unbounded(
                     grep_command(true, &pattern, &sub, &glob_str),
                     grep_command(false, &pattern, &sub, &glob_str)
                 );
-                match shell.exec(&cmd, root, COMMAND_TIMEOUT) {
+                match shell.exec(&cmd, root, command_timeout) {
                     Ok(o) => o
                         .stdout
                         .lines()

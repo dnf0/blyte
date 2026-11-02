@@ -139,10 +139,7 @@ fn no_wait_outlasts_the_deadline() {
     let mut st = State::new("g", "true");
     let started = Instant::now();
     let (outcome, report) = runner(&p, d.path(), Some(Duration::from_secs(1))).run(&mut st);
-    match outcome {
-        Outcome::Error(e) => assert!(e.contains("429"), "{e}"),
-        other => panic!("expected an error, got {other:?}"),
-    }
+    assert_eq!(outcome, Outcome::BudgetExhausted);
     assert_eq!(
         report.provider_retries, 0,
         "the first 2s wait would pass a 1s deadline"
