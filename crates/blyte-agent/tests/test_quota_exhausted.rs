@@ -140,7 +140,7 @@ fn a_quota_error_past_the_deadline_is_still_an_error() {
         budget: Budget {
             max_turns: 5,
             max_gate_attempts: 1,
-            max_duration: Some(std::time::Duration::from_millis(200)),
+            max_duration: Some(std::time::Duration::from_secs(2)),
         },
         rollback: false,
         on_event: None,
