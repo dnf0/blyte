@@ -1214,7 +1214,8 @@ fn test_clean_cherry_pick_record_squash_commit_quiet_clean() {
     );
     git(root, &["commit", "-am", &commit_msg, "--no-gpg-sign"]);
 
-    blyte_cli::clean::clean_quiet(root, None);
+    // Give the quiet clean a large budget so slow runners finish removing both worktrees inside it.
+    blyte_cli::clean::clean_quiet_with_budget(root, None, std::time::Duration::from_secs(60));
 
     assert!(!t1_path.exists());
     assert!(!t1b_path.exists());
@@ -1230,6 +1231,40 @@ fn test_clean_cherry_pick_record_squash_commit_quiet_clean() {
         .output()
         .unwrap();
     assert!(!b2.status.success(), "wip/T1b branch should be deleted");
+}
+
+#[test]
+fn test_clean_quiet_zero_budget_removes_no_worktrees() {
+    let repo = init_repo();
+    let root = repo.path();
+
+    let wt_path = root.join(".wt/T1");
+    git(
+        root,
+        &["worktree", "add", "-b", "wip/T1", wt_path.to_str().unwrap()],
+    );
+
+    let wt_dir = root.join(".wt");
+    write_file(
+        &wt_dir.join("T1.start.json"),
+        &serde_json::json!({ "id": "T1", "pid": 999999 }).to_string(),
+    );
+    write_file(
+        &wt_dir.join("T1.verdict.json"),
+        &serde_json::json!({ "verdict": "redone" }).to_string(),
+    );
+
+    blyte_cli::clean::clean_quiet_with_budget(root, None, std::time::Duration::ZERO);
+    assert!(
+        wt_path.exists(),
+        "zero budget should stop quiet clean before removing any worktrees"
+    );
+
+    blyte_cli::clean::clean_quiet_with_budget(root, None, std::time::Duration::from_secs(60));
+    assert!(
+        !wt_path.exists(),
+        "non-zero budget should remove the finished worktree"
+    );
 }
 
 #[test]
