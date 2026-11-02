@@ -2066,7 +2066,8 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
 
     let _lock_guard = if args.quiet {
         let Some(root) = repos.first() else {
-            return 0;
+            eprintln!("error: blyte clean --quiet found no repository to clean");
+            return 1;
         };
         match acquire_clean_lock(root) {
             LockOutcome::Acquired(guard) => Some(guard),
