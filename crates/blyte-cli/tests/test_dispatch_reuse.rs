@@ -74,6 +74,19 @@ fn dispatch_refuses_to_reuse_worktree_from_older_base() {
 
     let wt_dir = root.join(".wt").join("T1");
     assert!(wt_dir.is_dir());
+    std::fs::write(wt_dir.join("t1.txt"), "unmerged\n").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "t1.txt"])
+        .current_dir(&wt_dir)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-q", "-m", "unmerged T1 work"])
+        .current_dir(&wt_dir)
+        .status()
+        .unwrap()
+        .success());
     let wt_head_before = git_rev_parse(&wt_dir, "HEAD");
 
     std::fs::write(root.join("new.txt"), "new content\n").unwrap();

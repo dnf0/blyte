@@ -1089,7 +1089,8 @@ impl<'a> CleanContext<'a> {
                     let age = std::time::SystemTime::now()
                         .duration_since(mtime)
                         .unwrap_or(std::time::Duration::ZERO);
-                    if age >= std::time::Duration::from_secs(older_than_days * 86400) {
+                    if age >= std::time::Duration::from_secs(older_than_days.saturating_mul(86400))
+                    {
                         return Ok(RemovalReason::OlderThan(older_than_days));
                     }
                 }
@@ -1991,6 +1992,82 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
     }
 
     0
+}
+
+fn delete_wip_branch_strict(root: &Path, branch_name: &str) -> Result<(), String> {
+    let del_out = std::process::Command::new("git")
+        .args(["branch", "-D", branch_name])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git branch -D {branch_name}: {e}"))?;
+    if !del_out.status.success() {
+        return Err(format!(
+            "git branch -D {branch_name}: {}",
+            String::from_utf8_lossy(&del_out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Removes a finished run `<id>` when its work is merged (or it made no changes) and its worktree
+/// has no uncommitted changes.
+pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, String> {
+    let wt_path = root.join(".wt").join(id);
+    let branch_name = format!("wip/{id}");
+    let mut ctx = CleanContext::new(root);
+
+    if wt_path.exists() {
+        let reason = match ctx.check_removable(id, u64::MAX) {
+            Ok(
+                r @ (RemovalReason::Merged
+                | RemovalReason::MergedInto(_)
+                | RemovalReason::MergedThrough(_)
+                | RemovalReason::NoChanges),
+            ) => r,
+            Ok(
+                RemovalReason::Verdict(_)
+                | RemovalReason::OlderThan(_)
+                | RemovalReason::ResearchReport,
+            )
+            | Err(_) => return Ok(None),
+        };
+        if has_uncommitted_changes(&wt_path) {
+            return Ok(None);
+        }
+
+        let wt_rel = format!(".wt/{id}");
+        let rm_out = std::process::Command::new("git")
+            .args(["worktree", "remove", &wt_rel])
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("git worktree remove {wt_rel}: {e}"))?;
+        if !rm_out.status.success() {
+            return Err(format!(
+                "git worktree remove {wt_rel}: {}",
+                String::from_utf8_lossy(&rm_out.stderr).trim()
+            ));
+        }
+
+        if ctx.get_branch_tip(&branch_name).is_some() {
+            delete_wip_branch_strict(root, &branch_name)?;
+        }
+
+        return Ok(Some(reason.to_string()));
+    }
+
+    if ctx.get_branch_tip(&branch_name).is_some() {
+        if !is_branch_merged(root, &branch_name) {
+            return Ok(None);
+        }
+        let reason = ctx
+            .check_run_merged(id)
+            .unwrap_or(RemovalReason::Merged)
+            .to_string();
+        delete_wip_branch_strict(root, &branch_name)?;
+        return Ok(Some(reason));
+    }
+
+    Ok(None)
 }
 
 /// Quiet cleanup at dispatch start: no output unless something was removed,
