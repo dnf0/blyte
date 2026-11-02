@@ -999,6 +999,7 @@ impl<'a> Runner<'a> {
                 messages: self.context.build(state, history),
                 tools: specs.clone(),
                 max_output_tokens: None,
+                timeout: None,
             };
             let (appended, new_chars) = match &last_sent {
                 Some(prev)

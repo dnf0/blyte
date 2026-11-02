@@ -109,6 +109,7 @@ fn the_body_is_a_stateless_streaming_responses_request() {
             parameters: json!({"type": "object"}),
         }],
         max_output_tokens: None,
+        timeout: None,
     });
     assert_eq!(b["store"], false);
     assert_eq!(b["stream"], true);

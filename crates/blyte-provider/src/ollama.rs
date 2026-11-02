@@ -413,7 +413,8 @@ impl Provider for Ollama {
     /// Attaches Bearer authentication header when `api_key` is present.
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = format!("{}/chat", self.api_root);
-        let agent = crate::http_client();
+        let agent = crate::http_client_for(req.timeout);
+        let started = std::time::Instant::now();
         let mut req_builder = agent.post(&url).set("content-type", "application/json");
 
         // Attach Authorization header if credentials are configured.
@@ -427,14 +428,18 @@ impl Provider for Ollama {
             Ok(r) => {
                 let v: Value = r
                     .into_json()
-                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
+                    .map_err(|e| crate::body_read_error(e, req.timeout, started))?;
                 Self::parse(&v)
             }
             Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
                 status,
                 body: r.into_string().unwrap_or_default(),
             }),
-            Err(e) => Err(ProviderError::Transport(e.to_string())),
+            Err(e) => Err(crate::with_request_timeout_message(
+                ProviderError::Transport(e.to_string()),
+                req.timeout,
+                started,
+            )),
         }
     }
 

@@ -34,6 +34,7 @@ const STANDARD_ALIASES: &[(&str, &str)] = &[
 /// Anthropic Claude model provider adapter.
 pub struct Anthropic {
     api_key: String,
+    api_root: String,
     model: String,
 }
 
@@ -48,6 +49,7 @@ impl Anthropic {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            api_root: API_ROOT.to_string(),
             model: DEFAULT_MODEL.into(),
         }
     }
@@ -67,6 +69,7 @@ impl Anthropic {
             .map_err(|_| ProviderError::MissingKey("ANTHROPIC_API_KEY"))?;
         Ok(Self {
             api_key,
+            api_root: API_ROOT.to_string(),
             model: std::env::var("BLYTE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
         })
     }
@@ -80,6 +83,12 @@ impl Anthropic {
     /// The updated [`Anthropic`] instance.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// Overrides the API root URL (e.g. for local testing).
+    pub fn with_api_root(mut self, api_root: impl Into<String>) -> Self {
+        self.api_root = api_root.into().trim_end_matches('/').to_string();
         self
     }
 
@@ -341,8 +350,9 @@ impl Anthropic {
 
 impl Provider for Anthropic {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        let url = format!("{API_ROOT}/messages");
-        let agent = crate::http_client();
+        let url = format!("{}/messages", self.api_root);
+        let agent = crate::http_client_for(req.timeout);
+        let started = std::time::Instant::now();
         let resp = agent
             .post(&url)
             .set("x-api-key", &self.api_key)
@@ -354,14 +364,18 @@ impl Provider for Anthropic {
             Ok(r) => {
                 let v: Value = r
                     .into_json()
-                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
+                    .map_err(|e| crate::body_read_error(e, req.timeout, started))?;
                 Self::parse(&v)
             }
             Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
                 status,
                 body: r.into_string().unwrap_or_default(),
             }),
-            Err(e) => Err(ProviderError::Transport(e.to_string())),
+            Err(e) => Err(crate::with_request_timeout_message(
+                ProviderError::Transport(e.to_string()),
+                req.timeout,
+                started,
+            )),
         }
     }
 
@@ -370,7 +384,7 @@ impl Provider for Anthropic {
     }
 
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let url = format!("{API_ROOT}/models");
+        let url = format!("{}/models", self.api_root);
         let agent = crate::http_client();
         let resp = agent
             .get(&url)

@@ -69,6 +69,7 @@ pub fn build_request(task: &str, stat: &str, diff: &str) -> blyte_provider::Requ
         messages: vec![blyte_provider::Message::User(user_msg)],
         tools: Vec::new(),
         max_output_tokens: Some(32_000),
+        timeout: None,
     }
 }
 
