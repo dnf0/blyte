@@ -211,17 +211,34 @@ pub fn read_allowed(home: Option<&Path>, allow_read: &[PathBuf]) -> Vec<PathBuf>
     allowed
 }
 
+/// System temporary directories where tests may create and read `.env` files.
+const TEMP_DOT_ENV_DIRS: &[&str] = &["/private/tmp", "/private/var/folders"];
+
 /// Generates an SBPL profile denying file writes outside `write`, denying file reads under
-/// `deny_read` and any `.env` file, and granting file reads back under `allow_read`.
+/// `deny_read` and any `.env` file, allowing `.env` files under `/private/tmp` and
+/// `/private/var/folders` outside `workspace` (so tests can read `.env` files they create in temp
+/// folders while the workspace `.env` stays denied), and granting file reads back under
+/// `allow_read`.
 /// Reads are denied as `file-read-data`: contents and directory listings are refused, but `stat`
 /// still works (pytest stats every path while collecting, including `.env`).
-pub fn profile_with(write: &[PathBuf], deny_read: &[PathBuf], allow_read: &[PathBuf]) -> String {
+pub fn profile_with(
+    workspace: &Path,
+    write: &[PathBuf],
+    deny_read: &[PathBuf],
+    allow_read: &[PathBuf],
+) -> String {
     let mut out = profile(write);
     for path in deny_read {
         let escaped = escape_subpath(path);
         out.push_str(&format!(r#"(deny file-read-data (subpath "{escaped}"))"#));
     }
     out.push_str(r##"(deny file-read-data (regex #"/\.env$"))"##);
+    let escaped_ws = escape_subpath(workspace);
+    for dir in TEMP_DOT_ENV_DIRS {
+        out.push_str(&format!(
+            r##"(allow file-read-data (require-all (subpath "{dir}") (require-not (subpath "{escaped_ws}")) (regex #"/\.env$")))"##
+        ));
+    }
     for path in allow_read {
         let escaped = escape_subpath(path);
         out.push_str(&format!(r#"(allow file-read-data (subpath "{escaped}"))"#));
@@ -386,7 +403,12 @@ pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
             Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
             _ => Vec::new(),
         };
-        Profile::Seatbelt(profile_with(&default_allowed(root), &deny_read, allow_read))
+        Profile::Seatbelt(profile_with(
+            root,
+            &default_allowed(root),
+            &deny_read,
+            allow_read,
+        ))
     }
     #[cfg(not(target_os = "macos"))]
     {

@@ -26,8 +26,10 @@ fn the_deny_list_covers_the_usual_credential_stores() {
 
 #[test]
 fn the_read_rules_follow_the_write_profile_and_grants_come_last() {
-    let write = [PathBuf::from("/nonexistent/ws")];
+    let ws = Path::new("/nonexistent/ws");
+    let write = [ws.to_path_buf()];
     let p = profile_with(
+        ws,
         &write,
         &[PathBuf::from("/nonexistent/secret")],
         &[PathBuf::from("/nonexistent/secret/ok")],
@@ -39,10 +41,49 @@ fn the_read_rules_follow_the_write_profile_and_grants_come_last() {
     let env = p
         .find(r##"(deny file-read-data (regex #"/\.env$"))"##)
         .expect(&p);
+    let tmp_env = p
+        .find(r##"(allow file-read-data (require-all (subpath "/private/tmp") (require-not (subpath "/nonexistent/ws")) (regex #"/\.env$")))"##)
+        .expect(&p);
+    let var_folders_env = p
+        .find(r##"(allow file-read-data (require-all (subpath "/private/var/folders") (require-not (subpath "/nonexistent/ws")) (regex #"/\.env$")))"##)
+        .expect(&p);
     let grant = p
         .find(r#"(allow file-read-data (subpath "/nonexistent/secret/ok"))"#)
         .expect(&p);
-    assert!(deny < env && env < grant, "{p}");
+    assert!(
+        deny < env && env < tmp_env && tmp_env < var_folders_env && var_folders_env < grant,
+        "{p}"
+    );
+}
+
+#[test]
+fn dot_env_outside_temp_folders_and_workspace_stays_denied_in_profile() {
+    let ws = Path::new("/nonexistent/ws");
+    let p = profile_with(ws, &[ws.to_path_buf()], &[], &[]);
+    assert!(
+        p.contains(r##"(deny file-read-data (regex #"/\.env$"))"##),
+        "{p}"
+    );
+    // With no allow_read grants, the only file-read-data allows are for .env under
+    // /private/tmp and /private/var/folders (excluding the workspace), so a .env anywhere
+    // else (e.g. /Users/someone/other/.env) stays denied by the regex rule above.
+    let read_allows: Vec<&str> = p
+        .match_indices("(allow file-read-data")
+        .map(|(i, _)| &p[i..])
+        .collect();
+    assert_eq!(read_allows.len(), 2, "{p}");
+    assert!(
+        read_allows[0].starts_with(
+            r##"(allow file-read-data (require-all (subpath "/private/tmp") (require-not (subpath "/nonexistent/ws")) (regex #"/\.env$")))"##
+        ),
+        "{p}"
+    );
+    assert!(
+        read_allows[1].starts_with(
+            r##"(allow file-read-data (require-all (subpath "/private/var/folders") (require-not (subpath "/nonexistent/ws")) (regex #"/\.env$")))"##
+        ),
+        "{p}"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -76,6 +117,7 @@ mod macos {
         std::fs::write(ws.path().join(".env"), "TOKEN=x").unwrap();
         std::fs::write(ws.path().join(".env.example"), "TOKEN=").unwrap();
         let sh = LocalShell::sandboxed(profile_with(
+            ws.path(),
             &[ws.path().to_path_buf()],
             &[secret.path().to_path_buf()],
             &[],
@@ -97,11 +139,33 @@ mod macos {
     }
 
     #[test]
+    fn a_dot_env_in_a_separate_temp_folder_can_be_read_while_workspace_dot_env_cannot() {
+        let ws = tempfile::tempdir().unwrap();
+        let other_tmp = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join(".env"), "WS_SECRET=1").unwrap();
+        std::fs::write(other_tmp.path().join(".env"), "TEST_FIXTURE=2").unwrap();
+        let sh = LocalShell::sandboxed(profile_with(
+            ws.path(),
+            &[ws.path().to_path_buf()],
+            &[],
+            &[],
+        ));
+        let Some((code, out)) = cat(&sh, &other_tmp.path().join(".env"), ws.path()) else {
+            return;
+        };
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("TEST_FIXTURE=2"), "{out}");
+        let (code, out) = cat(&sh, &ws.path().join(".env"), ws.path()).unwrap();
+        assert!(code != 0 && !out.contains("WS_SECRET=1"), "{out}");
+    }
+
+    #[test]
     fn an_allow_read_grant_overrides_the_deny_list() {
         let ws = tempfile::tempdir().unwrap();
         let secret = tempfile::tempdir().unwrap();
         std::fs::write(secret.path().join("key"), "s3cret").unwrap();
         let sh = LocalShell::sandboxed(profile_with(
+            ws.path(),
             &[ws.path().to_path_buf()],
             &[secret.path().to_path_buf()],
             &[secret.path().to_path_buf()],
