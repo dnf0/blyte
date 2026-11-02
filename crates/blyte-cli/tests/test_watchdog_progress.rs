@@ -93,9 +93,12 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
     );
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
-    let err = v["error"].as_str().unwrap();
-    assert!(err.contains("stopped 1 s past --max-seconds 2"), "{err}");
-    assert!(err.contains("gate attempt 1 was still running"), "{err}");
+    assert_eq!(v["outcome"].as_str(), Some("budget_exhausted"), "{v}");
+    let gate_failure = v["gate_failures"][0].as_str().unwrap();
+    assert!(
+        gate_failure.contains("gate ran out of time"),
+        "{gate_failure}"
+    );
     assert_eq!(v["turns"], 1, "{v}");
     assert_eq!(v["gate_attempts"], 1, "{v}");
     assert_eq!(v["usage"]["input"], 10, "{v}");

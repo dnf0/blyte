@@ -130,6 +130,81 @@ pub fn streaming_http_client() -> &'static ureq::Agent {
     })
 }
 
+/// Returns an HTTP client respecting an optional per-request `timeout`.
+/// When `timeout` is `Some(t)`, connect, read (idle) and whole-call limits each become `min(current, t)`.
+pub(crate) fn http_client_for(timeout: Option<std::time::Duration>) -> ureq::Agent {
+    match timeout {
+        None => http_client().clone(),
+        Some(t) => {
+            let (whole, read) = model_timeouts();
+            let connect = std::time::Duration::from_secs(20).min(t);
+            ureq::AgentBuilder::new()
+                .timeout_connect(connect)
+                .timeout_read(read.min(t))
+                .timeout(whole.min(t))
+                .build()
+        }
+    }
+}
+
+/// Returns a streaming HTTP client respecting an optional per-request `timeout`.
+/// When `timeout` is `Some(t)`, connect and read (idle) limits each become `min(current, t)`.
+pub(crate) fn streaming_http_client_for(timeout: Option<std::time::Duration>) -> ureq::Agent {
+    match timeout {
+        None => streaming_http_client().clone(),
+        Some(t) => {
+            let connect = std::time::Duration::from_secs(20).min(t);
+            let idle = std::time::Duration::from_secs(model_idle_timeout_secs()).min(t);
+            ureq::AgentBuilder::new()
+                .timeout_connect(connect)
+                .timeout_read(idle)
+                .build()
+        }
+    }
+}
+
+/// Formats a timeout error with the request's time limit `t` when `req.timeout` is `Some(t)`.
+pub(crate) fn with_request_timeout_message(
+    err: ProviderError,
+    timeout: Option<std::time::Duration>,
+    started: std::time::Instant,
+) -> ProviderError {
+    if let Some(t) = timeout {
+        if err.is_timeout()
+            || (matches!(err, ProviderError::Transport(_)) && started.elapsed() >= t)
+        {
+            let detail = match &err {
+                ProviderError::Transport(s) => s.as_str(),
+                _ => "timed out",
+            };
+            return ProviderError::Transport(format!(
+                "timed out: request's time limit of {t:?} ({}s) was reached: {detail}",
+                t.as_secs()
+            ));
+        }
+    }
+    err
+}
+
+pub(crate) fn body_read_error(
+    e: std::io::Error,
+    timeout: Option<std::time::Duration>,
+    started: std::time::Instant,
+) -> ProviderError {
+    let msg = e.to_string();
+    let is_io_timeout = matches!(
+        e.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) || msg.to_ascii_lowercase().contains("timed out")
+        || timeout.is_some_and(|t| started.elapsed() >= t);
+    if is_io_timeout {
+        let err = ProviderError::Transport(format!("timed out: {msg}"));
+        with_request_timeout_message(err, timeout, started)
+    } else {
+        ProviderError::Parse(msg)
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -191,6 +266,9 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
     pub max_output_tokens: Option<u32>,
+    /// The most this one call may take, from send to the last byte; `None` keeps each provider's
+    /// own limits.
+    pub timeout: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

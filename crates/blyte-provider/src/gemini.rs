@@ -183,6 +183,7 @@ fn thought_summaries_from_env() -> bool {
 
 pub struct Gemini {
     auth: Auth,
+    api_root: String,
     model: String,
     thinking_level: Option<String>,
     thought_summaries: bool,
@@ -198,6 +199,7 @@ impl Gemini {
             split_effort(&std::env::var("BLYTE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()));
         Ok(Self {
             auth: Auth::ApiKey(api_key),
+            api_root: API_ROOT.to_string(),
             model,
             thinking_level,
             thought_summaries: thought_summaries_from_env(),
@@ -234,6 +236,7 @@ impl Gemini {
 
         Ok(Self {
             auth: Auth::Vertex(VertexAuth::new(project, location)),
+            api_root: API_ROOT.to_string(),
             model,
             thinking_level,
             thought_summaries: thought_summaries_from_env(),
@@ -245,6 +248,7 @@ impl Gemini {
         let (model, thinking_level) = split_effort(DEFAULT_MODEL);
         Self {
             auth: Auth::ApiKey(api_key.into()),
+            api_root: API_ROOT.to_string(),
             model,
             thinking_level,
             thought_summaries: true,
@@ -256,10 +260,16 @@ impl Gemini {
         let (model, thinking_level) = split_effort(DEFAULT_MODEL);
         Self {
             auth: Auth::Vertex(VertexAuth::new(project, location)),
+            api_root: API_ROOT.to_string(),
             model,
             thinking_level,
             thought_summaries: true,
         }
+    }
+
+    pub fn with_api_root(mut self, api_root: impl Into<String>) -> Self {
+        self.api_root = api_root.into().trim_end_matches('/').to_string();
+        self
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -321,7 +331,10 @@ impl Gemini {
 
     pub fn endpoint_url(&self) -> String {
         match &self.auth {
-            Auth::ApiKey(_) => format!("{API_ROOT}/{}:streamGenerateContent?alt=sse", self.model),
+            Auth::ApiKey(_) => format!(
+                "{}/{}:streamGenerateContent?alt=sse",
+                self.api_root, self.model
+            ),
             Auth::Vertex(v) => vertex_url(&v.project, &v.location, &self.model),
         }
     }
@@ -792,9 +805,10 @@ impl Gemini {
 impl Provider for Gemini {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = self.endpoint_url();
-        let agent = crate::streaming_http_client();
+        let agent = crate::streaming_http_client_for(req.timeout);
         let body = self.body(req);
-        let cap = Duration::from_secs(crate::model_stream_cap_secs());
+        let default_cap = Duration::from_secs(crate::model_stream_cap_secs());
+        let cap = req.timeout.map_or(default_cap, |t| default_cap.min(t));
         let mut started = Instant::now();
 
         let resp = match &self.auth {
@@ -813,22 +827,46 @@ impl Provider for Gemini {
                     .set("Accept", "text/event-stream")
                     .send_json(body.clone());
                 if let Err(ureq::Error::Status(401, _)) = &resp {
+                    if let Some(t) = req.timeout {
+                        if started.elapsed() >= t {
+                            return Err(ProviderError::Transport(format!(
+                                "request reached its time limit of {t:?} (timed out)"
+                            )));
+                        }
+                    }
                     vertex.invalidate_token();
                     let new_token = vertex.get_token()?;
-                    started = Instant::now();
-                    agent
-                        .post(&url)
-                        .set("Authorization", &format!("Bearer {new_token}"))
-                        .set("content-type", "application/json")
-                        .set("Accept", "text/event-stream")
-                        .send_json(body)
+                    if let Some(t) = req.timeout {
+                        let elapsed = started.elapsed();
+                        if elapsed >= t {
+                            return Err(ProviderError::Transport(format!(
+                                "request reached its time limit of {t:?} (timed out)"
+                            )));
+                        }
+                        let rem = t.saturating_sub(elapsed);
+                        let retry_agent = crate::streaming_http_client_for(Some(rem));
+                        retry_agent
+                            .post(&url)
+                            .set("Authorization", &format!("Bearer {new_token}"))
+                            .set("content-type", "application/json")
+                            .set("Accept", "text/event-stream")
+                            .send_json(body)
+                    } else {
+                        started = Instant::now();
+                        agent
+                            .post(&url)
+                            .set("Authorization", &format!("Bearer {new_token}"))
+                            .set("content-type", "application/json")
+                            .set("Accept", "text/event-stream")
+                            .send_json(body)
+                    }
                 } else {
                     resp
                 }
             }
         };
 
-        match resp {
+        let result = match resp {
             Ok(r) => {
                 let reader = std::io::BufReader::new(r.into_reader());
                 Self::parse_stream(reader, cap, started)
@@ -838,7 +876,8 @@ impl Provider for Gemini {
                 body: r.into_string().unwrap_or_default(),
             }),
             Err(e) => Err(ProviderError::Transport(e.to_string())),
-        }
+        };
+        result.map_err(|e| crate::with_request_timeout_message(e, req.timeout, started))
     }
 
     fn model_id(&self) -> String {
@@ -857,7 +896,7 @@ impl Provider for Gemini {
             Auth::ApiKey(key) => key,
             Auth::Vertex(_) => return Ok(Vec::new()),
         };
-        let url = API_ROOT;
+        let url = &self.api_root;
         let agent = crate::http_client();
         let resp = agent.get(url).set("x-goog-api-key", api_key).call();
 

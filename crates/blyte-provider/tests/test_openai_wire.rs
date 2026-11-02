@@ -71,6 +71,7 @@ fn the_body_puts_system_first_and_merges_a_parallel_batch() {
             parameters: json!({"type": "object"}),
         }],
         max_output_tokens: None,
+        timeout: None,
     };
     let b = provider().body(&req);
     assert_eq!(b["model"], "gpt-5.5");

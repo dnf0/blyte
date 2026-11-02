@@ -24,6 +24,7 @@ fn main() {
                 "required":["path"]}),
         }],
         max_output_tokens: Some(512),
+        timeout: None,
     };
     match g.complete(&req) {
         Ok(r) => {

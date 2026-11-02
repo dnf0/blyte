@@ -11,6 +11,7 @@ fn req() -> Request {
         messages: vec![Message::User("hi".into())],
         tools: vec![],
         max_output_tokens: None,
+        timeout: None,
     }
 }
 

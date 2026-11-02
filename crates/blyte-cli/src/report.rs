@@ -111,6 +111,8 @@ pub struct RunRecord {
     pub quote_problems: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_check: Option<blyte_agent::claim_check::ClaimCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_check_skipped: Option<String>,
 }
 
 impl RunRecord {
@@ -183,6 +185,7 @@ impl RunRecord {
             gate_seconds: 0.0,
             quote_problems: None,
             claim_check: None,
+            claim_check_skipped: None,
         }
     }
 
@@ -243,6 +246,7 @@ impl RunRecord {
             gate_seconds: gate_ms_sum as f64 / 1000.0,
             quote_problems: report.quote_problems.clone(),
             claim_check: report.claim_check.clone(),
+            claim_check_skipped: report.claim_check_skipped.clone(),
             ..Self::base(config, elapsed)
         }
     }

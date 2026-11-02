@@ -26,6 +26,16 @@ pub struct OpenAi {
 }
 
 impl OpenAi {
+    /// Constructs an OpenAI provider instance with an explicit API key and default model/base URL.
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            prefix: "openai".to_string(),
+            api_key: Some(api_key.into()),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-5.5".to_string(),
+        }
+    }
+
     /// Constructs an OpenAI provider instance from environment variables.
     ///
     /// Reads `OPENAI_API_KEY` (optional if `OPENAI_BASE_URL` is set), `OPENAI_BASE_URL`
@@ -394,7 +404,8 @@ impl Provider for OpenAi {
     /// Executes a synchronous completion request to `{base}/chat/completions`.
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let agent = crate::http_client();
+        let agent = crate::http_client_for(req.timeout);
+        let started = std::time::Instant::now();
         let mut req_builder = agent.post(&url).set("content-type", "application/json");
 
         if let Some(ref key) = self.api_key {
@@ -407,14 +418,18 @@ impl Provider for OpenAi {
             Ok(r) => {
                 let v: Value = r
                     .into_json()
-                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
+                    .map_err(|e| crate::body_read_error(e, req.timeout, started))?;
                 Self::parse(&v)
             }
             Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
                 status,
                 body: r.into_string().unwrap_or_default(),
             }),
-            Err(e) => Err(ProviderError::Transport(e.to_string())),
+            Err(e) => Err(crate::with_request_timeout_message(
+                ProviderError::Transport(e.to_string()),
+                req.timeout,
+                started,
+            )),
         }
     }
 

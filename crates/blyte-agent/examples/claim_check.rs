@@ -143,6 +143,7 @@ fn build_seed_request(claim: &Claim) -> Request {
         messages: vec![Message::User(prompt)],
         tools: Vec::new(),
         max_output_tokens: None,
+        timeout: None,
     }
 }
 
