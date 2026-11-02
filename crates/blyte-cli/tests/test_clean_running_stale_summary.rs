@@ -93,7 +93,7 @@ impl Drop for LiveChild {
 }
 
 // 1. Live PID, start file started_at = now, summary .wt/<ID>.json with mtime one hour before:
-//    blyte clean (and clean_quiet) keeps .wt/<ID>.
+//    blyte clean keeps .wt/<ID>.
 #[test]
 fn live_pid_with_stale_summary_is_kept() {
     let repo = init_repo();
@@ -125,8 +125,8 @@ fn live_pid_with_stale_summary_is_kept() {
     );
     set_mtime_secs(&summary_path, now - 3600);
 
-    blyte_cli::clean::clean_quiet(root, None);
-    assert!(wt_path.exists(), "clean_quiet must keep .wt/T1");
+    blyte_cli::clean::clean_repo(root, 14, false, None, true);
+    assert!(wt_path.exists(), "clean_repo must keep .wt/T1");
 
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .arg("clean")
@@ -180,8 +180,8 @@ fn live_pid_with_stale_summary_and_redone_verdict_is_kept() {
         &serde_json::json!({ "verdict": "redone" }).to_string(),
     );
 
-    blyte_cli::clean::clean_quiet(root, None);
-    assert!(wt_path.exists(), "clean_quiet must keep .wt/T2");
+    blyte_cli::clean::clean_repo(root, 14, false, None, true);
+    assert!(wt_path.exists(), "clean_repo must keep .wt/T2");
 
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .arg("clean")
@@ -314,8 +314,8 @@ fn live_pid_with_summary_and_no_started_at_is_kept() {
         &serde_json::json!({ "outcome": "verified" }).to_string(),
     );
 
-    blyte_cli::clean::clean_quiet(root, None);
-    assert!(wt_path.exists(), "clean_quiet must keep .wt/T5");
+    blyte_cli::clean::clean_repo(root, 14, false, None, true);
+    assert!(wt_path.exists(), "clean_repo must keep .wt/T5");
 
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .arg("clean")
