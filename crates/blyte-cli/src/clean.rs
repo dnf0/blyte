@@ -1567,6 +1567,7 @@ pub fn clean_repo(
     dry_run: bool,
     skip_id: Option<&str>,
     quiet: bool,
+    time_budget: Option<std::time::Duration>,
 ) -> CleanRepoStats {
     let mut removed_worktrees = 0;
     let mut freed_bytes = 0;
@@ -1576,8 +1577,10 @@ pub fn clean_repo(
     let start_time = std::time::Instant::now();
     let ids = find_blyte_worktrees(root);
     for id in ids {
-        if quiet && start_time.elapsed() >= std::time::Duration::from_secs(1) {
-            break;
+        if let Some(budget) = time_budget {
+            if start_time.elapsed() >= budget {
+                break;
+            }
         }
         if skip_id == Some(&id) {
             continue;
@@ -1977,7 +1980,7 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
 
     let mut total_freed = 0;
     for repo in &repos {
-        let stats = clean_repo(repo, args.older_than, args.dry_run, None, false);
+        let stats = clean_repo(repo, args.older_than, args.dry_run, None, false, None);
         total_freed += stats.freed_bytes;
     }
 
@@ -1994,7 +1997,15 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
 /// then one line `blyte: removed N finished worktrees (X GB)` on stderr.
 /// Never fails the dispatch: logs errors to stderr and goes on.
 pub fn clean_quiet(root: &Path, skip_id: Option<&str>) {
-    let stats = clean_repo(root, 14, false, skip_id, true);
+    clean_quiet_with_budget(root, skip_id, std::time::Duration::from_secs(1));
+}
+
+pub fn clean_quiet_with_budget(
+    root: &Path,
+    skip_id: Option<&str>,
+    time_budget: std::time::Duration,
+) {
+    let stats = clean_repo(root, 14, false, skip_id, true, Some(time_budget));
     if stats.removed_worktrees > 0 {
         eprintln!(
             "blyte: removed {} finished worktrees ({})",
