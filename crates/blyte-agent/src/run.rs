@@ -1110,7 +1110,11 @@ impl<'a> Runner<'a> {
                                 tools_ms: 0,
                             });
                         };
-                        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        // An exhausted quota is reported as an error even past the deadline:
+                        // the operator needs to see it to switch provider.
+                        if quota_exhausted(&e).is_none()
+                            && deadline.is_some_and(|d| std::time::Instant::now() >= d)
+                        {
                             push_deadline_turn(&mut report);
                             return (Outcome::BudgetExhausted, report);
                         }

@@ -111,3 +111,46 @@ fn a_run_stops_on_the_first_quota_error_without_retrying() {
     assert_eq!(report.provider_retries, 0);
     assert_eq!(*p.calls.lock().unwrap(), 1);
 }
+
+/// Answers with a quota error only after the request's time limit has passed.
+struct LateQuota;
+
+impl Provider for LateQuota {
+    fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        let t = req
+            .timeout
+            .expect("a run with a deadline sets the request's time limit");
+        std::thread::sleep(t + std::time::Duration::from_millis(50));
+        Err(e429(CHATGPT_FREE))
+    }
+    fn model_id(&self) -> String {
+        "late-quota".into()
+    }
+}
+
+#[test]
+fn a_quota_error_past_the_deadline_is_still_an_error() {
+    let d = tempfile::tempdir().unwrap();
+    let runner = Runner {
+        provider: &LateQuota,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 5,
+            max_gate_attempts: 1,
+            max_duration: Some(std::time::Duration::from_millis(200)),
+        },
+        rollback: false,
+        on_event: None,
+        research: false,
+        claim_check: false,
+    };
+    let mut st = State::new("g", "true");
+    let (outcome, _) = runner.run(&mut st);
+    match outcome {
+        Outcome::Error(e) => assert!(e.starts_with("usage quota exhausted"), "{e}"),
+        other => panic!("expected the quota error, got {other:?}"),
+    }
+}

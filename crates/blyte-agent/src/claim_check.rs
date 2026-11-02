@@ -176,13 +176,6 @@ pub fn check_claims(
         ..Default::default()
     };
 
-    if total_batches == 0 {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            out.skipped = Some("out of time after 0 of 0 batches".to_string());
-        }
-        return out;
-    }
-
     for (batch_idx, batch) in batches.iter().enumerate() {
         let pairs: Vec<(usize, &Claim)> =
             batch.iter().enumerate().map(|(i, c)| (i + 1, c)).collect();
