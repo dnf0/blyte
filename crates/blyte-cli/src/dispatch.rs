@@ -390,6 +390,73 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 }
             }
         }
+
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_out = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &branch_ref])
+            .current_dir(&root)
+            .output();
+        let branch_exists = match branch_out {
+            Ok(o) if o.status.success() => true,
+            Ok(o) if o.status.code() == Some(1) => false,
+            Ok(o) => {
+                eprintln!(
+                    "error: git show-ref --verify --quiet {branch_ref}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: git show-ref --verify --quiet {branch_ref}: {e}");
+                return 2;
+            }
+        };
+
+        if worktree_dir.exists() || branch_exists {
+            match crate::clean::remove_finished_run(&root, &args.id) {
+                Ok(Some(reason)) => {
+                    let secs =
+                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            Ok(d) => d.as_secs(),
+                            Err(e) => {
+                                eprintln!("error: system clock before unix epoch: {e}");
+                                return 2;
+                            }
+                        };
+                    let archive_rel = format!(".wt/archive/{}-{secs}", args.id);
+                    let archive_dir = root.join(&archive_rel);
+                    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+                        eprintln!("error: {}: {e}", archive_dir.display());
+                        return 2;
+                    }
+                    for ext in ["json", "report.json", "start.json", "verdict.json", "log"] {
+                        let file_name = format!("{}.{ext}", args.id);
+                        let src = wt_parent.join(&file_name);
+                        if src.exists() {
+                            let dst = archive_dir.join(&file_name);
+                            if let Err(e) = std::fs::rename(&src, &dst) {
+                                eprintln!(
+                                    "error: rename {} -> {}: {e}",
+                                    src.display(),
+                                    dst.display()
+                                );
+                                return 2;
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "dispatch: replaced the earlier run {} ({reason}); its records are in {archive_rel}/",
+                        args.id
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("error: could not remove the earlier run {}: {e}", args.id);
+                    return 2;
+                }
+            }
+        }
+
         crate::clean::clean_quiet(&root, Some(&args.id));
     }
 

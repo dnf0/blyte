@@ -70,18 +70,19 @@ fn dispatch_explains_existing_merged_wip_branch() {
     let r = repo();
     git(r.path(), &["branch", "wip/A1"]);
 
-    std::fs::write(r.path().join("task.md"), "Do work.\n").unwrap();
-    let out = blyte(r.path(), &["dispatch", "A1", "task.md", "--sandbox", "off"]);
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains(
-            "error: branch wip/A1 already exists from an earlier run, and its work is already merged. Run `blyte clean` to remove it, or dispatch with a new ID."
-        ),
-        "unexpected stderr: {stderr}"
-    );
     assert_eq!(
         branch_exists_message(r.path(), "wip/A1", "A1"),
         "error: branch wip/A1 already exists from an earlier run, and its work is already merged. Run `blyte clean` to remove it, or dispatch with a new ID."
+    );
+
+    std::fs::write(r.path().join("task.md"), "Do work.\n").unwrap();
+    let out = blyte(r.path(), &["dispatch", "A1", "task.md", "--sandbox", "off"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "dispatch: replaced the earlier run A1 (merged); its records are in .wt/archive/A1-"
+        ),
+        "unexpected stderr: {stderr}"
     );
 }
