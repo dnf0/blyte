@@ -405,7 +405,6 @@ pub struct CleanContext<'a> {
     pub wip_contains_cache: HashMap<String, Vec<String>>,
     pub merged_cache: HashMap<String, Option<RemovalReason>>,
     pub branch_contains_calls: usize,
-    pub quiet: bool,
     pub cherry_pick_set: Option<HashSet<String>>,
     pub rev_list_cache: HashMap<String, Vec<String>>,
     pub ancestor_cache: HashMap<(String, String), bool>,
@@ -481,15 +480,10 @@ impl<'a> CleanContext<'a> {
             wip_contains_cache: HashMap::new(),
             merged_cache: HashMap::new(),
             branch_contains_calls: 0,
-            quiet: false,
             cherry_pick_set: None,
             rev_list_cache: HashMap::new(),
             ancestor_cache: HashMap::new(),
         }
-    }
-
-    pub fn set_quiet(&mut self, quiet: bool) {
-        self.quiet = quiet;
     }
 
     fn compute_cherry_pick_set(&self) -> HashSet<String> {
@@ -875,13 +869,11 @@ impl<'a> CleanContext<'a> {
                     if self.is_ancestor_of_target(tip_sha, target) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
-                    if !self.quiet {
-                        if is_cherry_merged_into_target(self.root, tip_sha, target) {
-                            return Some(RemovalReason::MergedInto(display_name.clone()));
-                        }
-                        if is_merge_tree_merged_into_target(self.root, tip_sha, target, None) {
-                            return Some(RemovalReason::MergedInto(display_name.clone()));
-                        }
+                    if is_cherry_merged_into_target(self.root, tip_sha, target) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                    }
+                    if is_merge_tree_merged_into_target(self.root, tip_sha, target, None) {
+                        return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
                 }
             }
@@ -896,16 +888,6 @@ impl<'a> CleanContext<'a> {
             if self.is_child_run_merged(&child, visited) {
                 return Some(RemovalReason::MergedThrough(child));
             }
-        }
-
-        // clean_quiet uses only: ancestor, cherry-pick record, squash-merge subject match,
-        // follow-ups through those, and the redone / no_changes / research / age rules.
-        // No merge-tree, no history walk, no other-worktrees report.
-        if self.quiet {
-            if let Some(tip_sha) = tip_sha {
-                return self.squash_merged_reason(tip_sha, &base_targets);
-            }
-            return None;
         }
 
         if let Some(tip_sha) = tip_sha {
@@ -1089,7 +1071,8 @@ impl<'a> CleanContext<'a> {
                     let age = std::time::SystemTime::now()
                         .duration_since(mtime)
                         .unwrap_or(std::time::Duration::ZERO);
-                    if age >= std::time::Duration::from_secs(older_than_days * 86400) {
+                    if age >= std::time::Duration::from_secs(older_than_days.saturating_mul(86400))
+                    {
                         return Ok(RemovalReason::OlderThan(older_than_days));
                     }
                 }
@@ -1567,21 +1550,13 @@ pub fn clean_repo(
     dry_run: bool,
     skip_id: Option<&str>,
     quiet: bool,
-    time_budget: Option<std::time::Duration>,
 ) -> CleanRepoStats {
     let mut removed_worktrees = 0;
     let mut freed_bytes = 0;
 
     let mut ctx = CleanContext::new(root);
-    ctx.set_quiet(quiet);
-    let start_time = std::time::Instant::now();
     let ids = find_blyte_worktrees(root);
     for id in ids {
-        if let Some(budget) = time_budget {
-            if start_time.elapsed() >= budget {
-                break;
-            }
-        }
         if skip_id == Some(&id) {
             continue;
         }
@@ -1964,8 +1939,93 @@ pub fn report_other_worktrees(root: &Path) {
     }
 }
 
+struct CleanLockGuard(PathBuf);
+
+impl Drop for CleanLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+enum LockOutcome {
+    Acquired(CleanLockGuard),
+    AlreadyRunning,
+    Error(String),
+}
+
+fn acquire_clean_lock(root: &Path) -> LockOutcome {
+    use std::io::Write;
+    let wt_dir = root.join(".wt");
+    if let Err(e) = std::fs::create_dir_all(&wt_dir) {
+        return LockOutcome::Error(format!("{}: {e}", wt_dir.display()));
+    }
+    let lock_path = wt_dir.join("clean.lock");
+    let pid_str = format!("{}\n", std::process::id());
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(pid_str.as_bytes()) {
+                let _ = std::fs::remove_file(&lock_path);
+                return LockOutcome::Error(format!("{}: {e}", lock_path.display()));
+            }
+            LockOutcome::Acquired(CleanLockGuard(lock_path))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let contents = match std::fs::read_to_string(&lock_path) {
+                Ok(c) => c,
+                Err(read_err) => {
+                    return LockOutcome::Error(format!("{}: {read_err}", lock_path.display()));
+                }
+            };
+            let old_pid: i64 = match contents.trim().parse() {
+                Ok(p) => p,
+                Err(parse_err) => {
+                    return LockOutcome::Error(format!(
+                        "{}: invalid pid: {parse_err}",
+                        lock_path.display()
+                    ));
+                }
+            };
+            if is_pid_alive(old_pid) {
+                return LockOutcome::AlreadyRunning;
+            }
+            eprintln!(
+                "replacing stale {} from dead pid {old_pid}",
+                lock_path.display()
+            );
+            if let Err(rm_err) = std::fs::remove_file(&lock_path) {
+                return LockOutcome::Error(format!("{}: {rm_err}", lock_path.display()));
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut f) => {
+                    if let Err(write_err) = f.write_all(pid_str.as_bytes()) {
+                        let _ = std::fs::remove_file(&lock_path);
+                        return LockOutcome::Error(format!("{}: {write_err}", lock_path.display()));
+                    }
+                    LockOutcome::Acquired(CleanLockGuard(lock_path))
+                }
+                Err(open_err) => LockOutcome::Error(format!("{}: {open_err}", lock_path.display())),
+            }
+        }
+        Err(e) => LockOutcome::Error(format!("{}: {e}", lock_path.display())),
+    }
+}
+
 /// Runs the `blyte clean` command.
 pub fn run(args: &crate::cli::CleanArgs) -> i32 {
+    if (args.quiet || args.skip.is_some()) && (args.all || args.dry_run) {
+        eprintln!("error: --quiet and --skip cannot be combined with --all or --dry-run");
+        return 2;
+    }
+
     let repos = if args.all {
         crate::registry::registered()
     } else {
@@ -1978,40 +2038,147 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
         }
     };
 
+    let _lock_guard = if args.quiet {
+        let Some(root) = repos.first() else {
+            eprintln!("error: blyte clean --quiet found no repository to clean");
+            return 1;
+        };
+        match acquire_clean_lock(root) {
+            LockOutcome::Acquired(guard) => Some(guard),
+            LockOutcome::AlreadyRunning => return 0,
+            LockOutcome::Error(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
     let mut total_freed = 0;
     for repo in &repos {
-        let stats = clean_repo(repo, args.older_than, args.dry_run, None, false, None);
+        let stats = clean_repo(
+            repo,
+            args.older_than,
+            args.dry_run,
+            args.skip.as_deref(),
+            args.quiet,
+        );
         total_freed += stats.freed_bytes;
     }
 
-    if args.dry_run {
-        println!("would free {}", format_size(total_freed));
-    } else {
-        println!("freed {}", format_size(total_freed));
+    if !args.quiet {
+        if args.dry_run {
+            println!("would free {}", format_size(total_freed));
+        } else {
+            println!("freed {}", format_size(total_freed));
+        }
     }
 
     0
 }
 
-/// Quiet cleanup at dispatch start: no output unless something was removed,
-/// then one line `blyte: removed N finished worktrees (X GB)` on stderr.
-/// Never fails the dispatch: logs errors to stderr and goes on.
-pub fn clean_quiet(root: &Path, skip_id: Option<&str>) {
-    clean_quiet_with_budget(root, skip_id, std::time::Duration::from_secs(1));
+fn delete_wip_branch_strict(root: &Path, branch_name: &str) -> Result<(), String> {
+    let del_out = std::process::Command::new("git")
+        .args(["branch", "-D", branch_name])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git branch -D {branch_name}: {e}"))?;
+    if !del_out.status.success() {
+        return Err(format!(
+            "git branch -D {branch_name}: {}",
+            String::from_utf8_lossy(&del_out.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
-pub fn clean_quiet_with_budget(
-    root: &Path,
-    skip_id: Option<&str>,
-    time_budget: std::time::Duration,
-) {
-    let stats = clean_repo(root, 14, false, skip_id, true, Some(time_budget));
-    if stats.removed_worktrees > 0 {
-        eprintln!(
-            "blyte: removed {} finished worktrees ({})",
-            stats.removed_worktrees,
-            format_size(stats.freed_bytes)
-        );
+/// Removes a finished run `<id>` when its work is merged (or it made no changes) and its worktree
+/// has no uncommitted changes.
+pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, String> {
+    let wt_path = root.join(".wt").join(id);
+    let branch_name = format!("wip/{id}");
+    let mut ctx = CleanContext::new(root);
+
+    if wt_path.exists() {
+        let reason = match ctx.check_removable(id, u64::MAX) {
+            Ok(
+                r @ (RemovalReason::Merged
+                | RemovalReason::MergedInto(_)
+                | RemovalReason::MergedThrough(_)
+                | RemovalReason::NoChanges),
+            ) => r,
+            Ok(
+                RemovalReason::Verdict(_)
+                | RemovalReason::OlderThan(_)
+                | RemovalReason::ResearchReport,
+            )
+            | Err(_) => return Ok(None),
+        };
+        if has_uncommitted_changes(&wt_path) {
+            return Ok(None);
+        }
+
+        let wt_rel = format!(".wt/{id}");
+        let rm_out = std::process::Command::new("git")
+            .args(["worktree", "remove", &wt_rel])
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("git worktree remove {wt_rel}: {e}"))?;
+        if !rm_out.status.success() {
+            return Err(format!(
+                "git worktree remove {wt_rel}: {}",
+                String::from_utf8_lossy(&rm_out.stderr).trim()
+            ));
+        }
+
+        if ctx.get_branch_tip(&branch_name).is_some() {
+            delete_wip_branch_strict(root, &branch_name)?;
+        }
+
+        return Ok(Some(reason.to_string()));
+    }
+
+    if ctx.get_branch_tip(&branch_name).is_some() {
+        if !is_branch_merged(root, &branch_name) {
+            return Ok(None);
+        }
+        let reason = ctx
+            .check_run_merged(id)
+            .unwrap_or(RemovalReason::Merged)
+            .to_string();
+        delete_wip_branch_strict(root, &branch_name)?;
+        return Ok(Some(reason));
+    }
+
+    Ok(None)
+}
+
+/// Starts `blyte clean --quiet [--skip <ID>]` in the background without waiting for it.
+pub fn spawn_background_clean(root: &Path, skip_id: Option<&str>) {
+    let res: Result<(), std::io::Error> = (|| {
+        let wt_dir = root.join(".wt");
+        std::fs::create_dir_all(&wt_dir)?;
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(wt_dir.join("clean.log"))?;
+        let stderr_file = log_file.try_clone()?;
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("clean").arg("--quiet");
+        if let Some(id) = skip_id {
+            cmd.arg("--skip").arg(id);
+        }
+        cmd.current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(stderr_file));
+        let _child = cmd.spawn()?;
+        Ok(())
+    })();
+    if let Err(e) = res {
+        eprintln!("warning: could not start the background clean: {e}");
     }
 }
 
@@ -2022,7 +2189,7 @@ pub fn clean_quiet_with_budget(
 pub fn clean_on_review(root: &Path, id: &str) {
     let wt_path = root.join(".wt").join(id);
     if !wt_path.exists() {
-        clean_quiet(root, Some(id));
+        spawn_background_clean(root, Some(id));
         return;
     }
 
@@ -2051,7 +2218,7 @@ pub fn clean_on_review(root: &Path, id: &str) {
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
-        clean_quiet(root, Some(id));
+        spawn_background_clean(root, Some(id));
         return;
     }
 
@@ -2073,7 +2240,7 @@ pub fn clean_on_review(root: &Path, id: &str) {
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
-        clean_quiet(root, Some(id));
+        spawn_background_clean(root, Some(id));
         return;
     }
 
@@ -2097,5 +2264,5 @@ pub fn clean_on_review(root: &Path, id: &str) {
         println!("removed .wt/{id}");
     }
 
-    clean_quiet(root, Some(id));
+    spawn_background_clean(root, Some(id));
 }

@@ -97,11 +97,11 @@ fn test_squash_merged_quiet_clean() {
         &["commit", "-qm", "chore: edit a later", "--no-gpg-sign"],
     );
 
-    blyte_cli::clean::clean_quiet(root, None);
+    blyte_cli::clean::clean_repo(root, 14, false, None, true);
 
     assert!(
         !root.join(".wt/A1").exists(),
-        ".wt/A1 should be removed by clean_quiet"
+        ".wt/A1 should be removed by clean_repo"
     );
     let branch_check = Command::new("git")
         .args(["rev-parse", "--verify", "refs/heads/wip/A1"])
@@ -121,7 +121,7 @@ fn test_partly_listed_quiet_clean() {
 
     setup_finished_run_a1(root);
 
-    write_file(&root.join("a.txt"), "line 1 tweaked\n");
+    write_file(&root.join("a.txt"), "line 1\n");
     git(root, &["add", "."]);
     git(
         root,
@@ -140,7 +140,7 @@ fn test_partly_listed_quiet_clean() {
         &["commit", "-qm", "chore: edit a later", "--no-gpg-sign"],
     );
 
-    blyte_cli::clean::clean_quiet(root, None);
+    blyte_cli::clean::clean_repo(root, 14, false, None, true);
 
     assert!(
         root.join(".wt/A1").exists(),
@@ -205,14 +205,26 @@ fn test_review_sweep_removes_squash_merged_other_run() {
         &serde_json::json!({ "verdict": "accepted" }).to_string(),
     );
 
-    blyte_cli::clean::clean_on_review(root, "B1");
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["review", "B1", "--verdict", "accepted"])
+        .current_dir(root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let wt_a1 = root.join(".wt/A1");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while wt_a1.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 
     assert!(
         wt_b1.exists(),
         ".wt/B1 should be kept because B1 is not merged"
     );
     assert!(
-        !root.join(".wt/A1").exists(),
+        !wt_a1.exists(),
         ".wt/A1 should be removed by the review sweep"
     );
 }

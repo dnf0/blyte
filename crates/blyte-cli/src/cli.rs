@@ -246,6 +246,12 @@ pub struct CleanArgs {
     /// Clean every repository in the registry
     #[arg(long)]
     pub all: bool,
+
+    #[arg(long, hide = true, conflicts_with_all = ["all", "dry_run"])]
+    pub quiet: bool,
+
+    #[arg(long, hide = true, value_name = "ID", conflicts_with_all = ["all", "dry_run"])]
+    pub skip: Option<String>,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
