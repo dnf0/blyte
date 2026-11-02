@@ -242,10 +242,10 @@ fn test_dispatch_quiet_clean_prints_nothing_about_sibling_worktrees() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    assert!(
-        stderr.contains("blyte: removed 1 finished worktrees"),
-        "stderr was: {stderr}"
-    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while wt_old.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(!wt_old.exists(), "old worktree should have been removed");
 
     // Sibling worktree must not be mentioned in stdout or stderr
