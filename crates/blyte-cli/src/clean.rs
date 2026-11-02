@@ -1574,7 +1574,7 @@ pub fn clean_repo(
     let mut freed_bytes = 0;
 
     let mut ctx = CleanContext::new(root);
-    ctx.set_quiet(quiet);
+    ctx.set_quiet(time_budget.is_some());
     let start_time = std::time::Instant::now();
     let ids = find_blyte_worktrees(root);
     for id in ids {
@@ -1965,8 +1965,93 @@ pub fn report_other_worktrees(root: &Path) {
     }
 }
 
+struct CleanLockGuard(PathBuf);
+
+impl Drop for CleanLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+enum LockOutcome {
+    Acquired(CleanLockGuard),
+    AlreadyRunning,
+    Error(String),
+}
+
+fn acquire_clean_lock(root: &Path) -> LockOutcome {
+    use std::io::Write;
+    let wt_dir = root.join(".wt");
+    if let Err(e) = std::fs::create_dir_all(&wt_dir) {
+        return LockOutcome::Error(format!("{}: {e}", wt_dir.display()));
+    }
+    let lock_path = wt_dir.join("clean.lock");
+    let pid_str = format!("{}\n", std::process::id());
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(pid_str.as_bytes()) {
+                let _ = std::fs::remove_file(&lock_path);
+                return LockOutcome::Error(format!("{}: {e}", lock_path.display()));
+            }
+            LockOutcome::Acquired(CleanLockGuard(lock_path))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let contents = match std::fs::read_to_string(&lock_path) {
+                Ok(c) => c,
+                Err(read_err) => {
+                    return LockOutcome::Error(format!("{}: {read_err}", lock_path.display()));
+                }
+            };
+            let old_pid: i64 = match contents.trim().parse() {
+                Ok(p) => p,
+                Err(parse_err) => {
+                    return LockOutcome::Error(format!(
+                        "{}: invalid pid: {parse_err}",
+                        lock_path.display()
+                    ));
+                }
+            };
+            if is_pid_alive(old_pid) {
+                return LockOutcome::AlreadyRunning;
+            }
+            eprintln!(
+                "replacing stale {} from dead pid {old_pid}",
+                lock_path.display()
+            );
+            if let Err(rm_err) = std::fs::remove_file(&lock_path) {
+                return LockOutcome::Error(format!("{}: {rm_err}", lock_path.display()));
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut f) => {
+                    if let Err(write_err) = f.write_all(pid_str.as_bytes()) {
+                        let _ = std::fs::remove_file(&lock_path);
+                        return LockOutcome::Error(format!("{}: {write_err}", lock_path.display()));
+                    }
+                    LockOutcome::Acquired(CleanLockGuard(lock_path))
+                }
+                Err(open_err) => LockOutcome::Error(format!("{}: {open_err}", lock_path.display())),
+            }
+        }
+        Err(e) => LockOutcome::Error(format!("{}: {e}", lock_path.display())),
+    }
+}
+
 /// Runs the `blyte clean` command.
 pub fn run(args: &crate::cli::CleanArgs) -> i32 {
+    if (args.quiet || args.skip.is_some()) && (args.all || args.dry_run) {
+        eprintln!("error: --quiet and --skip cannot be combined with --all or --dry-run");
+        return 2;
+    }
+
     let repos = if args.all {
         crate::registry::registered()
     } else {
@@ -1979,16 +2064,41 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
         }
     };
 
+    let _lock_guard = if args.quiet {
+        let Some(root) = repos.first() else {
+            return 0;
+        };
+        match acquire_clean_lock(root) {
+            LockOutcome::Acquired(guard) => Some(guard),
+            LockOutcome::AlreadyRunning => return 0,
+            LockOutcome::Error(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
     let mut total_freed = 0;
     for repo in &repos {
-        let stats = clean_repo(repo, args.older_than, args.dry_run, None, false, None);
+        let stats = clean_repo(
+            repo,
+            args.older_than,
+            args.dry_run,
+            args.skip.as_deref(),
+            args.quiet,
+            None,
+        );
         total_freed += stats.freed_bytes;
     }
 
-    if args.dry_run {
-        println!("would free {}", format_size(total_freed));
-    } else {
-        println!("freed {}", format_size(total_freed));
+    if !args.quiet {
+        if args.dry_run {
+            println!("would free {}", format_size(total_freed));
+        } else {
+            println!("freed {}", format_size(total_freed));
+        }
     }
 
     0
@@ -2092,6 +2202,34 @@ pub fn clean_quiet_with_budget(
     }
 }
 
+/// Starts `blyte clean --quiet [--skip <ID>]` in the background without waiting for it.
+pub fn spawn_background_clean(root: &Path, skip_id: Option<&str>) {
+    let res: Result<(), std::io::Error> = (|| {
+        let wt_dir = root.join(".wt");
+        std::fs::create_dir_all(&wt_dir)?;
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(wt_dir.join("clean.log"))?;
+        let stderr_file = log_file.try_clone()?;
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("clean").arg("--quiet");
+        if let Some(id) = skip_id {
+            cmd.arg("--skip").arg(id);
+        }
+        cmd.current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(stderr_file));
+        let _child = cmd.spawn()?;
+        Ok(())
+    })();
+    if let Err(e) = res {
+        eprintln!("warning: could not start the background clean: {e}");
+    }
+}
+
 /// Removes a run's worktree on review after recording the verdict under the same rules.
 /// Removes the worktree only when the rules allow it now (e.g. redone, or work already merged);
 /// otherwise prints nothing extra beyond the verdict line, except for accepted/fixed prints
@@ -2099,7 +2237,7 @@ pub fn clean_quiet_with_budget(
 pub fn clean_on_review(root: &Path, id: &str) {
     let wt_path = root.join(".wt").join(id);
     if !wt_path.exists() {
-        clean_quiet(root, Some(id));
+        spawn_background_clean(root, Some(id));
         return;
     }
 
@@ -2128,7 +2266,7 @@ pub fn clean_on_review(root: &Path, id: &str) {
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
-        clean_quiet(root, Some(id));
+        spawn_background_clean(root, Some(id));
         return;
     }
 
@@ -2150,7 +2288,7 @@ pub fn clean_on_review(root: &Path, id: &str) {
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
-        clean_quiet(root, Some(id));
+        spawn_background_clean(root, Some(id));
         return;
     }
 
@@ -2174,5 +2312,5 @@ pub fn clean_on_review(root: &Path, id: &str) {
         println!("removed .wt/{id}");
     }
 
-    clean_quiet(root, Some(id));
+    spawn_background_clean(root, Some(id));
 }

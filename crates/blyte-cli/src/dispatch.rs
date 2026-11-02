@@ -457,7 +457,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             }
         }
 
-        crate::clean::clean_quiet(&root, Some(&args.id));
+        crate::clean::spawn_background_clean(&root, Some(&args.id));
     }
 
     let base_commit: Option<String> = if args.research {
