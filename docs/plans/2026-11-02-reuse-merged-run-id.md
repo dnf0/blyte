@@ -64,3 +64,48 @@ treat "could not tell whether it is merged" as merged.
    - `.wt/<id>.task.md` written before the dispatch is still in place afterwards.
 
 Gate: the repository checks. Commit: `fix(dispatch): reusing a merged run's ID replaces that run instead of failing`
+
+### Task RU2: a full clean in the background at each dispatch and review (after RU1)
+
+Why: the clean at dispatch and review (`clean_quiet`, `clean.rs` about line 1999) stops after 1 s and walks the runs in
+alphabetical order from the start every time. Runs it keeps (not merged yet) are re-checked on every call and use up the
+second, and removing one 1.4 GB worktree can take most of it. In a repository with a backlog it removes about one run per
+dispatch and rarely gets past the first letters. On 2026-11-02 a manual `blyte clean --all` removed 66 merged runs
+(about 54 GB) across 20 repositories, most of them merged after #306 added the automatic clean.
+
+Decision: dispatch and review start the full clean as a separate background process with no time limit, and do not
+wait for it. One clean at a time per repository.
+
+Files: `crates/blyte-cli/src/clean.rs`, `crates/blyte-cli/src/dispatch.rs`, the clean command's arguments (`grep -rn
+"Clean(" crates/blyte-cli/src`); tests in `crates/blyte-cli/tests/test_clean_background.rs`. Grep first; never read
+`dispatch.rs` or `clean.rs` whole.
+
+No fallbacks.
+
+1. `blyte clean` gets two hidden flags (not in `--help`): `--quiet` (print nothing to stdout; the same removals as
+   `blyte clean` without `--dry-run`) and `--skip <ID>` (leave that run alone, as `skip_id` does today). They cannot be
+   combined with `--all` or `--dry-run`; reject the combination with an error.
+2. A lock per repository: with `--quiet`, the clean first creates `.wt/clean.lock` with `create_new`, holding its pid.
+   - If the file exists and that pid is alive, exit 0 at once without removing anything.
+   - If that pid is not alive, replace the lock (say so in the log, see 3) and go on.
+   - Remove the lock when the clean ends, whatever the outcome.
+   - Any other error creating or reading the lock: print it to stderr and exit 1. Do not clean without the lock.
+3. Replace each `clean_quiet(...)` call in dispatch (about line 393) and in `clean_on_review` with a helper
+   `spawn_background_clean(root, skip_id)` that starts `std::env::current_exe()` with `clean --quiet --skip <ID>`, current
+   directory `root`, stdin null, stdout and stderr appended to `.wt/clean.log`, and does not wait for it. Do not let the
+   child be killed when the dispatch exits (no shared process group signal handling beyond what `Command::spawn`
+   does by default; check that the dispatch's own watchdog or kill paths do not reach it).
+   - If the spawn fails, print `warning: could not start the background clean: <error>` to stderr and go on with the
+     dispatch or review (the clean is housekeeping; the dispatch must not fail because of it).
+   - Keep `clean_quiet_with_budget` and its tests if other code or tests still use it; otherwise remove it and
+     `clean_quiet`, and update the tests that call them.
+4. Tests (real git repositories in temp dirs, the setup in `crates/blyte-cli/tests/test_clean.rs`; run the built binary
+   with `env!("CARGO_BIN_EXE_blyte")`; no tight timings):
+   - `blyte clean --quiet --skip B` with merged runs `A`, `B`, `C`: `A` and `C` are removed, `B` is kept, stdout is empty.
+   - With `.wt/clean.lock` holding the test process's own pid: `blyte clean --quiet` removes nothing and exits 0.
+   - With `.wt/clean.lock` holding a pid that is not running: the clean runs, and the lock is gone afterwards.
+   - `--quiet --all` and `--quiet --dry-run` are rejected.
+   - After a `blyte review <id> --verdict accepted` on one run, another merged run is removed within 60 s (poll; the
+     clean runs in the background).
+
+Gate: the repository checks. Commit: `fix(clean): run the full clean in the background at dispatch and review`
