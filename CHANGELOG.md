@@ -1,3 +1,9 @@
+## v0.37.6 (2026-11-03)
+
+### Fix
+
+- **sandbox**: let tests read .env files they create in temp folders (#319)
+
 ## v0.37.5 (2026-11-02)
 
 ### Fix
