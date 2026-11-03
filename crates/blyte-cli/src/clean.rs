@@ -11,6 +11,9 @@ pub enum RemovalReason {
     Verdict(String),
     NoChanges,
     ResearchReport,
+    ResearchReportInWorktree,
+    ResearchEndedWithoutReport(String),
+    ResearchStoppedWithoutSummary(u64),
     OlderThan(u64),
 }
 
@@ -29,6 +32,18 @@ impl std::fmt::Display for RemovalReason {
             }
             Self::NoChanges => write!(f, "no changes"),
             Self::ResearchReport => write!(f, "research report"),
+            Self::ResearchReportInWorktree => {
+                write!(f, "research report (copied out on removal)")
+            }
+            Self::ResearchEndedWithoutReport(outcome) => {
+                write!(f, "research run ended without a report ({outcome})")
+            }
+            Self::ResearchStoppedWithoutSummary(d) => {
+                write!(
+                    f,
+                    "research run stopped without a summary, started more than {d} days ago"
+                )
+            }
             Self::OlderThan(d) => write!(f, "finished over {d} days ago"),
         }
     }
@@ -41,6 +56,7 @@ pub enum KeptReason {
     NoVerdict,
     NotMergedYet,
     NoReport,
+    UnreadableSummary,
     Custom(String),
 }
 
@@ -52,6 +68,7 @@ impl std::fmt::Display for KeptReason {
             Self::NoVerdict => write!(f, "no verdict"),
             Self::NotMergedYet => write!(f, "not merged yet"),
             Self::NoReport => write!(f, "no report"),
+            Self::UnreadableSummary => write!(f, "unreadable summary"),
             Self::Custom(s) => write!(f, "{s}"),
         }
     }
@@ -1057,6 +1074,42 @@ impl<'a> CleanContext<'a> {
             return Ok(RemovalReason::ResearchReport);
         }
 
+        if is_res {
+            let wt_report_path = wt_dir.join(id).join("report.md");
+            if wt_report_path.is_file() && !report_path.is_file() {
+                return Ok(RemovalReason::ResearchReportInWorktree);
+            }
+            if summary_exists {
+                let outcome = std::fs::read_to_string(&summary_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| {
+                        v.get("outcome")
+                            .and_then(|o| o.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                    });
+                return match outcome {
+                    Some(outcome) => Ok(RemovalReason::ResearchEndedWithoutReport(outcome)),
+                    None => Err(KeptReason::UnreadableSummary),
+                };
+            }
+            let start_path = wt_dir.join(format!("{id}.start.json"));
+            if let Ok(meta) = std::fs::metadata(&start_path) {
+                if let Ok(mtime) = meta.modified() {
+                    let age = std::time::SystemTime::now()
+                        .duration_since(mtime)
+                        .unwrap_or(std::time::Duration::ZERO);
+                    if age >= std::time::Duration::from_secs(older_than_days.saturating_mul(86400))
+                    {
+                        return Ok(RemovalReason::ResearchStoppedWithoutSummary(
+                            older_than_days,
+                        ));
+                    }
+                }
+            }
+        }
+
         // Rule 1: Merged (its work is on the default branch or base branch or follow-up)
         if !is_res {
             if let Some(reason) = self.check_run_merged(id) {
@@ -1601,6 +1654,22 @@ pub fn clean_repo(
                     freed_bytes += size;
                     removed_worktrees += 1;
                 } else {
+                    if removal_reason == RemovalReason::ResearchReportInWorktree {
+                        let src = wt_path.join("report.md");
+                        let dst = root.join(".wt").join(format!("{id}.report.md"));
+                        if let Err(err) = std::fs::copy(&src, &dst) {
+                            eprintln!(
+                                "error: could not copy {} to {}: {err}",
+                                src.display(),
+                                dst.display()
+                            );
+                            if !quiet {
+                                println!("kept .wt/{id} (report copy failed)");
+                            }
+                            continue;
+                        }
+                    }
+
                     let removed_ok = if is_res {
                         std::fs::remove_dir_all(&wt_path).is_ok()
                     } else {
@@ -2111,7 +2180,10 @@ pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, Stri
             Ok(
                 RemovalReason::Verdict(_)
                 | RemovalReason::OlderThan(_)
-                | RemovalReason::ResearchReport,
+                | RemovalReason::ResearchReport
+                | RemovalReason::ResearchReportInWorktree
+                | RemovalReason::ResearchEndedWithoutReport(_)
+                | RemovalReason::ResearchStoppedWithoutSummary(_),
             )
             | Err(_) => return Ok(None),
         };
@@ -2209,17 +2281,31 @@ pub fn clean_on_review(root: &Path, id: &str) {
         .unwrap_or_default();
 
     let is_res = ctx.is_research_run(id);
-    let removable = match ctx.check_removable(id, 14) {
-        Ok(_) => is_res || !has_uncommitted_changes(&wt_path),
-        Err(_) => false,
+    let removal_reason = match ctx.check_removable(id, 14) {
+        Ok(r) if is_res || !has_uncommitted_changes(&wt_path) => Some(r),
+        _ => None,
     };
 
-    if !removable {
+    let Some(removal_reason) = removal_reason else {
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
         spawn_background_clean(root, Some(id));
         return;
+    };
+
+    if removal_reason == RemovalReason::ResearchReportInWorktree {
+        let src = wt_path.join("report.md");
+        let dst = root.join(".wt").join(format!("{id}.report.md"));
+        if let Err(err) = std::fs::copy(&src, &dst) {
+            eprintln!(
+                "error: could not copy {} to {}: {err}",
+                src.display(),
+                dst.display()
+            );
+            spawn_background_clean(root, Some(id));
+            return;
+        }
     }
 
     let removed_ok = if is_res {
