@@ -2096,6 +2096,36 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
     }
 
     let repos = if args.all {
+        let tidy_res = if args.dry_run {
+            crate::registry::missing_registered()
+        } else {
+            crate::registry::prune_missing()
+        };
+        match tidy_res {
+            Ok(removed) if !removed.is_empty() => {
+                let verb = if args.dry_run {
+                    "would forget"
+                } else {
+                    "forgot"
+                };
+                let list = removed
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "{verb} {} repositories that no longer exist: {list}",
+                    removed.len()
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                let path = crate::registry::state_dir()
+                    .map(|d| d.join("repos").display().to_string())
+                    .unwrap_or_default();
+                eprintln!("error: could not tidy the repository registry {path}: {err}");
+            }
+        }
         crate::registry::registered()
     } else {
         match find_repo_root() {
