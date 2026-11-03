@@ -110,6 +110,84 @@ fn registered_from(dir: Option<PathBuf>) -> Vec<PathBuf> {
     result
 }
 
+/// Removes non-existent directories, blank lines, and duplicates from `<state_dir>/repos`,
+/// rewriting the file atomically and returning the removed paths in file order.
+pub fn prune_missing() -> std::io::Result<Vec<PathBuf>> {
+    prune_missing_in(state_dir())
+}
+
+/// Returns the listed paths in `<state_dir>/repos` that no longer exist as directories,
+/// in file order, without duplicates, without modifying the registry file.
+pub fn missing_registered() -> std::io::Result<Vec<PathBuf>> {
+    missing_in(state_dir())
+}
+
+fn read_and_partition(dir: &Path) -> std::io::Result<Option<(Vec<String>, Vec<PathBuf>)>> {
+    let repos_file = dir.join("repos");
+    let content = match std::fs::read_to_string(&repos_file) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if path.is_dir() {
+            kept.push(trimmed.to_string());
+        } else {
+            removed.push(path);
+        }
+    }
+
+    Ok(Some((kept, removed)))
+}
+
+fn missing_in(dir: Option<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+    let Some(dir) = dir else {
+        return Ok(Vec::new());
+    };
+    let Some((_kept, removed)) = read_and_partition(&dir)? else {
+        return Ok(Vec::new());
+    };
+    Ok(removed)
+}
+
+fn prune_missing_in(dir: Option<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+    let Some(dir) = dir else {
+        return Ok(Vec::new());
+    };
+    let Some((kept, removed)) = read_and_partition(&dir)? else {
+        return Ok(Vec::new());
+    };
+
+    let mut new_content = String::new();
+    for line in &kept {
+        new_content.push_str(line);
+        new_content.push('\n');
+    }
+
+    let repos_file = dir.join("repos");
+    let tmp_file = dir.join(format!("repos.tmp.{}", std::process::id()));
+    std::fs::write(&tmp_file, new_content)?;
+    if let Err(e) = std::fs::rename(&tmp_file, &repos_file) {
+        let _ = std::fs::remove_file(&tmp_file);
+        return Err(e);
+    }
+
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +267,47 @@ mod tests {
         // Missing root is ignored gracefully by register()
         let missing = temp.path().join("does-not-exist");
         register(&missing);
+    }
+
+    #[test]
+    fn prune_missing_rewrites_registry_and_returns_removed_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        let existing = temp.path().join("existing");
+        let missing = temp.path().join("missing");
+        std::fs::create_dir(&existing).unwrap();
+
+        let repos_file = state.join("repos");
+        let content = format!(
+            "{}\n{}\n{}\n\n",
+            existing.display(),
+            missing.display(),
+            existing.display(),
+        );
+        std::fs::write(&repos_file, content).unwrap();
+
+        let removed = prune_missing_in(Some(state.clone())).unwrap();
+        assert_eq!(removed, vec![missing]);
+
+        let rewritten = std::fs::read_to_string(&repos_file).unwrap();
+        assert_eq!(rewritten, format!("{}\n", existing.display()));
+    }
+
+    #[test]
+    fn prune_missing_on_missing_registry_returns_empty_and_creates_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_state = temp.path().join("no-state");
+
+        let removed = prune_missing_in(Some(missing_state.clone())).unwrap();
+        assert!(removed.is_empty());
+        assert!(!missing_state.exists());
+
+        let empty_state = temp.path().join("empty-state");
+        std::fs::create_dir_all(&empty_state).unwrap();
+        let removed2 = prune_missing_in(Some(empty_state.clone())).unwrap();
+        assert!(removed2.is_empty());
+        assert!(!empty_state.join("repos").exists());
     }
 }
