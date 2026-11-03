@@ -1,3 +1,9 @@
+## v0.37.7 (2026-11-03)
+
+### Fix
+
+- **clean**: remove finished research runs and forget missing repositories (#321)
+
 ## v0.37.6 (2026-11-03)
 
 ### Fix
