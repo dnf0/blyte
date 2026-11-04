@@ -339,9 +339,18 @@ fn test_clean_linked_worktree_reports_nothing_about_other_worktrees() {
     let sha = git(&side_path, &["rev-parse", "HEAD"]);
     git(&root, &["cherry-pick", &sha]);
 
-    // Clean from linked worktree root
+    // Clean the linked worktree root (registered in state dir before WT1)
+    let state_dir = tempfile::tempdir().unwrap();
+    let linked_canon = linked_path.canonicalize().unwrap();
+    std::fs::write(
+        state_dir.path().join("repos"),
+        format!("{}\n", linked_canon.display()),
+    )
+    .unwrap();
+
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
+        .args(["clean", "--all"])
+        .env("BLYTE_STATE_DIR", state_dir.path())
         .current_dir(&linked_path)
         .output()
         .unwrap();
@@ -359,7 +368,8 @@ fn test_clean_linked_worktree_reports_nothing_about_other_worktrees() {
 
     // Also verify with --dry-run
     let out_dry = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--dry-run"])
+        .args(["clean", "--all", "--dry-run"])
+        .env("BLYTE_STATE_DIR", state_dir.path())
         .current_dir(&linked_path)
         .output()
         .unwrap();

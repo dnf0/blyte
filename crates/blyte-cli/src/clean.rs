@@ -149,7 +149,7 @@ pub fn is_pid_alive(pid: i64) -> bool {
     }
 }
 
-/// Finds the root repository (resolving the owning repository if inside a `.wt` run).
+/// Finds the root repository (resolving the main checkout if inside a linked worktree).
 pub fn find_repo_root() -> Result<PathBuf, String> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -159,21 +159,16 @@ pub fn find_repo_root() -> Result<PathBuf, String> {
         return Err("not a git repository".to_string());
     }
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if has_wt_component(&root) {
-        if let Some(wt_parent) = root.parent().and_then(|p| p.parent()) {
-            if root
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|n| n == ".wt")
-            {
-                return Ok(wt_parent.to_path_buf());
-            }
-        }
-        if let Some(main) = crate::config::main_checkout(&root) {
-            return Ok(main);
-        }
+    if root.join(".git").is_file() {
+        crate::config::main_checkout(&root).ok_or_else(|| {
+            format!(
+                "cannot find main checkout for linked worktree {}",
+                root.display()
+            )
+        })
+    } else {
+        Ok(root)
     }
-    Ok(root)
 }
 
 /// Checks whether a run is a research run from its start file.
