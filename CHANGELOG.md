@@ -1,3 +1,9 @@
+## v0.38.1 (2026-11-04)
+
+### Fix
+
+- one home for worktrees, and clean removes merged session worktrees (#326)
+
 ## v0.38.0 (2026-11-04)
 
 ### Feat
