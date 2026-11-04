@@ -1648,14 +1648,17 @@ pub fn list_running_process_cwds() -> Result<Vec<PathBuf>, String> {
         .args(["-a", "-d", "cwd", "-Fn"])
         .output()
         .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let paths = parse_lsof_cwd_output(&stdout);
-    if !out.status.success() && paths.is_empty() {
+    // A failed lsof may have listed only some processes, so its output is not trusted.
+    if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         if stderr.is_empty() {
             return Err(format!("lsof exited with {}", out.status));
         }
-        return Err(stderr);
+        return Err(format!("lsof exited with {}: {stderr}", out.status));
+    }
+    let paths = parse_lsof_cwd_output(&String::from_utf8_lossy(&out.stdout));
+    if paths.is_empty() {
+        return Err("lsof listed no working directories".to_string());
     }
     Ok(paths)
 }
@@ -1727,43 +1730,42 @@ pub fn is_worktree_in_use(wt_path: &Path, cwds: &[PathBuf]) -> bool {
     })
 }
 
-/// Returns true if `index` and `HEAD` in the worktree's git admin directory
+/// Returns whether `index` and `HEAD` in the worktree's git admin directory
 /// (`git -C <wt> rev-parse --absolute-git-dir`) are both more than `idle_days` days old.
-pub fn is_worktree_idle(wt_path: &Path, idle_days: u64) -> bool {
-    let out = std::process::Command::new("git")
+/// Errors name what could not be read.
+pub fn is_worktree_idle(wt_path: &Path, idle_days: u64) -> Result<bool, String> {
+    let o = std::process::Command::new("git")
         .arg("-C")
         .arg(wt_path.as_os_str())
         .args(["rev-parse", "--absolute-git-dir"])
-        .output();
-    let Ok(o) = out else {
-        return false;
-    };
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
     if !o.status.success() {
-        return false;
+        return Err(format!(
+            "git rev-parse --absolute-git-dir failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ));
     }
     let git_dir_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
     if git_dir_str.is_empty() {
-        return false;
+        return Err("git rev-parse --absolute-git-dir printed nothing".to_string());
     }
     let git_dir = PathBuf::from(git_dir_str);
     let now = std::time::SystemTime::now();
     let threshold = std::time::Duration::from_secs(idle_days.saturating_mul(86400));
     for name in ["index", "HEAD"] {
         let p = git_dir.join(name);
-        let Ok(meta) = std::fs::metadata(&p) else {
-            return false;
-        };
-        let Ok(mtime) = meta.modified() else {
-            return false;
-        };
+        let mtime = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .map_err(|e| format!("cannot read the time of {}: {e}", p.display()))?;
         let age = now
             .duration_since(mtime)
             .unwrap_or(std::time::Duration::ZERO);
         if idle_days > 0 && age <= threshold {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// Evaluates whether a session worktree is removable.
@@ -1804,8 +1806,14 @@ pub fn check_session_worktree_removable(
         }
     }
 
-    if !is_worktree_idle(&wt.path, idle_days) {
-        return Err(KeptReason::UsedRecently(idle_days));
+    match is_worktree_idle(&wt.path, idle_days) {
+        Ok(true) => {}
+        Ok(false) => return Err(KeptReason::UsedRecently(idle_days)),
+        Err(e) => {
+            return Err(KeptReason::Custom(format!(
+                "cannot tell when it was last used: {e}"
+            )))
+        }
     }
 
     let branch_label = wt.branch.clone().unwrap_or_else(|| {
@@ -2074,13 +2082,27 @@ pub fn clean_repo_with_options(
                                                 .args(["branch", "-D", branch_name])
                                                 .current_dir(root)
                                                 .output();
-                                            if del_out.map(|o| o.status.success()).unwrap_or(false)
-                                            {
-                                                ctx.wip_branch_tips.remove(branch_name);
-                                                if !quiet {
-                                                    println!(
-                                                        "deleted branch {branch_name} (merged)"
+                                            match del_out {
+                                                Ok(o) if o.status.success() => {
+                                                    ctx.wip_branch_tips.remove(branch_name);
+                                                    if !quiet {
+                                                        println!(
+                                                            "deleted branch {branch_name} (merged)"
+                                                        );
+                                                    }
+                                                }
+                                                Ok(o) => {
+                                                    eprintln!(
+                                                        "error: could not delete branch {branch_name}: {}",
+                                                        String::from_utf8_lossy(&o.stderr).trim()
                                                     );
+                                                    had_errors = true;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "error: could not delete branch {branch_name}: {e}"
+                                                    );
+                                                    had_errors = true;
                                                 }
                                             }
                                         }

@@ -689,3 +689,10 @@ fn test_parse_lsof_cwd_output_and_is_session_worktree() {
         ".claude/worktrees/<name> is a session worktree"
     );
 }
+
+#[test]
+fn idle_check_errors_instead_of_guessing_when_git_dir_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = blyte_cli::clean::is_worktree_idle(dir.path(), 7).unwrap_err();
+    assert!(err.contains("absolute-git-dir"), "got: {err}");
+}
