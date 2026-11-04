@@ -184,18 +184,22 @@ Removable:
 - `merged`: work is on the default branch (or `origin/<default>`).
 - `merged into <base>`: work is on the branch the run was dispatched from.
 - `merged through <child>`: work is merged through a follow-up run.
+- `<branch> merged`: a session worktree under `.wt/<name>` or `.claude/worktrees/<name>` whose branch is merged, clean, holds no runs, is not in use, and has been idle for more than 7 days.
 - `verdict redone`: the run was discarded with a `redone` verdict.
 - `no changes`: the run completed with outcome `no_changes`.
 - `research report`: a research run whose report was copied to `.wt/<id>.report.md`.
 - `finished over N days ago`: the run finished more than the allowed age in days (default 14).
 
 Kept:
-- `not merged yet`: has an `accepted` or `fixed` verdict, but its work is not yet merged.
-- `uncommitted changes`: the worktree has uncommitted modifications.
+- `not merged yet`: has an `accepted` or `fixed` verdict, or is a session worktree whose branch is not yet merged.
+- `uncommitted changes`: the worktree has uncommitted modifications or untracked files.
 - `running`: the run's process is still alive.
 - `no report`: a research run with no report file yet.
+- `in use by a running process`: a running process has its working directory inside the session worktree.
+- `used in the last 7 days`: the session worktree's git `index` or `HEAD` was modified within the last 7 days.
+- `holds runs: review them from <path>`: the session worktree contains dispatched runs under `<worktree>/.wt/*.start.json`.
 
-Other worktrees whose branch is merged and working directory is clean are reported with their `git worktree remove` commands, but never deleted automatically.
+Worktrees outside the repository whose branch is merged and working directory is clean are reported with their `git worktree remove` commands, but never deleted automatically.
 
 ## blyte skill install
 

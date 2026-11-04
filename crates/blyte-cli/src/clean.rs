@@ -8,6 +8,7 @@ pub enum RemovalReason {
     Merged,
     MergedInto(String),
     MergedThrough(String),
+    SessionMerged(String),
     Verdict(String),
     NoChanges,
     ResearchReport,
@@ -23,6 +24,7 @@ impl std::fmt::Display for RemovalReason {
             Self::Merged => write!(f, "merged"),
             Self::MergedInto(base) => write!(f, "merged into {base}"),
             Self::MergedThrough(child) => write!(f, "merged through {child}"),
+            Self::SessionMerged(branch) => write!(f, "{branch} merged"),
             Self::Verdict(v) => {
                 if v.is_empty() {
                     write!(f, "verdict")
@@ -57,6 +59,10 @@ pub enum KeptReason {
     NotMergedYet,
     NoReport,
     UnreadableSummary,
+    InUse,
+    CannotCheckInUse(String),
+    UsedRecently(u64),
+    HoldsRuns(String),
     Custom(String),
 }
 
@@ -69,6 +75,12 @@ impl std::fmt::Display for KeptReason {
             Self::NotMergedYet => write!(f, "not merged yet"),
             Self::NoReport => write!(f, "no report"),
             Self::UnreadableSummary => write!(f, "unreadable summary"),
+            Self::InUse => write!(f, "in use by a running process"),
+            Self::CannotCheckInUse(err) => {
+                write!(f, "cannot tell whether it is in use: {err}")
+            }
+            Self::UsedRecently(d) => write!(f, "used in the last {d} days"),
+            Self::HoldsRuns(path) => write!(f, "holds runs: review them from {path}"),
             Self::Custom(s) => write!(f, "{s}"),
         }
     }
@@ -1610,9 +1622,223 @@ pub fn find_blyte_worktrees(root: &Path) -> Vec<String> {
     ids
 }
 
+#[derive(Debug, Default)]
 pub struct CleanRepoStats {
     pub removed_worktrees: usize,
     pub freed_bytes: u64,
+    pub had_errors: bool,
+}
+
+/// Default idle threshold in days for session worktrees.
+pub const DEFAULT_SESSION_IDLE_DAYS: u64 = 7;
+
+/// Parses `lsof -a -d cwd -Fn` output into a list of working directory paths.
+pub fn parse_lsof_cwd_output(stdout: &str) -> Vec<PathBuf> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Lists the current working directories of all running processes via `lsof -a -d cwd -Fn`.
+pub fn list_running_process_cwds() -> Result<Vec<PathBuf>, String> {
+    let out = std::process::Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fn"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let paths = parse_lsof_cwd_output(&stdout);
+    if !out.status.success() && paths.is_empty() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(format!("lsof exited with {}", out.status));
+        }
+        return Err(stderr);
+    }
+    Ok(paths)
+}
+
+/// Returns true if `wt_path` is a session worktree of `root`:
+/// - directly under `<root>/.wt/` with no `<root>/.wt/<name>.start.json`, or
+/// - under `<root>/.claude/worktrees/` (excluding any nested `.wt` run worktrees).
+pub fn is_session_worktree(root: &Path, wt_path: &Path) -> bool {
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let wt_canon = wt_path
+        .canonicalize()
+        .unwrap_or_else(|_| wt_path.to_path_buf());
+    let Some(wt_parent) = wt_canon.parent() else {
+        return false;
+    };
+    let Some(wt_name) = wt_canon.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    let wt_dir_canon = root_canon
+        .join(".wt")
+        .canonicalize()
+        .unwrap_or_else(|_| root_canon.join(".wt"));
+    if wt_parent == wt_dir_canon {
+        let start_file = wt_dir_canon.join(format!("{wt_name}.start.json"));
+        return !start_file.is_file();
+    }
+
+    let claude_wt_dir_canon = root_canon
+        .join(".claude")
+        .join("worktrees")
+        .canonicalize()
+        .unwrap_or_else(|_| root_canon.join(".claude").join("worktrees"));
+    if let Ok(rel) = wt_canon.strip_prefix(&claude_wt_dir_canon) {
+        if !rel.as_os_str().is_empty() && !has_wt_component(rel) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns true if `<wt_path>/.wt/` contains any `*.start.json` file.
+pub fn has_dispatched_runs(wt_path: &Path) -> bool {
+    let wt_dir = wt_path.join(".wt");
+    let Ok(entries) = std::fs::read_dir(&wt_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(".start.json")
+            && entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true if any process working directory in `cwds` is `wt_path` or a subdirectory of it.
+/// Compares canonical paths.
+pub fn is_worktree_in_use(wt_path: &Path, cwds: &[PathBuf]) -> bool {
+    let wt_canon = wt_path
+        .canonicalize()
+        .unwrap_or_else(|_| wt_path.to_path_buf());
+    cwds.iter().any(|cwd| {
+        let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+        cwd_canon.starts_with(&wt_canon)
+    })
+}
+
+/// Returns true if `index` and `HEAD` in the worktree's git admin directory
+/// (`git -C <wt> rev-parse --absolute-git-dir`) are both more than `idle_days` days old.
+pub fn is_worktree_idle(wt_path: &Path, idle_days: u64) -> bool {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(wt_path.as_os_str())
+        .args(["rev-parse", "--absolute-git-dir"])
+        .output();
+    let Ok(o) = out else {
+        return false;
+    };
+    if !o.status.success() {
+        return false;
+    }
+    let git_dir_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if git_dir_str.is_empty() {
+        return false;
+    }
+    let git_dir = PathBuf::from(git_dir_str);
+    let now = std::time::SystemTime::now();
+    let threshold = std::time::Duration::from_secs(idle_days.saturating_mul(86400));
+    for name in ["index", "HEAD"] {
+        let p = git_dir.join(name);
+        let Ok(meta) = std::fs::metadata(&p) else {
+            return false;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return false;
+        };
+        let age = now
+            .duration_since(mtime)
+            .unwrap_or(std::time::Duration::ZERO);
+        if idle_days > 0 && age <= threshold {
+            return false;
+        }
+    }
+    true
+}
+
+/// Evaluates whether a session worktree is removable.
+pub fn check_session_worktree_removable(
+    root: &Path,
+    wt: &GitWorktreeInfo,
+    cwds: &Result<Vec<PathBuf>, String>,
+    idle_days: u64,
+) -> Result<RemovalReason, KeptReason> {
+    let is_merged = if let Some(ref branch) = wt.branch {
+        is_branch_merged(root, branch)
+    } else if let Some(ref sha) = wt.head_sha {
+        is_commit_merged(root, sha)
+    } else {
+        false
+    };
+    if !is_merged {
+        return Err(KeptReason::NotMergedYet);
+    }
+
+    if has_dispatched_runs(&wt.path) {
+        let display_path = display_worktree_path(&wt.path, root);
+        return Err(KeptReason::HoldsRuns(display_path));
+    }
+
+    if !is_worktree_clean(&wt.path) {
+        return Err(KeptReason::UncommittedChanges);
+    }
+
+    match cwds {
+        Ok(list) => {
+            if is_worktree_in_use(&wt.path, list) {
+                return Err(KeptReason::InUse);
+            }
+        }
+        Err(err) => {
+            return Err(KeptReason::CannotCheckInUse(err.clone()));
+        }
+    }
+
+    if !is_worktree_idle(&wt.path, idle_days) {
+        return Err(KeptReason::UsedRecently(idle_days));
+    }
+
+    let branch_label = wt.branch.clone().unwrap_or_else(|| {
+        wt.head_sha
+            .as_deref()
+            .map(|s| s[..s.len().min(7)].to_string())
+            .unwrap_or_else(|| "detached".to_string())
+    });
+    Ok(RemovalReason::SessionMerged(branch_label))
+}
+
+fn branch_checked_out_elsewhere(
+    worktrees: &[GitWorktreeInfo],
+    removed_wt_paths: &HashSet<PathBuf>,
+    current_wt_canon: &Path,
+    branch_name: &str,
+) -> bool {
+    for wt in worktrees {
+        if !wt.path.exists() {
+            continue;
+        }
+        let wt_canon = wt
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| wt.path.to_path_buf());
+        if wt_canon == current_wt_canon || removed_wt_paths.contains(&wt_canon) {
+            continue;
+        }
+        if wt.branch.as_deref() == Some(branch_name) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Cleans one repository.
@@ -1623,8 +1849,30 @@ pub fn clean_repo(
     skip_id: Option<&str>,
     quiet: bool,
 ) -> CleanRepoStats {
+    clean_repo_with_options(
+        root,
+        older_than_days,
+        dry_run,
+        skip_id,
+        quiet,
+        DEFAULT_SESSION_IDLE_DAYS,
+        None,
+    )
+}
+
+/// Cleans one repository with configurable session worktree idle threshold and process cwd list.
+pub fn clean_repo_with_options(
+    root: &Path,
+    older_than_days: u64,
+    dry_run: bool,
+    skip_id: Option<&str>,
+    quiet: bool,
+    session_idle_days: u64,
+    process_cwds: Option<Result<Vec<PathBuf>, String>>,
+) -> CleanRepoStats {
     let mut removed_worktrees = 0;
     let mut freed_bytes = 0;
+    let mut had_errors = false;
 
     let mut ctx = CleanContext::new(root);
     let ids = find_blyte_worktrees(root);
@@ -1729,6 +1977,142 @@ pub fn clean_repo(
         }
     }
 
+    if !is_linked_worktree(root) {
+        let all_worktrees = parse_worktree_list(root);
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let main_canon = all_worktrees
+            .first()
+            .map(|wt| wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone()));
+
+        let mut session_indices: Vec<(String, usize)> = all_worktrees
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(idx, wt)| {
+                if wt.is_bare || !wt.path.exists() {
+                    return None;
+                }
+                let wt_canon = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+                if wt_canon == root_canon || Some(&wt_canon) == main_canon.as_ref() {
+                    return None;
+                }
+                if !is_session_worktree(root, &wt.path) {
+                    return None;
+                }
+                Some((display_worktree_path(&wt.path, root), idx))
+            })
+            .collect();
+        session_indices.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if !session_indices.is_empty() {
+            let cwds = process_cwds.unwrap_or_else(list_running_process_cwds);
+            let mut removed_wt_paths = HashSet::new();
+
+            for (display_path, idx) in session_indices {
+                let wt = &all_worktrees[idx];
+                let wt_canon = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+                match check_session_worktree_removable(root, wt, &cwds, session_idle_days) {
+                    Err(kept_reason) => {
+                        if !quiet {
+                            println!("kept {display_path} ({kept_reason})");
+                        }
+                    }
+                    Ok(removal_reason) => {
+                        let size = dir_size(&wt.path);
+                        if dry_run {
+                            removed_wt_paths.insert(wt_canon.clone());
+                            if !quiet {
+                                println!(
+                                    "would remove {display_path} ({removal_reason}, {})",
+                                    format_size(size)
+                                );
+                                if let Some(ref branch_name) = wt.branch {
+                                    if !branch_checked_out_elsewhere(
+                                        &all_worktrees,
+                                        &removed_wt_paths,
+                                        &wt_canon,
+                                        branch_name,
+                                    ) && get_branch_tip(root, branch_name).is_some()
+                                    {
+                                        println!("would delete branch {branch_name} (merged)");
+                                    }
+                                }
+                            }
+                            freed_bytes += size;
+                            removed_worktrees += 1;
+                        } else {
+                            let rm_out = std::process::Command::new("git")
+                                .arg("worktree")
+                                .arg("remove")
+                                .arg(&wt.path)
+                                .current_dir(root)
+                                .output();
+                            match rm_out {
+                                Ok(o) if o.status.success() => {
+                                    let _ = std::process::Command::new("git")
+                                        .args(["worktree", "prune"])
+                                        .current_dir(root)
+                                        .output();
+                                    removed_wt_paths.insert(wt_canon.clone());
+                                    freed_bytes += size;
+                                    removed_worktrees += 1;
+                                    if !quiet {
+                                        println!(
+                                            "removed {display_path} ({removal_reason}, {})",
+                                            format_size(size)
+                                        );
+                                    }
+                                    if let Some(ref branch_name) = wt.branch {
+                                        if !branch_checked_out_elsewhere(
+                                            &all_worktrees,
+                                            &removed_wt_paths,
+                                            &wt_canon,
+                                            branch_name,
+                                        ) && get_branch_tip(root, branch_name).is_some()
+                                        {
+                                            let del_out = std::process::Command::new("git")
+                                                .args(["branch", "-D", branch_name])
+                                                .current_dir(root)
+                                                .output();
+                                            if del_out.map(|o| o.status.success()).unwrap_or(false)
+                                            {
+                                                ctx.wip_branch_tips.remove(branch_name);
+                                                if !quiet {
+                                                    println!(
+                                                        "deleted branch {branch_name} (merged)"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(o) => {
+                                    let stderr =
+                                        String::from_utf8_lossy(&o.stderr).trim().to_string();
+                                    let stdout =
+                                        String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                    let msg = if !stderr.is_empty() {
+                                        stderr
+                                    } else if !stdout.is_empty() {
+                                        stdout
+                                    } else {
+                                        format!("exit status {}", o.status)
+                                    };
+                                    eprintln!("error: could not remove {display_path}: {msg}");
+                                    had_errors = true;
+                                }
+                                Err(e) => {
+                                    eprintln!("error: could not remove {display_path}: {e}");
+                                    had_errors = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if !quiet {
         report_other_worktrees(root);
     }
@@ -1736,6 +2120,7 @@ pub fn clean_repo(
     CleanRepoStats {
         removed_worktrees,
         freed_bytes,
+        had_errors,
     }
 }
 
@@ -1906,6 +2291,7 @@ pub fn has_wt_component(path: &Path) -> bool {
 /// `git status --porcelain` lists nothing other than `.DS_Store` files, at any depth.
 pub fn is_worktree_clean(wt_path: &Path) -> bool {
     let out = std::process::Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(wt_path.as_os_str())
         .args(["status", "--porcelain", "-u"])
@@ -1978,8 +2364,11 @@ pub fn report_other_worktrees(root: &Path) {
         if Some(&wt_canon) == main_canon.as_ref() {
             continue;
         }
-        // Never list blyte runs: exclude any worktree whose path has a .wt directory component anywhere
-        if has_wt_component(&wt.path) || has_wt_component(&wt_canon) {
+        // Never list blyte runs or session worktrees handled by clean_repo
+        if has_wt_component(&wt.path)
+            || has_wt_component(&wt_canon)
+            || is_session_worktree(root, &wt.path)
+        {
             continue;
         }
 
@@ -2174,6 +2563,7 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
     };
 
     let mut total_freed = 0;
+    let mut had_errors = false;
     for repo in &repos {
         let stats = clean_repo(
             repo,
@@ -2183,6 +2573,9 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
             args.quiet,
         );
         total_freed += stats.freed_bytes;
+        if stats.had_errors {
+            had_errors = true;
+        }
     }
 
     if !args.quiet {
@@ -2193,7 +2586,11 @@ pub fn run(args: &crate::cli::CleanArgs) -> i32 {
         }
     }
 
-    0
+    if had_errors {
+        1
+    } else {
+        0
+    }
 }
 
 fn delete_wip_branch_strict(root: &Path, branch_name: &str) -> Result<(), String> {
@@ -2227,7 +2624,8 @@ pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, Stri
                 | RemovalReason::NoChanges),
             ) => r,
             Ok(
-                RemovalReason::Verdict(_)
+                RemovalReason::SessionMerged(_)
+                | RemovalReason::Verdict(_)
                 | RemovalReason::OlderThan(_)
                 | RemovalReason::ResearchReport
                 | RemovalReason::ResearchReportInWorktree
