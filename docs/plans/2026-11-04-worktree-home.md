@@ -63,8 +63,13 @@ Files:
    - the branch is merged (`is_branch_merged`, or `is_commit_merged` for a detached HEAD);
    - `is_worktree_clean`;
    - no `<worktree>/.wt/*.start.json`;
-   - `index` and `HEAD` in the worktree's git admin folder (`git -C <wt> rev-parse
-     --absolute-git-dir`) are both more than 24 hours old.
+   - not in use: no running process has its working directory inside it. Get the working
+     directories once per `clean` run with `lsof -a -d cwd -Fn` (lines starting with `n`), and
+     compare canonical paths: a process in the worktree or any folder below it counts. If `lsof`
+     fails or is missing, keep every such worktree with the reason `cannot tell whether it is in
+     use: <error>`. Put the lookup behind a small function so tests can pass in a list.
+   - idle for 7 days: `index` and `HEAD` in the worktree's git admin folder (`git -C <wt>
+     rev-parse --absolute-git-dir`) are both more than 7 days old.
 
    Remove it with `git worktree remove <path>` (never `--force`). Then delete its local branch the
    way `clean` deletes a merged `wip/` branch, but only if no other worktree has it checked out.
@@ -72,8 +77,8 @@ Files:
 3. Add `RemovalReason`/`KeptReason` variants in the existing style. Output, alongside the run
    lines:
    - `removed .wt/plan-AC (fix/x merged, 2.3 GB)`, `deleted branch fix/x (merged)`;
-   - `kept .wt/plan-RB (not merged yet)`, `kept … (uncommitted changes)`, `kept … (used in the
-     last 24 hours)`;
+   - `kept .wt/plan-RB (not merged yet)`, `kept … (uncommitted changes)`, `kept … (in use by a running process)`,
+     `kept … (used in the last 7 days)`;
    - `kept … (holds runs: review them from <path>)`.
 
    Count freed bytes in the existing total.
@@ -83,7 +88,7 @@ Files:
    with the other worktrees, and make `clean` exit non-zero at the end. This is not a silent skip.
 6. Tests, in temp git repos with linked worktrees, cover each removal condition and each kept
    reason; `--dry-run`; a squash-merged branch; and a `.claude/worktrees/x` worktree. For the
-   24-hour rule, set the admin files' mtimes with `filetime` if it is already a dependency.
+   7-day rule, set the admin files' mtimes with `filetime` if it is already a dependency.
    Otherwise put the threshold behind a parameter that the tests set to zero, and add no new
    dependency.
 

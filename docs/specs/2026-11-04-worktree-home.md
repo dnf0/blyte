@@ -68,9 +68,12 @@ It removes one only when all of these hold:
   is applied to its commit.
 - it is clean (`is_worktree_clean`): no uncommitted or untracked files.
 - it holds no runs: no `<worktree>/.wt/*.start.json`.
-- it hasn't been touched for 24 hours: `index` and `HEAD` in its git admin folder
-  (`.git/worktrees/<name>/`) are both more than 24 hours old. This keeps a live session's
-  worktree.
+- it is not in use: no running process has its working directory inside it (`lsof -a -d cwd -Fn`,
+  comparing canonical paths). If `lsof` can't be run, `clean` keeps the worktree and says so; it
+  never assumes "not in use".
+- it has been idle for 7 days: `index` and `HEAD` in its git admin folder
+  (`.git/worktrees/<name>/`) are both more than 7 days old. This covers a closed session that may be
+  resumed. The user chose 7 days over 24 hours on 2026-11-04.
 
 Removal uses `git worktree remove` (never `--force`), then deletes the local branch the way
 `clean` deletes a merged `wip/` branch. `--dry-run` lists what would go. Output follows the run
