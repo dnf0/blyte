@@ -12,6 +12,12 @@ the work yourself and delegate the implementation to blyte with the `blyte-imple
 Split the work into independent tasks and dispatch them in parallel (`blyte dispatch`, one
 worktree each); run tasks one after another only when one depends on another. Keep for
 yourself: design decisions, ambiguous requirements, one-line edits, and anything with no check.
+
+Worktrees of your own (not blyte runs) go inside the repository at `.wt/plan-<topic>`,
+branched from the default branch: `git worktree add .wt/plan-<topic> -b <branch> origin/<default>`.
+Never next to the repository or in a temp or scratchpad folder. Remove it after its PR merges
+if you are still running; otherwise `blyte clean` removes it once the branch is merged and it
+has no changes.
 <!-- /blyte:default -->";
 
 pub const CONTEXT_BLOCK: &str = "\

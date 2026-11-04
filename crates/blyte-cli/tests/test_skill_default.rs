@@ -139,3 +139,50 @@ fn install_with_no_default_removes_an_earlier_default_block() {
         .join(".claude/skills/blyte-implementer/SKILL.md")
         .exists());
 }
+
+#[test]
+fn install_force_replaces_an_existing_default_block_with_the_new_worktree_rule() {
+    for line in DEFAULT_BLOCK.lines() {
+        assert!(
+            line.chars().count() < 100,
+            "line >= 100 chars ({}): {line}",
+            line.chars().count()
+        );
+    }
+    assert!(
+        DEFAULT_BLOCK.contains(
+            "Worktrees of your own (not blyte runs) go inside the repository at `.wt/plan-<topic>`"
+        ),
+        "{DEFAULT_BLOCK}"
+    );
+    assert!(
+        DEFAULT_BLOCK.contains("git worktree add .wt/plan-<topic> -b <branch> origin/<default>"),
+        "{DEFAULT_BLOCK}"
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let md = home.path().join(".claude/CLAUDE.md");
+    let skill = home
+        .path()
+        .join(".claude/skills/blyte-implementer/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, "older skill\n").unwrap();
+    std::fs::write(
+        &md,
+        "# My rules\n\n<!-- blyte:default -->\n## Implementation: delegate to blyte, in parallel\n\nold paragraph only\n<!-- /blyte:default -->\n\n## After\n",
+    )
+    .unwrap();
+
+    let out = blyte(cwd.path(), home.path(), &["skill", "install", "--force"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(&md).unwrap();
+    assert!(text.contains(DEFAULT_BLOCK), "{text}");
+    assert!(!text.contains("old paragraph only"), "{text}");
+    assert!(text.contains("## After"), "{text}");
+}
