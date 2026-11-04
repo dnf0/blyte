@@ -161,10 +161,17 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         eprintln!("error: not a git repository");
         return 2;
     }
-    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    let start_dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    let root = match crate::clean::find_repo_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
     crate::registry::register(&root);
 
-    let (repo_config, from_main) = match crate::config::load_with_fallback(&root) {
+    let (repo_config, from_main) = match crate::config::load_with_fallback(&start_dir) {
         Ok(Some((cfg, from_main))) => (Some(cfg), from_main),
         Ok(None) => (None, false),
         Err(e) => {
@@ -181,11 +188,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         (g.clone(), "flag")
     } else if let Some(ref g) = dispatch_cfg.gate {
         let toml_path = if from_main {
-            crate::config::main_checkout(&root)
-                .map(|m| m.join("blyte.toml"))
-                .unwrap_or_else(|| root.join("blyte.toml"))
-        } else {
             root.join("blyte.toml")
+        } else {
+            start_dir.join("blyte.toml")
         };
         let toml_content = std::fs::read_to_string(&toml_path).unwrap_or_default();
         left_out = crate::gate_drift::left_out_steps(&toml_content);
@@ -287,7 +292,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
+    let main_checkout = root.clone();
     let config_allow_read = match crate::config::expand_allow_read(
         &dispatch_cfg.allow_read,
         home.as_deref(),
@@ -301,7 +306,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     if !args.no_path_check {
-        let mut readable = vec![root.clone(), main_checkout.clone()];
+        let mut readable = vec![start_dir.clone(), root.clone()];
         readable.extend(config_allow_read.iter().cloned());
         readable.extend(args.allow_read.iter().cloned());
         let bad = unreadable_paths(&task_content, &readable);
@@ -541,7 +546,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 "--verify",
                 &format!("{}^{{commit}}", args.base),
             ])
-            .current_dir(&root)
+            .current_dir(&start_dir)
             .output();
         let base_commit = match base_commit {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -557,7 +562,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 "-b",
                 &branch,
                 worktree_dir.to_str().unwrap(),
-                &args.base,
+                &base_commit,
             ])
             .current_dir(&root)
             .output();
@@ -583,7 +588,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 "--verify",
                 &format!("{}^{{commit}}", args.base),
             ])
-            .current_dir(&root)
+            .current_dir(&start_dir)
             .output()
         {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -1113,18 +1118,13 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
 }
 
 pub fn run_review(args: &ReviewArgs) -> i32 {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output();
-    let Ok(out) = out else {
-        eprintln!("error: git not found");
-        return 2;
+    let root = match crate::clean::find_repo_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
     };
-    if !out.status.success() {
-        eprintln!("error: not a git repository");
-        return 2;
-    }
-    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
 
     if args.notes.is_some() && args.verdict.is_none() {
         eprintln!("error: --notes requires --verdict");
@@ -1861,18 +1861,13 @@ pub struct StatusOutput {
 }
 
 pub fn run_status(id: &str, json: bool) -> i32 {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output();
-    let Ok(out) = out else {
-        eprintln!("error: git not found");
-        return 2;
+    let root = match crate::clean::find_repo_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
     };
-    if !out.status.success() {
-        eprintln!("error: not a git repository");
-        return 2;
-    }
-    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
 
     let start_path = root.join(".wt").join(format!("{id}.start.json"));
     if !start_path.exists() {
