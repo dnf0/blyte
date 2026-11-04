@@ -434,21 +434,13 @@ fn compute_plan_rel(root: &Path, plan: &Path, full_plan_path: &Path) -> String {
 pub fn run(plan: &Path, json: bool) -> i32 {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&current_dir)
-        .output();
-    let Ok(out) = out else {
-        eprintln!("error: git not found");
-        return 2;
+    let root = match crate::clean::find_repo_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
     };
-    if !out.status.success() {
-        eprintln!("error: not in a git repository");
-        return 2;
-    }
-
-    let toplevel = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    let root = crate::config::main_checkout(&current_dir).unwrap_or(toplevel);
 
     let full_plan_path = if plan.is_absolute() {
         plan.to_path_buf()

@@ -4,18 +4,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub fn run(ids: &[String], any: bool, timeout_secs: u64) -> i32 {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output();
-    let Ok(out) = out else {
-        eprintln!("error: git not found");
-        return 2;
+    let root = match crate::clean::find_repo_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
     };
-    if !out.status.success() {
-        eprintln!("error: not a git repository");
-        return 2;
-    }
-    let root = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
     wait_in(
         &root.join(".wt"),
         ids,
