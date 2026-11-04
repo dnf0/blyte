@@ -406,3 +406,46 @@ fn review_status_and_wait_from_linked_worktree_find_run_under_main_wt() {
     let wait_stdout = String::from_utf8_lossy(&wait_out.stdout);
     assert_eq!(wait_stdout.trim(), "R1 verified 3 $0.05");
 }
+
+#[test]
+fn find_repo_root_treats_a_submodule_as_its_own_main_checkout() {
+    let _guard = cwd_lock().lock().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let sub_src = parent.path().join("sub-src");
+    std::fs::create_dir_all(&sub_src).unwrap();
+    git(&sub_src, &["init", "-q", "-b", "main"]);
+    git(&sub_src, &["commit", "-q", "--allow-empty", "-m", "init"]);
+
+    let superproject = parent.path().join("super");
+    std::fs::create_dir_all(&superproject).unwrap();
+    git(&superproject, &["init", "-q", "-b", "main"]);
+    git(
+        &superproject,
+        &["commit", "-q", "--allow-empty", "-m", "init"],
+    );
+    git(
+        &superproject,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub_src.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    let sub = superproject.join("sub");
+    assert!(
+        sub.join(".git").is_file(),
+        "submodule should have a .git file"
+    );
+
+    let _d = DirGuard::chdir(&sub);
+    let root = blyte_cli::clean::find_repo_root().unwrap();
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        sub.canonicalize().unwrap(),
+        "a submodule is its own root"
+    );
+}

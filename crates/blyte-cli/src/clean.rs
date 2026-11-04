@@ -159,7 +159,31 @@ pub fn find_repo_root() -> Result<PathBuf, String> {
         return Err("not a git repository".to_string());
     }
     let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if root.join(".git").is_file() {
+    // A linked worktree has its own git dir apart from the shared one. A submodule also has a
+    // `.git` file, but its git dir is the common dir, so it is its own main checkout.
+    let dirs = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .current_dir(&root)
+        .output()
+        .map_err(|e| format!("git not found: {e}"))?;
+    if !dirs.status.success() {
+        return Err(format!(
+            "cannot read the git dirs of {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&dirs.stderr).trim()
+        ));
+    }
+    let dirs = String::from_utf8_lossy(&dirs.stdout);
+    let mut lines = dirs.lines();
+    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
+        return Err(format!("cannot read the git dirs of {}", root.display()));
+    };
+    if git_dir != common_dir {
         crate::config::main_checkout(&root).ok_or_else(|| {
             format!(
                 "cannot find main checkout for linked worktree {}",
