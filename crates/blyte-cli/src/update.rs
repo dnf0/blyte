@@ -272,20 +272,37 @@ pub fn refresh_skills(new_exe: &Path, home: &Path) -> Vec<String> {
                 args.push("--no-default");
             }
 
-            let ok = Command::new(new_exe)
-                .args(&args)
-                .env("HOME", home)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let out = Command::new(new_exe).args(&args).env("HOME", home).output();
 
-            if ok {
-                lines.push(format!("skill refreshed for {}", harness.name));
-            } else {
-                lines.push(format!(
-                    "skill not refreshed for {}: blyte skill install failed; run it by hand",
-                    harness.name
-                ));
+            match out {
+                Ok(o) if o.status.success() => {
+                    lines.push(format!("skill refreshed for {}", harness.name));
+                    for line in String::from_utf8_lossy(&o.stdout).lines() {
+                        if line.starts_with("auto-compact:") {
+                            lines.push(line.to_string());
+                        }
+                    }
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    let cause = stderr.lines().rev().map(str::trim).find(|l| !l.is_empty());
+                    match cause {
+                        Some(c) => lines.push(format!(
+                            "skill not refreshed for {}: blyte skill install failed; run it by hand ({c})",
+                            harness.name
+                        )),
+                        None => lines.push(format!(
+                            "skill not refreshed for {}: blyte skill install failed; run it by hand",
+                            harness.name
+                        )),
+                    }
+                }
+                Err(e) => {
+                    lines.push(format!(
+                        "skill not refreshed for {}: blyte skill install failed; run it by hand ({e})",
+                        harness.name
+                    ));
+                }
             }
         }
     }

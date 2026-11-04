@@ -314,6 +314,10 @@ pub enum SkillAction {
         #[arg(long)]
         no_statusline: bool,
 
+        /// Do not set Claude Code's auto-compact window
+        #[arg(long)]
+        no_autocompact: bool,
+
         /// Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all
         #[arg(
             long,

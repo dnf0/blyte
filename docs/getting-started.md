@@ -71,10 +71,15 @@ In an interactive terminal, `blyte skill install` asks for the default implement
 `BLYTE_MODEL` is not yet in `~/.config/blyte/env`; pass `--model <id>` to set `BLYTE_MODEL` without
 asking. Installing also adds a short, marked block to `CLAUDE.md` (`~/.claude/CLAUDE.md`, or the
 repository's with `--project`) that makes blyte Claude Code's default implementer, with
-independent tasks dispatched in parallel. Pass `--no-default` to skip it; `blyte skill uninstall`
-removes both. The skill always matches the installed blyte; after upgrading blyte, run
-`blyte skill install --force` to refresh it. Make sure the repository has a check command that
-proves a change is right: your tests, plus formatting and lint.
+independent tasks dispatched in parallel. Pass `--no-default` to skip it. For a global Claude Code
+install, `blyte skill install` also updates `~/.claude/settings.json` (backing up the original once
+to `settings.json.blyte-backup`) to set the status line (`--no-statusline` skips this) and to set
+`autoCompactWindow` to `200000` unless an auto-compact window is already set (`--no-autocompact`
+skips this). `blyte skill uninstall` removes the skill, the `CLAUDE.md` block, the status line, and
+`autoCompactWindow` if blyte set it and it is still `200000`. The skill always matches the
+installed blyte; after upgrading blyte, run `blyte skill install --force` to refresh it. Make sure
+the repository has a check command that proves a change is right: your tests, plus formatting and
+lint.
 
 ## 4. Delegate your first task
 

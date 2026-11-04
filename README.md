@@ -102,7 +102,11 @@ each diff with `blyte review` and merges them in order.
 - `--project` installs into the current repository instead (committed, so everyone gets it).
 - `--no-default` installs the skill without making blyte the default; then ask for it: *"use
   blyte to implement this"*.
-- `blyte skill uninstall` removes the skill and the `CLAUDE.md` block.
+- In `~/.claude/settings.json`, global install sets the status line (`--no-statusline` skips it)
+  and sets `autoCompactWindow` to `200000` unless an auto-compact window is already set
+  (`--no-autocompact` skips it).
+- `blyte skill uninstall` removes the skill, the `CLAUDE.md` block, the status line, and the
+  `200000` `autoCompactWindow` if blyte set it and it has not been changed.
 - `--harness codex` (or `all`) sets up Codex CLI the same way: skill, `AGENTS.md` block, and
   rules that let `blyte dispatch` run outside Codex's sandbox. Run end to end with Codex CLI on 2026-09-30. Any other orchestrator can do the same: `blyte dispatch` takes a task
 file and a gate and prints JSON, and `blyte skill print` prints the instructions.
