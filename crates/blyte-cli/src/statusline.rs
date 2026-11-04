@@ -1,8 +1,197 @@
 //! Claude Code status line showing session Claude cost and blyte dispatch costs.
 
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Resolved auto-compact window configuration for the status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactWindow {
+    /// An explicit token window (`100_000..=1_000_000`).
+    Window(u64),
+    /// Use the model's own context window (nothing set, or `"auto"`).
+    Tuned,
+    /// An invalid setting or unreadable/unparseable settings file, with a description.
+    Invalid(String),
+}
+
+/// Returns the settings file paths in precedence order (highest first):
+/// 1. `/Library/Application Support/ClaudeCode/managed-settings.json`
+/// 2. `<project_dir>/.claude/settings.local.json` (when `workspace.project_dir` is present)
+/// 3. `<project_dir>/.claude/settings.json` (when `workspace.project_dir` is present)
+/// 4. `<home>/.claude/settings.json` (when `home` is `Some`)
+pub fn settings_files(d: &serde_json::Value, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut files = Vec::with_capacity(4);
+    files.push(PathBuf::from(
+        "/Library/Application Support/ClaudeCode/managed-settings.json",
+    ));
+    if let Some(project_dir) = d
+        .get("workspace")
+        .and_then(|w| w.get("project_dir"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        let claude_dir = Path::new(project_dir).join(".claude");
+        files.push(claude_dir.join("settings.local.json"));
+        files.push(claude_dir.join("settings.json"));
+    }
+    if let Some(h) = home.filter(|p| !p.as_os_str().is_empty()) {
+        files.push(h.join(".claude").join("settings.json"));
+    }
+    files
+}
+
+fn normalize_model_key(mut s: &str) -> &str {
+    loop {
+        let prev = s;
+        if let Some(without_bracket) = s.strip_suffix(']') {
+            if let Some(idx) = without_bracket.rfind('[') {
+                if idx > 0 {
+                    s = &without_bracket[..idx];
+                }
+            }
+        }
+        if s.len() > 9 {
+            let (prefix, suffix) = s.split_at(s.len() - 9);
+            if let Some(date) = suffix.strip_prefix('-') {
+                if date.bytes().all(|b| b.is_ascii_digit()) {
+                    s = prefix;
+                }
+            }
+        }
+        if s == prev {
+            break;
+        }
+    }
+    s
+}
+
+fn parse_env_window(raw: &str) -> CompactWindow {
+    let parsed = if let Some(num_str) = raw.strip_suffix('k') {
+        num_str
+            .parse::<u64>()
+            .ok()
+            .and_then(|n| n.checked_mul(1_000))
+            .or_else(|| {
+                num_str
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|f| f.is_finite() && *f >= 0.0)
+                    .map(|f| (f * 1_000.0).round() as u64)
+            })
+    } else if let Some(num_str) = raw.strip_suffix('M') {
+        num_str
+            .parse::<u64>()
+            .ok()
+            .and_then(|n| n.checked_mul(1_000_000))
+            .or_else(|| {
+                num_str
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|f| f.is_finite() && *f >= 0.0)
+                    .map(|f| (f * 1_000_000.0).round() as u64)
+            })
+    } else {
+        raw.parse::<u64>().ok()
+    };
+
+    match parsed {
+        Some(n) if (100_000..=1_000_000).contains(&n) => CompactWindow::Window(n),
+        Some(n) => CompactWindow::Invalid(format!(
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW={raw} ({n}) out of range 100000..=1000000"
+        )),
+        None => CompactWindow::Invalid(format!(
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW={raw} is not a valid window"
+        )),
+    }
+}
+
+fn parse_json_window(path: &Path, key_desc: &str, v: &serde_json::Value) -> CompactWindow {
+    if v.as_str() == Some("auto") {
+        return CompactWindow::Tuned;
+    }
+    let num = v.as_u64().or_else(|| {
+        v.as_f64()
+            .filter(|f| f.is_finite() && f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64)
+            .map(|f| f as u64)
+    });
+    match num {
+        Some(n) if (100_000..=1_000_000).contains(&n) => CompactWindow::Window(n),
+        Some(n) => CompactWindow::Invalid(format!(
+            "{}: {key_desc}={n} out of range 100000..=1000000",
+            path.display()
+        )),
+        None => CompactWindow::Invalid(format!("{}: invalid {key_desc} {v}", path.display())),
+    }
+}
+
+/// Resolves the auto-compact window from `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or settings files
+/// in scope order (highest precedence first).
+pub fn resolve_compact_window<P: AsRef<Path>>(
+    model_id: Option<&str>,
+    env_val: Option<&str>,
+    settings_files: &[P],
+) -> CompactWindow {
+    if let Some(raw) = env_val.map(str::trim).filter(|s| !s.is_empty()) {
+        return parse_env_window(raw);
+    }
+
+    let norm_model = model_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_model_key);
+
+    for path_ref in settings_files {
+        let path = path_ref.as_ref();
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return CompactWindow::Invalid(format!("{}: {e}", path.display())),
+        };
+        let val: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => return CompactWindow::Invalid(format!("{}: {e}", path.display())),
+        };
+        let Some(root) = val.as_object() else {
+            return CompactWindow::Invalid(format!("{}: expected JSON object", path.display()));
+        };
+
+        if let (Some(target_key), Some(ms_obj)) = (
+            norm_model,
+            root.get("modelSettings").and_then(|v| v.as_object()),
+        ) {
+            let matched = model_id
+                .map(str::trim)
+                .and_then(|raw_id| {
+                    ms_obj
+                        .get(raw_id)
+                        .and_then(|v| v.get("autoCompactWindow"))
+                        .map(|acw| (raw_id, acw))
+                })
+                .or_else(|| {
+                    ms_obj.iter().find_map(|(k, v)| {
+                        (normalize_model_key(k) == target_key)
+                            .then(|| v.get("autoCompactWindow").map(|acw| (k.as_str(), acw)))
+                            .flatten()
+                    })
+                });
+            if let Some((k, acw)) = matched {
+                return parse_json_window(
+                    path,
+                    &format!("modelSettings.{k}.autoCompactWindow"),
+                    acw,
+                );
+            }
+        }
+
+        if let Some(acw) = root.get("autoCompactWindow") {
+            return parse_json_window(path, "autoCompactWindow", acw);
+        }
+    }
+
+    CompactWindow::Tuned
+}
 
 /// Generates the base status line from Claude Code's JSON report.
 ///
@@ -10,13 +199,17 @@ use std::time::{Duration, Instant};
 /// - `d.model.display_name`, or `"claude"` when missing.
 /// - context:
 ///   - with `p = d.context_window.used_percentage` and `size = d.context_window.context_window_size` (or `.size`):
-///     `used = p / 100 * size`, `limit = min(size, compact_window.unwrap_or(200000))`,
-///     text `context {used/1000:.0}k of {limit/1000}k`, plus ` — consider /compact or a new session` when
-///     `100 * used / limit >= 60`.
+///     `used = p / 100 * size`:
+///     - `CompactWindow::Window(w)`: `limit = min(size, w)`, text `context {used/1000:.0}k of {limit/1000}k`,
+///       plus ` — consider /compact or a new session` when `100 * used / limit >= 60`.
+///     - `CompactWindow::Tuned`: `limit = size`, text `context {used/1000:.0}k of {limit/1000}k`,
+///       plus ` — consider /compact or a new session` when `100 * used / limit >= 60`.
+///     - `CompactWindow::Invalid(msg)`: `context {used/1000:.0}k of {size/1000}k (auto-compact window unknown: {msg})`,
+///       with no suggestion.
 ///   - with `p` but no size: `context {p:.0}%`.
 ///   - without `p`: no part.
 /// - `${d.cost.total_cost_usd:.2} this session` when present.
-pub fn base_line(d: &serde_json::Value, compact_window: Option<u64>) -> String {
+pub fn base_line(d: &serde_json::Value, compact_window: CompactWindow) -> String {
     let model_name = d
         .get("model")
         .and_then(|m| {
@@ -39,13 +232,30 @@ pub fn base_line(d: &serde_json::Value, compact_window: Option<u64>) -> String {
             .filter(|&s| s > 0);
 
         if let Some(size) = size {
-            let limit = size.min(compact_window.filter(|&cw| cw > 0).unwrap_or(200_000));
             let used = (p / 100.0) * (size as f64);
-            let mut text = format!("context {:.0}k of {}k", used / 1000.0, limit / 1000);
-            if limit > 0 && (100.0 * used / (limit as f64)) >= 60.0 {
-                text.push_str(" — consider /compact or a new session");
+            match compact_window {
+                CompactWindow::Window(w) => {
+                    let limit = size.min(w);
+                    let mut text = format!("context {:.0}k of {}k", used / 1000.0, limit / 1000);
+                    if limit > 0 && (100.0 * used / (limit as f64)) >= 60.0 {
+                        text.push_str(" — consider /compact or a new session");
+                    }
+                    Some(text)
+                }
+                CompactWindow::Tuned => {
+                    let limit = size;
+                    let mut text = format!("context {:.0}k of {}k", used / 1000.0, limit / 1000);
+                    if (100.0 * used / (limit as f64)) >= 60.0 {
+                        text.push_str(" — consider /compact or a new session");
+                    }
+                    Some(text)
+                }
+                CompactWindow::Invalid(msg) => Some(format!(
+                    "context {:.0}k of {}k (auto-compact window unknown: {msg})",
+                    used / 1000.0,
+                    size / 1000
+                )),
             }
-            Some(text)
         } else {
             Some(format!("context {:.0}%", p))
         }
@@ -69,18 +279,6 @@ pub fn base_line(d: &serde_json::Value, compact_window: Option<u64>) -> String {
         parts.push(cp);
     }
     parts.join(" · ")
-}
-
-/// Retrieves `autoCompactWindow` from `~/.claude/settings.json`, if present.
-pub fn compact_window_from_settings() -> Option<u64> {
-    let home = std::env::var_os("HOME")?;
-    let path = std::path::Path::new(&home)
-        .join(".claude")
-        .join("settings.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
-    val.get("autoCompactWindow")
-        .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
 }
 
 /// Formats the blyte dispatch cost segment.
@@ -196,12 +394,22 @@ pub fn run(args: &crate::cli::StatuslineArgs) -> i32 {
     let d: serde_json::Value = serde_json::from_slice(&stdin_bytes)
         .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
 
-    let compact_window = compact_window_from_settings();
+    let resolve = || {
+        let model_id = d
+            .get("model")
+            .and_then(|m| m.get("id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
+        let env_val = std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW").ok();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let files = settings_files(&d, home.as_deref());
+        resolve_compact_window(model_id, env_val.as_deref(), &files)
+    };
 
     let base = match args.after {
         Some(ref cmd) => run_after(cmd, &stdin_bytes, Duration::from_secs(2))
-            .unwrap_or_else(|| base_line(&d, compact_window)),
-        None => base_line(&d, compact_window),
+            .unwrap_or_else(|| base_line(&d, resolve())),
+        None => base_line(&d, resolve()),
     };
 
     let session_id = d
