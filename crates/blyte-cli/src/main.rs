@@ -74,6 +74,7 @@ fn main() {
                     default: _,
                     no_default,
                     no_statusline,
+                    no_autocompact,
                     harness,
                     model,
                 } => {
@@ -91,6 +92,7 @@ fn main() {
                             force,
                             no_default,
                             no_statusline,
+                            no_autocompact,
                         ) {
                             Ok(w) => w,
                             Err(e) => {

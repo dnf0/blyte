@@ -225,6 +225,103 @@ pub fn ensure_context_block(home: &Path) -> Result<Option<PathBuf>, String> {
 }
 
 pub const STATUS_LINE_REFRESH_SECS: u64 = 30;
+pub const AUTO_COMPACT_WINDOW: u64 = 200_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoCompact {
+    Kept { key: String, value: String },
+    Set(String),
+}
+
+fn json_value_display(v: &serde_json::Value) -> String {
+    match v.as_str() {
+        Some(s) => s.to_string(),
+        None => v.to_string(),
+    }
+}
+
+pub fn set_auto_compact_window(settings: &str) -> Result<AutoCompact, String> {
+    let mut val: serde_json::Value = if settings.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(settings).map_err(|e| e.to_string())?
+    };
+
+    let Some(obj) = val.as_object_mut() else {
+        return Err("settings must be a JSON object".to_string());
+    };
+
+    if let Some(v) = obj.get("autoCompactWindow").filter(|v| !v.is_null()) {
+        return Ok(AutoCompact::Kept {
+            key: "autoCompactWindow".to_string(),
+            value: json_value_display(v),
+        });
+    }
+
+    if let Some(models) = obj.get("modelSettings").and_then(|v| v.as_object()) {
+        for (model, model_obj) in models {
+            if let Some(v) = model_obj
+                .as_object()
+                .and_then(|m| m.get("autoCompactWindow"))
+                .filter(|v| !v.is_null())
+            {
+                return Ok(AutoCompact::Kept {
+                    key: format!("modelSettings.{model}.autoCompactWindow"),
+                    value: json_value_display(v),
+                });
+            }
+        }
+    }
+
+    if let Some(v) = obj
+        .get("env")
+        .and_then(|e| e.as_object())
+        .and_then(|e| e.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))
+        .filter(|v| !v.is_null())
+    {
+        return Ok(AutoCompact::Kept {
+            key: "env.CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+            value: json_value_display(v),
+        });
+    }
+
+    obj.insert(
+        "autoCompactWindow".to_string(),
+        serde_json::json!(AUTO_COMPACT_WINDOW),
+    );
+    let mut out = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
+    out.push('\n');
+    Ok(AutoCompact::Set(out))
+}
+
+pub fn remove_auto_compact_window(settings: &str) -> Result<Option<String>, String> {
+    let mut val: serde_json::Value = if settings.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(settings).map_err(|e| e.to_string())?
+    };
+
+    let Some(obj) = val.as_object_mut() else {
+        return Err("settings must be a JSON object".to_string());
+    };
+
+    if obj.get("autoCompactWindow").and_then(|v| v.as_u64()) != Some(AUTO_COMPACT_WINDOW) {
+        return Ok(None);
+    }
+
+    obj.remove("autoCompactWindow");
+    let mut out = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
+    out.push('\n');
+    Ok(Some(out))
+}
+
+fn autocompact_marker_path() -> Result<PathBuf, String> {
+    let dir = crate::registry::state_dir().ok_or_else(|| {
+        "cannot determine state directory: none of BLYTE_STATE_DIR, XDG_STATE_HOME, or HOME is set"
+            .to_string()
+    })?;
+    Ok(dir.join("autocompact-window"))
+}
 
 pub fn set_status_line(settings: &str) -> Result<Option<String>, String> {
     let mut val: serde_json::Value = if settings.trim().is_empty() {
@@ -351,6 +448,7 @@ pub fn install_for(
     force: bool,
     no_default: bool,
     no_statusline: bool,
+    no_autocompact: bool,
 ) -> Result<Vec<PathBuf>, String> {
     let claude_context_written = if harness == Harness::Claude && !project {
         let home = home_dir()?;
@@ -437,47 +535,95 @@ pub fn install_for(
         written.push(rules_path);
     }
 
-    if harness == Harness::Claude && !project && !no_statusline {
+    if harness == Harness::Claude && !project && (!no_statusline || !no_autocompact) {
         let home = home_dir()?;
         let claude_dir = home.join(".claude");
         let settings_path = claude_dir.join("settings.json");
         let backup_path = claude_dir.join("settings.json.blyte-backup");
 
         let existing = if settings_path.exists() {
-            match std::fs::read_to_string(&settings_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    return Err(format!("failed to read {}: {e}", settings_path.display()));
-                }
-            }
+            std::fs::read_to_string(&settings_path)
+                .map_err(|e| format!("failed to read {}: {e}", settings_path.display()))?
         } else {
             String::new()
         };
 
-        match set_status_line(&existing) {
-            Ok(Some(updated)) => {
-                if settings_path.exists() && !backup_path.exists() {
-                    std::fs::copy(&settings_path, &backup_path).map_err(|e| {
-                        format!("failed to create backup {}: {e}", backup_path.display())
-                    })?;
-                }
-                if let Some(parent) = settings_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        format!("failed to create directory {}: {e}", parent.display())
-                    })?;
-                }
-                std::fs::write(&settings_path, &updated)
-                    .map_err(|e| format!("failed to write {}: {e}", settings_path.display()))?;
+        let mut current = existing;
+        let mut settings_changed = false;
+        let mut statusline_msg: Option<&'static str> = None;
 
+        if !no_statusline {
+            let updated = set_status_line(&current)
+                .map_err(|e| format!("failed to update {}: {e}", settings_path.display()))?;
+            if let Some(updated) = updated {
                 if updated.contains("blyte statusline --after") {
-                    println!("status line: wrapped your status line command");
+                    statusline_msg = Some("status line: wrapped your status line command");
                 } else {
-                    println!("status line: set to blyte statusline");
+                    statusline_msg = Some("status line: set to blyte statusline");
                 }
+                current = updated;
+                settings_changed = true;
             }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("warning: could not update {}: {e}", settings_path.display());
+        }
+
+        let mut autocompact_action: Option<(AutoCompact, PathBuf)> = None;
+        if !no_autocompact {
+            let marker = autocompact_marker_path()?;
+            if !marker.exists() {
+                let res = set_auto_compact_window(&current)
+                    .map_err(|e| format!("failed to update {}: {e}", settings_path.display()))?;
+                if let AutoCompact::Set(ref updated) = res {
+                    current = updated.clone();
+                    settings_changed = true;
+                }
+                autocompact_action = Some((res, marker));
+            }
+        }
+
+        if settings_changed {
+            if settings_path.exists() && !backup_path.exists() {
+                std::fs::copy(&settings_path, &backup_path).map_err(|e| {
+                    format!("failed to create backup {}: {e}", backup_path.display())
+                })?;
+            }
+            if let Some(parent) = settings_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
+            }
+            std::fs::write(&settings_path, &current)
+                .map_err(|e| format!("failed to write {}: {e}", settings_path.display()))?;
+        }
+
+        if let Some(msg) = statusline_msg {
+            println!("{msg}");
+        }
+
+        if let Some((action, marker)) = autocompact_action {
+            match action {
+                AutoCompact::Set(_) => {
+                    if let Some(parent) = marker.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            format!(
+                                "failed to write {}: {e} (autoCompactWindow was set in {}, but uninstall will not remove it)",
+                                marker.display(),
+                                settings_path.display()
+                            )
+                        })?;
+                    }
+                    std::fs::write(&marker, AUTO_COMPACT_WINDOW.to_string()).map_err(|e| {
+                        format!(
+                            "failed to write {}: {e} (autoCompactWindow was set in {}, but uninstall will not remove it)",
+                            marker.display(),
+                            settings_path.display()
+                        )
+                    })?;
+                    println!(
+                        "auto-compact: set autoCompactWindow to {AUTO_COMPACT_WINDOW} in ~/.claude/settings.json (Claude Code compacts at 200k tokens; delete the key to use the model's full window)"
+                    );
+                }
+                AutoCompact::Kept { key, value } => {
+                    println!("auto-compact: keeping your {key} ({value})");
+                }
             }
         }
     }
@@ -548,20 +694,40 @@ pub fn uninstall_for(harness: Harness, project: bool) -> Result<Vec<PathBuf>, St
     if harness == Harness::Claude && !project {
         let home = home_dir()?;
         let settings_path = home.join(".claude/settings.json");
+        let marker = autocompact_marker_path()?;
+        let marker_exists = marker.exists();
+
         if settings_path.exists() {
-            if let Ok(existing) = std::fs::read_to_string(&settings_path) {
-                match remove_status_line(&existing) {
-                    Ok(Some(updated)) => {
-                        std::fs::write(&settings_path, updated).map_err(|e| {
-                            format!("failed to write {}: {e}", settings_path.display())
-                        })?;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        eprintln!("warning: could not update {}: {e}", settings_path.display());
-                    }
+            let existing = std::fs::read_to_string(&settings_path)
+                .map_err(|e| format!("failed to read {}: {e}", settings_path.display()))?;
+            let mut current = existing;
+            let mut settings_changed = false;
+
+            if let Some(updated) = remove_status_line(&current)
+                .map_err(|e| format!("failed to update {}: {e}", settings_path.display()))?
+            {
+                current = updated;
+                settings_changed = true;
+            }
+
+            if marker_exists {
+                if let Some(updated) = remove_auto_compact_window(&current)
+                    .map_err(|e| format!("failed to update {}: {e}", settings_path.display()))?
+                {
+                    current = updated;
+                    settings_changed = true;
                 }
             }
+
+            if settings_changed {
+                std::fs::write(&settings_path, current)
+                    .map_err(|e| format!("failed to write {}: {e}", settings_path.display()))?;
+            }
+        }
+
+        if marker_exists {
+            std::fs::remove_file(&marker)
+                .map_err(|e| format!("failed to remove {}: {e}", marker.display()))?;
         }
     }
 
@@ -573,8 +739,16 @@ pub fn install(
     force: bool,
     no_default: bool,
     no_statusline: bool,
+    no_autocompact: bool,
 ) -> Result<PathBuf, String> {
-    let written = install_for(Harness::Claude, project, force, no_default, no_statusline)?;
+    let written = install_for(
+        Harness::Claude,
+        project,
+        force,
+        no_default,
+        no_statusline,
+        no_autocompact,
+    )?;
     Ok(written.into_iter().next().unwrap())
 }
 
