@@ -1,3 +1,13 @@
+## v0.38.0 (2026-11-04)
+
+### Feat
+
+- **skill**: install sets Claude Code's auto-compact window to 200k (#324)
+
+### Fix
+
+- **statusline**: show the real auto-compact window, not an assumed 200k (#323)
+
 ## v0.37.7 (2026-11-03)
 
 ### Fix
