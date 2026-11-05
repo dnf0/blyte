@@ -207,8 +207,14 @@ pub const LAST_CALL_TURNS: u32 = 10;
 /// Fraction of `max_duration` after which the last call may fire (once nudged).
 pub const LAST_CALL_TIME_FRACTION: f64 = 0.5;
 
+/// Turn on which a research run reminds the model to start `report.md` if it is still missing or empty.
+pub const RESEARCH_FIRST_REPORT_TURN: u32 = 8;
+/// Repeated read/grep/glob calls without a workspace change in a research run before warning.
+pub const READ_LOOP_WARN: u32 = 20;
 /// Repeated read/grep/glob calls without a workspace change allowed before ending the run.
 const READ_LOOP_LIMIT: u32 = 30;
+/// Extra turns a research run gets after reaching `READ_LOOP_LIMIT` to write `report.md` and stop.
+pub const READ_LOOP_GRACE_TURNS: u32 = 3;
 
 fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
     call.name == "dispatch"
@@ -883,6 +889,8 @@ impl<'a> Runner<'a> {
         let mut last_fingerprint: Option<String> = None;
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut repeats: u32 = 0;
+        let mut read_warn_sent = false;
+        let mut read_loop_turn: Option<u32> = None;
         let start_fp = self.fingerprint();
         let mut change_fp = start_fp.clone();
         let mut progressed = false;
@@ -904,6 +912,9 @@ impl<'a> Runner<'a> {
         let mut wrap_up_sent = false;
 
         for turn in 1..=self.budget.max_turns {
+            if read_loop_turn.is_some_and(|t| turn > t + READ_LOOP_GRACE_TURNS) {
+                return (Outcome::BudgetExhausted, report);
+            }
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return (Outcome::BudgetExhausted, report);
             }
@@ -937,6 +948,18 @@ impl<'a> Runner<'a> {
                             "You have about {m} minutes left of {total}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools."
                         )));
                     }
+                }
+            }
+
+            if self.research && turn == RESEARCH_FIRST_REPORT_TURN {
+                let has_report = self
+                    .fs
+                    .read(&self.root.join("report.md"))
+                    .is_ok_and(|s| !s.trim().is_empty());
+                if !has_report {
+                    history.push(Message::User(
+                        "Start report.md now with what you have found so far, even if unfinished, then carry on.".to_string(),
+                    ));
                 }
             }
 
@@ -1218,6 +1241,7 @@ impl<'a> Runner<'a> {
                 if current_fp != change_fp {
                     call_counts.clear();
                     repeats = 0;
+                    read_warn_sent = false;
                     change_fp = current_fp;
                 }
                 for call in &resp.tool_calls {
@@ -1234,14 +1258,23 @@ impl<'a> Runner<'a> {
                         pre_dispatch_calls += 1;
                     }
 
-                    let mut outcome = tools::execute_with_deadline(
-                        &self.root,
-                        self.shell,
-                        self.fs,
-                        &call.name,
-                        &call.arguments,
-                        deadline,
-                    );
+                    let read_closed = read_loop_turn.is_some()
+                        && matches!(call.name.as_str(), "read" | "grep" | "glob");
+                    let mut outcome = if read_closed {
+                        tools::ToolOutcome {
+                            content: "[blyte] reading is closed; write report.md now from what you have found.".to_string(),
+                            is_error: true,
+                        }
+                    } else {
+                        tools::execute_with_deadline(
+                            &self.root,
+                            self.shell,
+                            self.fs,
+                            &call.name,
+                            &call.arguments,
+                            deadline,
+                        )
+                    };
 
                     let summary = outcome
                         .content
@@ -1283,7 +1316,7 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
 
-                    if self.research {
+                    if self.research && !read_closed {
                         seen_names.extend(
                             research_check::identifiers(&outcome.content).map(str::to_owned),
                         );
@@ -1292,7 +1325,9 @@ impl<'a> Runner<'a> {
                         progressed = true;
                         call_counts.clear();
                         repeats = 0;
-                    } else if matches!(call.name.as_str(), "read" | "grep" | "glob") {
+                        read_warn_sent = false;
+                    } else if !read_closed && matches!(call.name.as_str(), "read" | "grep" | "glob")
+                    {
                         let key = format!("{}:{}", call.name, call.arguments);
                         let n = call_counts.entry(key).or_insert(0);
                         *n += 1;
@@ -1302,8 +1337,19 @@ impl<'a> Runner<'a> {
                             report.peak_read_repeats = report.peak_read_repeats.max(repeats);
                         }
                         if n >= 3 {
+                            let tail = if self.research {
+                                "write what you need into report.md"
+                            } else {
+                                "and make your change"
+                            };
                             outcome.content.push_str(&format!(
-                                "\n\n[blyte] You have made this exact call {n} times since the workspace last changed; earlier results were dropped from your context to save space. Do not read it again: note what you need from it in your reply, read only the lines you need, and make your change."
+                                "\n\n[blyte] You have made this exact call {n} times since the workspace last changed; earlier results were dropped from your context to save space. Do not read it again: note what you need from it in your reply, read only the lines you need, {tail}."
+                            ));
+                        }
+                        if self.research && !read_warn_sent && repeats >= READ_LOOP_WARN {
+                            read_warn_sent = true;
+                            outcome.content.push_str(&format!(
+                                "\n\n[blyte] You have re-read {READ_LOOP_WARN} files or searches since the workspace last changed; earlier results were dropped to save space. Write what you need into report.md now; reading stops at {READ_LOOP_LIMIT}."
                             ));
                         }
                     }
@@ -1313,12 +1359,20 @@ impl<'a> Runner<'a> {
                         content: outcome.content,
                         is_error: outcome.is_error,
                     });
-                    if repeats >= READ_LOOP_LIMIT {
-                        report.turn_usage.last_mut().unwrap().tools_ms =
-                            tools_start.elapsed().as_millis() as u64;
+                    if repeats >= READ_LOOP_LIMIT && read_loop_turn.is_none() {
                         report.read_loop = true;
-                        return (Outcome::BudgetExhausted, report);
+                        if !self.research {
+                            report.turn_usage.last_mut().unwrap().tools_ms =
+                                tools_start.elapsed().as_millis() as u64;
+                            return (Outcome::BudgetExhausted, report);
+                        }
+                        read_loop_turn = Some(turn);
                     }
+                }
+                if read_loop_turn == Some(turn) {
+                    history.push(Message::User(
+                        "[blyte] Stop reading; write report.md now from what you have found, mark what you could not confirm as open questions, then stop calling tools.".to_string(),
+                    ));
                 }
                 report.turn_usage.last_mut().unwrap().tools_ms =
                     tools_start.elapsed().as_millis() as u64;
