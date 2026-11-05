@@ -1,3 +1,9 @@
+## v0.38.2 (2026-11-05)
+
+### Fix
+
+- **agent**: research runs write a report instead of stopping on a read loop (#328)
+
 ## v0.38.1 (2026-11-04)
 
 ### Fix
