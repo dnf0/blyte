@@ -162,7 +162,7 @@ fn missing_or_new_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)\b(?:new|create|creates|created|propose|proposed|missing|deleted|removed|renamed|absent)\b|does not exist|do not exist|no such file",
+            r"(?i)\b(?:new|create|creates|created|add|adds|added|adding|propose|proposed|missing|deleted|removed|renamed|absent)\b|does not exist|do not exist|no such file",
         )
         .expect("missing or new regex")
     })
@@ -170,9 +170,14 @@ fn missing_or_new_re() -> &'static Regex {
 
 /// Every slash-containing file path in `text`, as written.
 pub fn paths(text: &str) -> impl Iterator<Item = &str> {
-    prose_path_re()
-        .captures_iter(text)
-        .map(|c| c.get(1).expect("path group").as_str())
+    let re = prose_path_re();
+    let mut pos = 0;
+    std::iter::from_fn(move || {
+        let c = re.captures_at(text, pos)?;
+        let m = c.get(1).expect("path group");
+        pos = m.end();
+        Some(m.as_str())
+    })
 }
 
 fn prose_change_ref_re() -> &'static Regex {
