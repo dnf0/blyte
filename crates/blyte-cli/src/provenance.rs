@@ -189,3 +189,31 @@ pub fn render(sources: &[(PathBuf, SourceState)]) -> String {
     );
     out
 }
+
+/// The first lines of a research report whose run did not end `verified`.
+pub fn unverified_banner(outcome: &str, turns: Option<u64>) -> String {
+    let after = match turns {
+        Some(n) => format!(" after {n} turns"),
+        None => String::new(),
+    };
+    format!(
+        "> **Not verified.** This research run ended as `{outcome}`{after}. The report below did not pass blyte's checks and may be an unfinished draft: check it before relying on it.\n\n"
+    )
+}
+
+/// Put `unverified_banner` at the top of the report at `path`, unless `outcome` is "verified".
+/// The rest of the file is kept byte for byte. A file that cannot be read or written is an error.
+pub fn mark_if_unverified(path: &Path, outcome: &str, turns: Option<u64>) -> std::io::Result<()> {
+    if outcome == "verified" {
+        return Ok(());
+    }
+    let body = std::fs::read(path)?;
+    let banner = unverified_banner(outcome, turns);
+    if body.starts_with(banner.as_bytes()) {
+        return Ok(());
+    }
+    let mut combined = Vec::with_capacity(banner.len() + body.len());
+    combined.extend_from_slice(banner.as_bytes());
+    combined.extend_from_slice(&body);
+    std::fs::write(path, combined)
+}

@@ -1113,6 +1113,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         error,
         final_message,
         turns,
+        report_turns,
         gate_attempts,
         gate_failures,
         cost_usd,
@@ -1137,6 +1138,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         .collect()
                 })
                 .unwrap_or_default();
+            let raw_turns = rec.get("turns").and_then(|v| v.as_u64());
 
             (
                 rec.get("outcome")
@@ -1147,7 +1149,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 rec.get("final_message")
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                rec.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                raw_turns.unwrap_or(0) as u32,
+                raw_turns,
                 rec.get("gate_attempts")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32,
@@ -1171,6 +1174,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             Some(err_msg),
             None,
             0,
+            None,
             0,
             Vec::new(),
             None,
@@ -1192,6 +1196,31 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         dispatch_outcome(&report_outcome, commits.len())
     };
     let exit = exit_code(outcome);
+
+    if args.research {
+        if research_report_path.exists() {
+            if let Err(err) =
+                crate::provenance::mark_if_unverified(&research_report_path, outcome, report_turns)
+            {
+                eprintln!(
+                    "error: could not mark {} as not verified: {err}",
+                    research_report_path.display()
+                );
+            }
+        }
+        if let Some(ref report_to) = args.report_to {
+            if report_to.exists() {
+                if let Err(err) =
+                    crate::provenance::mark_if_unverified(report_to, outcome, report_turns)
+                {
+                    eprintln!(
+                        "error: could not mark {} as not verified: {err}",
+                        report_to.display()
+                    );
+                }
+            }
+        }
+    }
 
     let research_report = if args.research && research_report_path.exists() {
         Some(research_report_path.display().to_string())
