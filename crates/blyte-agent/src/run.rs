@@ -29,6 +29,7 @@ use crate::claim_check;
 use crate::context::ContextStrategy;
 use crate::fs::Fs;
 use crate::gate_slots;
+use crate::quote_expand;
 use crate::research_check;
 use crate::shell::Shell;
 use crate::state::State;
@@ -720,9 +721,18 @@ impl<'a> Runner<'a> {
 
     /// Problems with report.md's quotes, line citations and unseen names (see `research_check`).
     fn check_report_quotes(&self, seen_names: &HashSet<String>) -> Vec<String> {
-        let Ok(report) = self.fs.read(&self.root.join("report.md")) else {
+        let Ok(raw) = self.fs.read(&self.root.join("report.md")) else {
             return Vec::new();
         };
+        let expand_read = |p: &Path| self.fs.read(p);
+        let (report, mut problems) = quote_expand::expand(&raw, &expand_read);
+        if report != raw {
+            if let Err(e) = self.fs.write(&self.root.join("report.md"), &report) {
+                problems.push(format!(
+                    "report.md: could not write the expanded quotes: {e}"
+                ));
+            }
+        }
         let read_roots = tools::read_roots();
         let mut listing = Vec::new();
         // A read root can be any repository; `core.fsmonitor` in its config would run a command
@@ -739,7 +749,7 @@ impl<'a> Runner<'a> {
             }
         }
         let read = |p: &Path| self.fs.read(p);
-        let mut problems = research_check::check(
+        problems.extend(research_check::check(
             &report,
             &research_check::Sources {
                 workspace: &self.root,
@@ -747,7 +757,7 @@ impl<'a> Runner<'a> {
                 listing: &listing,
                 read: &read,
             },
-        );
+        ));
         problems.extend(research_check::unseen_names(&report, seen_names));
         problems
     }

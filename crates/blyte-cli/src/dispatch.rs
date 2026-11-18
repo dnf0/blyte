@@ -44,9 +44,9 @@ pub const RESEARCH_RULES: &str = r#"Rules:
 - Do not run git commands that change state (no checkout, pull, commit, stash, worktree), and do not build, install, push, open pull requests, or write to any service.
 - Read the code with the read, grep and glob tools, using absolute paths under the repository (glob and grep with `path` set to the repository's absolute path); use the shell only when they cannot do what you need. Do not run `find`, `grep -r` or `rg` in the shell over `/`, your home directory, or any directory outside the repository: they walk huge trees and are killed at the time limit.
 - Answer the question with evidence: file paths with line numbers, and quote only what is needed.
-- Quote code only from what you have just read. Earlier tool output is folded out of your context as the run goes on; read the file again before quoting it, never quote from memory.
+- To quote code, do not retype it: put a line `<<quote /absolute/path:N-M>>` on its own in report.md (at most 200 lines) and the harness replaces it with those lines of the file. You need the line numbers, not a fresh read of the file.
 - Write your findings to `report.md` in your working directory, then stop calling tools and reply with one line summarising them.
-- The harness checks report.md: every cited `path:line` must exist, and a code block must be copied from the file and lines cited on the line before it (`path:N-M`). A code block with no citation fails unless it is a command or output (```bash, ```text) or is tagged ```proposed (code you propose or sketch, not in the repository). If the check fails you get the list of problems to fix.
+- The harness checks report.md: every cited `path:line` must exist, and a code block must be copied from the file and lines cited on the line before it (`path:N-M`). A code block you type yourself is checked the same way, so prefer the quote line. A code block with no citation fails unless it is a command or output (```bash, ```text) or is tagged ```proposed (code you propose or sketch, not in the repository). If the check fails you get the list of problems to fix.
 - Start report.md early, after your first findings, and keep it updated as you go, so it always holds your best answer."#;
 
 pub fn wrap_research(question: &str, root: &Path) -> String {
