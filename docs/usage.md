@@ -330,6 +330,30 @@ does the reading and writes a report. Run them as a dispatch with `--research`:
 blyte dispatch Q1 question.md --research [--report-to <path>]
 ```
 
+### Asking a good question
+
+A research run is fast and reliable while its prompt stays small. On 19 runs measured on 2026-11-18,
+waiting for the model was 90% or more of the time in 15; narrow questions finished in 3 to 10 minutes
+for USD 0.20 to 0.50, and questions that made the run read a whole repository took the full 30 minutes
+for USD 3 to 6, and two of three failed. So ask one subsystem or page per run (about ten files or
+fewer), run the parts in parallel, and give a second round the verified reports of the first.
+
+blyte checks the question before it starts a research run:
+
+- **The brief.** The question needs four headed sections: `Objective`, `Start from`, `Out of scope`
+  and `Answer format` (any heading level; case does not matter). Dispatch stops with exit 2 and names
+  each missing section. `blyte dispatch <id> --research` with no question prints a template.
+- **Inputs.** A question that names a Markdown file starting with `> **Not verified.**` (a report from
+  a run that did not pass) is refused, with the file's path.
+
+`--no-brief-check` starts the run anyway, for example to ask a run to check an unverified report.
+
+`blyte review` adds two flags for research runs, under `== checks`:
+
+- `broad research run: N of M turns had prompts over 100K tokens`, when 10 or more turns did;
+- `ran out of budget: split the question; files read by directory: ...`, when the run ended
+  `budget_exhausted`, listing up to eight directories with the number of files read in each.
+
 In research mode, blyte runs in an isolated scratch repository under `.wt/<id>` instead of creating
 a worktree of the repository. The dispatch passes `--read-root <repository root>` to the child run,
 allowing the `read` and `grep` tools to inspect the repository by absolute path while writing remains

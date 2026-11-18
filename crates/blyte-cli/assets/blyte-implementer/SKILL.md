@@ -219,12 +219,31 @@ more on the merged branch. Push or open a pull request only if the user asks. Le
 
 A question that would otherwise take many file reads of your own (how something works, where
 something is used, what a change would break) can go to blyte too, so the reading costs the cheaper
-model. Write the question to a file, saying what the answer must contain (paths with line numbers, a
-table, a recommendation), and from the repository:
+model. Write the question to a file and, from the repository:
 
 ```bash
 blyte dispatch R1 /abs/question-R1.md --research
 ```
+
+**Ask small questions, several at once.** A research run is fast and reliable while its prompt stays
+small: narrow questions finish in 3 to 10 minutes; a question that makes the run read a whole
+repository takes the full 30 minutes and often fails (measured 2026-11-18). So:
+
+- One subsystem, page or behaviour per run, about ten files or fewer. Split a broad question
+  ("audit the docs", "how does the whole pipeline work") by directory or by page, and dispatch the
+  parts in parallel.
+- Build up in rounds. A second round takes the first round's reports as its starting point
+  (`.wt/R1.report.md`, verified ones only) and asks only what crosses their boundaries. You combine
+  the answers; do not ask one run to.
+- Every question has four headed sections, and dispatch refuses one without them
+  (`blyte dispatch R1 --research` with no file prints the template):
+  - `## Objective`: what you need to know and what you will do with the answer;
+  - `## Start from`: the files or directories to read first, as absolute paths;
+  - `## Out of scope`: what not to read or answer, including what the sibling runs cover;
+  - `## Answer format`: what the report must contain (a table, paths with line numbers, a
+    recommendation) and a length limit.
+- In `blyte review`, `broad research run` means the question was too wide: split it next time. When
+  a run ran out of budget, review lists the directories it read from: split along those.
 
 blyte works in a scratch directory under `.wt/R1`, reads the repository by absolute path, and cannot
 change it; the run passes when it has written a report whose cited lines and quoted code match the
