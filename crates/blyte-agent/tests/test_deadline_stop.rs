@@ -505,7 +505,7 @@ fn claim_check_runs_in_the_reserve_after_the_loop_runs_out() {
             },
         ]),
         seen_timeouts: Mutex::new(Vec::new()),
-        sleep_before_complete: Duration::from_millis(1850),
+        sleep_before_complete: Duration::from_millis(4600),
     };
 
     let shell = RecordingShell::new();
@@ -518,7 +518,7 @@ fn claim_check_runs_in_the_reserve_after_the_loop_runs_out() {
         budget: Budget {
             max_turns: 5,
             max_gate_attempts: 2,
-            max_duration: Some(Duration::from_secs(2)),
+            max_duration: Some(Duration::from_secs(5)),
         },
         rollback: false,
         on_event: None,
