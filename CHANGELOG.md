@@ -1,3 +1,9 @@
+## v0.43.0 (2026-11-18)
+
+### Feat
+
+- **review**: save each review's check flags to .wt/<id>.checks.json (#352)
+
 ## v0.42.0 (2026-11-18)
 
 ### Feat
