@@ -1,8 +1,9 @@
 //! Flags added lines in a unified diff that match common fallback patterns.
 
+use serde::Serialize;
 use std::path::{Component, Path};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
     pub file: String,
     pub line: usize,
