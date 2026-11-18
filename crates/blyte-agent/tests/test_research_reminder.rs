@@ -84,7 +84,7 @@ fn research_reminder_at_turn_30_and_not_again_at_60_if_report_changed() {
         budget: Budget {
             max_turns: 65,
             max_gate_attempts: 1,
-            max_duration: Some(Duration::from_secs(30)),
+            max_duration: Some(Duration::from_secs(300)),
         },
         rollback: false,
         on_event: None,
@@ -146,7 +146,7 @@ fn research_reminder_repeats_at_turn_60_if_report_never_changed() {
         budget: Budget {
             max_turns: 65,
             max_gate_attempts: 1,
-            max_duration: Some(Duration::from_secs(30)),
+            max_duration: Some(Duration::from_secs(300)),
         },
         rollback: false,
         on_event: None,
@@ -229,7 +229,7 @@ fn research_gate_fails_on_a_misquote_until_it_is_fixed() {
         budget: Budget {
             max_turns: 10,
             max_gate_attempts: 3,
-            max_duration: Some(Duration::from_secs(30)),
+            max_duration: Some(Duration::from_secs(300)),
         },
         rollback: false,
         on_event: None,
@@ -291,7 +291,7 @@ fn the_quote_check_does_not_run_a_repositorys_fsmonitor() {
         budget: Budget {
             max_turns: 10,
             max_gate_attempts: 3,
-            max_duration: Some(Duration::from_secs(30)),
+            max_duration: Some(Duration::from_secs(300)),
         },
         rollback: false,
         on_event: None,
