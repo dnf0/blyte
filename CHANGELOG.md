@@ -1,3 +1,9 @@
+## v0.43.1 (2026-11-18)
+
+### Fix
+
+- **research**: the path check sees adjacent paths and accepts "add" for a new file (#351)
+
 ## v0.43.0 (2026-11-18)
 
 ### Feat
