@@ -887,14 +887,28 @@ pub fn claims(report: &str, src: &Sources<'_>) -> Vec<Claim> {
     out
 }
 
-/// Every `[A-Za-z_][A-Za-z0-9_]*` token of 3+ characters in `text`.
+/// A commit id as written in prose: 7 to 40 lowercase hex characters with at least one digit
+/// and at least one letter.
+fn is_commit_like(tok: &str) -> bool {
+    (7..=40).contains(&tok.len())
+        && tok
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && tok.bytes().any(|b| b.is_ascii_digit())
+        && tok.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+/// Every `[A-Za-z_][A-Za-z0-9_]*` token of 3+ characters in `text`, plus every commit-like
+/// token (see `is_commit_like`) even when it starts with a digit.
 pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|s| {
             s.len() >= 3
-                && s.as_bytes()
+                && (s
+                    .as_bytes()
                     .first()
                     .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+                    || is_commit_like(s))
         })
 }
 
@@ -960,6 +974,9 @@ pub fn unseen_names(report: &str, seen: &HashSet<String>) -> Vec<String> {
         for span in inline_spans(line) {
             let bytes = span.as_bytes();
             for tok in identifiers(span) {
+                if tok.starts_with(|c: char| c.is_ascii_digit()) {
+                    continue;
+                }
                 let end = (tok.as_ptr() as usize - span.as_ptr() as usize) + tok.len();
                 let followed_by_paren = bytes.get(end) == Some(&b'(');
                 if (tok.contains('_') || has_inner_capital(tok) || followed_by_paren)
@@ -974,6 +991,45 @@ pub fn unseen_names(report: &str, seen: &HashSet<String>) -> Vec<String> {
             }
         }
         i += 1;
+    }
+    problems.extend(unseen_commit_ids(&lines, seen));
+    problems
+}
+
+/// Commit ids cited in prose lines (outside fenced blocks) that match no seen id, prefix either way.
+fn unseen_commit_ids(lines: &[&str], seen: &HashSet<String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut reported: HashSet<&str> = HashSet::new();
+    let mut fence: Option<(char, usize)> = None;
+    for (idx, &line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
+        let run = marker.map_or(0, |m| trimmed.chars().take_while(|&c| c == m).count());
+        if let Some((m, n)) = fence {
+            if marker == Some(m) && run >= n {
+                fence = None;
+            }
+            continue;
+        }
+        if run >= 3 {
+            fence = marker.map(|m| (m, run));
+            continue;
+        }
+        for tok in identifiers(line) {
+            if !is_commit_like(tok) {
+                continue;
+            }
+            let seen_id = seen
+                .iter()
+                .any(|s| is_commit_like(s) && (s.starts_with(tok) || tok.starts_with(s.as_str())));
+            if !seen_id && reported.insert(tok) {
+                problems.push(format!(
+                    "report.md:{}: commit id `{tok}` does not appear in anything this run read \
+                     (the task, files or command output); cite only commit ids you have seen",
+                    idx + 1
+                ));
+            }
+        }
     }
     problems
 }
