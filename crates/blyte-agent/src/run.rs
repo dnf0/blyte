@@ -754,16 +754,15 @@ impl<'a> Runner<'a> {
             }
         }
         let read = |p: &Path| self.fs.read(p);
-        problems.extend(research_check::check(
-            &report,
-            &research_check::Sources {
-                workspace: &self.root,
-                read_roots: &read_roots,
-                listing: &listing,
-                read: &read,
-            },
-        ));
+        let sources = research_check::Sources {
+            workspace: &self.root,
+            read_roots: &read_roots,
+            listing: &listing,
+            read: &read,
+        };
+        problems.extend(research_check::check(&report, &sources));
         problems.extend(research_check::unseen_names(&report, seen_names));
+        problems.extend(research_check::unseen_paths(&report, &sources, seen_names));
         problems
     }
 
@@ -947,6 +946,8 @@ impl<'a> Runner<'a> {
         let mut thrash: u32 = 0;
         let mut last_big_read_warn: Option<u32> = None;
         let mut wrap_up_sent = false;
+        let mut wrap_up_tools_closed = false;
+        let mut wrap_up_report: Option<String> = None;
 
         for turn in 1..=self.budget.max_turns {
             if read_loop_turn.is_some_and(|t| turn > t + READ_LOOP_GRACE_TURNS) {
@@ -985,6 +986,10 @@ impl<'a> Runner<'a> {
                             "You have about {m} minutes left of {total}. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools."
                         )));
                     }
+                }
+                if wrap_up_sent && self.research {
+                    wrap_up_tools_closed = true;
+                    wrap_up_report = self.fs.read(&self.root.join("report.md")).ok();
                 }
             }
 
@@ -1311,11 +1316,30 @@ impl<'a> Runner<'a> {
                         pre_dispatch_calls += 1;
                     }
 
+                    if wrap_up_tools_closed
+                        && self
+                            .fs
+                            .read(&self.root.join("report.md"))
+                            .ok()
+                            .is_some_and(|s| {
+                                !s.is_empty() && Some(s.as_str()) != wrap_up_report.as_deref()
+                            })
+                    {
+                        wrap_up_tools_closed = false;
+                    }
                     let read_closed = read_loop_turn.is_some()
                         && matches!(call.name.as_str(), "read" | "grep" | "glob");
+                    let wrap_up_closed =
+                        wrap_up_tools_closed && !matches!(call.name.as_str(), "write" | "edit");
+                    let tool_closed = read_closed || wrap_up_closed;
                     let mut outcome = if read_closed {
                         tools::ToolOutcome {
                             content: "[blyte] reading is closed; write report.md now from what you have found.".to_string(),
+                            is_error: true,
+                        }
+                    } else if wrap_up_closed {
+                        tools::ToolOutcome {
+                            content: "[blyte] almost out of budget: write report.md now (write or edit). Other tools are closed until report.md has changed.".to_string(),
                             is_error: true,
                         }
                     } else {
@@ -1369,7 +1393,7 @@ impl<'a> Runner<'a> {
                         is_error: outcome.is_error,
                     });
 
-                    if self.research && !read_closed {
+                    if self.research && !tool_closed {
                         seen_names.extend(
                             research_check::identifiers(&outcome.content).map(str::to_owned),
                         );
@@ -1379,7 +1403,7 @@ impl<'a> Runner<'a> {
                         call_counts.clear();
                         repeats = 0;
                         read_warn_sent = false;
-                    } else if !read_closed && matches!(call.name.as_str(), "read" | "grep" | "glob")
+                    } else if !tool_closed && matches!(call.name.as_str(), "read" | "grep" | "glob")
                     {
                         let key = format!("{}:{}", call.name, call.arguments);
                         let n = call_counts.entry(key).or_insert(0);
