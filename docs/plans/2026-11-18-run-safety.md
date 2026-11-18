@@ -7,8 +7,7 @@ Date: 2026-11-18. Base: `origin/main` at v0.38.2 (76dc404).
 **1. Parallel dispatches delete each other's fresh worktrees (major).** Reproduced on 0.38.2 in a
 scratch repository: four `blyte dispatch` started together, three lost their worktree within two
 seconds (`gate_failed`, "workspace directory ... does not exist"); a second set of four lost three
-again. Reported from premise-lookup (4 Nov), spatial-service (5 Nov) and climate-x-data-platform
-(11 Nov).
+again. Reported from three other repositories (4, 5 and 11 Nov).
 
 Cause, from the code (`crates/blyte-cli/src/clean.rs`): every dispatch starts `blyte clean --quiet`
 in the background. `CleanContext::new` reads every `.wt/*.start.json` once into `start_files`; a file
