@@ -499,7 +499,14 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         eprintln!("error: {}: {e}", archive_dir.display());
                         return 2;
                     }
-                    for ext in ["json", "report.json", "start.json", "verdict.json", "log"] {
+                    for ext in [
+                        "json",
+                        "report.json",
+                        "start.json",
+                        "verdict.json",
+                        "checks.json",
+                        "log",
+                    ] {
                         let file_name = format!("{}.{ext}", args.id);
                         let src = wt_parent.join(&file_name);
                         if src.exists() {
@@ -1559,6 +1566,7 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         reads.len(),
         outcome,
     );
+    let mut fallbacks: Vec<crate::fallback_check::Finding> = Vec::new();
     if !is_research {
         if let Some(ref res) = diff_res {
             match res {
@@ -1567,6 +1575,7 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                     if let Some(flag) = crate::fallback_check::flag(&findings) {
                         checks.flags.push(flag);
                     }
+                    fallbacks = findings;
                 }
                 Err(reason) => {
                     let first_line = reason.lines().next().unwrap_or(reason.as_str());
@@ -1613,6 +1622,31 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             "refused reads: {refused_count} (outside the workspace and --allow-read): {}",
             first_3.join(", ")
         ));
+    }
+
+    let checks_path = root.join(".wt").join(format!("{}.checks.json", args.id));
+    let ts = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            eprintln!("error: the system clock is before 1970: {e}");
+            return 2;
+        }
+    };
+    let checks_obj = serde_json::json!({
+        "ts": ts,
+        "flags": &checks.flags,
+        "fallbacks": &fallbacks,
+    });
+    let checks_json = match serde_json::to_string_pretty(&checks_obj) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error writing {}: {e}", checks_path.display());
+            return 2;
+        }
+    };
+    if let Err(e) = std::fs::write(&checks_path, checks_json + "\n") {
+        eprintln!("error writing {}: {e}", checks_path.display());
+        return 2;
     }
 
     println!("== checks");
