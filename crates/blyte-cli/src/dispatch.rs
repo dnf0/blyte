@@ -1395,16 +1395,50 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    let diff_out = if args.diff {
-        Command::new("git")
-            .args(["diff", &format!("{base}..HEAD")])
-            .current_dir(&wt)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
+    let is_research = crate::clean::is_research(&root, &args.id)
+        || root
+            .join(".wt")
+            .join(format!("{}.report.md", args.id))
+            .exists();
+
+    let diff_res: Option<Result<String, String>> = if !is_research {
+        Some(
+            Command::new("git")
+                .args(["diff", &format!("{base}..HEAD")])
+                .current_dir(&wt)
+                .output()
+                .map_err(|e| e.to_string())
+                .and_then(|o| {
+                    if o.status.success() {
+                        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+                    } else {
+                        let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                        if stderr.is_empty() {
+                            Err(format!("exit {}", o.status))
+                        } else {
+                            Err(stderr)
+                        }
+                    }
+                }),
+        )
+    } else if args.diff {
+        Some(
+            Command::new("git")
+                .args(["diff", &format!("{base}..HEAD")])
+                .current_dir(&wt)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .map_err(|e| e.to_string()),
+        )
     } else {
-        String::new()
+        None
     };
+
+    let diff_out = diff_res
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
     let task_text: Option<String> = (|| {
         let start_file = root.join(".wt").join(format!("{}.start.json", args.id));
@@ -1525,6 +1559,24 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         reads.len(),
         outcome,
     );
+    if !is_research {
+        if let Some(ref res) = diff_res {
+            match res {
+                Ok(diff) => {
+                    let findings = crate::fallback_check::added_fallbacks(diff);
+                    if let Some(flag) = crate::fallback_check::flag(&findings) {
+                        checks.flags.push(flag);
+                    }
+                }
+                Err(reason) => {
+                    let first_line = reason.lines().next().unwrap_or(reason.as_str());
+                    let msg = format!("fallback check not run: git diff failed: {first_line}");
+                    let cut: String = msg.chars().take(200).collect();
+                    checks.flags.push(cut);
+                }
+            }
+        }
+    }
     if let Some(ref problems) = quote_problems {
         if !problems.is_empty() {
             checks.flags.push(format!(
