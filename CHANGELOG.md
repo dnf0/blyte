@@ -1,3 +1,9 @@
+## v0.42.0 (2026-11-18)
+
+### Feat
+
+- **dispatch**: start record first, unverified reports marked, fallback check in review (#344)
+
 ## v0.41.0 (2026-11-18)
 
 ### Feat
