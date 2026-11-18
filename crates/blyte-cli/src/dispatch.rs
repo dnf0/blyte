@@ -31,6 +31,19 @@ pub fn write_start_record(
     std::fs::rename(&tmp_path, path)
 }
 
+struct StartRecordGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for StartRecordGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub fn wrap_task(task: &str) -> String {
     format!(
         "You are implementing exactly one task. Your working directory is a git worktree on its own branch; work only there.\n\n{}\n\n{}",
@@ -513,15 +526,59 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 }
             }
         }
+    } else if worktree_dir.exists() {
+        eprintln!("error: {} already exists", worktree_dir.display());
+        return 2;
+    }
 
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut tags = args.tags.clone();
+    if args.research {
+        tags.push("research".to_string());
+    }
+    let session = crate::usage_log::session_from(
+        std::env::var("BLYTE_SESSION").ok(),
+        std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+    );
+    let start_path = wt_parent.join(format!("{}.start.json", args.id));
+    let mut initial_start = serde_json::json!({
+        "id": args.id,
+        "pid": std::process::id(),
+        "started_at": started_at,
+        "starting": true,
+        "tags": tags,
+        "plan": args.plan,
+        "plan_task": args.plan_task,
+        "base": args.base,
+    });
+    if let Some(ref s) = session {
+        initial_start["session"] = serde_json::json!(s);
+    }
+    if args.research {
+        initial_start["research"] = serde_json::json!(true);
+    }
+    if let Err(err) = std::fs::create_dir_all(&wt_parent)
+        .and_then(|()| write_start_record(&start_path, &initial_start))
+    {
+        eprintln!(
+            "error: could not write the start record {}: {err}",
+            start_path.display()
+        );
+        return 2;
+    }
+    let mut start_guard = StartRecordGuard {
+        path: start_path.clone(),
+        armed: true,
+    };
+
+    if !args.research {
         crate::clean::spawn_background_clean(&root, Some(&args.id));
     }
 
     let base_commit: Option<String> = if args.research {
-        if worktree_dir.exists() {
-            eprintln!("error: {} already exists", worktree_dir.display());
-            return 2;
-        }
         if let Err(e) = std::fs::create_dir_all(&worktree_dir) {
             eprintln!(
                 "error creating scratch directory {}: {e}",
@@ -914,17 +971,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             return 2;
         }
     };
-
-    let started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    start_guard.armed = false;
 
     let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
-    let mut tags = args.tags.clone();
-    if args.research {
-        tags.push("research".to_string());
-    }
     let mut start_json = serde_json::json!({
         "id": args.id,
         "pid": child.id(),
@@ -940,10 +989,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "base": args.base,
         "base_sha": base_commit,
     });
-    if let Some(session) = crate::usage_log::session_from(
-        std::env::var("BLYTE_SESSION").ok(),
-        std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
-    ) {
+    if let Some(session) = session {
         start_json["session"] = serde_json::json!(session);
     }
     if args.research {
@@ -958,7 +1004,6 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             }))
             .collect::<Vec<_>>());
     }
-    let start_path = wt_parent.join(format!("{}.start.json", args.id));
     if let Err(err) = write_start_record(&start_path, &start_json) {
         eprintln!(
             "error: could not write the start record {}: {err}",
@@ -1068,6 +1113,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         error,
         final_message,
         turns,
+        report_turns,
         gate_attempts,
         gate_failures,
         cost_usd,
@@ -1092,6 +1138,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         .collect()
                 })
                 .unwrap_or_default();
+            let raw_turns = rec.get("turns").and_then(|v| v.as_u64());
 
             (
                 rec.get("outcome")
@@ -1102,7 +1149,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 rec.get("final_message")
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                rec.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                raw_turns.unwrap_or(0) as u32,
+                raw_turns,
                 rec.get("gate_attempts")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32,
@@ -1126,6 +1174,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             Some(err_msg),
             None,
             0,
+            None,
             0,
             Vec::new(),
             None,
@@ -1147,6 +1196,31 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         dispatch_outcome(&report_outcome, commits.len())
     };
     let exit = exit_code(outcome);
+
+    if args.research {
+        if research_report_path.exists() {
+            if let Err(err) =
+                crate::provenance::mark_if_unverified(&research_report_path, outcome, report_turns)
+            {
+                eprintln!(
+                    "error: could not mark {} as not verified: {err}",
+                    research_report_path.display()
+                );
+            }
+        }
+        if let Some(ref report_to) = args.report_to {
+            if report_to.exists() {
+                if let Err(err) =
+                    crate::provenance::mark_if_unverified(report_to, outcome, report_turns)
+                {
+                    eprintln!(
+                        "error: could not mark {} as not verified: {err}",
+                        report_to.display()
+                    );
+                }
+            }
+        }
+    }
 
     let research_report = if args.research && research_report_path.exists() {
         Some(research_report_path.display().to_string())
@@ -1321,16 +1395,50 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    let diff_out = if args.diff {
-        Command::new("git")
-            .args(["diff", &format!("{base}..HEAD")])
-            .current_dir(&wt)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
+    let is_research = crate::clean::is_research(&root, &args.id)
+        || root
+            .join(".wt")
+            .join(format!("{}.report.md", args.id))
+            .exists();
+
+    let diff_res: Option<Result<String, String>> = if !is_research {
+        Some(
+            Command::new("git")
+                .args(["diff", &format!("{base}..HEAD")])
+                .current_dir(&wt)
+                .output()
+                .map_err(|e| e.to_string())
+                .and_then(|o| {
+                    if o.status.success() {
+                        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+                    } else {
+                        let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                        if stderr.is_empty() {
+                            Err(format!("exit {}", o.status))
+                        } else {
+                            Err(stderr)
+                        }
+                    }
+                }),
+        )
+    } else if args.diff {
+        Some(
+            Command::new("git")
+                .args(["diff", &format!("{base}..HEAD")])
+                .current_dir(&wt)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .map_err(|e| e.to_string()),
+        )
     } else {
-        String::new()
+        None
     };
+
+    let diff_out = diff_res
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
     let task_text: Option<String> = (|| {
         let start_file = root.join(".wt").join(format!("{}.start.json", args.id));
@@ -1451,6 +1559,24 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         reads.len(),
         outcome,
     );
+    if !is_research {
+        if let Some(ref res) = diff_res {
+            match res {
+                Ok(diff) => {
+                    let findings = crate::fallback_check::added_fallbacks(diff);
+                    if let Some(flag) = crate::fallback_check::flag(&findings) {
+                        checks.flags.push(flag);
+                    }
+                }
+                Err(reason) => {
+                    let first_line = reason.lines().next().unwrap_or(reason.as_str());
+                    let msg = format!("fallback check not run: git diff failed: {first_line}");
+                    let cut: String = msg.chars().take(200).collect();
+                    checks.flags.push(cut);
+                }
+            }
+        }
+    }
     if let Some(ref problems) = quote_problems {
         if !problems.is_empty() {
             checks.flags.push(format!(

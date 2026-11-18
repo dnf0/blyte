@@ -5,6 +5,7 @@ pub mod cost;
 pub mod dashboard;
 pub mod dispatch;
 pub mod env_file;
+pub mod fallback_check;
 pub mod gate_drift;
 pub mod init;
 pub mod model_review;
