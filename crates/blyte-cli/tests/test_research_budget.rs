@@ -52,7 +52,15 @@ fn research_defaults_to_a_tight_budget_and_flags_still_win() {
 
     let s = start(
         r,
-        &["dispatch", "Q1", "q.md", "--research", "--sandbox", "off"],
+        &[
+            "dispatch",
+            "Q1",
+            "q.md",
+            "--research",
+            "--no-brief-check",
+            "--sandbox",
+            "off",
+        ],
         "Q1",
     );
     assert_eq!(
@@ -67,6 +75,7 @@ fn research_defaults_to_a_tight_budget_and_flags_still_win() {
             "Q2",
             "q.md",
             "--research",
+            "--no-brief-check",
             "--max-turns",
             "120",
             "--sandbox",

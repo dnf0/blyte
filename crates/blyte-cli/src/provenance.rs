@@ -217,3 +217,14 @@ pub fn mark_if_unverified(path: &Path, outcome: &str, turns: Option<u64>) -> std
     combined.extend_from_slice(&body);
     std::fs::write(path, combined)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_banner_starts_with_the_prefix_the_brief_check_looks_for() {
+        let banner = unverified_banner("budget_exhausted", Some(300));
+        assert!(banner.starts_with(crate::research_brief::NOT_VERIFIED_PREFIX));
+    }
+}

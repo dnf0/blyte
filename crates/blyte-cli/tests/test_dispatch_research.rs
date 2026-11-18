@@ -52,7 +52,15 @@ fn a_research_dispatch_uses_a_scratch_repository_and_a_report_gate() {
     // No key: the run fails fast, after the workspace and start file exist.
     let out = blyte(
         r,
-        &["dispatch", "Q1", "q.md", "--research", "--sandbox", "off"],
+        &[
+            "dispatch",
+            "Q1",
+            "q.md",
+            "--research",
+            "--no-brief-check",
+            "--sandbox",
+            "off",
+        ],
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
     assert_eq!(v["gate_source"], "research");
@@ -87,7 +95,15 @@ fn a_research_dispatch_uses_a_scratch_repository_and_a_report_gate() {
     assert_eq!(
         blyte(
             r,
-            &["dispatch", "Q1", "q.md", "--research", "--sandbox", "off"]
+            &[
+                "dispatch",
+                "Q1",
+                "q.md",
+                "--research",
+                "--no-brief-check",
+                "--sandbox",
+                "off"
+            ]
         )
         .status
         .code(),

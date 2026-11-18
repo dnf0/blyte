@@ -300,6 +300,7 @@ make test
             "Q1",
             "task.md",
             "--research",
+            "--no-brief-check",
             "--sandbox",
             "off",
         ],
