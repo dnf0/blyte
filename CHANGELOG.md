@@ -1,3 +1,9 @@
+## v0.39.0 (2026-11-18)
+
+### Feat
+
+- **agent**: record first-data time and longest silence of every model call (#330)
+
 ## v0.38.4 (2026-11-18)
 
 ### Fix
