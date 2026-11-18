@@ -5,13 +5,13 @@ credentials itself; they are removed from the environment of every command the m
 
 | model name | provider | credentials |
 |---|---|---|
-| `gemini-3.8-flash-high` (default) | Google Gemini; `-low` / `-medium` / `-high` sets the thinking level | `GEMINI_API_KEY` |
+| `gemini-3.8-flash-high` (default) | Google Gemini; `-low` / `-medium` / `-high` sets the thinking level | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) |
 | `vertex/<model>` (e.g. `vertex/gemini-4-argon`) | Google Gemini on Vertex AI; ADC authentication | `gcloud auth application-default login`, `GOOGLE_CLOUD_PROJECT` |
 | `claude-…` or `anthropic/…` | Anthropic | `ANTHROPIC_API_KEY` |
 | `openai/<model>` | any OpenAI-compatible API: OpenAI, or a local vLLM or LM Studio server | `OPENAI_API_KEY`, `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) |
 | `openrouter/<vendor>/<model>` | OpenRouter | `OPENROUTER_API_KEY` |
 | `<name>:<tag>` or `ollama/…` | Ollama, local or cloud; thinking off unless the name ends in `+think` | `OLLAMA_HOST` (e.g. `http://localhost:11434`) or `OLLAMA_API_KEY` |
-| `chatgpt/<model>` (e.g. `chatgpt/gpt-5.5`) | a ChatGPT subscription, through the Codex CLI's login | `~/.codex/auth.json` from `codex login` |
+| `chatgpt/<model>` (e.g. `chatgpt/gpt-5.5`) | a ChatGPT subscription, through the Codex CLI's login | `~/.codex/auth.json` from `codex login` (`$CODEX_HOME/auth.json` when `CODEX_HOME` is set) |
 
 ## Choosing an implementer model
 
@@ -25,8 +25,8 @@ planning: the frontier model above it does that.
 | Claude Haiku, GPT mini-class models | supported (via `claude-…`, `openai/…`, `openrouter/…`), not yet measured as implementers |
 | local models via Ollama | supported; `qwen3:14b` handled small tasks but failed a real repository task in our tests. Worth trying on simple, well-tested tasks; slow on a laptop. |
 
-Only Gemini 3.8 Flash has a list price in blyte today, so it is the only model for which the
-report's `cost_usd` and `--max-cost` work. For another model, compare token counts in the report.
+Gemini 3.8 Flash and Gemini 4 Argon (also through `vertex/`) have list prices in blyte today, so they
+are the only models for which the report's `cost_usd` and `--max-cost` work. For another model, compare token counts in the report.
 
 ## Notes per provider
 
@@ -68,7 +68,7 @@ Burst rate limits (HTTP 429 with a short retry delay), server errors and dropped
 retried with backoff (2, 4, 8, 16, 32, then 60 seconds, six times), never past `--max-seconds`.
 Streamed Gemini calls fail after `BLYTE_MODEL_IDLE_TIMEOUT_SECS` (default 300 s; Gemini can think silently for over two minutes before a long reply) of silence with no
 bytes received, or once `BLYTE_MODEL_TIMEOUT_SECS` (default 1800 s for streamed calls) has passed.
-Other providers do not stream and use `BLYTE_MODEL_TIMEOUT_SECS` as a whole-call HTTP timeout
+Other providers use `BLYTE_MODEL_TIMEOUT_SECS` as a whole-call HTTP timeout
 (default 180 s, with a read timeout 30 s shorter, at least 30 s) for slow providers such as a local
 Ollama instance.
 An exhausted **quota** (a daily limit, `insufficient_quota`, or a reset more than five minutes

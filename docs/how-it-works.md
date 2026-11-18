@@ -19,7 +19,11 @@ background tasks, hooks or polling to wait on. The loop ends when:
 1. the model says it is finished and the **gate** passes (`verified`);
 2. the gate has failed `--max-gates` times (`gate_failed`);
 3. a budget runs out: turns, seconds or cost (`budget_exhausted`);
-4. something unrecoverable happens (`error`), for example an exhausted provider quota.
+4. the model says it cannot go on, and the gate steps that fail also fail at the commit the run started
+   from, so the task cannot pass until that is fixed (`blocked`);
+5. something unrecoverable happens (`error`), for example an exhausted provider quota.
+
+An ungated run (`--orchestrate`) that stops by itself ends `finished`.
 
 Transient provider errors (a burst rate limit, a 5xx, a dropped connection) are waited out with
 backoff, but never past the run's deadline.
@@ -29,7 +33,8 @@ backoff, but never past the run's deadline.
 The gate is a command, not a tool. The model is told a check exists and that it decides when the
 work is done, but it cannot call it, pass arguments to it or see it run early. When the model says
 it is finished, blyte runs every step of the gate, collects every failure, and either ends the run
-or hands all the failures back at once. With rollback on, the tree is reset to the run's starting
+or hands all the failures back at once. On a later attempt it runs the steps that failed last time
+first, and stops there if one still fails. With rollback on, the tree is reset to the run's starting
 commit first, and the model is told its edits are gone.
 
 The model is asked to run the **quick** checks itself (formatting, lint, the affected tests)
