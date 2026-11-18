@@ -1,3 +1,9 @@
+## v0.38.4 (2026-11-18)
+
+### Fix
+
+- **clean**: never remove a run whose start record appeared or was half-written during clean (#333)
+
 ## v0.38.3 (2026-11-18)
 
 ### Fix
