@@ -13,12 +13,14 @@ apply to every command the model runs on the host: `bash`, and the gate.
 | layer | macOS | Linux | turn off / adjust |
 |---|---|---|---|
 | **Writes** only inside the workspace, its git directory, temp directories and tool caches | Seatbelt | Landlock (kernel 5.13+) | `--sandbox=off` |
-| **Credential reads** refused: `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.kube`, `~/.gnupg`, `~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`, `~/.pypirc`, cargo credentials, `~/.codex`, keychains, cookies and browser profiles, and any file named `.env` | Seatbelt | not enforced | `--allow-read PATH` grants one back |
+| **Credential reads** refused: `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.kube`, `~/.gnupg`, `~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`, `~/.pypirc`, cargo credentials, `~/.codex`, keychains, cookies and browser profiles, and any file named `.env` | Seatbelt | Landlock: reads are confined to an allow-list that leaves these out (see below) | `--allow-read PATH` grants one back |
 | **Environment**: variables that look like credentials, and the AWS profile variables, are withheld from commands | yes | yes | `--pass-env NAME` keeps one |
 | **Network**: commands cannot connect out | Seatbelt | Landlock (kernel 6.7+) | opt in with `--network=off` |
 
 blyte's own provider keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, …) and `BLYTE_*` variables are
-always removed from commands, sandbox or not.
+always removed from commands, sandbox or not, and `--pass-env` cannot keep them. The one exception is
+`BLYTE_SESSION`, the session id, which is kept so that dispatches started by a command are counted
+with their session.
 
 ## Writes
 
@@ -35,16 +37,20 @@ Anything else fails with "Operation not permitted". This is what stops a model t
 failing test by clearing a system cache, editing your shell profile or writing into another
 checkout.
 
-## Credential reads (macOS)
+## Credential reads
 
 The paths in the table above are denied as `file-read-data`: their contents and directory listings
 are refused, but `stat` still works, so tools that check whether `.env` exists (pytest does while
 collecting) keep working. `--allow-read PATH` (repeatable) grants a path back, for a task that
 legitimately needs, say, a kubeconfig.
 
-Linux's Landlock can only *allow* paths, not carve holes in an allowed tree, so the read-deny is
-macOS-only; blyte says so when it starts on Linux. The environment filter and the write sandbox
-apply on both.
+Linux's Landlock can only *allow* paths, not carve holes in an allowed tree, so on Linux reads are
+confined to an allow-list instead: the system directories (`/usr`, `/lib`, `/bin`, `/etc`, `/opt`,
+`/proc`, `/sys`, `/dev`, `/run`, `/var`, `/tmp`, `/snap`, `/nix`), the workspace and the other
+writable paths, and tool directories under `$HOME` (`.cargo`, `.rustup`, `.cache`, `.npm`, `.nvm`,
+`.pyenv`, `.local/bin`, `.local/lib`, `go`, the git and shell configuration files, and similar). The
+credential stores in the table are outside that list, so they cannot be read; `--allow-read PATH`
+adds a path. The environment filter and the write sandbox apply on both.
 
 ## The environment filter
 

@@ -125,9 +125,12 @@ Details that matter:
   and when repeats reach 30 the run stops as `budget_exhausted` with `read_loop` set to `true`;
   `peak_read_repeats` in the run report records the highest count, to tune the limit.
 
-A run ends in one of four outcomes: `verified` (the gate passed; the only success),
-`gate_failed` (the gate failed `--max-gates` times), `budget_exhausted`, or `error` (the provider
-or the environment broke, which is distinct from failing work).
+A gated run ends in one of five outcomes: `verified` (the gate passed; the only success),
+`gate_failed` (the gate failed `--max-gates` times), `budget_exhausted`, `blocked` (the model says it
+cannot go on, the tree is unchanged since the last gate, and the failing steps also fail at the commit
+the run started from), or `error` (the provider
+or the environment broke, which is distinct from failing work). An ungated run (`--orchestrate`)
+that stops by itself ends `finished`.
 
 ## The gate
 
@@ -160,7 +163,7 @@ flowchart TD
   lists the steps that weren't re-run.
 - **Gate slots** (`gate_slots.rs`). Parallel dispatches on one machine would otherwise build and
   test all at once. Each gate takes one of N machine-wide slots: `flock` on files in
-  `$TMPDIR/blyte-gate-slots`, N defaulting to an eighth of the cores (measured on 12 cores:
+  `$TMPDIR/blyte-gate-slots`, N defaulting to a quarter of the cores, at least 2 (`BLYTE_GATE_SLOTS` sets it) (measured on 12 cores:
   three builds in parallel took 49 s, one after another 47 s). Only the `blyte` command turns
   slots on. Gate commands run with `__BLYTE_IN_GATE=1`, so a blyte started inside a gate, such as
   the runner tests in blyte's own `cargo test`, never waits for the slot its parent holds.
@@ -184,7 +187,7 @@ default, keeps the prompt **append-only** so the provider's prefix cache stays v
 [system] [opening: the task] [digest 1] … [digest k] [recent turns, verbatim]
 ```
 
-When the verbatim tail passes the fold budget (48K tokens by default, 96K for research runs, estimated as characters ÷ 4),
+When the verbatim tail passes the fold budget (48K tokens by default, 180K for research runs, estimated as characters ÷ 4),
 its older half becomes one digest: a line per tool call, written by the harness, not summarised
 by a model. Fold boundaries are computed greedily from the start of the history, so each depends
 only on the messages before it. The next turn reproduces every earlier fold exactly, so between
@@ -244,8 +247,9 @@ Two things are set when a local session starts:
 - **The PATH is restored.** macOS `path_helper` in the login profile reorders `PATH`, so the
   inherited `PATH` is put back in front.
 - **The environment is filtered.** Provider credentials, anything that looks like one (a
-  credential-like name segment, or a URL with inline credentials) and every `BLYTE_*` variable are
-  withheld from the commands, unless `--pass-env` names them. Container commands never inherit
+  credential-like name segment, or a URL with inline credentials) and every `BLYTE_*` variable except `BLYTE_SESSION` are
+  withheld from the commands. `--pass-env` keeps a variable that only looks like a credential; it
+  cannot keep a provider key or a `BLYTE_*` variable. Container commands never inherit
   the host environment.
 
 ## The sandbox
@@ -267,7 +271,7 @@ network setting each run used. See [Security](security.md) for the full policy.
 
 `registry::resolve_provider` maps a model name to an adapter:
 - a prefix picks the provider explicitly: `anthropic/`, `gemini/`, `openai/`, `openrouter/`,
-  `ollama/`, `chatgpt/`;
+  `ollama/`, `chatgpt/`, `vertex/`;
 - otherwise the name's family decides: `claude…` or `gemini…`, and a `:` tag means Ollama;
 - with no model given, the credentials in the environment decide.
 
@@ -309,8 +313,9 @@ flowchart LR
     o -->|"blyte review T1 --diff"| rev["review, then merge or send back"]
 ```
 
-- **The gate** comes from `--gate` or from `blyte.toml`. A dispatch with neither is refused.
-- **Defaults:** 300 turns, one hour, rollback off. The task is wrapped in fixed rules: stay in
+- **The gate** comes from `--gate` or from `blyte.toml`. A dispatch with neither is refused, except a
+  `--research` dispatch, whose gate is the report check.
+- **Defaults:** 300 turns, one hour (30 minutes for `--research`), rollback off. The task is wrapped in fixed rules: stay in
   the task and the worktree, never change the machine to make a check pass, never push or read
   secrets, commit with the given message, finish with a short report.
 - **The outcome** is the report's, with one change: a verified run with no commits is

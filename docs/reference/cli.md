@@ -8,14 +8,19 @@ A lean coding-agent harness with a sealed verification gate
 Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
 
 Commands:
-  init       Detect this repository's checks and write blyte.toml
-  dashboard  Serve a local dashboard of running and recent jobs
-  dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
-  review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
-  clean      Remove finished worktrees and merged branches
-  skill      Install or print the Claude Code skill for the plan, delegate, review workflow
-  update     Replace this binary with the latest release (the old one is kept as blyte.prev)
-  help       Print this message or the help of the given subcommand(s)
+  init        Detect this repository's checks and write blyte.toml
+  dashboard   Serve a local dashboard of running and recent jobs
+  dispatch    Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
+  review      Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
+  clean       Remove finished worktrees and merged branches
+  status      Show what a dispatch is doing
+  wait        Wait until dispatched runs finish (all of them, or the first with --any) and print one line per finished run
+  skill       Install or print the Claude Code skill for the plan, delegate, review workflow
+  update      Replace this binary with the latest release (the old one is kept as blyte.prev)
+  cost        Show orchestrator and implementer costs
+  statusline  Print Claude Code's status line with blyte costs
+  plan        List a plan's tasks with their state and the command to dispatch each ready one
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PROMPT]  Direct task prompt to run in single-shot / headless mode
@@ -59,6 +64,12 @@ Options:
           Pass this environment variable to commands even though it looks like a credential (repeatable)
       --read-root <DIR>
           Directory allowed for reading with the read and grep tools (repeatable)
+      --no-gate-slot
+          Gates in this run do not take a machine-wide slot
+      --research
+          Whether this is a research run: periodically remind the model to keep report.md updated
+      --claim-check
+          Research run: check report.md's claims against their cited lines
   -h, --help
           Print help
   -V, --version
@@ -126,6 +137,8 @@ Options:
       --sandbox <SANDBOX>          Sandbox local command execution: 'on' or 'off' (default 'on') [default: on] [possible values: on, off]
       --network <NETWORK>          Outbound network mode: 'on' or 'off' (default 'on') [possible values: on, off]
       --allow-read <ALLOW_READ>    Let sandboxed commands read this path despite credential deny-list (repeatable)
+      --no-path-check              Start even if the task names paths outside the workspace and --allow-read
+      --no-claim-check             Skip the model claim check on report.md for research runs
       --pass-env <PASS_ENV>        Pass this environment variable to commands (repeatable)
   -h, --help                       Print help
 ```
@@ -161,6 +174,7 @@ Options:
       --diff               
       --verdict <VERDICT>  [possible values: accepted, fixed, redone]
       --notes <TEXT>       
+      --model-review       Ask the implementer model for a first review of the diff against the task (trial)
   -h, --help               Print help
 ```
 
@@ -204,61 +218,19 @@ Worktrees outside the repository whose branch is merged and working directory is
 ## blyte skill install
 
 ```text
-A lean coding-agent harness with a sealed verification gate
+Install the Claude Code skill
 
-Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
-
-Commands:
-  dashboard  Serve a local dashboard of running and recent jobs
-  dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
-  review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
-  clean      Remove finished worktrees and merged branches
-  skill      Install or print the Claude Code skill for the plan, delegate, review workflow
-  update     Replace this binary with the latest release (the old one is kept as blyte.prev)
-  help       Print this message or the help of the given subcommand(s)
-
-Arguments:
-  [PROMPT]  Direct task prompt to run in single-shot / headless mode
+Usage: blyte skill install [OPTIONS]
 
 Options:
-  -g, --gate <GATE>
-          Verification gate command (e.g. 'pytest', 'cargo test'). Several steps may be given one per line: every step runs and all failures are reported together
-      --context <CONTEXT>
-          Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget) [default: folded] [possible values: conversational, folded]
-  -m, --model <MODEL>
-          Model identifier or provider selection
-      --container <CONTAINER>
-          Run inside an isolated container workspace instead of local host
-      --max-turns <MAX_TURNS>
-          Maximum turn budget [default: 25]
-      --max-gates <MAX_GATES>
-          Maximum verification gate attempts before failing [default: 5]
-      --rollback[=<ROLLBACK>]
-          Enable automatic rollback to baseline git commit if gate fails (disable with --rollback=false) [default: true] [possible values: true, false]
-      --container-workdir <CONTAINER_WORKDIR>
-          Working directory inside the container when --container is set [default: /workspace]
-      --max-seconds <MAX_SECONDS>
-          Wall-clock budget in seconds; the run stops itself and reports when it is spent
-      --max-cost <MAX_COST_USD>
-          Maximum spend in USD; the run stops before a model call once reached
-      --report <REPORT>
-          Write a JSON run report to this path when the headless run exits
-      --fold-budget <FOLD_BUDGET>
-          Approximate token budget for the verbatim tail before folding (folded context; default 48000)
-      --sandbox <SANDBOX>
-          Sandbox the commands blyte runs on this machine (macOS Seatbelt, Linux Landlock): 'on' or 'off' [default: on] [possible values: on, off]
-      --network <NETWORK>
-          Let commands blyte runs connect out: 'on' or 'off' (default 'on'). 'off' needs the sandbox [default: on] [possible values: on, off]
-      --allow-read <ALLOW_READ>
-          Let sandboxed commands read this path despite the credential deny-list (repeatable)
-      --pass-env <PASS_ENV>
-          Pass this environment variable to commands even though it looks like a credential (repeatable)
-      --read-root <DIR>
-          Directory allowed for reading with the read and grep tools (repeatable)
-  -h, --help
-          Print help
-  -V, --version
-          Print version
+      --project            Install to repository instead of personal ~/.claude
+      --force              Overwrite even if existing skill was modified
+      --no-default         Install the skill without making blyte the default in CLAUDE.md
+      --no-statusline      Do not set Claude Code's status line
+      --no-autocompact     Do not set Claude Code's auto-compact window
+      --harness <HARNESS>  Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all [default: claude] [possible values: claude, codex, all]
+      --model <ID>         Default implementer model to write to the env file
+  -h, --help               Print help
 ```
 
 If an older, separate `blyte-research` skill directory exists (`~/.claude/skills/blyte-research`, `~/.codex/skills/blyte-research`, or `~/.agents/skills/blyte-research`), `blyte skill install` warns on stderr that it is superseded by the `blyte-implementer` skill's research section (default 300 turns) and should be removed (`rm -r <path>`).
@@ -266,61 +238,14 @@ If an older, separate `blyte-research` skill directory exists (`~/.claude/skills
 ## blyte skill uninstall
 
 ```text
-A lean coding-agent harness with a sealed verification gate
+Remove the skill and the CLAUDE.md block
 
-Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
-
-Commands:
-  dashboard  Serve a local dashboard of running and recent jobs
-  dispatch   Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
-  review     Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
-  clean      Remove finished worktrees and merged branches
-  skill      Install or print the Claude Code skill for the plan, delegate, review workflow
-  update     Replace this binary with the latest release (the old one is kept as blyte.prev)
-  help       Print this message or the help of the given subcommand(s)
-
-Arguments:
-  [PROMPT]  Direct task prompt to run in single-shot / headless mode
+Usage: blyte skill uninstall [OPTIONS]
 
 Options:
-  -g, --gate <GATE>
-          Verification gate command (e.g. 'pytest', 'cargo test'). Several steps may be given one per line: every step runs and all failures are reported together
-      --context <CONTEXT>
-          Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget) [default: folded] [possible values: conversational, folded]
-  -m, --model <MODEL>
-          Model identifier or provider selection
-      --container <CONTAINER>
-          Run inside an isolated container workspace instead of local host
-      --max-turns <MAX_TURNS>
-          Maximum turn budget [default: 25]
-      --max-gates <MAX_GATES>
-          Maximum verification gate attempts before failing [default: 5]
-      --rollback[=<ROLLBACK>]
-          Enable automatic rollback to baseline git commit if gate fails (disable with --rollback=false) [default: true] [possible values: true, false]
-      --container-workdir <CONTAINER_WORKDIR>
-          Working directory inside the container when --container is set [default: /workspace]
-      --max-seconds <MAX_SECONDS>
-          Wall-clock budget in seconds; the run stops itself and reports when it is spent
-      --max-cost <MAX_COST_USD>
-          Maximum spend in USD; the run stops before a model call once reached
-      --report <REPORT>
-          Write a JSON run report to this path when the headless run exits
-      --fold-budget <FOLD_BUDGET>
-          Approximate token budget for the verbatim tail before folding (folded context; default 48000)
-      --sandbox <SANDBOX>
-          Sandbox the commands blyte runs on this machine (macOS Seatbelt, Linux Landlock): 'on' or 'off' [default: on] [possible values: on, off]
-      --network <NETWORK>
-          Let commands blyte runs connect out: 'on' or 'off' (default 'on'). 'off' needs the sandbox [default: on] [possible values: on, off]
-      --allow-read <ALLOW_READ>
-          Let sandboxed commands read this path despite the credential deny-list (repeatable)
-      --pass-env <PASS_ENV>
-          Pass this environment variable to commands even though it looks like a credential (repeatable)
-      --read-root <DIR>
-          Directory allowed for reading with the read and grep tools (repeatable)
-  -h, --help
-          Print help
-  -V, --version
-          Print version
+      --project            Remove from repository instead of personal ~/.claude
+      --harness <HARNESS>  Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all [default: claude] [possible values: claude, codex, all]
+  -h, --help               Print help
 ```
 
 ## blyte update
@@ -342,6 +267,90 @@ signed in with access to the repository), checks that it runs, keeps the old bin
 Like `blyte skill install`, it also checks for a superseded `blyte-research` skill directory and
 warns on stderr to remove it.
 
+## blyte status
+
+```text
+Show what a dispatch is doing
+
+Usage: blyte status [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## blyte wait
+
+```text
+Wait until dispatched runs finish (all of them, or the first with --any) and print one line per finished run
+
+Usage: blyte wait [OPTIONS] <IDS>...
+
+Arguments:
+  <IDS>...  Run ids, as given to `blyte dispatch`
+
+Options:
+      --any                Return as soon as at least one run has finished
+      --timeout <TIMEOUT>  Give up after this many seconds (exit 2); stays under the 300 s shell-command limit [default: 280]
+  -h, --help               Print help
+```
+
+## blyte plan
+
+```text
+List a plan's tasks with their state and the command to dispatch each ready one
+
+Usage: blyte plan [OPTIONS] <PLAN>
+
+Arguments:
+  <PLAN>  Path to the plan markdown file
+
+Options:
+      --json  Output task statuses as JSON
+  -h, --help  Print help
+```
+
+## blyte cost
+
+```text
+Show orchestrator and implementer costs
+
+Usage: blyte cost [OPTIONS]
+
+Options:
+      --session <ID>       Session identifier to filter by
+      --since <UNIX_SECS>  Filter runs at or after this Unix timestamp in seconds
+      --repo <PATH>        Repository path to filter by
+      --json               Output totals as JSON
+  -h, --help               Print help
+```
+
+## blyte statusline
+
+```text
+Print Claude Code's status line with blyte costs
+
+Usage: blyte statusline [OPTIONS]
+
+Options:
+      --after <COMMAND>  Command to generate the base line before appending blyte costs
+  -h, --help             Print help
+```
+
+## blyte skill print
+
+```text
+Print the skill markdown to stdout
+
+Usage: blyte skill print
+
+Options:
+  -h, --help  Print help
+```
+
 ## Environment
 
 | variable | meaning |
@@ -350,5 +359,13 @@ warns on stderr to remove it.
 | `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENROUTER_API_KEY`, `OLLAMA_HOST`, `OLLAMA_API_KEY` | provider credentials and endpoints; never passed to commands |
 | `GOOGLE_CLOUD_PROJECT`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_CLOUD_LOCATION` | project and location for Vertex AI models (`vertex/<model>`); never passed to commands |
 | `CODEX_HOME` | where the ChatGPT provider looks for `auth.json` (default `~/.codex`) |
+| `GOOGLE_API_KEY` | read for Gemini when `GEMINI_API_KEY` is not set; never passed to commands |
+| `BLYTE_ENV_FILE` | the file provider keys are loaded from (default `~/.config/blyte/env`); empty turns loading off |
+| `BLYTE_MODEL_TIMEOUT_SECS` | limit for one model call: 180 s by default, 1800 s for a streamed Gemini call |
+| `BLYTE_MODEL_IDLE_TIMEOUT_SECS` | how long a streamed Gemini call may stay silent before it fails (default 300 s) |
+| `BLYTE_GEMINI_THOUGHT_SUMMARIES` | `0` turns off Gemini's thought summaries |
+| `BLYTE_GATE_SLOTS` | how many gates may run at once on the machine (default a quarter of the cores, at least 2) |
+| `BLYTE_STATE_DIR` | where blyte keeps its state, such as the list of repositories the dashboard reads (default `$XDG_STATE_HOME/blyte` or `~/.local/state/blyte`) |
+| `BLYTE_NO_UPDATE_CHECK` | `1` turns off the check for a newer release |
 
 Models prefixed with `vertex/` (such as `vertex/gemini-4-argon`) reach Gemini through Vertex AI using Google Cloud Application Default Credentials instead of an API key. Authenticate by running `gcloud auth application-default login`. The cloud project is read from `GOOGLE_CLOUD_PROJECT` (or `CLOUDSDK_CORE_PROJECT`), and the location from `GOOGLE_CLOUD_LOCATION` (default `global`).

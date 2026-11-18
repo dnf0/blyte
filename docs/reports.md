@@ -2,7 +2,8 @@
 
 `--report path.json` writes one JSON object when a headless run exits, on every outcome, including
 an error before the first turn. Every field is always written: a zero is a measurement, and a
-missing key would be a bug. `schema_version` changes only when a field changes meaning or is
+missing key would be a bug. The exceptions are the research fields `quote_problems`, `claim_check` and
+`claim_check_skipped`, and a turn's `failed_attempts`, which are left out when there is nothing to record. `schema_version` changes only when a field changes meaning or is
 removed; new fields are added without a bump.
 
 ```json
@@ -56,7 +57,7 @@ removed; new fields are added without a bump.
 | field | meaning |
 |---|---|
 | `harness_build` | the commit blyte was built from |
-| `outcome` | `verified`, `budget_exhausted`, `gate_failed`, `blocked` or `error` |
+| `outcome` | `verified`, `finished` (an ungated run that stopped by itself), `budget_exhausted`, `gate_failed`, `blocked` or `error` |
 | `error` | the error message for an `error` or `blocked` outcome, else `null` |
 | `model_requested` / `model_id` | the `--model` given, and what the provider actually called |
 | `effort` | the effort level when the model supports it, else `null` |
@@ -75,13 +76,20 @@ removed; new fields are added without a bump.
 | `gate_turns` | the turn on which each gate attempt ran, in order (one entry per gate attempt) |
 | `rollbacks` | times the tree was reset after a failed gate |
 | `provider_retries` | transient provider errors waited out |
+| `gate_wait_ms` | time spent waiting for a machine-wide gate slot on each attempt, in order (0 when a slot was free) |
+| `gate_left_out` | dispatch only: the gate steps `blyte.toml` records as left out, each with its reason |
+| `truncated_turns` | turns whose reply hit the output token limit and was cut off |
+| `big_read_turns` | turns whose tool output was more than half of the fold budget |
+| `read_loop`, `peak_read_repeats` | whether the run stopped because it kept repeating `read`, `grep` and `glob` calls without changing the workspace, and the most repeats seen between two changes |
+| `fold_thrash` | whether the run stopped because consecutive turns kept folding the previous turn's results |
+| `stalled` | whether a fix run stopped because it made no change and kept calling tools |
 
 **Cost and time**
 
 | field | meaning |
 |---|---|
 | `usage` | tokens over the run: fresh `input`, `cached` input, `output`, `thinking` |
-| `turn_usage` | the same per call, with the prompt's size and how much of it was new |
+| `turn_usage` | the same per call (`turn`, `input`, `cached`, `output`, `thinking`), with the prompt's size (`prompt_messages`), whether it was the previous prompt plus new messages (`appended`) and how much was new (`new_chars`), the fold budget in force, and timings: `model_ms` (the model call, retries included), `tools_ms` (running the tool calls), `first_data_ms` and `max_gap_ms` (time to the first streamed data and the longest silence; `null` and 0 when the provider does not stream) |
 | `cost_usd` | list-price cost, or `null` when the model's price is unknown |
 | `max_cost_usd`, `cost_capped` | the `--max-cost` cap, and whether the run stopped at it |
 | `fold_budget` | the `--fold-budget` given, if any |

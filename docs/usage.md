@@ -272,6 +272,9 @@ saves what it flagged to `<root>/.wt/<id>.checks.json` (`ts`, `flags` as printed
 finding with its file, line and pattern), so flags can be counted against verdicts after `blyte clean` has
 removed the worktree.
 
+`blyte review <id> --model-review` (a trial) asks the implementer model for a first review of the diff
+against the task. It cannot be combined with `--verdict`: the verdict is yours.
+
 ### Listing plan tasks (`blyte plan`)
 
 ```bash
@@ -356,6 +359,11 @@ except `write` and `edit` is closed until `report.md` has changed. If the run do
 `verified`, the copies of its report (`.wt/<id>.report.md` and `--report-to`) start with a
 `> **Not verified.**` line naming the outcome, so an unfinished draft cannot pass for a finished
 report.
+
+To quote code without retyping it, the model writes `<<quote /absolute/path:N-M>>` (or `:N` for one
+line) alone on a line of `report.md`. blyte replaces it with a citation and a fenced block holding those
+lines (at most 200 per directive), so the quote is exact. A directive that cannot be expanded stays in
+the text and is reported.
 
 A failed check is a failed gate: the model gets the list of mismatches and fixes the report. After
 the quote check passes, blyte also runs a model claim check on `report.md` (unless

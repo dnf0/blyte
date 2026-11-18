@@ -60,7 +60,7 @@ Kept for about the last four weeks; older items are in the git history and the e
     waiting), with the selected task's details, the plan's activity and decisions, all from files
     blyte already writes (`/api/plans`). `blyte dispatch --plan/--plan-task` links a dispatch to its
     plan task; older dispatches are matched by tag, task text and their `Plan:` line.
-  - Research runs read the repository with the `read` and `grep` tools, default to 300 turns, and
+  - Research runs read the repository with the `read`, `grep` and `glob` tools, default to 300 turns, and
     keep their report current; every run is warned ten turns before its turn budget ends.
   - `blyte dispatch --research`: read-only research as a dispatch (a scratch workspace under `.wt/`,
     gate "report.md written", the report copied beside the run), so it gets the registry, status,
@@ -136,33 +136,16 @@ Kept for about the last four weeks; older items are in the git history and the e
   blyte-eval #93; rerunning the Codex + blyte against Claude Code + blyte comparison is parked
   (2026-10-02): the failures were likely down to the Codex subscription level.
 
-- **Open-sourcing blyte** and a brief for the decision: on hold until the information gathering ends.
-- **Docs hosting:** GitHub Pages, deployed by a workflow on merge to `main` (MkDocs Material builds
-  already run in CI), at `<user>.github.io/blyte`. A custom domain (about $10-50 a year; no reliable
-  free one) keeps links stable if the repository moves; a free `*.github.io` address is fine to start.
-- **Publishing (prepared 2026-10-02):** internal names are out of the files that will be public, and
-  `test_public_names` keeps them out: it fails on any internal name outside its allow-list, which now
-  holds only the publish-day items (the repository URL and the author/copyright holder). Internal
-  working notes (`docs/superpowers/`, ADRs 0001-0002) stay out of the public copy. On the day:
-  decide the copyright holder; change `Cargo.toml`'s `repository` (which `blyte update` follows) and the
-  allow-listed URLs to the public home; empty the allow-list and run the check; run a secrets scan;
-  publish a fresh repository as one squashed commit; then make a last release here with the new
-  `repository`, so existing installs move to the public releases on their next `blyte update`.
-- **Transfer to the author's personal GitHub account (end of October 2026; agreed verbally, the
-  transfer done by the person who agreed it).** Before: get the agreement in writing, including who
-  holds the copyright; decide how CI runs while the repository is private on a personal account (free
-  accounts get 2,000 Actions minutes a month for private repositories and macOS minutes count ten
-  times; drop the macOS job, upgrade, or publish soon). After: add collaborators (access through the
-  organisation ends); check repository secrets and branch protection came across; change
-  `Cargo.toml`'s `repository` and the allow-listed URLs to the new home (GitHub redirects the old URLs
-  meanwhile, including the API calls `blyte update` makes, until a repository is created at the old
-  address); cut a release so installs pick up the new home. The transferred repository keeps its full
-  history, so it stays private; the public release is still a fresh, squashed repository (above).
-- **When open source is approved** (these need a public repository and a crates.io release):
+- **Open-sourcing blyte:** done. The repository is public at `github.com/dnf0/blyte` and every release
+  publishes the crates to crates.io. `test_public_names` still fails on any internal name
+  in the files.
+- **Docs hosting:** done. GitHub Pages serves the docs at <https://dnf0.github.io/blyte/>, deployed by a
+  workflow on merge to `main`. Still open: a custom domain (about USD 10-50 a year), which would keep
+  links stable if the repository moves.
+- **Still open now that the repository is public:**
   - `blyte update` updates the way blyte was installed: `cargo install blyte --locked` (or
     `cargo binstall blyte`) for a cargo install, detected from `~/.cargo/.crates2.json`, and the
     release binary over plain HTTPS otherwise, with no GitHub CLI needed. Today it always downloads
     the release binary through `gh`.
-  - Publish the crates to crates.io (done: every release publishes them from `release-on-merge.yml`).
   - Contributions: a DCO sign-off or a CLA, decided before accepting outside
     pull requests.

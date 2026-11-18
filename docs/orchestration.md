@@ -125,10 +125,13 @@ there with rollback off, and prints one JSON object. From a real run of the task
 | `verified` | the gate passed and something was committed | 0 |
 | `no_changes` | the gate passed on an untouched tree: not done | 4 |
 | `gate_failed`, `budget_exhausted`, `error` | see `gate_failures`, `error` and the log | 1 |
+| `blocked` | the gate already fails at the base commit, or `setup` failed: fix that first | 5 |
+
+Exit 2 means the dispatch never started (bad arguments, no gate, not a git repository).
 
 The summary also names the `log` (`.wt/T1.log`) and the full [run report](reports.md).
 Budgets and sandbox flags (`--max-seconds`, `--max-turns`, `--max-cost`, `--model`, `--network`,
-`--allow-read`, `--pass-env`) pass through to the run; `.wt/` is added to `.git/info/exclude`, so
+`--sandbox`, `--allow-read`, `--pass-env`, `--fold-budget`) pass through to the run; `.wt/` is added to `.git/info/exclude`, so
 no tracked file changes.
 
 **3. Check it:**

@@ -147,7 +147,7 @@ run it with escalated permissions too, or leave the merge to the user. If `blyte
 run, stop and say why; do not implement the change yourself.
 
 Each dispatch prints one JSON object: `outcome` (`verified`, `no_changes`, `gate_failed`,
-`budget_exhausted`, `error`), `exit` (0 only for `verified`), `commits`, `changed_files`,
+`budget_exhausted`, `blocked`, `error`), `exit` (0 only for `verified`), `commits`, `changed_files`,
 `final_message` (blyte's own report), `gate_failures`, `turns`, `cost_usd`, `seconds`, and the
 `log` and `report` paths. `no_changes` means the gate passed on an untouched tree: not done.
 

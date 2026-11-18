@@ -31,7 +31,7 @@ versions; `--rollback` restores the previous build, kept as `blyte.prev`). `blyt
 blyte's model does the implementation, so pick one that follows instructions well. `blyte skill
 install` asks for your default model (`gemini-4-argon` recommended, `gemini-3.8-flash-high` built-in
 default, or any model id) and writes `BLYTE_MODEL` to `~/.config/blyte/env` (or pass `blyte skill
-install --model <id>`):
+install --model <id>`); for an Argon model it also writes `BLYTE_MODEL_TIMEOUT_SECS=600`:
 
 ```bash
 export GEMINI_API_KEY=...
@@ -71,11 +71,12 @@ In an interactive terminal, `blyte skill install` asks for the default implement
 `BLYTE_MODEL` is not yet in `~/.config/blyte/env`; pass `--model <id>` to set `BLYTE_MODEL` without
 asking. Installing also adds a short, marked block to `CLAUDE.md` (`~/.claude/CLAUDE.md`, or the
 repository's with `--project`) that makes blyte Claude Code's default implementer, with
-independent tasks dispatched in parallel. Pass `--no-default` to skip it. For a global Claude Code
+independent tasks dispatched in parallel. Pass `--no-default` to skip it. A global install adds a
+second marked block with rules for keeping a session's context small. For a global Claude Code
 install, `blyte skill install` also updates `~/.claude/settings.json` (backing up the original once
 to `settings.json.blyte-backup`) to set the status line (`--no-statusline` skips this) and to set
 `autoCompactWindow` to `200000` unless an auto-compact window is already set (`--no-autocompact`
-skips this). `blyte skill uninstall` removes the skill, the `CLAUDE.md` block, the status line, and
+skips this). `blyte skill uninstall` removes the skill, both `CLAUDE.md` blocks, the status line, and
 `autoCompactWindow` if blyte set it and it is still `200000`. The skill always matches the
 installed blyte; after upgrading blyte, run `blyte skill install --force` to refresh it. Make sure
 the repository has a check command that proves a change is right: your tests, plus formatting and
@@ -114,7 +115,8 @@ It works until the gate exits 0 or a budget runs out:
 | exit | meaning |
 |---|---|
 | `0` | verified: the gate passed (ungated: the model said it was finished) |
-| `1` | the gate failed, a budget ran out, or an error stopped the run |
+| `1` | the gate failed, a budget ran out, the gate already failed before the run changed anything (`blocked`), or an error stopped the run |
+| `2` | invalid arguments or environment (for example, not a git repository) |
 
 !!! warning "Start from a clean tree"
     By default a failed gate resets the tree to the commit the run started from, discarding
@@ -129,6 +131,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test'
 ```
 
-`blyte` with no prompt starts a REPL (`/help`, `/model`, `/gate`, `/state`, `/diff`,
-`/workspace`, `/clear`, `/exit`). Every flag is on [Running tasks](usage.md) and
+`blyte` with no prompt starts a REPL (`/help`, `/model`, `/cost`, `/gate`, `/state`, `/diff`,
+`/clear`, `/exit`). Every flag is on [Running tasks](usage.md) and
 [CLI flags](reference/cli.md).

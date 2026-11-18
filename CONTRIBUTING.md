@@ -19,7 +19,7 @@ the same version. To move to a newer Rust, change it there and in every `toolcha
 
 ## The checks
 
-These are exactly what CI runs. A change is ready when all three pass:
+These are the checks CI runs on the code, on macOS and Linux. A change is ready when all three pass:
 
 ```bash
 cargo fmt --all --check
@@ -63,7 +63,9 @@ uvx --with mkdocs-material mkdocs build --strict
 ## Commits and pull requests
 
 - [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`,
-  `refactor:`, `chore:`, `test:`. The PR title is checked in CI.
+  `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`. The PR title is checked
+  in CI. CI also checks dependency licences (`cargo deny check licenses`) and builds the documentation
+  site.
 - One logical change per PR. Say what changed, why, and how you verified it.
 - Update the docs (`docs/`, `README.md`) in the same PR when behaviour or flags change.
 
@@ -94,5 +96,5 @@ squash-merge title is the commit message, so the pull request title decides the 
 bumps the minor version, `fix:`, `refactor:` and `perf:` the patch, and a breaking change (`!` or a
 `BREAKING CHANGE:` footer) the minor while the version is 0.x; `docs:`, `ci:`, `chore:`, `test:` and
 `style:` do not release. The workflow updates the version and `CHANGELOG.md` through a
-`chore(release): vX.Y.Z` pull request, tags `vX.Y.Z`, publishes the GitHub release and attaches the
-static binaries. The rules are in `.cz.toml` (commitizen).
+`chore(release): vX.Y.Z` pull request, tags `vX.Y.Z`, publishes the GitHub release, attaches the
+static binaries and publishes the crates to crates.io. The rules are in `.cz.toml` (commitizen).
