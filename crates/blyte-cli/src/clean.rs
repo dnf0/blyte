@@ -63,6 +63,7 @@ pub enum KeptReason {
     CannotCheckInUse(String),
     UsedRecently(u64),
     HoldsRuns(String),
+    UnreadableStartRecord(String),
     Custom(String),
 }
 
@@ -81,6 +82,7 @@ impl std::fmt::Display for KeptReason {
             }
             Self::UsedRecently(d) => write!(f, "used in the last {d} days"),
             Self::HoldsRuns(path) => write!(f, "holds runs: review them from {path}"),
+            Self::UnreadableStartRecord(reason) => write!(f, "unreadable start record: {reason}"),
             Self::Custom(s) => write!(f, "{s}"),
         }
     }
@@ -438,6 +440,24 @@ fn check_history_merged(
     }
 
     false
+}
+
+/// Reads `.wt/<id>.start.json` from disk now.
+///
+/// A missing file is `Ok(None)`. A read error, or content that is not a JSON object
+/// (including an empty or half-written file), is an error naming the path and the reason.
+pub fn read_start_record(root: &Path, id: &str) -> Result<Option<serde_json::Value>, String> {
+    let path = root.join(".wt").join(format!("{id}.start.json"));
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(value) if value.is_object() => Ok(Some(value)),
+        Ok(_) => Err(format!("{}: not a JSON object", path.display())),
+        Err(err) => Err(format!("{}: {err}", path.display())),
+    }
 }
 
 /// Context for cleaning a repository, caching metadata to avoid redundant git calls and disk reads.
@@ -1044,6 +1064,15 @@ impl<'a> CleanContext<'a> {
         let verdict_path = wt_dir.join(format!("{id}.verdict.json"));
         let report_path = wt_dir.join(format!("{id}.report.md"));
 
+        match read_start_record(self.root, id) {
+            Err(reason) => return Err(KeptReason::UnreadableStartRecord(reason)),
+            Ok(Some(value)) => {
+                self.start_files.insert(id.to_string(), value);
+            }
+            Ok(None) => {
+                self.start_files.remove(id);
+            }
+        }
         let start_json = self.start_files.get(id);
         let summary_exists = summary_path.is_file();
 
@@ -1943,6 +1972,13 @@ pub fn clean_repo_with_options(
                             }
                             continue;
                         }
+                    }
+
+                    if let Err(reason) = ctx.check_removable(&id, older_than_days) {
+                        if !quiet {
+                            println!("kept .wt/{id} ({reason})");
+                        }
+                        continue;
                     }
 
                     let removed_ok = if is_res {

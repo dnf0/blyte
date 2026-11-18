@@ -16,6 +16,21 @@ pub const DISPATCH_RULES: &str = r#"Rules:
 - Do not run the full test suite or the whole check yourself, not before you start and not while you work: the gate runs it when you stop, and each extra run costs minutes. Run the tests for the code you change.
 - Finish with a short report: what you changed, what you ran, and anything that deviated from the task."#;
 
+/// Writes a start record as pretty JSON plus a newline, through a temporary file renamed
+/// into place, so a concurrent reader never sees a partly written file.
+pub fn write_start_record(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    let mut json = serde_json::to_string_pretty(value).map_err(std::io::Error::other)?;
+    json.push('\n');
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = std::path::PathBuf::from(tmp_name);
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(&tmp_path, path)
+}
+
 pub fn wrap_task(task: &str) -> String {
     format!(
         "You are implementing exactly one task. Your working directory is a git worktree on its own branch; work only there.\n\n{}\n\n{}",
@@ -904,8 +919,11 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             .collect::<Vec<_>>());
     }
     let start_path = wt_parent.join(format!("{}.start.json", args.id));
-    if let Ok(json_str) = serde_json::to_string_pretty(&start_json) {
-        let _ = std::fs::write(&start_path, json_str + "\n");
+    if let Err(err) = write_start_record(&start_path, &start_json) {
+        eprintln!(
+            "error: could not write the start record {}: {err}",
+            start_path.display()
+        );
     }
 
     let _ = child.wait();
