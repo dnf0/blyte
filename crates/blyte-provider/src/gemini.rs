@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use crate::{
+    Message, ModelInfo, Provider, ProviderError, Request, Response, StreamTiming, ToolCall, Usage,
+};
 
 /// High effort: every measured run (the A/B pairs and the evals, 2026-09) used `-high`.
 const DEFAULT_MODEL: &str = "gemini-3.8-flash-high";
@@ -181,12 +183,26 @@ fn thought_summaries_from_env() -> bool {
     )
 }
 
+fn duration_ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Timing of a call that failed before any data was read.
+fn no_data_timing(started: Instant) -> StreamTiming {
+    StreamTiming {
+        first_data_ms: None,
+        max_gap_ms: duration_ms(started.elapsed()),
+        data_events: 0,
+    }
+}
+
 pub struct Gemini {
     auth: Auth,
     api_root: String,
     model: String,
     thinking_level: Option<String>,
     thought_summaries: bool,
+    last_timing: Mutex<Option<StreamTiming>>,
 }
 
 impl Gemini {
@@ -203,6 +219,7 @@ impl Gemini {
             model,
             thinking_level,
             thought_summaries: thought_summaries_from_env(),
+            last_timing: Mutex::new(None),
         })
     }
 
@@ -240,6 +257,7 @@ impl Gemini {
             model,
             thinking_level,
             thought_summaries: thought_summaries_from_env(),
+            last_timing: Mutex::new(None),
         })
     }
 
@@ -252,6 +270,7 @@ impl Gemini {
             model,
             thinking_level,
             thought_summaries: true,
+            last_timing: Mutex::new(None),
         }
     }
 
@@ -264,6 +283,7 @@ impl Gemini {
             model,
             thinking_level,
             thought_summaries: true,
+            last_timing: Mutex::new(None),
         }
     }
 
@@ -555,9 +575,35 @@ impl Gemini {
     /// Read an SSE stream from `:streamGenerateContent?alt=sse`, merge the chunks into a single
     /// `generateContent`-shaped JSON value, and parse it with [`Self::parse`].
     pub fn parse_stream<R: std::io::BufRead>(
+        reader: R,
+        cap: Duration,
+        started: Instant,
+    ) -> Result<Response, ProviderError> {
+        Self::parse_stream_timed(reader, cap, started, &mut StreamTiming::default())
+    }
+
+    /// As [`Self::parse_stream`], and fills `timing` with when the data arrived. `timing` is
+    /// complete on every return path, including errors: the trailing silence (from the last data
+    /// event, or from `started`, to the end of the stream) is added after the read loop returns.
+    pub fn parse_stream_timed<R: std::io::BufRead>(
+        reader: R,
+        cap: Duration,
+        started: Instant,
+        timing: &mut StreamTiming,
+    ) -> Result<Response, ProviderError> {
+        let mut last_data = started;
+        let result = Self::read_stream(reader, cap, started, timing, &mut last_data);
+        let trailing = duration_ms(last_data.elapsed());
+        timing.max_gap_ms = timing.max_gap_ms.max(trailing);
+        result
+    }
+
+    fn read_stream<R: std::io::BufRead>(
         mut reader: R,
         cap: Duration,
         started: Instant,
+        timing: &mut StreamTiming,
+        last_data: &mut Instant,
     ) -> Result<Response, ProviderError> {
         let mut merged_parts: Vec<Value> = Vec::new();
         let mut finish_reason: Option<Value> = None;
@@ -609,6 +655,15 @@ impl Gemini {
             let Some(rest) = trimmed.strip_prefix("data:") else {
                 continue;
             };
+            let now = Instant::now();
+            timing.first_data_ms = timing
+                .first_data_ms
+                .or(Some(duration_ms(now.duration_since(started))));
+            timing.max_gap_ms = timing
+                .max_gap_ms
+                .max(duration_ms(now.duration_since(*last_data)));
+            timing.data_events = timing.data_events.saturating_add(1);
+            *last_data = now;
             let data = rest.trim();
             if data.is_empty() || data == "[DONE]" {
                 continue;
@@ -802,8 +857,13 @@ impl Gemini {
     }
 }
 
-impl Provider for Gemini {
-    fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+impl Gemini {
+    /// One streaming call. `timing` is set once the call has been sent, on success and on error.
+    fn complete_timed(
+        &self,
+        req: &Request,
+        timing: &mut Option<StreamTiming>,
+    ) -> Result<Response, ProviderError> {
         let url = self.endpoint_url();
         let agent = crate::streaming_http_client_for(req.timeout);
         let body = self.body(req);
@@ -829,6 +889,7 @@ impl Provider for Gemini {
                 if let Err(ureq::Error::Status(401, _)) = &resp {
                     if let Some(t) = req.timeout {
                         if started.elapsed() >= t {
+                            *timing = Some(no_data_timing(started));
                             return Err(ProviderError::Transport(format!(
                                 "request reached its time limit of {t:?} (timed out)"
                             )));
@@ -839,6 +900,7 @@ impl Provider for Gemini {
                     if let Some(t) = req.timeout {
                         let elapsed = started.elapsed();
                         if elapsed >= t {
+                            *timing = Some(no_data_timing(started));
                             return Err(ProviderError::Transport(format!(
                                 "request reached its time limit of {t:?} (timed out)"
                             )));
@@ -869,15 +931,38 @@ impl Provider for Gemini {
         let result = match resp {
             Ok(r) => {
                 let reader = std::io::BufReader::new(r.into_reader());
-                Self::parse_stream(reader, cap, started)
+                let mut call_timing = StreamTiming::default();
+                let parsed = Self::parse_stream_timed(reader, cap, started, &mut call_timing);
+                *timing = Some(call_timing);
+                parsed
             }
-            Err(ureq::Error::Status(status, r)) => Err(ProviderError::Api {
-                status,
-                body: r.into_string().unwrap_or_default(),
-            }),
-            Err(e) => Err(ProviderError::Transport(e.to_string())),
+            Err(ureq::Error::Status(status, r)) => {
+                *timing = Some(no_data_timing(started));
+                Err(ProviderError::Api {
+                    status,
+                    body: r.into_string().unwrap_or_default(),
+                })
+            }
+            Err(e) => {
+                *timing = Some(no_data_timing(started));
+                Err(ProviderError::Transport(e.to_string()))
+            }
         };
         result.map_err(|e| crate::with_request_timeout_message(e, req.timeout, started))
+    }
+}
+
+impl Provider for Gemini {
+    fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        *self.last_timing.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let mut timing = None;
+        let result = self.complete_timed(req, &mut timing);
+        *self.last_timing.lock().unwrap_or_else(|e| e.into_inner()) = timing;
+        result
+    }
+
+    fn last_stream_timing(&self) -> Option<StreamTiming> {
+        *self.last_timing.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn model_id(&self) -> String {
