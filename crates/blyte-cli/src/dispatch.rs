@@ -1641,11 +1641,7 @@ fn is_host_command(cmd: &str) -> bool {
     }
 
     let names_outside = OUTSIDE_PATHS.iter().any(|path| cmd.contains(path));
-    if names_outside && changes_something(cmd) {
-        return true;
-    }
-
-    false
+    names_outside && changes_something(cmd)
 }
 
 pub fn host_commands(log: &str) -> Vec<String> {
