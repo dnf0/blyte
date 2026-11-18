@@ -366,11 +366,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         let missing = crate::research_brief::missing_sections(&task_content);
         if !missing.is_empty() {
             eprintln!(
-                "blyte: the research question has no section for: {}. Add each as a heading (the template: blyte dispatch {} --research), or --no-brief-check to start anyway.",
+                "blyte: warning: the research question has no section for: {}. Questions with all four run faster and fail less (the template: blyte dispatch {} --research); --no-brief-check hides this.",
                 missing.join(", "),
                 args.id
             );
-            return 2;
         }
         let unverified = crate::research_brief::unverified_inputs(&task_content, &root);
         if !unverified.is_empty() {

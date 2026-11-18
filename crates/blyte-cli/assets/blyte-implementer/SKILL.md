@@ -235,7 +235,7 @@ repository takes the full 30 minutes and often fails (measured 2026-11-18). So:
 - Build up in rounds. A second round takes the first round's reports as its starting point
   (`.wt/R1.report.md`, verified ones only) and asks only what crosses their boundaries. You combine
   the answers; do not ask one run to.
-- Every question has four headed sections, and dispatch refuses one without them
+- Every question has four headed sections, and dispatch warns about one without them
   (`blyte dispatch R1 --research` with no file prints the template):
   - `## Objective`: what you need to know and what you will do with the answer;
   - `## Start from`: the files or directories to read first, as absolute paths;

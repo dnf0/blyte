@@ -23,9 +23,13 @@ coordinator combines short, cited results.
 
 blyte gives guidance and applies deterministic guardrails. No extra model calls, no planner.
 
-1. **A brief is required.** A research question must have four headed sections: `Objective`,
-   `Start from`, `Out of scope`, `Answer format`. `blyte dispatch --research` stops with exit 2 and
-   names each missing section. `--no-brief-check` starts anyway.
+1. **A brief is asked for.** A research question should have four headed sections: `Objective`,
+   `Start from`, `Out of scope`, `Answer format`. `blyte dispatch --research` warns, naming each
+   missing section, and starts the run. `--no-brief-check` hides the warning. It is a warning, not a
+   refusal, because the format comes from Anthropic's write-up and has not been measured on blyte:
+   our data shows that narrow questions do better, not that these headings do. Revisit after about
+   20 runs, comparing time, cost and outcome for questions with and without the sections (each
+   run's question is kept at `.wt/<id>.task.md`).
 2. **A template.** `blyte dispatch <id> --research` with no question prints the template with the
    error, so the orchestrator can fill it in.
 3. **Unverified reports are not inputs.** When the question names a Markdown file that starts with
@@ -49,5 +53,6 @@ blyte gives guidance and applies deterministic guardrails. No extra model calls,
 
 ## No fallbacks
 
-Each check stops with an error that names what is missing. A flag in review is a prompt to the
+The unverified-report check stops with an error that names the file. The brief check is a warning by
+decision 1. A flag in review is a prompt to the
 reviewer, as the fallback flag is, and never changes the run's outcome.

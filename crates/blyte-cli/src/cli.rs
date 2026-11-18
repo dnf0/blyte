@@ -181,7 +181,7 @@ pub struct DispatchArgs {
     #[arg(long = "no-path-check")]
     pub no_path_check: bool,
 
-    /// Start a research run even if the question lacks the brief sections or names an unverified report
+    /// Research runs: no warning for missing brief sections, and allow a question that names an unverified report
     #[arg(long = "no-brief-check")]
     pub no_brief_check: bool,
 

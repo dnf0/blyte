@@ -341,12 +341,14 @@ fewer), run the parts in parallel, and give a second round the verified reports 
 blyte checks the question before it starts a research run:
 
 - **The brief.** The question needs four headed sections: `Objective`, `Start from`, `Out of scope`
-  and `Answer format` (any heading level; case does not matter). Dispatch stops with exit 2 and names
-  each missing section. `blyte dispatch <id> --research` with no question prints a template.
+  and `Answer format` (any heading level; case does not matter). Dispatch warns, naming each missing
+  section, and starts the run anyway: the format is borrowed from published practice and has not yet
+  been measured on blyte. `blyte dispatch <id> --research` with no question prints a template.
 - **Inputs.** A question that names a Markdown file starting with `> **Not verified.**` (a report from
   a run that did not pass) is refused, with the file's path.
 
-`--no-brief-check` starts the run anyway, for example to ask a run to check an unverified report.
+`--no-brief-check` hides the warning and allows the unverified report, for example to ask a run to
+check it.
 
 `blyte review` adds two flags for research runs, under `== checks`:
 

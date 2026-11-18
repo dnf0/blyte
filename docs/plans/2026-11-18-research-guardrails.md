@@ -271,3 +271,9 @@ which in the final message. Not a long-running job.
   three broad audits (R-DA, R-DB, R-DC) and 10 runs that ended `verified`. It is advice, not a failure.
 - `blyte review` needs the run's worktree, and a research run's worktree is removed once its report is
   copied out, so the flags show for a recent run only. Not changed here.
+
+## Changed after review (2026-11-18)
+
+The brief check warns instead of refusing (spec decision 1): Task RG3's refusal for missing sections
+became a warning, and its test 2 now asserts the warning and that the dispatch went on. The refusal
+for an unverified report is unchanged.

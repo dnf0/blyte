@@ -58,21 +58,20 @@ fn research_dispatch_without_a_question_prints_the_template() {
 }
 
 #[test]
-fn research_dispatch_names_missing_sections() {
+fn research_dispatch_warns_about_missing_sections_and_goes_on() {
     let r = repo();
     std::fs::write(r.path().join("q.md"), "## Objective\nFind out X.\n").unwrap();
     let out = blyte(
         r.path(),
         &["dispatch", "R1", "q.md", "--research", "--sandbox", "off"],
     );
-    assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("Start from, Out of scope, Answer format"),
+        stderr.contains("warning: the research question has no section for: Start from, Out of scope, Answer format"),
         "{stderr}"
     );
-    assert!(!r.path().join(".wt/R1.task.md").exists());
-    assert!(!r.path().join(".wt/R1").exists());
+    // A warning, not a refusal: the dispatch went on and saved the question.
+    assert!(r.path().join(".wt/R1.task.md").exists(), "{stderr}");
 }
 
 #[test]
