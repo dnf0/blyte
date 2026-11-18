@@ -754,16 +754,15 @@ impl<'a> Runner<'a> {
             }
         }
         let read = |p: &Path| self.fs.read(p);
-        problems.extend(research_check::check(
-            &report,
-            &research_check::Sources {
-                workspace: &self.root,
-                read_roots: &read_roots,
-                listing: &listing,
-                read: &read,
-            },
-        ));
+        let sources = research_check::Sources {
+            workspace: &self.root,
+            read_roots: &read_roots,
+            listing: &listing,
+            read: &read,
+        };
+        problems.extend(research_check::check(&report, &sources));
         problems.extend(research_check::unseen_names(&report, seen_names));
+        problems.extend(research_check::unseen_paths(&report, &sources, seen_names));
         problems
     }
 

@@ -147,6 +147,34 @@ fn path_re() -> &'static Regex {
     })
 }
 
+/// A slash-containing path in prose.
+fn prose_path_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(&format!(
+            r"(?:^|[\s`(\[])(/?(?:[\w.~-]+/)+(?:[\w.-]*\.[A-Za-z][A-Za-z0-9_]*|{BARE_NAMES}))(?:$|[\s`):,\].;])"
+        ))
+        .expect("prose path regex")
+    })
+}
+
+fn missing_or_new_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:new|create|creates|created|propose|proposed|missing|deleted|removed|renamed|absent)\b|does not exist|do not exist|no such file",
+        )
+        .expect("missing or new regex")
+    })
+}
+
+/// Every slash-containing file path in `text`, as written.
+pub fn paths(text: &str) -> impl Iterator<Item = &str> {
+    prose_path_re()
+        .captures_iter(text)
+        .map(|c| c.get(1).expect("path group").as_str())
+}
+
 fn lines_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)\blines?\s+(\d+)(?:\s*[-–]\s*(\d+))?").expect("lines regex"))
@@ -899,7 +927,7 @@ fn is_commit_like(tok: &str) -> bool {
 }
 
 /// Every `[A-Za-z_][A-Za-z0-9_]*` token of 3+ characters in `text`, plus every commit-like
-/// token (see `is_commit_like`) even when it starts with a digit.
+/// token (see `is_commit_like`) even when it starts with a digit, plus every path from [`paths`].
 pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|s| {
@@ -910,6 +938,7 @@ pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
                     .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
                     || is_commit_like(s))
         })
+        .chain(paths(text))
 }
 
 fn has_inner_capital(s: &str) -> bool {
@@ -974,7 +1003,7 @@ pub fn unseen_names(report: &str, seen: &HashSet<String>) -> Vec<String> {
         for span in inline_spans(line) {
             let bytes = span.as_bytes();
             for tok in identifiers(span) {
-                if tok.starts_with(|c: char| c.is_ascii_digit()) {
+                if tok.starts_with(|c: char| c.is_ascii_digit()) || tok.contains('/') {
                     continue;
                 }
                 let end = (tok.as_ptr() as usize - span.as_ptr() as usize) + tok.len();
@@ -1030,6 +1059,107 @@ fn unseen_commit_ids(lines: &[&str], seen: &HashSet<String>) -> Vec<String> {
                 ));
             }
         }
+    }
+    problems
+}
+
+fn opens_proposed_diff_or_patch(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let fence_char = if trimmed.starts_with("```") {
+        '`'
+    } else if trimmed.starts_with("~~~") {
+        '~'
+    } else {
+        return false;
+    };
+    let marker_len = trimmed.chars().take_while(|&c| c == fence_char).count();
+    let info = trimmed[marker_len..].trim();
+    let lang = info.split_whitespace().next().unwrap_or("");
+    lang.eq_ignore_ascii_case("proposed")
+        || lang.eq_ignore_ascii_case("diff")
+        || lang.eq_ignore_ascii_case("patch")
+}
+
+/// Source paths named in prose of `report` that neither resolve in `src` nor appear in `seen`.
+pub fn unseen_paths(report: &str, src: &Sources<'_>, seen: &HashSet<String>) -> Vec<String> {
+    let mut resolver = Resolver {
+        src,
+        cache: HashMap::new(),
+    };
+    let mut problems = Vec::new();
+    let mut reported: HashSet<String> = HashSet::new();
+    let lines: Vec<&str> = report.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        let fence = if trimmed.starts_with("```") {
+            "```"
+        } else if trimmed.starts_with("~~~") {
+            "~~~"
+        } else {
+            ""
+        };
+        if !fence.is_empty() {
+            let marker_len = trimmed
+                .chars()
+                .take_while(|&c| c == fence.chars().next().unwrap())
+                .count();
+            let close = fence.chars().next().unwrap().to_string().repeat(marker_len);
+            let mut end = i + 1;
+            while end < lines.len() && !lines[end].trim_start().starts_with(&close) {
+                end += 1;
+            }
+            i = end + 1;
+            continue;
+        }
+        let line_no = i + 1;
+        let line_cites = citations(line);
+        let said_missing_or_new = missing_or_new_re().is_match(line);
+        let next_is_proposed = lines[i + 1..]
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .is_some_and(|l| opens_proposed_diff_or_patch(l));
+        for raw_p in paths(line) {
+            let p = raw_p.strip_prefix("./").unwrap_or(raw_p);
+            let file_name = p.rsplit_once('/').map_or(p, |(_, f)| f);
+            let ext = file_name
+                .rsplit_once('.')
+                .map(|(_, e)| e.to_ascii_lowercase());
+            let is_code_ext = ext.is_some_and(|e| CODE_EXTENSIONS.contains(&e.as_str()));
+            let is_bare_name = BARE_NAMES.split('|').any(|b| b == file_name);
+            if !is_code_ext && !is_bare_name {
+                continue;
+            }
+            if p.starts_with('~') || p.starts_with("..") {
+                continue;
+            }
+            if line_cites.iter().any(|c| c.path == p) {
+                continue;
+            }
+            if said_missing_or_new || next_is_proposed {
+                continue;
+            }
+            if matches!(resolver.resolve(p), Resolved::Files(_) | Resolved::Skip) {
+                continue;
+            }
+            let slash_p = format!("/{p}");
+            let was_seen = seen.iter().any(|s| {
+                s.contains('/')
+                    && (s == p || s.ends_with(&slash_p) || p.ends_with(&format!("/{s}")))
+            });
+            if was_seen {
+                continue;
+            }
+            if reported.insert(p.to_string()) {
+                problems.push(format!(
+                    "report.md:{line_no}: `{p}`: no such file, and the path does not appear in \
+                     anything this run read (the task, files or command output); name only files \
+                     you have seen, or say on the same line that the file is new or missing"
+                ));
+            }
+        }
+        i += 1;
     }
     problems
 }
