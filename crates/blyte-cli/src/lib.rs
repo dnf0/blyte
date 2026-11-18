@@ -16,6 +16,7 @@ pub mod provenance;
 pub mod registry;
 pub mod repl;
 pub mod report;
+pub mod research_breadth;
 pub mod review_checks;
 pub mod setup;
 pub mod skill;
