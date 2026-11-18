@@ -1,3 +1,9 @@
+## v0.44.0 (2026-11-18)
+
+### Feat
+
+- **research**: blyte advises on the question's brief and flags broad runs (#358)
+
 ## v0.43.2 (2026-11-18)
 
 ### Fix
