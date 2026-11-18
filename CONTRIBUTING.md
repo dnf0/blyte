@@ -12,7 +12,10 @@ cargo build
 cargo install --path crates/blyte-cli --locked   # optional: put `blyte` on your PATH
 ```
 
-blyte builds on macOS and Linux with a recent stable Rust toolchain.
+blyte builds on macOS and Linux. The Rust version is pinned in `rust-toolchain.toml` (1.100.0, with rustfmt and
+clippy); `rustup` installs it the first time you run `cargo` in the repository, and CI and release builds use
+the same version. To move to a newer Rust, change it there and in every `toolchain:` line of
+`.github/workflows` (a test keeps them equal).
 
 ## The checks
 

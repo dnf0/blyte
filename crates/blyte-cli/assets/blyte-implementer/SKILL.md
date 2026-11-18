@@ -158,7 +158,8 @@ blyte review T1
 ```
 
 It starts with `== checks`: files the task does not name, commit messages not in the task, a run that
-did not pass, host commands and reads outside the repository. Add `--diff` for the full diff when
+did not pass, added lines that look like a fallback (read each against the task), host commands and
+reads outside the repository. Add `--diff` for the full diff when
 something is flagged or surprising; otherwise the summary is usually enough, and it keeps your context small.
 If blyte review prints "blyte: <version> is out", tell the user, with that line.
 
@@ -227,7 +228,7 @@ blyte dispatch R1 /abs/question-R1.md --research
 
 blyte works in a scratch directory under `.wt/R1`, reads the repository by absolute path, and cannot
 change it; the run passes when it has written a report whose cited lines and quoted code match the
-files, copied to `.wt/R1.report.md` (and to `--report-to <path>`). Leave the budget at its default (300 turns, 30 minutes) rather than tightening it: a run cut short wastes what it spent, and it is warned ten turns before the end to finish its report. The check covers quotes, not conclusions: check any claim you will act on against the code it cites.
+files, copied to `.wt/R1.report.md` (and to `--report-to <path>`). Leave the budget at its default (300 turns, 30 minutes) rather than tightening it: a run cut short wastes what it spent, and it is warned ten turns before the end to finish its report. A report that starts with `> **Not verified.**` came from a run that did not pass: treat it as a draft. The check covers quotes, not conclusions: check any claim you will act on against the code it cites.
 
 ## Rules
 

@@ -299,8 +299,8 @@ which is what `--max-cost` and the report's `cost_usd` use.
 ```mermaid
 flowchart LR
     o["orchestrator"] -->|"blyte dispatch T1 task.md"| d["dispatch"]
+    d --> start[".wt/T1.start.json (written first)"]
     d --> wt["git worktree .wt/T1 on branch wip/T1"]
-    d --> start[".wt/T1.start.json"]
     d --> child["child blyte in the worktree: task wrapped in the dispatch rules, gate, rollback off, report"]
     child --> log[".wt/T1.log and report"]
     child --> sum["JSON summary: outcome, commits, changed files, final message, cost"]

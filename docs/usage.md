@@ -263,6 +263,15 @@ dashboard can show plans.
 
 Record your verdict after reviewing a run with `blyte review <id> --verdict <accepted|fixed|redone> [--notes <text>]`. This writes `<root>/.wt/<id>.verdict.json`, which `blyte dashboard` displays beside the run. Recording the verdict removes the worktree only when the clean rules allow it (in practice: `redone`, or the work is already merged); otherwise it prints `worktree .wt/<id> kept until wip/<id> is merged` (for `accepted`/`fixed`). A worktree with uncommitted changes is kept. It works even after the worktree has been removed. Without `--verdict`, `blyte review` flags commands that may have changed things outside the worktree under `== host commands`, and reads of other terminals or files outside the repository under `== reads outside the repository`.
 
+For an implementation run, `== checks` also flags lines the run added that look like a fallback
+(`possible fallbacks added (N): ...`): `unwrap_or`, `unwrap_or_default` and `unwrap_or_else` in Rust; an
+`except` that only passes, `.get(key, default)` and `or <literal>` in Python; `??`, `|| <literal>` and an
+empty `catch` in JavaScript and TypeScript; `|| true` and `${VAR:-default}` in shell and YAML. Test files
+are left out. The flag is a prompt to read each line against the task, not a failure. Each review also
+saves what it flagged to `<root>/.wt/<id>.checks.json` (`ts`, `flags` as printed, and every fallback
+finding with its file, line and pattern), so flags can be counted against verdicts after `blyte clean` has
+removed the worktree.
+
 ### Listing plan tasks (`blyte plan`)
 
 ```bash
@@ -336,7 +345,17 @@ non-empty report was written, followed by a quote check that blyte runs itself:
   `text`, `output`, ...) and untagged plain blocks are not checked;
 - a cited source file (`.py`, `.rs`, `.tf`, ...) must exist even when given without a directory;
 - every code-like identifier in a backticked span in prose (containing `_`, an inner capital, `.`
-  between identifiers, or followed by `(`) must appear in the task or a tool result the run saw.
+  between identifiers, or followed by `(`) must appear in the task or a tool result the run saw;
+- a source path named in prose must exist or have appeared in something the run read, unless the
+  same line says the file is new, added, to be created or missing;
+- a pull request or issue number (`#123`) and a commit id cited in prose must have appeared in the
+  task, a file or command output the run saw.
+
+Ten turns before the budget ends, the run is told to write `report.md`; from then on every tool
+except `write` and `edit` is closed until `report.md` has changed. If the run does not end
+`verified`, the copies of its report (`.wt/<id>.report.md` and `--report-to`) start with a
+`> **Not verified.**` line naming the outcome, so an unfinished draft cannot pass for a finished
+report.
 
 A failed check is a failed gate: the model gets the list of mismatches and fixes the report. After
 the quote check passes, blyte also runs a model claim check on `report.md` (unless
