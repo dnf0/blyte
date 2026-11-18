@@ -259,3 +259,15 @@ dispatches a research question without the sections may add `--no-brief-check` o
 which in the final message. Not a long-running job.
 
 **Commit message:** `feat(research): dispatch checks the brief and review flags broad runs`
+
+## Check on real runs (2026-11-18)
+
+- Dispatch: a question with only `## Objective` was refused naming the three other sections; a
+  question naming `.wt/R-DA.report.md` (an unverified report) was refused with its path; no question
+  printed the template. None created a worktree or a `.wt/<id>.*` file.
+- Review, replaying R-DA's saved files: `broad research run: 50 of 56 turns` and the split
+  suggestion (`crates/blyte-cli/src (25)`, `crates/blyte-agent/src (11)`, `crates/blyte-provider/src (7)`, ...).
+- The breadth flag on the 40 past research runs with a report: 14 would be flagged, including all
+  three broad audits (R-DA, R-DB, R-DC) and 10 runs that ended `verified`. It is advice, not a failure.
+- `blyte review` needs the run's worktree, and a research run's worktree is removed once its report is
+  copied out, so the flags show for a recent run only. Not changed here.
