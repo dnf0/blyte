@@ -1,0 +1,5 @@
+# The one Rust version for CI, release builds and local checks. To move to a newer Rust, change
+# it here and in every `toolchain:` line of .github/workflows (a test keeps them equal).
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
