@@ -3,6 +3,7 @@
 //! A line that reads `<<quote /absolute/path:N-M>>` (or `<<quote /absolute/path:N>>`) on its own
 //! is replaced by a citation and a fenced block holding those lines of the file, so the quote is
 //! exact and the model never retypes it. A directive inside a fenced block is not a directive.
+//! Lines that hold a code fence cannot be quoted: the fence would end the block.
 //! A directive that cannot be expanded stays in the text and is reported, never partly expanded.
 
 use std::path::Path;
@@ -93,6 +94,16 @@ fn expand_one(
             "quotes {count} lines; the most is {MAX_QUOTE_LINES}, quote the part that matters"
         ));
     }
+    let quoted = &lines[first - 1..last];
+    if let Some(i) = quoted
+        .iter()
+        .position(|l| l.trim_start().starts_with("```"))
+    {
+        return Err(format!(
+            "line {} of the file is a code fence, which would end the quote; quote the lines around it",
+            first + i
+        ));
+    }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let cite = if first == last {
         format!("{}:{first}", path.display())
@@ -100,7 +111,7 @@ fn expand_one(
         format!("{}:{first}-{last}", path.display())
     };
     let mut out = vec![format!("`{cite}`"), format!("```{ext}")];
-    out.extend(lines[first - 1..last].iter().map(|l| (*l).to_string()));
+    out.extend(quoted.iter().map(|l| (*l).to_string()));
     out.push("```".to_string());
     Ok(out)
 }

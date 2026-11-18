@@ -404,7 +404,7 @@ fn resolve_in_workspace(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, 
 }
 
 /// Reject a path that escapes the workspace, unless an absolute path is inside a read root.
-fn resolve_for_read(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_for_read(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, String> {
     if let Ok(p) = resolve_in_workspace(fs, root, raw) {
         return Ok(p);
     }

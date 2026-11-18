@@ -139,3 +139,50 @@ fn directive_for_missing_file_is_reported_on_stop() {
     let on_disk = std::fs::read_to_string(d.path().join("report.md")).unwrap();
     assert!(on_disk.contains("<<quote"), "{on_disk}");
 }
+
+#[test]
+fn directive_outside_the_workspace_and_read_roots_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("src.py"), "def main():\n    run()\n").unwrap();
+    // A real, readable file that the run may not read: it is outside the workspace.
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.env");
+    std::fs::write(&secret, "KEY=do-not-paste\n").unwrap();
+    let report = format!("Entry point:\n<<quote {}:1>>\n", secret.display());
+
+    let provider = Scripted {
+        turn: Mutex::new(0),
+        report,
+        finish: false,
+    };
+    let runner = Runner {
+        provider: &provider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 2,
+            max_gate_attempts: 1,
+            max_duration: Some(Duration::from_secs(30)),
+        },
+        rollback: false,
+        on_event: None,
+        research: true,
+        claim_check: false,
+    };
+
+    let mut st = State::new("research task", "test -s report.md");
+    let (outcome, report) = runner.run(&mut st);
+    assert!(matches!(outcome, Outcome::BudgetExhausted), "{outcome:?}");
+    let problems = report
+        .quote_problems
+        .expect("quote check should have run on stop");
+    assert!(
+        problems.iter().any(|p| p.contains("cannot read the file")),
+        "unexpected problems: {problems:?}"
+    );
+    let on_disk = std::fs::read_to_string(d.path().join("report.md")).unwrap();
+    assert!(on_disk.contains("<<quote"), "{on_disk}");
+    assert!(!on_disk.contains("do-not-paste"), "{on_disk}");
+}

@@ -724,7 +724,12 @@ impl<'a> Runner<'a> {
         let Ok(raw) = self.fs.read(&self.root.join("report.md")) else {
             return Vec::new();
         };
-        let expand_read = |p: &Path| self.fs.read(p);
+        // A directive may name only what the `read` tool may read: the workspace and the read
+        // roots. Anything else would paste a file the run is not allowed to see into the report.
+        let expand_read = |p: &Path| {
+            let allowed = tools::resolve_for_read(self.fs, &self.root, &p.to_string_lossy())?;
+            self.fs.read(&allowed)
+        };
         let (report, mut problems) = quote_expand::expand(&raw, &expand_read);
         if report != raw {
             if let Err(e) = self.fs.write(&self.root.join("report.md"), &report) {

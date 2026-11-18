@@ -223,3 +223,26 @@ fn expanded_block_passes_the_research_check() {
     );
     assert!(problems.is_empty(), "{problems:?}\n{expanded}");
 }
+
+#[test]
+fn lines_holding_a_code_fence_are_not_quoted() {
+    let mut m = files();
+    m.insert(
+        PathBuf::from("/r/doc.md"),
+        "intro\n```sh\nls\n```\nend\n".to_string(),
+    );
+    let report = "<<quote /r/doc.md:1-3>>\n<<quote /r/doc.md:5>>\n";
+    let (out, problems) = expand(report, &read(&m));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with(
+            "report.md:1: <<quote /r/doc.md:1-3>>: line 2 of the file is a code fence"
+        ),
+        "{problems:?}"
+    );
+    assert!(
+        out.starts_with("<<quote /r/doc.md:1-3>>\n`/r/doc.md:5`\n```md\nend\n```\n"),
+        "{out}"
+    );
+    assert_eq!(expand(&out, &read(&m)).0, out);
+}
