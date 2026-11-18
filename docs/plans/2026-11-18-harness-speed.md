@@ -28,7 +28,10 @@ the 21 days before, read from every repository's `.wt/*.report.json` and `.wt/*.
   In implementation runs only 1% of turns are reads of content already held.
 - Preloading the files a task names would save about one turn per run. Not worth the code.
 - Tests (the implementer's own runs plus the gate) are up to 36% of implementation wall time.
-  Not measured yet: how many of the implementer's runs are the full suite. No task until then.
+  The implementer's own runs do not duplicate the gate: of 1,219 test commands in 339 runs, at
+  least 80% name specific test files (2.9 per run, 29 s each, 60% of them failing, so they are
+  doing work), and full-suite runs take at most 3.5 hours against the gate's 25. The gate's
+  time is the repository's own check. No task.
 
 ## Rules for both tasks
 
