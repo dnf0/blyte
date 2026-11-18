@@ -31,6 +31,19 @@ pub fn write_start_record(
     std::fs::rename(&tmp_path, path)
 }
 
+struct StartRecordGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for StartRecordGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub fn wrap_task(task: &str) -> String {
     format!(
         "You are implementing exactly one task. Your working directory is a git worktree on its own branch; work only there.\n\n{}\n\n{}",
@@ -513,15 +526,59 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 }
             }
         }
+    } else if worktree_dir.exists() {
+        eprintln!("error: {} already exists", worktree_dir.display());
+        return 2;
+    }
 
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut tags = args.tags.clone();
+    if args.research {
+        tags.push("research".to_string());
+    }
+    let session = crate::usage_log::session_from(
+        std::env::var("BLYTE_SESSION").ok(),
+        std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+    );
+    let start_path = wt_parent.join(format!("{}.start.json", args.id));
+    let mut initial_start = serde_json::json!({
+        "id": args.id,
+        "pid": std::process::id(),
+        "started_at": started_at,
+        "starting": true,
+        "tags": tags,
+        "plan": args.plan,
+        "plan_task": args.plan_task,
+        "base": args.base,
+    });
+    if let Some(ref s) = session {
+        initial_start["session"] = serde_json::json!(s);
+    }
+    if args.research {
+        initial_start["research"] = serde_json::json!(true);
+    }
+    if let Err(err) = std::fs::create_dir_all(&wt_parent)
+        .and_then(|()| write_start_record(&start_path, &initial_start))
+    {
+        eprintln!(
+            "error: could not write the start record {}: {err}",
+            start_path.display()
+        );
+        return 2;
+    }
+    let mut start_guard = StartRecordGuard {
+        path: start_path.clone(),
+        armed: true,
+    };
+
+    if !args.research {
         crate::clean::spawn_background_clean(&root, Some(&args.id));
     }
 
     let base_commit: Option<String> = if args.research {
-        if worktree_dir.exists() {
-            eprintln!("error: {} already exists", worktree_dir.display());
-            return 2;
-        }
         if let Err(e) = std::fs::create_dir_all(&worktree_dir) {
             eprintln!(
                 "error creating scratch directory {}: {e}",
@@ -914,17 +971,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             return 2;
         }
     };
-
-    let started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    start_guard.armed = false;
 
     let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
-    let mut tags = args.tags.clone();
-    if args.research {
-        tags.push("research".to_string());
-    }
     let mut start_json = serde_json::json!({
         "id": args.id,
         "pid": child.id(),
@@ -940,10 +989,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "base": args.base,
         "base_sha": base_commit,
     });
-    if let Some(session) = crate::usage_log::session_from(
-        std::env::var("BLYTE_SESSION").ok(),
-        std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
-    ) {
+    if let Some(session) = session {
         start_json["session"] = serde_json::json!(session);
     }
     if args.research {
@@ -958,7 +1004,6 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             }))
             .collect::<Vec<_>>());
     }
-    let start_path = wt_parent.join(format!("{}.start.json", args.id));
     if let Err(err) = write_start_record(&start_path, &start_json) {
         eprintln!(
             "error: could not write the start record {}: {err}",
