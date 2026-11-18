@@ -129,9 +129,10 @@ fn not_matching_the_form_is_reported() {
     assert_eq!(out, "<<quote /r/a.py 1-2>>\n");
     assert_eq!(
         problems,
-        vec![format!(
+        vec![
             "report.md:1: <<quote /r/a.py 1-2>>: not a quote directive; write <<quote /absolute/path:N-M>> alone on a line"
-        )]
+                .to_string()
+        ]
     );
 }
 
