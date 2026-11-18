@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use blyte_provider::{Message, Provider, ProviderError, Request, Usage};
+use blyte_provider::{Message, Provider, ProviderError, Request, StreamTiming, Usage};
 
 use crate::claim_check;
 use crate::context::ContextStrategy;
@@ -93,6 +93,28 @@ pub struct TurnUsage {
     /// Wall time spent executing this turn's tool calls (0 for a turn with none).
     #[serde(default)]
     pub tools_ms: u64,
+    /// Milliseconds to the first data of the model call that ended this turn's calling
+    /// (`None`: the provider does not stream, or no data arrived).
+    #[serde(default)]
+    pub first_data_ms: Option<u64>,
+    /// Longest silence, in milliseconds, in that same call (0 when the provider does not stream).
+    #[serde(default)]
+    pub max_gap_ms: u64,
+    /// One entry per attempt of this turn's model call that failed and was retried, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_attempts: Vec<FailedAttempt>,
+}
+
+/// A model call attempt that failed and was retried.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FailedAttempt {
+    /// Wall time of the attempt, in milliseconds.
+    pub elapsed_ms: u64,
+    /// Whether the error was a timeout (`ProviderError::is_timeout`).
+    pub timed_out: bool,
+    /// As in [`blyte_provider::StreamTiming`]; `None` and 0 when the provider reported none.
+    pub first_data_ms: Option<u64>,
+    pub max_gap_ms: u64,
 }
 
 /// Characters a message contributes to a prompt, as the context strategies size them.
@@ -1096,6 +1118,7 @@ impl<'a> Runner<'a> {
             // waited out, but never past the deadline: a run that cannot finish in time reports.
             let model_start = std::time::Instant::now();
             let mut attempt = 0;
+            let mut failed_attempts: Vec<FailedAttempt> = Vec::new();
             let resp = loop {
                 if let Some(d) = deadline {
                     let time_left = d.saturating_duration_since(std::time::Instant::now());
@@ -1119,6 +1142,7 @@ impl<'a> Runner<'a> {
                             _ => (0, 0, 0, 0),
                         };
                         let push_deadline_turn = |report: &mut RunReport| {
+                            let timing = self.provider.last_stream_timing().unwrap_or_default();
                             report.turn_usage.push(TurnUsage {
                                 turn,
                                 input: u_in,
@@ -1131,6 +1155,9 @@ impl<'a> Runner<'a> {
                                 fold_budget,
                                 model_ms: model_start.elapsed().as_millis() as u64,
                                 tools_ms: 0,
+                                first_data_ms: timing.first_data_ms,
+                                max_gap_ms: timing.max_gap_ms,
+                                failed_attempts: failed_attempts.clone(),
                             });
                         };
                         // An exhausted quota is reported as an error even past the deadline:
@@ -1156,6 +1183,13 @@ impl<'a> Runner<'a> {
                                 return (Outcome::BudgetExhausted, report);
                             }
                             report.provider_retries += 1;
+                            let timing = self.provider.last_stream_timing().unwrap_or_default();
+                            failed_attempts.push(FailedAttempt {
+                                elapsed_ms: call_start.elapsed().as_millis() as u64,
+                                timed_out: e.is_timeout(),
+                                first_data_ms: timing.first_data_ms,
+                                max_gap_ms: timing.max_gap_ms,
+                            });
                             if e.is_timeout() {
                                 eprintln!(
                                     "model call timed out after {s} s; retrying ({attempt} of {max_retries}; raise BLYTE_MODEL_IDLE_TIMEOUT_SECS for silence or BLYTE_MODEL_TIMEOUT_SECS for whole call)"
@@ -1178,6 +1212,7 @@ impl<'a> Runner<'a> {
                 }
             };
             let model_ms = model_start.elapsed().as_millis() as u64;
+            let timing: StreamTiming = self.provider.last_stream_timing().unwrap_or_default();
             report.usage.input += resp.usage.input;
             report.usage.cached += resp.usage.cached;
             report.usage.output += resp.usage.output;
@@ -1194,6 +1229,9 @@ impl<'a> Runner<'a> {
                 fold_budget,
                 model_ms,
                 tools_ms: 0,
+                first_data_ms: timing.first_data_ms,
+                max_gap_ms: timing.max_gap_ms,
+                failed_attempts,
             });
 
             let trimmed = resp.text.trim();

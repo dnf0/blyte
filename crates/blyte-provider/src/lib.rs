@@ -320,6 +320,19 @@ pub struct ToolCall {
     pub signature: Option<String>,
 }
 
+/// When a streamed model call's data arrived. A "data event" is one SSE `data:` line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamTiming {
+    /// Milliseconds from the start of the call to its first data event; `None` if none arrived.
+    pub first_data_ms: Option<u64>,
+    /// The longest wait for data, in milliseconds: from the start of the call to the first
+    /// data event, between consecutive data events, or from the last data event to the end
+    /// of the stream (its end, an error, or a timeout).
+    pub max_gap_ms: u64,
+    /// Data events received.
+    pub data_events: u32,
+}
+
 /// Token accounting, normalised.
 ///
 /// `cached` is reported separately rather than folded into `input` because the distinction is
@@ -494,5 +507,10 @@ pub trait Provider {
     /// Lists available models supported by this provider for the configured credentials.
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(Vec::new())
+    }
+    /// Timing of the most recent `complete` call on this provider, whether it succeeded or
+    /// failed; `None` for a provider that does not stream or has made no call.
+    fn last_stream_timing(&self) -> Option<StreamTiming> {
+        None
     }
 }
