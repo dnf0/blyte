@@ -1,3 +1,10 @@
+## v0.40.0 (2026-11-18)
+
+### Feat
+
+- **research**: reports state what was read, and may not cite unseen commit ids (#334)
+- **research**: reports quote code by reference and blyte pastes the lines (#332)
+
 ## v0.39.0 (2026-11-18)
 
 ### Feat
