@@ -108,7 +108,7 @@ fn a_research_run_ends_with_a_complete_start_record() {
     let r = d.path();
     setup_repo(r);
 
-    let out = run_dispatch(r, "S3", &["--research"]);
+    let out = run_dispatch(r, "S3", &["--research", "--no-brief-check"]);
     assert!(
         !out.stdout.is_empty(),
         "{}",

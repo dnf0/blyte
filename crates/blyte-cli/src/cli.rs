@@ -181,6 +181,10 @@ pub struct DispatchArgs {
     #[arg(long = "no-path-check")]
     pub no_path_check: bool,
 
+    /// Research runs: no warning for missing brief sections, and allow a question that names an unverified report
+    #[arg(long = "no-brief-check")]
+    pub no_brief_check: bool,
+
     /// Skip the model claim check on report.md for research runs
     #[arg(long = "no-claim-check")]
     pub no_claim_check: bool,

@@ -138,6 +138,7 @@ Options:
       --network <NETWORK>          Outbound network mode: 'on' or 'off' (default 'on') [possible values: on, off]
       --allow-read <ALLOW_READ>    Let sandboxed commands read this path despite credential deny-list (repeatable)
       --no-path-check              Start even if the task names paths outside the workspace and --allow-read
+      --no-brief-check             Research runs: no warning for missing brief sections, and allow a question that names an unverified report
       --no-claim-check             Skip the model claim check on report.md for research runs
       --pass-env <PASS_ENV>        Pass this environment variable to commands (repeatable)
   -h, --help                       Print help

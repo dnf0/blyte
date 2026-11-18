@@ -351,10 +351,36 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             }
             _ => {
                 eprintln!("error: give a task file, or --plan with --plan-task");
+                if args.research {
+                    eprintln!(
+                        "A research question needs these sections:\n\n{}",
+                        crate::research_brief::TEMPLATE
+                    );
+                }
                 return 2;
             }
         }
     };
+
+    if args.research && !args.no_brief_check {
+        let missing = crate::research_brief::missing_sections(&task_content);
+        if !missing.is_empty() {
+            eprintln!(
+                "blyte: warning: the research question has no section for: {}. Questions with all four run faster and fail less (the template: blyte dispatch {} --research); --no-brief-check hides this.",
+                missing.join(", "),
+                args.id
+            );
+        }
+        let unverified = crate::research_brief::unverified_inputs(&task_content, &root);
+        if !unverified.is_empty() {
+            let paths: Vec<String> = unverified.iter().map(|p| p.display().to_string()).collect();
+            eprintln!(
+                "blyte: the question names a report that did not pass blyte's checks: {}. Use a verified report, or --no-brief-check to start anyway.",
+                paths.join(", ")
+            );
+            return 2;
+        }
+    }
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let main_checkout = root.clone();
@@ -1622,6 +1648,39 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             "refused reads: {refused_count} (outside the workspace and --allow-read): {}",
             first_3.join(", ")
         ));
+    }
+    if is_research {
+        match &report_val {
+            Some(rv) => match crate::research_breadth::large_prompt_turns(rv) {
+                Ok((large, total)) => {
+                    if let Some(flag) = crate::research_breadth::breadth_flag(large, total) {
+                        checks.flags.push(flag);
+                    }
+                }
+                Err(e) => {
+                    checks.flags.push(format!("breadth check not run: {e}"));
+                }
+            },
+            None => {
+                checks.flags.push(format!(
+                    "breadth check not run: cannot read {}",
+                    report_file.display()
+                ));
+            }
+        }
+        if outcome == Some("budget_exhausted") {
+            match std::fs::read_to_string(&log_file) {
+                Ok(log) => {
+                    let dirs = crate::research_breadth::read_dirs(&log, &root);
+                    if let Some(flag) = crate::research_breadth::split_flag(&dirs) {
+                        checks.flags.push(flag);
+                    }
+                }
+                Err(e) => {
+                    checks.flags.push(format!("split suggestion not run: {e}"));
+                }
+            }
+        }
     }
 
     let checks_path = root.join(".wt").join(format!("{}.checks.json", args.id));

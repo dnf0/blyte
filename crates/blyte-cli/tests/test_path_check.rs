@@ -90,7 +90,15 @@ fn research_dispatch_refuses_unreadable_paths_until_allowed_or_skipped() {
 
     let refused = blyte(
         r.path(),
-        &["dispatch", "Q1", "q.md", "--research", "--sandbox", "off"],
+        &[
+            "dispatch",
+            "Q1",
+            "q.md",
+            "--research",
+            "--no-brief-check",
+            "--sandbox",
+            "off",
+        ],
     );
     assert_eq!(refused.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&refused.stderr);
@@ -115,6 +123,7 @@ fn research_dispatch_refuses_unreadable_paths_until_allowed_or_skipped() {
             "Q1",
             "q.md",
             "--research",
+            "--no-brief-check",
             "--sandbox",
             "off",
             "--allow-read",
@@ -135,6 +144,7 @@ fn research_dispatch_refuses_unreadable_paths_until_allowed_or_skipped() {
             "Q2",
             "q.md",
             "--research",
+            "--no-brief-check",
             "--sandbox",
             "off",
             "--no-path-check",
