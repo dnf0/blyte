@@ -375,6 +375,9 @@ report instead of failing the gate again. If a run stops early without passing t
 still runs the quote and claim checks on `report.md` and `blyte review` shows the results (including
 the `claim check: N checked, K contradicted, ...` summary, up to 5 contradicted claims with the
 checker's reason, and a `! claim check: K contradicted claims` flag under `== checks`).
+So that there is time for it, the main loop of a research run stops a reserve before the time budget (a
+tenth of it, at most 180 s) and the claim check may use the rest. When even that is not enough, the
+report records `claim_check_skipped` with how many batches were checked.
 Research runs fold their context at 180K tokens instead of 48K (unless `--fold-budget` is given), so
 the code the model read is still in context when it writes the report; most research runs never fold. Paths given with
 `--allow-read` (or `[dispatch] allow_read`) are read roots too, for every dispatch. When finished, the report is copied to `.wt/<id>.report.md` (and to
