@@ -154,6 +154,43 @@ pub fn branch_exists_message(root: &Path, branch: &str, id: &str) -> String {
     }
 }
 
+/// Source-state block for the research root and each read root, skipping duplicates.
+fn research_source_block(
+    root: &Path,
+    config_allow_read: &[PathBuf],
+    allow_read: &[PathBuf],
+) -> String {
+    let mut roots: Vec<PathBuf> = vec![root.to_path_buf()];
+    for r in config_allow_read.iter().chain(allow_read) {
+        if !roots.contains(r) {
+            roots.push(r.clone());
+        }
+    }
+    let sources: Vec<(PathBuf, crate::provenance::SourceState)> = roots
+        .into_iter()
+        .map(|p| {
+            let state = crate::provenance::source_state(&p);
+            (p, state)
+        })
+        .collect();
+    crate::provenance::render(&sources)
+}
+
+/// Appends the source-state block to a copied report. Failure is reported, not fatal.
+fn append_source_state(path: &Path, block: &str) {
+    use std::io::Write;
+    let result = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(format!("\n\n{block}").as_bytes()));
+    if let Err(e) = result {
+        eprintln!(
+            "error: could not add the source state to {}: {e}",
+            path.display()
+        );
+    }
+}
+
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if let Ok(home) = crate::skill::home_dir() {
         if let Ok(Some(path)) = crate::skill::ensure_context_block(&home) {
@@ -855,8 +892,11 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     cmd.arg("--");
-    let task_prompt = if args.research {
-        wrap_research(&task_content, &root)
+    let research_sources = args
+        .research
+        .then(|| research_source_block(&root, &config_allow_read, &args.allow_read));
+    let task_prompt = if let Some(block) = &research_sources {
+        wrap_research(&format!("{block}\n\n{task_content}"), &root)
     } else {
         let mut prompt = wrap_task(&task_content);
         if let Some(qs) = quick_steps(&gate) {
@@ -950,6 +990,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             .unwrap_or(false);
         if is_non_empty {
             let _ = std::fs::copy(&scratch_report, &research_report_path);
+            if let Some(block) = &research_sources {
+                append_source_state(&research_report_path, block);
+            }
             if let Some(ref report_to) = args.report_to {
                 if let Some(parent) = report_to.parent() {
                     if !parent.as_os_str().is_empty() {
@@ -957,6 +1000,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     }
                 }
                 let _ = std::fs::copy(&scratch_report, report_to);
+                if let Some(block) = &research_sources {
+                    append_source_state(report_to, block);
+                }
             }
         }
     }
