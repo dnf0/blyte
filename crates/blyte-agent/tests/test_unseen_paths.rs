@@ -155,3 +155,52 @@ fn paths_finds_only_slash_paths() {
     let found: Vec<&str> = paths("see routes.py and src/api/routes.py.").collect();
     assert_eq!(found, vec!["src/api/routes.py"]);
 }
+
+#[test]
+fn two_paths_one_space_apart_are_both_flagged() {
+    let p = problems("See src/nope_a.rs src/nope_b.rs for details.", &[]);
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(p[0].contains("`src/nope_a.rs`"), "{}", p[0]);
+    assert!(p[1].contains("`src/nope_b.rs`"), "{}", p[1]);
+}
+
+#[test]
+fn two_backticked_paths_one_space_apart_are_both_flagged() {
+    let p = problems("See `src/nope_a.rs` `src/nope_b.rs` for details.", &[]);
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(p[0].contains("`src/nope_a.rs`"), "{}", p[0]);
+    assert!(p[1].contains("`src/nope_b.rs`"), "{}", p[1]);
+}
+
+#[test]
+fn three_paths_in_a_row_are_all_flagged() {
+    let p = problems("src/nope_a.rs src/nope_b.rs src/nope_c.rs", &[]);
+    assert_eq!(p.len(), 3, "{p:?}");
+    assert!(p[0].contains("`src/nope_a.rs`"), "{}", p[0]);
+    assert!(p[1].contains("`src/nope_b.rs`"), "{}", p[1]);
+    assert!(p[2].contains("`src/nope_c.rs`"), "{}", p[2]);
+}
+
+#[test]
+fn a_file_to_add_is_clean() {
+    for word in ["Add", "Adding", "adds", "added"] {
+        let report = format!("- `src/nope_new.rs`: {word} tests for the parser.");
+        let p = problems(&report, &[]);
+        assert!(p.is_empty(), "{word}: {p:?}");
+    }
+}
+
+#[test]
+fn address_is_not_add() {
+    let p = problems("We address this in `src/nope_a.rs`.", &[]);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].contains("`src/nope_a.rs`"), "{}", p[0]);
+}
+
+#[test]
+fn paths_finds_adjacent_and_separated_paths() {
+    let adj: Vec<&str> = paths("a/x.rs b/y.rs").collect();
+    assert_eq!(adj, vec!["a/x.rs", "b/y.rs"]);
+    let sep: Vec<&str> = paths("see a/x.rs, then b/y.rs.").collect();
+    assert_eq!(sep, vec!["a/x.rs", "b/y.rs"]);
+}
