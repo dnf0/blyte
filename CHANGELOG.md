@@ -1,3 +1,9 @@
+## v0.41.0 (2026-11-18)
+
+### Feat
+
+- **research**: wrap-up closes other tools; reports may not name unseen files or change numbers (#343)
+
 ## v0.40.0 (2026-11-18)
 
 ### Feat
