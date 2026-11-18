@@ -175,6 +175,36 @@ pub fn paths(text: &str) -> impl Iterator<Item = &str> {
         .map(|c| c.get(1).expect("path group").as_str())
 }
 
+fn prose_change_ref_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?:^|[\s(\[])#(\d{2,6})\b|(?i:\b(?:pr|pull\s+request|issue))\s+#?(\d{1,6})\b|/(?:pull|issues)/(\d{1,6})\b",
+        )
+        .expect("prose change ref regex")
+    })
+}
+
+fn change_ref_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)(?:^|[\s(\[])#(\d{2,6})\b|(?i:\b(?:pr|pull\s+request|issue))\s+#?(\d{1,6})\b|/(?:pull|issues)/(\d{1,6})\b|"number":\s*(\d{1,6})\b|^(\d{1,6})\t"#,
+        )
+        .expect("change ref regex")
+    })
+}
+
+/// The digits of every pull request or issue reference in `text`.
+pub fn change_refs(text: &str) -> impl Iterator<Item = &str> {
+    change_ref_re().captures_iter(text).map(|c| {
+        (1..=5)
+            .find_map(|i| c.get(i))
+            .expect("change ref group")
+            .as_str()
+    })
+}
+
 fn lines_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)\blines?\s+(\d+)(?:\s*[-–]\s*(\d+))?").expect("lines regex"))
@@ -927,7 +957,8 @@ fn is_commit_like(tok: &str) -> bool {
 }
 
 /// Every `[A-Za-z_][A-Za-z0-9_]*` token of 3+ characters in `text`, plus every commit-like
-/// token (see `is_commit_like`) even when it starts with a digit, plus every path from [`paths`].
+/// token (see `is_commit_like`) even when it starts with a digit, plus every path from [`paths`]
+/// and every change reference from [`change_refs`].
 pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|s| {
@@ -939,6 +970,7 @@ pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
                     || is_commit_like(s))
         })
         .chain(paths(text))
+        .chain(change_refs(text))
 }
 
 fn has_inner_capital(s: &str) -> bool {
@@ -967,6 +999,26 @@ fn inline_spans(mut s: &str) -> Vec<&str> {
             break;
         }
     }
+    out
+}
+
+fn strip_inline_spans(mut s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    while let Some(pos) = s.find('`') {
+        out.push_str(&s[..pos]);
+        let after = &s[pos..];
+        let ticks = after.bytes().take_while(|&b| b == b'`').count();
+        let needle = &after[..ticks];
+        let rest = &after[ticks..];
+        if let Some(end) = rest.find(needle) {
+            out.push('`');
+            s = &rest[end + ticks..];
+        } else {
+            out.push_str(after);
+            return out;
+        }
+    }
+    out.push_str(s);
     out
 }
 
@@ -1022,6 +1074,57 @@ pub fn unseen_names(report: &str, seen: &HashSet<String>) -> Vec<String> {
         i += 1;
     }
     problems.extend(unseen_commit_ids(&lines, seen));
+    problems.extend(unseen_change_refs(report, seen));
+    problems
+}
+
+/// Pull request and issue numbers cited in prose lines of `report` (outside fenced blocks and
+/// inline code spans) that are not in `seen`.
+pub fn unseen_change_refs(report: &str, seen: &HashSet<String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut reported: HashSet<String> = HashSet::new();
+    let lines: Vec<&str> = report.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        let fence = if trimmed.starts_with("```") {
+            "```"
+        } else if trimmed.starts_with("~~~") {
+            "~~~"
+        } else {
+            ""
+        };
+        if !fence.is_empty() {
+            let marker_len = trimmed
+                .chars()
+                .take_while(|&c| c == fence.chars().next().unwrap())
+                .count();
+            let close = fence.chars().next().unwrap().to_string().repeat(marker_len);
+            let mut end = i + 1;
+            while end < lines.len() && !lines[end].trim_start().starts_with(&close) {
+                end += 1;
+            }
+            i = end + 1;
+            continue;
+        }
+        let line_no = i + 1;
+        let prose = strip_inline_spans(line);
+        for caps in prose_change_ref_re().captures_iter(&prose) {
+            let n = (1..=3)
+                .find_map(|g| caps.get(g))
+                .expect("change ref group")
+                .as_str();
+            if !seen.contains(n) && reported.insert(n.to_string()) {
+                problems.push(format!(
+                    "report.md:{line_no}: #{n} does not appear in anything this run read \
+                     (the task, files or command output); cite only pull requests and issues you \
+                     have seen"
+                ));
+            }
+        }
+        i += 1;
+    }
     problems
 }
 
