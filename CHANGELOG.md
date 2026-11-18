@@ -1,3 +1,9 @@
+## v0.43.2 (2026-11-18)
+
+### Fix
+
+- **research**: the main loop leaves time for the claim check (#356)
+
 ## v0.43.1 (2026-11-18)
 
 ### Fix
