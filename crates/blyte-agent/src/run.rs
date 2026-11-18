@@ -239,6 +239,15 @@ const READ_LOOP_LIMIT: u32 = 30;
 /// Extra turns a research run gets after reaching `READ_LOOP_LIMIT` to write `report.md` and stop.
 pub const READ_LOOP_GRACE_TURNS: u32 = 3;
 
+/// Most time a research run's main loop leaves for the claim check.
+pub const CLAIM_CHECK_RESERVE_MAX: Duration = Duration::from_secs(180);
+
+/// Time the main loop of a research run leaves before its deadline for the claim check:
+/// a tenth of the time budget, at most `CLAIM_CHECK_RESERVE_MAX`.
+pub fn claim_check_reserve(max_duration: Duration) -> Duration {
+    (max_duration / 10).min(CLAIM_CHECK_RESERVE_MAX)
+}
+
 fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
     call.name == "dispatch"
         || (call.name == "bash"
@@ -873,8 +882,23 @@ impl<'a> Runner<'a> {
             }
         }
 
-        let (outcome, mut report) =
-            self.run_loop(state, &mut history, &mut seen_names, &system, deadline);
+        let loop_deadline = match (
+            self.research && self.claim_check,
+            deadline,
+            self.budget.max_duration,
+        ) {
+            (true, Some(d), Some(max_d)) => d.checked_sub(claim_check_reserve(max_d)).or(deadline),
+            _ => deadline,
+        };
+
+        let (outcome, mut report) = self.run_loop(
+            state,
+            &mut history,
+            &mut seen_names,
+            &system,
+            loop_deadline,
+            deadline,
+        );
         if self.research
             && outcome != Outcome::Verified
             && self
@@ -915,6 +939,7 @@ impl<'a> Runner<'a> {
         seen_names: &mut HashSet<String>,
         system: &str,
         deadline: Option<std::time::Instant>,
+        claim_deadline: Option<std::time::Instant>,
     ) -> (Outcome, RunReport) {
         let mut deadline = deadline;
         let mut report = RunReport::default();
@@ -1506,7 +1531,7 @@ impl<'a> Runner<'a> {
                 problems.truncate(research_check::MAX_PROBLEMS);
                 report.quote_problems = Some(problems);
                 if passed {
-                    if let Some(cc) = self.run_claim_check(deadline) {
+                    if let Some(cc) = self.run_claim_check(claim_deadline) {
                         report.usage.input += cc.usage.input;
                         report.usage.cached += cc.usage.cached;
                         report.usage.output += cc.usage.output;

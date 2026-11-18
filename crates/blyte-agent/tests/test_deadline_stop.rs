@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
-use blyte_agent::run::{Budget, Outcome, Runner};
+use blyte_agent::run::{claim_check_reserve, Budget, Outcome, Runner, CLAIM_CHECK_RESERVE_MAX};
 use blyte_agent::shell::{LocalShell, Output, Shell};
 use blyte_agent::state::State;
 use blyte_agent::tools::COMMAND_TIMEOUT;
@@ -149,8 +149,13 @@ impl ScriptedProvider {
 
 impl Provider for ScriptedProvider {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        self.seen_timeouts.lock().unwrap().push(req.timeout);
-        if !self.sleep_before_complete.is_zero() {
+        let first_call = {
+            let mut seen = self.seen_timeouts.lock().unwrap();
+            let first = seen.is_empty();
+            seen.push(req.timeout);
+            first
+        };
+        if first_call && !self.sleep_before_complete.is_zero() {
             std::thread::sleep(self.sleep_before_complete);
         }
         let mut t = self.turns.lock().unwrap();
@@ -372,4 +377,161 @@ fn research_run_whose_deadline_passes_before_claim_check_sets_skipped_and_runs_q
     );
     // Only the 1 worker turn called the provider; the claim check made 0 calls.
     assert_eq!(provider.seen_timeouts.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn claim_check_reserve_is_a_tenth_capped_at_180s() {
+    assert_eq!(CLAIM_CHECK_RESERVE_MAX, Duration::from_secs(180));
+    assert_eq!(
+        claim_check_reserve(Duration::from_secs(1800)),
+        Duration::from_secs(180)
+    );
+    assert_eq!(
+        claim_check_reserve(Duration::from_secs(600)),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        claim_check_reserve(Duration::from_secs(7200)),
+        Duration::from_secs(180)
+    );
+    assert_eq!(
+        claim_check_reserve(Duration::from_secs(1)),
+        Duration::from_millis(100)
+    );
+}
+
+#[test]
+fn research_loop_stops_a_reserve_before_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = ScriptedProvider::new(vec![Response {
+        text: "done".into(),
+        ..Default::default()
+    }]);
+    let runner = Runner {
+        provider: &provider,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: dir.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 1,
+            max_gate_attempts: 1,
+            max_duration: Some(Duration::from_secs(100)),
+        },
+        rollback: false,
+        on_event: None,
+        research: true,
+        claim_check: true,
+    };
+    let mut state = State::new("goal", "true");
+    let _ = runner.run(&mut state);
+    let seen = provider.seen_timeouts.lock().unwrap();
+    let t = seen[0].expect("expected first timeout to be Some");
+    assert!(
+        t <= Duration::from_secs(90) && t > Duration::from_secs(80),
+        "expected first timeout in (80s, 90s], got {t:?}"
+    );
+}
+
+#[test]
+fn non_research_loop_keeps_the_whole_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    for (research, claim_check) in [(false, false), (true, false)] {
+        let provider = ScriptedProvider::new(vec![Response {
+            text: "done".into(),
+            ..Default::default()
+        }]);
+        let runner = Runner {
+            provider: &provider,
+            shell: &LocalShell,
+            fs: &LocalFs,
+            context: &Conversational,
+            root: dir.path().to_path_buf(),
+            budget: Budget {
+                max_turns: 1,
+                max_gate_attempts: 1,
+                max_duration: Some(Duration::from_secs(100)),
+            },
+            rollback: false,
+            on_event: None,
+            research,
+            claim_check,
+        };
+        let mut state = State::new("goal", "true");
+        let _ = runner.run(&mut state);
+        let seen = provider.seen_timeouts.lock().unwrap();
+        let t = seen[0].expect("expected first timeout to be Some");
+        assert!(
+            t > Duration::from_secs(90) && t <= Duration::from_secs(100),
+            "expected first timeout in (90s, 100s] for research={research}, claim_check={claim_check}, got {t:?}"
+        );
+    }
+}
+
+#[test]
+fn claim_check_runs_in_the_reserve_after_the_loop_runs_out() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("src.py"), "def main():\n    run()\n").unwrap();
+    std::fs::write(
+        dir.path().join("report.md"),
+        "In `src.py:1-2`, `main` calls `run`.\n",
+    )
+    .unwrap();
+    LocalShell
+        .exec(
+            "git init -q && git add src.py",
+            dir.path(),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+
+    let provider = ScriptedProvider {
+        turns: Mutex::new(vec![
+            Response {
+                text: "reading".into(),
+                tool_calls: vec![ToolCall {
+                    id: "r1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "src.py"}),
+                    signature: None,
+                }],
+                usage: Usage::default(),
+                finish_reason: None,
+            },
+            Response {
+                text: r#"[{"id": 1, "verdict": "supported", "reason": "line 2 calls run()"}]"#
+                    .into(),
+                ..Default::default()
+            },
+        ]),
+        seen_timeouts: Mutex::new(Vec::new()),
+        sleep_before_complete: Duration::from_millis(1850),
+    };
+
+    let shell = RecordingShell::new();
+    let runner = Runner {
+        provider: &provider,
+        shell: &shell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: dir.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 5,
+            max_gate_attempts: 2,
+            max_duration: Some(Duration::from_secs(2)),
+        },
+        rollback: false,
+        on_event: None,
+        research: true,
+        claim_check: true,
+    };
+    let mut state = State::new("investigate src.py", "test -s report.md");
+    let (outcome, report) = runner.run(&mut state);
+
+    assert_eq!(outcome, Outcome::BudgetExhausted);
+    assert_eq!(report.claim_check_skipped, None);
+    let cc = report
+        .claim_check
+        .expect("expected claim_check to run in the reserve");
+    assert_eq!(cc.checked, 1);
 }
