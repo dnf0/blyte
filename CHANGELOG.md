@@ -1,3 +1,9 @@
+## v0.38.3 (2026-11-18)
+
+### Fix
+
+- **cli**: satisfy clippy 1.100's needless_bool lint in the host-command check (#335)
+
 ## v0.38.2 (2026-11-05)
 
 ### Fix
