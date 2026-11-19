@@ -20,6 +20,7 @@ Commands:
   cost        Show orchestrator and implementer costs
   statusline  Print Claude Code's status line with blyte costs
   plan        List a plan's tasks with their state and the command to dispatch each ready one
+  comments    Fail when the working tree adds comments since a base commit
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -313,6 +314,18 @@ Arguments:
 Options:
       --json  Output task statuses as JSON
   -h, --help  Print help
+```
+
+## blyte comments
+
+```text
+Fail when the working tree adds comments since a base commit
+
+Usage: blyte comments --base <REV>
+
+Options:
+      --base <REV>  Base commit or revision to compare the working tree against
+  -h, --help        Print help
 ```
 
 ## blyte cost

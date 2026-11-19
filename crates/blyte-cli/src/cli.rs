@@ -50,6 +50,8 @@ pub enum Command {
     Statusline(StatuslineArgs),
     /// List a plan's tasks with their state and the command to dispatch each ready one
     Plan(PlanArgs),
+    /// Fail when the working tree adds comments since a base commit
+    Comments(CommentsArgs),
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
@@ -296,6 +298,13 @@ pub struct PlanArgs {
     /// Output task statuses as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct CommentsArgs {
+    /// Base commit or revision to compare the working tree against
+    #[arg(long, value_name = "REV")]
+    pub base: String,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]

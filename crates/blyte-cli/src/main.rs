@@ -67,6 +67,10 @@ fn main() {
             blyte_cli::cli::Command::Plan(args) => {
                 std::process::exit(blyte_cli::plan_cmd::run(&args.plan, args.json));
             }
+            blyte_cli::cli::Command::Comments(args) => {
+                let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                std::process::exit(blyte_cli::comments_cmd::run(&args.base, &dir));
+            }
             blyte_cli::cli::Command::Skill(args) => match args.action {
                 blyte_cli::cli::SkillAction::Install {
                     project,
