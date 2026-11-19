@@ -146,6 +146,95 @@ fn an_implementation_dispatch_is_not_brief_checked() {
     );
 }
 
+fn read_start_record(r: &Path, id: &str) -> serde_json::Value {
+    let path = r.join(format!(".wt/{id}.start.json"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+#[test]
+fn the_start_record_lists_missing_brief_sections() {
+    let r = repo();
+    std::fs::write(r.path().join("q.md"), "## Objective\nFind out X.\n").unwrap();
+    blyte(
+        r.path(),
+        &["dispatch", "R1", "q.md", "--research", "--sandbox", "off"],
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert_eq!(
+        start["brief_missing"],
+        serde_json::json!(["Start from", "Out of scope", "Answer format"])
+    );
+}
+
+#[test]
+fn the_start_record_has_an_empty_list_for_a_full_brief() {
+    let r = repo();
+    std::fs::write(
+        r.path().join("q.md"),
+        "## Objective\nFind out X.\n\n## Start from\nf.txt\n\n## Out of scope\nnothing\n\n## Answer format\nshort\n",
+    )
+    .unwrap();
+    blyte(
+        r.path(),
+        &["dispatch", "R1", "q.md", "--research", "--sandbox", "off"],
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert_eq!(start["brief_missing"], serde_json::json!([]));
+}
+
+#[test]
+fn no_brief_check_still_records_the_missing_sections() {
+    let r = repo();
+    std::fs::write(r.path().join("q.md"), "## Objective\nFind out X.\n").unwrap();
+    let out = blyte(
+        r.path(),
+        &[
+            "dispatch",
+            "R1",
+            "q.md",
+            "--research",
+            "--no-brief-check",
+            "--sandbox",
+            "off",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("has no section for"),
+        "unexpected brief check warning:\n{stderr}"
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert_eq!(
+        start["brief_missing"],
+        serde_json::json!(["Start from", "Out of scope", "Answer format"])
+    );
+}
+
+#[test]
+fn an_implementation_dispatch_has_no_brief_missing_field() {
+    let r = repo();
+    std::fs::write(r.path().join("q.md"), "## Objective\nFind out X.\n").unwrap();
+    blyte(
+        r.path(),
+        &[
+            "dispatch",
+            "R1",
+            "q.md",
+            "--gate",
+            "true",
+            "--sandbox",
+            "off",
+        ],
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert!(
+        start.get("brief_missing").is_none(),
+        "unexpected brief_missing field in start record: {start}"
+    );
+}
+
 fn setup_review_worktree(r: &Path, id: &str) {
     git(
         r,

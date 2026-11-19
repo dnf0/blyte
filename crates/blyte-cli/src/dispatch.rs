@@ -362,23 +362,28 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     };
 
-    if args.research && !args.no_brief_check {
-        let missing = crate::research_brief::missing_sections(&task_content);
-        if !missing.is_empty() {
-            eprintln!(
-                "blyte: warning: the research question has no section for: {}. Questions with all four run faster and fail less (the template: blyte dispatch {} --research); --no-brief-check hides this.",
-                missing.join(", "),
-                args.id
-            );
-        }
-        let unverified = crate::research_brief::unverified_inputs(&task_content, &root);
-        if !unverified.is_empty() {
-            let paths: Vec<String> = unverified.iter().map(|p| p.display().to_string()).collect();
-            eprintln!(
-                "blyte: the question names a report that did not pass blyte's checks: {}. Use a verified report, or --no-brief-check to start anyway.",
-                paths.join(", ")
-            );
-            return 2;
+    let brief_missing = args
+        .research
+        .then(|| crate::research_brief::missing_sections(&task_content));
+    if let Some(ref missing) = brief_missing {
+        if !args.no_brief_check {
+            if !missing.is_empty() {
+                eprintln!(
+                    "blyte: warning: the research question has no section for: {}. Questions with all four run faster and fail less (the template: blyte dispatch {} --research); --no-brief-check hides this.",
+                    missing.join(", "),
+                    args.id
+                );
+            }
+            let unverified = crate::research_brief::unverified_inputs(&task_content, &root);
+            if !unverified.is_empty() {
+                let paths: Vec<String> =
+                    unverified.iter().map(|p| p.display().to_string()).collect();
+                eprintln!(
+                    "blyte: the question names a report that did not pass blyte's checks: {}. Use a verified report, or --no-brief-check to start anyway.",
+                    paths.join(", ")
+                );
+                return 2;
+            }
         }
     }
 
@@ -590,8 +595,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if let Some(ref s) = session {
         initial_start["session"] = serde_json::json!(s);
     }
-    if args.research {
+    if let Some(ref missing) = brief_missing {
         initial_start["research"] = serde_json::json!(true);
+        initial_start["brief_missing"] = serde_json::json!(missing);
     }
     if let Err(err) = std::fs::create_dir_all(&wt_parent)
         .and_then(|()| write_start_record(&start_path, &initial_start))
@@ -1025,8 +1031,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     if let Some(session) = session {
         start_json["session"] = serde_json::json!(session);
     }
-    if args.research {
+    if let Some(ref missing) = brief_missing {
         start_json["research"] = serde_json::json!(true);
+        start_json["brief_missing"] = serde_json::json!(missing);
     }
     if !left_out.is_empty() {
         start_json["gate_left_out"] = serde_json::json!(left_out
