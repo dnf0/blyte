@@ -1732,19 +1732,10 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                     }
                     fallbacks = findings;
                     if start_comments.as_deref() != Some("off") {
-                        let head = Command::new("git")
-                            .args(["rev-parse", "HEAD"])
-                            .current_dir(&wt)
-                            .output()
-                            .ok()
-                            .filter(|o| o.status.success())
-                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                        let rev = head.as_deref().unwrap_or("HEAD");
-                        let show_dir = if head.is_some() { &root } else { &wt };
                         match crate::comment_lint::added_comments(diff, &|path| {
                             Command::new("git")
-                                .args(["show", &format!("{rev}:{path}")])
-                                .current_dir(show_dir)
+                                .args(["show", &format!("HEAD:{path}")])
+                                .current_dir(&wt)
                                 .output()
                                 .map_err(|e| e.to_string())
                                 .and_then(|o| {

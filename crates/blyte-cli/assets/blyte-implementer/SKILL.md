@@ -185,6 +185,7 @@ handling, migrations, a public interface), or when the diff surprises you.
 
 - `blocked` means the check already fails at the base commit, so the task cannot pass until that is fixed: confirm it, then fix the base (or tell the user) before redispatching, rather than redispatching as it is.
 - A dispatch runs the gate on the untouched worktree before the model starts, so `blocked` with zero turns means the environment or the base commit is broken: read the step it names. For a task meant to fix a check that already fails, dispatch with `--no-base-check`.
+- A run may not add comments: the gate's first step (`blyte comments`) fails on any it adds, apart from documentation comments and tool directives. Do not ask for explanatory comments in a task; ask for a test or a name that carries the meaning. `comments added (N)` in `== checks` means some got through (`comments = "review"` or `"off"` in `blyte.toml`): read what each was covering for.
 - A review flag "the gate may have run in an environment from outside the worktree" means the implementer copied or linked a `.venv`, `node_modules` or cache entry from elsewhere: do not accept that run on the gate alone.
 
 **Record your verdict** once you have checked it, so the repository keeps an honest record of

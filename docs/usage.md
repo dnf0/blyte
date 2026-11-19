@@ -86,6 +86,7 @@ max_turns = 300
 | `gate` | string | the check command; several lines are several steps |
 | `setup` | string | a command run once in each new dispatch worktree before the implementer starts, outside the sandbox, with `[dispatch.env]` and `BLYTE_MAIN_CHECKOUT` set; a failure ends the run as `blocked` |
 | `base_check` | boolean | default `true`: the gate is run once on the untouched worktree before the implementer starts, and a failure ends the run as `blocked` with no model call; set `false` (or pass `--no-base-check`) for a task meant to fix a check that already fails |
+| `comments` | string | default `"gate"`: the gate starts with `blyte comments --base <sha>`, which fails on any comment the run added, and `blyte review` flags them; `"review"` flags them in review only; `"off"` does neither. Any other value is an error |
 | `allow_read` | array of strings | extra paths the sandbox may read, for every dispatch; `~/` and `$BLYTE_MAIN_CHECKOUT/` are expanded, otherwise absolute |
 | `model` | string | model identifier or provider selection |
 | `max_seconds` | integer | wall-clock budget in seconds (default 3600) |
@@ -96,6 +97,8 @@ max_turns = 300
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
 
 **The environment is checked before the model starts.** After `setup`, a dispatch runs the gate once on the untouched worktree. If a step fails (dependencies that cannot be installed, a missing service, a base commit that is already broken), the run ends as `blocked` with zero turns and names the step and the end of its output. The implementer is also told never to copy, link or use a dependency environment from outside the worktree, and `blyte review` flags a run whose log shows it did: its gate may have passed in a borrowed environment, so do not accept it on the gate alone.
+
+**A run may not add comments.** The code and its tests carry the meaning; a comment is where an implementer notes an assumption or a shortcut instead of fixing it, and nothing checks it. By default the first gate step is `blyte comments --base <sha>`: it lists every comment on a line the run added (`file:line: text`) and fails, so the implementer removes them and says what they explained in its final report. Only added lines count, in Rust, Python, JavaScript and TypeScript files. Not counted, because a tool reads them: documentation comments (`///`, `//!`, `/** */`), a `#!` first line, and directives such as `noqa`, `type: ignore`, `eslint-disable`, `@ts-expect-error` and `SAFETY:`. `blyte review` shows `comments added (N): ...` for any that remain, which is the only effect under `comments = "review"`. You can run the command yourself on a branch: `blyte comments --base origin/main`.
 
 On macOS a dispatch holds `caffeinate -i` while it runs, so idle sleep does not stall a model call. A closed lid on battery still sleeps the machine.
 
