@@ -78,6 +78,7 @@ removed; new fields are added without a bump.
 | `provider_retries` | transient provider errors waited out |
 | `gate_wait_ms` | time spent waiting for a machine-wide gate slot on each attempt, in order (0 when a slot was free) |
 | `gate_left_out` | dispatch only: the gate steps `blyte.toml` records as left out, each with its reason |
+| `brief_missing` | research dispatch only (in `.wt/<id>.start.json`): the brief sections the question lacked (`[]` when all four are present) |
 | `truncated_turns` | turns whose reply hit the output token limit and was cut off |
 | `big_read_turns` | turns whose tool output was more than half of the fold budget |
 | `read_loop`, `peak_read_repeats` | whether the run stopped because it kept repeating `read`, `grep` and `glob` calls without changing the workspace, and the most repeats seen between two changes |

@@ -146,6 +146,95 @@ fn an_implementation_dispatch_is_not_brief_checked() {
     );
 }
 
+fn read_start_record(r: &Path, id: &str) -> serde_json::Value {
+    let path = r.join(format!(".wt/{id}.start.json"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+#[test]
+fn the_start_record_lists_missing_brief_sections() {
+    let r = repo();
+    std::fs::write(r.path().join("q.md"), "## Objective\nFind out X.\n").unwrap();
+    blyte(
+        r.path(),
+        &["dispatch", "R1", "q.md", "--research", "--sandbox", "off"],
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert_eq!(
+        start["brief_missing"],
+        serde_json::json!(["Start from", "Out of scope", "Answer format"])
+    );
+}
+
+#[test]
+fn the_start_record_has_an_empty_list_for_a_full_brief() {
+    let r = repo();
+    std::fs::write(
+        r.path().join("q.md"),
+        "## Objective\nFind out X.\n\n## Start from\nf.txt\n\n## Out of scope\nnothing\n\n## Answer format\nshort\n",
+    )
+    .unwrap();
+    blyte(
+        r.path(),
+        &["dispatch", "R1", "q.md", "--research", "--sandbox", "off"],
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert_eq!(start["brief_missing"], serde_json::json!([]));
+}
+
+#[test]
+fn no_brief_check_still_records_the_missing_sections() {
+    let r = repo();
+    std::fs::write(r.path().join("q.md"), "## Objective\nFind out X.\n").unwrap();
+    let out = blyte(
+        r.path(),
+        &[
+            "dispatch",
+            "R1",
+            "q.md",
+            "--research",
+            "--no-brief-check",
+            "--sandbox",
+            "off",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("has no section for"),
+        "unexpected brief check warning:\n{stderr}"
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert_eq!(
+        start["brief_missing"],
+        serde_json::json!(["Start from", "Out of scope", "Answer format"])
+    );
+}
+
+#[test]
+fn an_implementation_dispatch_has_no_brief_missing_field() {
+    let r = repo();
+    std::fs::write(r.path().join("q.md"), "## Objective\nFind out X.\n").unwrap();
+    blyte(
+        r.path(),
+        &[
+            "dispatch",
+            "R1",
+            "q.md",
+            "--gate",
+            "true",
+            "--sandbox",
+            "off",
+        ],
+    );
+    let start = read_start_record(r.path(), "R1");
+    assert!(
+        start.get("brief_missing").is_none(),
+        "unexpected brief_missing field in start record: {start}"
+    );
+}
+
 fn setup_review_worktree(r: &Path, id: &str) {
     git(
         r,
@@ -323,4 +412,194 @@ fn review_does_not_flag_a_narrow_or_non_research_run() {
         !checks2.contains("ran out of budget: split the question"),
         "unexpected split flag in non-research run:\n{checks2}"
     );
+}
+
+#[test]
+fn review_works_for_a_research_run_without_its_worktree() {
+    let r = repo();
+    std::fs::create_dir_all(r.path().join(".wt")).unwrap();
+
+    std::fs::write(
+        r.path().join(".wt/R1.start.json"),
+        serde_json::json!({
+            "id": "R1",
+            "research": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let turns: Vec<serde_json::Value> = (0..12)
+        .map(|_| serde_json::json!({"input": 120000, "cached": 0, "output": 100}))
+        .collect();
+    std::fs::write(
+        r.path().join(".wt/R1.report.json"),
+        serde_json::json!({
+            "outcome": "budget_exhausted",
+            "turn_usage": turns
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let log = format!(
+        "  ● read {}/crates/a/lib.rs -> 100 lines\n  ● read {}/crates/b/mod.rs -> 50 lines\n",
+        r.path().display(),
+        r.path().display()
+    );
+    std::fs::write(r.path().join(".wt/R1.log"), log).unwrap();
+
+    assert!(!r.path().join(".wt/R1").exists());
+
+    let out = blyte(r.path(), &["review", "R1"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("does not exist"), "{stderr}");
+    assert!(!stdout.contains("does not exist"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("! broad research run: 12 of 12 turns")),
+        "missing broad research run line:\n{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("! ran out of budget: split the question")),
+        "missing split suggestion line:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("== commits\n(worktree removed)\n"),
+        "missing (worktree removed) under == commits:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("no files changed"),
+        "unexpected 'no files changed' in output:\n{stdout}"
+    );
+}
+
+#[test]
+fn review_gives_the_same_research_flags_with_and_without_the_worktree() {
+    let r = repo();
+    setup_review_worktree(r.path(), "R1");
+
+    std::fs::write(
+        r.path().join(".wt/R1.start.json"),
+        serde_json::json!({
+            "id": "R1",
+            "research": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let turns: Vec<serde_json::Value> = (0..12)
+        .map(|_| serde_json::json!({"input": 120000, "cached": 0, "output": 100}))
+        .collect();
+    std::fs::write(
+        r.path().join(".wt/R1.report.json"),
+        serde_json::json!({
+            "outcome": "budget_exhausted",
+            "turn_usage": turns
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let log = format!(
+        "  ● read {}/crates/a/lib.rs -> 100 lines\n  ● read {}/crates/b/mod.rs -> 50 lines\n",
+        r.path().display(),
+        r.path().display()
+    );
+    std::fs::write(r.path().join(".wt/R1.log"), log).unwrap();
+
+    let with_wt = blyte(r.path(), &["review", "R1"]);
+    assert_eq!(
+        with_wt.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&with_wt.stderr)
+    );
+    let with_stdout = String::from_utf8_lossy(&with_wt.stdout);
+
+    git(r.path(), &["worktree", "remove", "--force", ".wt/R1"]);
+    assert!(!r.path().join(".wt/R1").exists());
+
+    let without_wt = blyte(r.path(), &["review", "R1"]);
+    assert_eq!(
+        without_wt.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&without_wt.stderr)
+    );
+    let without_stdout = String::from_utf8_lossy(&without_wt.stdout);
+
+    let with_broad = with_stdout
+        .lines()
+        .find(|l| l.starts_with("! broad research run:"))
+        .expect("broad line with worktree");
+    let without_broad = without_stdout
+        .lines()
+        .find(|l| l.starts_with("! broad research run:"))
+        .expect("broad line without worktree");
+    assert_eq!(with_broad, without_broad);
+
+    let with_split = with_stdout
+        .lines()
+        .find(|l| l.starts_with("! ran out of budget:"))
+        .expect("split line with worktree");
+    let without_split = without_stdout
+        .lines()
+        .find(|l| l.starts_with("! ran out of budget:"))
+        .expect("split line without worktree");
+    assert_eq!(with_split, without_split);
+}
+
+#[test]
+fn review_without_a_worktree_or_a_report_names_both() {
+    let r = repo();
+    std::fs::create_dir_all(r.path().join(".wt")).unwrap();
+    std::fs::write(
+        r.path().join(".wt/R1.start.json"),
+        serde_json::json!({
+            "id": "R1",
+            "research": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = blyte(r.path(), &["review", "R1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("nothing to review"), "{stderr}");
+    assert!(stderr.contains("R1.report.json"), "{stderr}");
+}
+
+#[test]
+fn review_of_an_implementation_run_still_needs_its_worktree() {
+    let r = repo();
+    std::fs::create_dir_all(r.path().join(".wt")).unwrap();
+    std::fs::write(
+        r.path().join(".wt/R1.start.json"),
+        serde_json::json!({
+            "id": "R1"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        r.path().join(".wt/R1.report.json"),
+        serde_json::json!({
+            "outcome": "verified"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = blyte(r.path(), &["review", "R1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("does not exist"), "{stderr}");
 }
