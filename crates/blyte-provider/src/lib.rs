@@ -390,7 +390,6 @@ fn today_utc() -> (u32, u32, u32) {
 }
 
 pub fn pricing_on(model_id: &str, date: (u32, u32, u32)) -> Option<Pricing> {
-    // Gemini 3.8 Flash, list price through 2026-12-31.
     if model_id.contains("gemini-3.8-flash") {
         return Some(Pricing {
             input: 0.75,
@@ -398,9 +397,21 @@ pub fn pricing_on(model_id: &str, date: (u32, u32, u32)) -> Option<Pricing> {
             output: 3.75,
         });
     }
-    // Gemini 4 Argon, introductory price announced 2026-09-30 (cached input 95% off)
-    // through 2026-11-30; post-introductory price from 2026-12-01.
-    if model_id.contains("gemini-4-argon") {
+    if model_id.contains("gemini-4-hydrogen") {
+        return Some(Pricing {
+            input: 1.50,
+            cached: 0.075,
+            output: 7.50,
+        });
+    }
+    if model_id.contains("gemini-4-neon") {
+        return Some(Pricing {
+            input: 3.00,
+            cached: 0.15,
+            output: 15.00,
+        });
+    }
+    if model_id.contains("gemini-4-argon") || model_id.contains("gemini-4-carbon") {
         if date <= (2026, 11, 30) {
             return Some(Pricing {
                 input: 2.00,
@@ -408,10 +419,9 @@ pub fn pricing_on(model_id: &str, date: (u32, u32, u32)) -> Option<Pricing> {
                 output: 10.00,
             });
         } else {
-            // The cached rate from 2026-12-01 is unannounced; 10% of input ($0.40) is an assumption.
             return Some(Pricing {
                 input: 4.00,
-                cached: 0.40,
+                cached: 0.20,
                 output: 20.00,
             });
         }
@@ -449,7 +459,7 @@ mod tests {
         };
         let post_intro = Pricing {
             input: 4.00,
-            cached: 0.40,
+            cached: 0.20,
             output: 20.00,
         };
 
