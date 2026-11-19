@@ -1,3 +1,9 @@
+## v0.45.0 (2026-11-19)
+
+### Feat
+
+- **research**: review works without the worktree; the start record lists missing brief sections (#360)
+
 ## v0.44.0 (2026-11-18)
 
 ### Feat
