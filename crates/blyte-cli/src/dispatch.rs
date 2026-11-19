@@ -8,6 +8,7 @@ use crate::cli::{DispatchArgs, ReviewArgs};
 
 pub const DISPATCH_RULES: &str = r#"Rules:
 - Stay within the task. If it cannot pass without a small change elsewhere, make the smallest one and say so.
+- Write no comments in code: not to explain it, not to mark a section, not to note an assumption or a TODO. The check fails on any comment you add. If something needs saying, say it in your final report. Documentation comments a tool reads (///, //!, /** */) and tool directives (noqa, eslint-disable, SAFETY:) are the only exceptions; do not use them to get around this rule.
 - Never delete, clean or modify anything outside the worktree, and never change the machine to make a check pass. If a check fails because of the environment (disk, network, a missing service), stop and say so.
 - Never copy, link or use a dependency environment from outside the worktree (a .venv, node_modules, site-packages or a package-cache entry from the main checkout, another worktree, another repository or your home directory). If the environment cannot be built here, stop and say so.
 - Find files with the glob tool and search file contents with the grep tool. Do not run `find`, `grep -r` or `rg` in the shell over `/`, your home directory, or any directory outside the worktree: they walk huge trees and are killed at the time limit.
@@ -70,6 +71,19 @@ pub fn wrap_research(question: &str, root: &Path) -> String {
         question.trim(),
         RESEARCH_RULES
     )
+}
+
+pub fn comment_step(exe: &std::path::Path, base_sha: &str) -> String {
+    let escaped = exe.display().to_string().replace('\'', r"'\''");
+    format!("'{escaped}' comments --base {base_sha}")
+}
+
+pub fn gate_with_comment_step(gate: &str, step: &str) -> String {
+    if gate.lines().all(|l| l.trim().is_empty()) {
+        gate.to_string()
+    } else {
+        format!("{step}\n{gate}")
+    }
 }
 
 pub fn quick_steps(gate: &str) -> Option<String> {
@@ -246,6 +260,13 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     };
     let dispatch_cfg = repo_config.map(|c| c.dispatch).unwrap_or_default();
+    let comments = match crate::config::comment_mode(dispatch_cfg.comments.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
 
     let mut left_out: Vec<(String, String)> = Vec::new();
     let (gate, gate_source) = if args.research {
@@ -939,6 +960,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     };
 
+    let gate = if !args.research && comments == crate::config::CommentMode::Gate {
+        gate_with_comment_step(&gate, &comment_step(&current_exe, &base_sha))
+    } else {
+        gate
+    };
+
     let mut cmd = Command::new(current_exe);
     cmd.current_dir(&worktree_dir);
     cmd.stdout(log_file);
@@ -1020,6 +1047,15 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         eprintln!("blyte: warning: {msg}; the machine may sleep during this run");
     }
 
+    let comments_str = if args.research {
+        "off"
+    } else {
+        match comments {
+            crate::config::CommentMode::Gate => "gate",
+            crate::config::CommentMode::Review => "review",
+            crate::config::CommentMode::Off => "off",
+        }
+    };
     let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
     let mut start_json = serde_json::json!({
         "id": args.id,
@@ -1036,6 +1072,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "base": args.base,
         "base_sha": base_commit,
         "base_check": base_check,
+        "comments": comments_str,
     });
     if let Some(session) = session {
         start_json["session"] = serde_json::json!(session);
@@ -1378,6 +1415,7 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
 
     let (
         base,
+        start_comments,
         commits_out,
         files_out,
         tree_out,
@@ -1390,25 +1428,32 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         // Runs dispatched before base_sha was recorded have no start record field; a record that
         // exists but cannot be read is an error, not a reason to guess the base.
         let start_path = root.join(".wt").join(format!("{}.start.json", args.id));
-        let start_base_sha: Option<String> = match std::fs::read_to_string(&start_path) {
-            Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
-                Ok(v) => v
-                    .get("base_sha")
-                    .and_then(|s| s.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from),
+        let (start_base_sha, start_comments): (Option<String>, Option<String>) =
+            match std::fs::read_to_string(&start_path) {
+                Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
+                    Ok(v) => (
+                        v.get("base_sha")
+                            .and_then(|s| s.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from),
+                        v.get("comments")
+                            .and_then(|s| s.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from),
+                    ),
+                    Err(e) => {
+                        eprintln!("error: cannot parse {}: {e}", start_path.display());
+                        return 2;
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
                 Err(e) => {
-                    eprintln!("error: cannot parse {}: {e}", start_path.display());
+                    eprintln!("error: cannot read {}: {e}", start_path.display());
                     return 2;
                 }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                eprintln!("error: cannot read {}: {e}", start_path.display());
-                return 2;
-            }
-        };
+            };
 
         let base = if let Some(sha) = start_base_sha {
             let has_base = Command::new("git")
@@ -1562,6 +1607,7 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
 
         (
             base,
+            start_comments,
             commits_out,
             files_out,
             tree_out,
@@ -1574,6 +1620,7 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     } else {
         (
             String::new(),
+            None,
             String::new(),
             String::new(),
             String::new(),
@@ -1684,6 +1731,49 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                         checks.flags.push(flag);
                     }
                     fallbacks = findings;
+                    if start_comments.as_deref() != Some("off") {
+                        let head = Command::new("git")
+                            .args(["rev-parse", "HEAD"])
+                            .current_dir(&wt)
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                        let rev = head.as_deref().unwrap_or("HEAD");
+                        let show_dir = if head.is_some() { &root } else { &wt };
+                        match crate::comment_lint::added_comments(diff, &|path| {
+                            Command::new("git")
+                                .args(["show", &format!("{rev}:{path}")])
+                                .current_dir(show_dir)
+                                .output()
+                                .map_err(|e| e.to_string())
+                                .and_then(|o| {
+                                    if o.status.success() {
+                                        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+                                    } else {
+                                        let stderr =
+                                            String::from_utf8_lossy(&o.stderr).trim().to_string();
+                                        if stderr.is_empty() {
+                                            Err(format!("exit {}", o.status))
+                                        } else {
+                                            Err(stderr)
+                                        }
+                                    }
+                                })
+                        }) {
+                            Ok(comments) => {
+                                if let Some(flag) = crate::comment_lint::flag(&comments) {
+                                    checks.flags.push(flag);
+                                }
+                            }
+                            Err(reason) => {
+                                let first_line = reason.lines().next().unwrap_or(reason.as_str());
+                                let msg = format!("comment check not run: {first_line}");
+                                let cut: String = msg.chars().take(200).collect();
+                                checks.flags.push(cut);
+                            }
+                        }
+                    }
                 }
                 Err(reason) => {
                     let first_line = reason.lines().next().unwrap_or(reason.as_str());

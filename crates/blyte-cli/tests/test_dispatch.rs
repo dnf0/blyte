@@ -198,6 +198,7 @@ fn summary_carries_model_from_report() {
             "gemini-4-argon",
             "--max-turns",
             "0",
+            "--no-base-check",
             "--sandbox",
             "off",
         ])
