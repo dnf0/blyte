@@ -9,6 +9,7 @@ use crate::cli::{DispatchArgs, ReviewArgs};
 pub const DISPATCH_RULES: &str = r#"Rules:
 - Stay within the task. If it cannot pass without a small change elsewhere, make the smallest one and say so.
 - Never delete, clean or modify anything outside the worktree, and never change the machine to make a check pass. If a check fails because of the environment (disk, network, a missing service), stop and say so.
+- Never copy, link or use a dependency environment from outside the worktree (a .venv, node_modules, site-packages or a package-cache entry from the main checkout, another worktree, another repository or your home directory). If the environment cannot be built here, stop and say so.
 - Find files with the glob tool and search file contents with the grep tool. Do not run `find`, `grep -r` or `rg` in the shell over `/`, your home directory, or any directory outside the worktree: they walk huge trees and are killed at the time limit.
 - Do not push, open pull requests, or read secrets.
 - Commit locally before you stop, with the exact commit message the task gives (or a conventional one if it gives none).
@@ -1585,15 +1586,16 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     };
 
     let log_file = root.join(".wt").join(format!("{}.log", args.id));
+    let log_content_opt = std::fs::read_to_string(&log_file).ok();
     let (hcmds, reads, (refused_count, refused_paths)) =
-        if let Ok(log_content) = std::fs::read_to_string(&log_file) {
-            let hcmds = host_commands(&log_content);
+        if let Some(ref log_content) = log_content_opt {
+            let hcmds = host_commands(log_content);
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/"));
             let allowed = [root.clone(), wt.clone()];
-            let reads = outside_reads(&log_content, &allowed, &home);
-            let refused = refused_reads(&log_content);
+            let reads = outside_reads(log_content, &allowed, &home);
+            let refused = refused_reads(log_content);
             (hcmds, reads, refused)
         } else {
             (Vec::new(), Vec::new(), (0, Vec::new()))
@@ -1689,6 +1691,38 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
                     let cut: String = msg.chars().take(200).collect();
                     checks.flags.push(cut);
                 }
+            }
+        }
+        let summary_path = root.join(".wt").join(format!("{}.json", args.id));
+        match std::fs::read_to_string(&summary_path) {
+            Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
+                Ok(v) => match crate::outside_env::summary_worktree(&v) {
+                    Ok(summary_wt) => {
+                        if let Some(ref log_content) = log_content_opt {
+                            let borrowed =
+                                crate::outside_env::borrowed_env_commands(log_content, &summary_wt);
+                            if let Some(flag) = crate::outside_env::flag(&borrowed) {
+                                checks.flags.push(flag);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        checks.flags.push(format!("outside-env check not run: {e}"));
+                    }
+                },
+                Err(e) => {
+                    checks.flags.push(format!(
+                        "outside-env check not run: cannot parse {}: {e}",
+                        summary_path.display()
+                    ));
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && log_content_opt.is_none() => {}
+            Err(e) => {
+                checks.flags.push(format!(
+                    "outside-env check not run: cannot read {}: {e}",
+                    summary_path.display()
+                ));
             }
         }
     }
@@ -2015,7 +2049,7 @@ fn is_host_command(cmd: &str) -> bool {
     names_outside && changes_something(cmd)
 }
 
-pub fn host_commands(log: &str) -> Vec<String> {
+pub(crate) fn bash_commands(log: &str) -> Vec<String> {
     let cleaned = strip_ansi(log);
     let mut result = Vec::new();
     for line in cleaned.lines() {
@@ -2023,12 +2057,22 @@ pub fn host_commands(log: &str) -> Vec<String> {
         if let Some(rest) = trimmed.strip_prefix("● bash ") {
             if let Some((cmd, _)) = rest.rsplit_once(" -> ") {
                 let cmd = cmd.trim();
-                if is_host_command(cmd) && !result.iter().any(|c| c == cmd) {
+                if !cmd.is_empty() {
                     result.push(cmd.to_string());
-                    if result.len() == 20 {
-                        break;
-                    }
                 }
+            }
+        }
+    }
+    result
+}
+
+pub fn host_commands(log: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    for cmd in bash_commands(log) {
+        if is_host_command(&cmd) && !result.iter().any(|c| c == &cmd) {
+            result.push(cmd);
+            if result.len() == 20 {
+                break;
             }
         }
     }
