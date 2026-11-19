@@ -792,7 +792,7 @@ pub fn warn_superseded(home: &Path) {
     }
 }
 
-pub const RECOMMENDED_MODEL: &str = "gemini-4-argon";
+pub const RECOMMENDED_MODEL: &str = "gemini-4-neon";
 pub const FLASH_MODEL: &str = "gemini-3.8-flash-high";
 pub const ARGON_TIMEOUT_SECS: &str = "600";
 
@@ -825,7 +825,7 @@ pub fn prompt_model<R: std::io::BufRead, W: std::io::Write>(
     write!(
         writer,
         "Default implementer model:\n  \
-         1) {RECOMMENDED_MODEL} (recommended: passes more gates in fewer turns and lower total cost)\n  \
+         1) {RECOMMENDED_MODEL} (recommended: best results in the 2026-11 trial at the lowest total cost)\n  \
          2) {FLASH_MODEL} (cheaper per token, more turns)\n  \
          3) any other model id, typed in\n\
          Choice [1]: "
