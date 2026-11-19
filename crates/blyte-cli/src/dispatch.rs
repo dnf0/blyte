@@ -131,6 +131,15 @@ pub fn exit_code(outcome: &str) -> i32 {
     }
 }
 
+pub fn summary_error(outcome: &str, error: Option<&str>) -> Option<String> {
+    let err = error?;
+    if outcome == "blocked" {
+        err.lines().next().map(String::from)
+    } else {
+        Some(err.to_string())
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct CommitRecord {
     pub sha: String,
@@ -1225,16 +1234,14 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 })
                 .unwrap_or_default();
             let raw_turns = rec.get("turns").and_then(|v| v.as_u64());
+            let rec_outcome = rec
+                .get("outcome")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error");
 
             (
-                rec.get("outcome")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("error")
-                    .to_string(),
-                rec.get("error")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.lines().next())
-                    .map(String::from),
+                rec_outcome.to_string(),
+                summary_error(rec_outcome, rec.get("error").and_then(|v| v.as_str())),
                 rec.get("final_message")
                     .and_then(|v| v.as_str())
                     .map(String::from),
