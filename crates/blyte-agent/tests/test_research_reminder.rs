@@ -90,6 +90,7 @@ fn research_reminder_at_turn_30_and_not_again_at_60_if_report_changed() {
         on_event: None,
         research: true,
         claim_check: false,
+        base_check: false,
     };
 
     let mut st = State::new("research task", "true");
@@ -152,6 +153,7 @@ fn research_reminder_repeats_at_turn_60_if_report_never_changed() {
         on_event: None,
         research: true,
         claim_check: false,
+        base_check: false,
     };
 
     let mut st = State::new("research task", "true");
@@ -235,6 +237,7 @@ fn research_gate_fails_on_a_misquote_until_it_is_fixed() {
         on_event: None,
         research: true,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("research task", "test -s report.md");
     let (outcome, report) = runner.run(&mut st);
@@ -297,6 +300,7 @@ fn the_quote_check_does_not_run_a_repositorys_fsmonitor() {
         on_event: None,
         research: true,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("research task", "test -s report.md");
     let (outcome, _) = runner.run(&mut st);

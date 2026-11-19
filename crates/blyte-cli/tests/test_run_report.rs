@@ -34,6 +34,7 @@ fn config() -> TaskConfig {
         pass_env: Vec::new(),
         research: false,
         claim_check: false,
+        base_check: false,
         orchestrate: false,
         dispatch_cmd: None,
     }

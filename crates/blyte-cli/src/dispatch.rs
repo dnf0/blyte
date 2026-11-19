@@ -978,6 +978,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     for r in config_allow_read.iter().chain(&args.allow_read) {
         cmd.arg("--read-root").arg(r);
     }
+    let base_check =
+        !args.research && !args.no_base_check && dispatch_cfg.base_check != Some(false);
     if args.research {
         cmd.arg("--read-root").arg(&root);
         cmd.arg("--no-gate-slot");
@@ -985,6 +987,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         if !args.no_claim_check {
             cmd.arg("--claim-check");
         }
+    } else if base_check {
+        cmd.arg("--base-check");
     }
 
     cmd.arg("--");
@@ -1027,6 +1031,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "plan_task": args.plan_task,
         "base": args.base,
         "base_sha": base_commit,
+        "base_check": base_check,
     });
     if let Some(session) = session {
         start_json["session"] = serde_json::json!(session);
@@ -1185,7 +1190,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     .and_then(|v| v.as_str())
                     .unwrap_or("error")
                     .to_string(),
-                rec.get("error").and_then(|v| v.as_str()).map(String::from),
+                rec.get("error")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.lines().next())
+                    .map(String::from),
                 rec.get("final_message")
                     .and_then(|v| v.as_str())
                     .map(String::from),

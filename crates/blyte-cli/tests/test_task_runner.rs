@@ -95,6 +95,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         pass_env: Vec::new(),
         research: false,
         claim_check: false,
+        base_check: false,
         orchestrate: false,
         dispatch_cmd: None,
     };
@@ -137,6 +138,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         pass_env: Vec::new(),
         research: false,
         claim_check: false,
+        base_check: false,
         orchestrate: false,
         dispatch_cmd: None,
     };
@@ -168,6 +170,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         pass_env: Vec::new(),
         research: false,
         claim_check: false,
+        base_check: false,
         orchestrate: false,
         dispatch_cmd: None,
     };
@@ -210,6 +213,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         pass_env: Vec::new(),
         research: false,
         claim_check: false,
+        base_check: false,
         orchestrate: false,
         dispatch_cmd: None,
     };

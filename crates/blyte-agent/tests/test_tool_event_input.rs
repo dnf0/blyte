@@ -58,6 +58,7 @@ fn run_bash(cmd: &str) -> String {
         on_event: Some(&on_event),
         research: false,
         claim_check: false,
+        base_check: false,
     };
     runner.run(&mut State::new("bash", "true"));
     inputs.into_inner().unwrap().remove(0)

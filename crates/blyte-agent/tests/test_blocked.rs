@@ -86,6 +86,7 @@ fn run(dir: &std::path::Path, steps: Vec<Result<String, String>>) -> (Outcome, u
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("make the check pass", "test -f ok");
     let (outcome, report) = r.run(&mut st);

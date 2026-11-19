@@ -633,6 +633,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                     pass_env: Vec::new(),
                     research: false,
                     claim_check: false,
+                    base_check: false,
                     orchestrate: session.orchestrate,
                     dispatch_cmd: session.dispatch_cmd.clone(),
                 };

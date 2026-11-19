@@ -90,6 +90,7 @@ fn big_reads_every_turn_warn_on_third_turn_and_stop_after_fifth_thrash() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
 
     let mut state = State::new("goal", "");
@@ -148,6 +149,7 @@ fn small_reads_every_turn_produce_no_note_and_no_thrash() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
 
     let mut state = State::new("goal", "");
@@ -205,6 +207,7 @@ fn one_big_read_then_small_ones_warns_once_and_does_not_stop() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
 
     let mut state = State::new("goal", "");

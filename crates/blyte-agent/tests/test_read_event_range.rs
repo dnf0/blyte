@@ -68,6 +68,7 @@ fn a_ranged_read_is_logged_with_its_range() {
         on_event: Some(&on_event),
         research: false,
         claim_check: false,
+        base_check: false,
     };
     runner.run(&mut State::new("read", "true"));
     assert_eq!(*inputs.lock().unwrap(), vec!["a.txt", "a.txt (L2-L3)"]);

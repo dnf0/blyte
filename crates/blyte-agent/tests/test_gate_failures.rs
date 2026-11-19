@@ -48,6 +48,7 @@ fn run(gate: &str, attempts: u32) -> RunReport {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     r.run(&mut State::new("g", gate)).1
 }

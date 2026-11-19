@@ -9,6 +9,7 @@ use std::process::Command;
 pub struct DispatchConfig {
     pub gate: Option<String>,
     pub setup: Option<String>,
+    pub base_check: Option<bool>,
     pub model: Option<String>,
     pub max_seconds: Option<u64>,
     pub max_turns: Option<u32>,
