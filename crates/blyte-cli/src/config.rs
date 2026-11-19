@@ -10,6 +10,7 @@ pub struct DispatchConfig {
     pub gate: Option<String>,
     pub setup: Option<String>,
     pub base_check: Option<bool>,
+    pub comments: Option<String>,
     pub model: Option<String>,
     pub max_seconds: Option<u64>,
     pub max_turns: Option<u32>,
@@ -20,6 +21,24 @@ pub struct DispatchConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub allow_read: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentMode {
+    Gate,
+    Review,
+    Off,
+}
+
+pub fn comment_mode(value: Option<&str>) -> Result<CommentMode, String> {
+    match value {
+        None | Some("gate") => Ok(CommentMode::Gate),
+        Some("review") => Ok(CommentMode::Review),
+        Some("off") => Ok(CommentMode::Off),
+        Some(value) => Err(format!(
+            "blyte.toml: [dispatch] comments must be \"gate\", \"review\" or \"off\", not \"{value}\""
+        )),
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
