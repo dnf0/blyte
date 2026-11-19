@@ -1015,6 +1015,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     };
     start_guard.armed = false;
+    if let Err(msg) = crate::keep_awake::hold(child.id()) {
+        eprintln!("blyte: warning: {msg}; the machine may sleep during this run");
+    }
 
     let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
     let mut start_json = serde_json::json!({

@@ -71,16 +71,81 @@ where
 /// Default token source running `gcloud auth application-default print-access-token`.
 pub struct GcloudTokenSource;
 
+const GCLOUD_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[doc(hidden)]
+pub fn output_with_timeout(
+    cmd: &mut std::process::Command,
+    limit: Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut out) = stdout {
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut err) = stderr {
+            let _ = err.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "command timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    let stdout_bytes = stdout_handle.join().unwrap_or_default();
+    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
 impl TokenSource for GcloudTokenSource {
     fn token(&self) -> Result<String, ProviderError> {
-        let output = std::process::Command::new("gcloud")
-            .args(["auth", "application-default", "print-access-token"])
-            .output()
-            .map_err(|e| {
+        let mut cmd = std::process::Command::new("gcloud");
+        cmd.args(["auth", "application-default", "print-access-token"]);
+        let output = output_with_timeout(&mut cmd, GCLOUD_TIMEOUT).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                ProviderError::Auth(
+                    "`gcloud auth application-default print-access-token` did not finish in 60s; run it by hand to see why"
+                        .to_string(),
+                )
+            } else {
                 ProviderError::Auth(format!(
                     "failed to execute `gcloud`: {e}; run `gcloud auth application-default login`"
                 ))
-            })?;
+            }
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
