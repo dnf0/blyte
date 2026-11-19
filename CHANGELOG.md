@@ -1,3 +1,9 @@
+## v0.48.0 (2026-11-19)
+
+### Feat
+
+- **skill**: recommend gemini-4-neon, and price Hydrogen, Neon and Carbon (#365)
+
 ## v0.47.0 (2026-11-19)
 
 ### Feat
