@@ -1,3 +1,9 @@
+## v0.46.0 (2026-11-19)
+
+### Feat
+
+- **dispatch**: stop as blocked when the gate cannot run, and flag borrowed environments (#362)
+
 ## v0.45.0 (2026-11-19)
 
 ### Feat
