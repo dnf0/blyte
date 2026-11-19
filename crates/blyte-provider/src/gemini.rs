@@ -89,19 +89,19 @@ pub fn output_with_timeout(
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
 
-    let stdout_handle = std::thread::spawn(move || {
+    let stdout_handle = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
         let mut buf = Vec::new();
         if let Some(ref mut out) = stdout {
-            let _ = out.read_to_end(&mut buf);
+            out.read_to_end(&mut buf)?;
         }
-        buf
+        Ok(buf)
     });
-    let stderr_handle = std::thread::spawn(move || {
+    let stderr_handle = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
         let mut buf = Vec::new();
         if let Some(ref mut err) = stderr {
-            let _ = err.read_to_end(&mut buf);
+            err.read_to_end(&mut buf)?;
         }
-        buf
+        Ok(buf)
     });
 
     let started = Instant::now();
@@ -120,8 +120,12 @@ pub fn output_with_timeout(
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    let stdout_bytes = stdout_handle.join().unwrap_or_default();
-    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+    let stdout_bytes = stdout_handle
+        .join()
+        .map_err(|_| std::io::Error::other("the thread reading the command's stdout panicked"))??;
+    let stderr_bytes = stderr_handle
+        .join()
+        .map_err(|_| std::io::Error::other("the thread reading the command's stderr panicked"))??;
 
     Ok(std::process::Output {
         status,
