@@ -1,3 +1,9 @@
+## v0.47.0 (2026-11-19)
+
+### Feat
+
+- **dispatch**: the gate fails on comments a run adds, and review flags them (#364)
+
 ## v0.46.0 (2026-11-19)
 
 ### Feat
