@@ -134,6 +134,7 @@ fn the_loop_records_a_turns_calls_then_its_results() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("read both", "true");
     let (outcome, report) = runner.run(&mut st);
@@ -207,6 +208,7 @@ fn the_system_prompt_invites_batching_independent_calls() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     runner.run(&mut State::new("anything", "true"));
     let system = p.seen.lock().unwrap()[0].system.clone();

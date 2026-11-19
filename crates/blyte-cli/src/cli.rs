@@ -189,6 +189,10 @@ pub struct DispatchArgs {
     #[arg(long = "no-claim-check")]
     pub no_claim_check: bool,
 
+    /// Skip the pre-run gate check on the untouched worktree
+    #[arg(long = "no-base-check")]
+    pub no_base_check: bool,
+
     /// Pass this environment variable to commands (repeatable)
     #[arg(long = "pass-env")]
     pub pass_env: Vec<String>,
@@ -482,6 +486,10 @@ pub struct Cli {
     /// Research run: check report.md's claims against their cited lines
     #[arg(long = "claim-check")]
     pub claim_check: bool,
+
+    /// Run the verification gate once before the first model call and stop as blocked if it fails
+    #[arg(long = "base-check")]
+    pub base_check: bool,
 }
 
 /// Turn and context defaults for `--orchestrate`. A flag the user gave explicitly wins.

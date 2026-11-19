@@ -375,6 +375,8 @@ pub struct Runner<'a> {
     pub research: bool,
     /// Research runs: check report.md's claims with the run's model (`claim_check`).
     pub claim_check: bool,
+    /// Run the verification gate once before the first model call and return `Outcome::Blocked` if it fails.
+    pub base_check: bool,
 }
 
 const CLAIM_PHRASES: &[&str] = &[
@@ -973,6 +975,25 @@ impl<'a> Runner<'a> {
         let mut wrap_up_sent = false;
         let mut wrap_up_tools_closed = false;
         let mut wrap_up_report: Option<String> = None;
+
+        if self.base_check && !gate_steps(&state.orchestrator.verification_cmd).is_empty() {
+            let (passed, output, _wait_ms, failing_steps) =
+                self.run_gate(state, &[], &mut deadline);
+            if !passed {
+                let steps = failing_steps.join("; ");
+                let lines: Vec<&str> = output.lines().collect();
+                let tail = if lines.len() > 20 {
+                    lines[lines.len() - 20..].join("\n")
+                } else {
+                    lines.join("\n")
+                };
+                let msg = format!(
+                    "the check fails before any change ({steps}): {tail}. Fix the environment or the base commit, or pass --no-base-check if this task is meant to fix that check."
+                );
+                report.final_message = Some(msg.clone());
+                return (Outcome::Blocked(msg), report);
+            }
+        }
 
         for turn in 1..=self.budget.max_turns {
             if read_loop_turn.is_some_and(|t| turn > t + READ_LOOP_GRACE_TURNS) {

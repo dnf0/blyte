@@ -95,6 +95,7 @@ fn a_run_stops_on_the_first_quota_error_without_retrying() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("g", "true");
     let (outcome, report) = runner.run(&mut st);
@@ -146,6 +147,7 @@ fn a_quota_error_past_the_deadline_is_still_an_error() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("g", "true");
     let (outcome, _) = runner.run(&mut st);

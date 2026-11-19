@@ -48,6 +48,7 @@ fn run_with_state(state: &mut State) -> String {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     runner.run(state);
     let sys = p.seen.lock().unwrap()[0].system.clone();
@@ -207,6 +208,7 @@ fn orchestrator_run_nudges_once_after_eight_reads() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
 
     let (outcome, _) = runner.run(&mut state);
@@ -265,6 +267,7 @@ fn interactive_orchestrator_run_never_nudges() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
 
     let (outcome, _) = runner.run(&mut state);
@@ -324,6 +327,7 @@ fn orchestrator_run_with_early_dispatch_never_nudges() {
             on_event: None,
             research: false,
             claim_check: false,
+            base_check: false,
         };
 
         let (outcome, _) = runner.run(&mut state);
@@ -367,6 +371,7 @@ fn non_orchestrator_run_with_nine_reads_never_nudges() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
 
     let (outcome, _) = runner.run(&mut state);

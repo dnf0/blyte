@@ -112,6 +112,7 @@ fn time_warning_arrives_once_under_ten_percent_of_max_duration() {
         on_event: None,
         research: true,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("g", "true");
     let (outcome, _) = r.run(&mut st);
@@ -169,6 +170,7 @@ fn without_time_limit_only_turn_warning_appears_at_turn_21() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("g", "true");
     let (outcome, _) = r.run(&mut st);
@@ -220,6 +222,7 @@ fn long_time_limit_with_fast_provider_sends_only_turn_warning_once() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("g", "true");
     let (outcome, _) = r.run(&mut st);

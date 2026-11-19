@@ -61,6 +61,7 @@ fn run(cap: Option<f64>) -> (Outcome, blyte_agent::run::RunReport, u32) {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut st = State::new("g", "true");
     st.orchestrator.max_cost_usd = cap;

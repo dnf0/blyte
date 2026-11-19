@@ -61,6 +61,7 @@ fn model_call_blocks_until_req_timeout_then_returns_budget_exhausted() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut state = State::new("goal", "true");
     let (outcome, report) = runner.run(&mut state);
@@ -213,6 +214,7 @@ fn bash_timeout_is_clamped_to_deadline_or_command_timeout_without_deadline() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut state = State::new("goal", "true");
     let (outcome, _) = runner.run(&mut state);
@@ -243,6 +245,7 @@ fn bash_timeout_is_clamped_to_deadline_or_command_timeout_without_deadline() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut state2 = State::new("goal", "true");
     let (outcome2, _) = runner_no_deadline.run(&mut state2);
@@ -281,6 +284,7 @@ fn gate_clamps_timeout_and_ends_budget_exhausted_when_deadline_passes() {
         on_event: None,
         research: false,
         claim_check: false,
+        base_check: false,
     };
     let mut state = State::new("goal", "cargo test");
     let (outcome, report) = runner.run(&mut state);
@@ -354,6 +358,7 @@ fn research_run_whose_deadline_passes_before_claim_check_sets_skipped_and_runs_q
         on_event: None,
         research: true,
         claim_check: true,
+        base_check: false,
     };
     let mut state = State::new("investigate src.py", "test -s report.md");
     let (outcome, report) = runner.run(&mut state);
@@ -422,6 +427,7 @@ fn research_loop_stops_a_reserve_before_the_budget() {
         on_event: None,
         research: true,
         claim_check: true,
+        base_check: false,
     };
     let mut state = State::new("goal", "true");
     let _ = runner.run(&mut state);
@@ -456,6 +462,7 @@ fn non_research_loop_keeps_the_whole_budget() {
             on_event: None,
             research,
             claim_check,
+            base_check: false,
         };
         let mut state = State::new("goal", "true");
         let _ = runner.run(&mut state);
@@ -524,6 +531,7 @@ fn claim_check_runs_in_the_reserve_after_the_loop_runs_out() {
         on_event: None,
         research: true,
         claim_check: true,
+        base_check: false,
     };
     let mut state = State::new("investigate src.py", "test -s report.md");
     let (outcome, report) = runner.run(&mut state);

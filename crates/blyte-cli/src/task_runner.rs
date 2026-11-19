@@ -64,6 +64,8 @@ pub struct TaskConfig {
     pub research: bool,
     /// Research run: check report.md's claims against their cited lines.
     pub claim_check: bool,
+    /// Run the verification gate once before the first model call and stop as blocked if it fails.
+    pub base_check: bool,
     /// Whether this run is in orchestrate mode (`--orchestrate`).
     pub orchestrate: bool,
     /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool (`--dispatch-cmd`).
@@ -102,6 +104,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             pass_env: cli.pass_env.clone(),
             research: cli.research,
             claim_check: cli.claim_check,
+            base_check: cli.base_check,
             orchestrate: cli.orchestrate,
             dispatch_cmd: cli.dispatch_cmd.clone(),
         }
@@ -467,6 +470,7 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
         on_event: Some(&on_event),
         research: config.research,
         claim_check: config.claim_check,
+        base_check: config.base_check,
     };
 
     let (outcome, report) = runner.run(state);

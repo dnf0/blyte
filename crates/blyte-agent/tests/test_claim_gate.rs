@@ -91,6 +91,7 @@ fn runner<'a>(provider: &'a dyn Provider, root: &Path, claim_check: bool) -> Run
         on_event: None,
         research: true,
         claim_check,
+        base_check: false,
     }
 }
 
