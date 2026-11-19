@@ -130,3 +130,10 @@ research run" or "dispatched before this version", never "unknown"). Existing te
 Not a long-running job. No new dependencies.
 
 **Commit message:** `feat(research): the start record lists the brief sections a question lacked`
+
+## Check on real runs (2026-11-19)
+
+With the worktrees of R-DA and R-DC already removed, `blyte review` printed their flags from the saved
+files: R-DA `broad research run: 50 of 56 turns` and the split suggestion (`crates/blyte-cli/src (25)`,
+`crates/blyte-agent/src (11)`, `crates/blyte-provider/src (7)`, ...); R-DC `42 of 47 turns`. An
+implementation run without its worktree (A1) still gives `worktree ... does not exist`.

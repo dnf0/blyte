@@ -350,6 +350,11 @@ blyte checks the question before it starts a research run:
 `--no-brief-check` hides the warning and allows the unverified report, for example to ask a run to
 check it.
 
+A research run can be reviewed after its worktree is removed (which happens once its report is copied
+out): `blyte review` then reads the saved `.wt/<id>.*` files and prints `(worktree removed)` under the
+sections that need the worktree. Its start record (`.wt/<id>.start.json`) lists the brief sections the
+question lacked in `brief_missing`, so runs with and without a full brief can be compared.
+
 `blyte review` adds two flags for research runs, under `== checks`:
 
 - `broad research run: N of M turns had prompts over 100K tokens`, when 10 or more turns did;
