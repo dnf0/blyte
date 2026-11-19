@@ -1,5 +1,6 @@
 pub mod clean;
 pub mod cli;
+pub mod comment_lint;
 pub mod config;
 pub mod cost;
 pub mod dashboard;
