@@ -9,7 +9,7 @@ not apply. Do not add any name of a private repository to this public repository
 pass; change an existing test only where the task says so. The gate is
 `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`.
 
-### Task EG1
+### Task EG1: run the gate before the model starts
 
 **Goal.** Before the first model call, a dispatch with a gate runs the gate once on the untouched
 worktree. If it fails, the run ends as `blocked` with zero turns. Why: today a worktree whose
@@ -66,7 +66,7 @@ Run: `cargo test -p blyte-agent --test test_base_check && cargo test -p blyte-cl
 
 **Commit message:** `feat(dispatch): run the gate before the model starts and stop as blocked if it fails`
 
-### Task EG2
+### Task EG2: flag environments borrowed from outside the worktree
 
 **Goal.** Tell the model not to borrow dependency environments from outside the worktree, and
 make `blyte review` flag a run that did. Why: two runs reached `verified` on a gate that ran in a
@@ -117,7 +117,7 @@ Run: `cargo test -p blyte-cli --test test_outside_env`.
 
 **Commit message:** `feat(review): flag a gate that may have run in an environment from outside the worktree`
 
-### Task EG3
+### Task EG3: keep the Mac awake and bound the gcloud token fetch
 
 **Goal.** Keep the machine awake while a dispatch runs on macOS, and give the Vertex token fetch
 a timeout. Why: a run stood still for 47 minutes because the Mac went to idle sleep mid-call; and
