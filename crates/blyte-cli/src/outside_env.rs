@@ -56,20 +56,19 @@ fn borrows_env(cmd: &str, norm_wt: &Path) -> bool {
 }
 
 fn part_borrows_env(part: &str, norm_wt: &Path) -> bool {
-    let tokens: Vec<&str> = part.split_whitespace().collect();
+    let tokens = shell_words(part);
     let mut i = 0;
     while i < tokens.len() {
-        let t = tokens[i].trim_matches(|c: char| matches!(c, '"' | '\''));
+        let t = tokens[i].as_str();
         if t == "sudo" || is_env_assignment(t) {
             i += 1;
         } else {
             break;
         }
     }
-    let Some(&raw_prog) = tokens.get(i) else {
+    let Some(prog) = tokens.get(i).map(String::as_str) else {
         return false;
     };
-    let prog = raw_prog.trim_matches(|c: char| matches!(c, '"' | '\''));
     let prog_name = Path::new(prog)
         .file_name()
         .and_then(|s| s.to_str())
@@ -78,24 +77,95 @@ fn part_borrows_env(part: &str, norm_wt: &Path) -> bool {
         return false;
     }
 
-    for &raw_arg in &tokens[i + 1..] {
-        let trimmed = raw_arg.trim_matches(|c: char| matches!(c, '"' | '\''));
-        if trimmed.is_empty() {
+    for raw_arg in &tokens[i + 1..] {
+        if raw_arg.is_empty() {
             continue;
         }
-        let arg = if trimmed.starts_with('-') {
-            match trimmed.split_once('=') {
-                Some((_, val)) => val.trim_matches(|c: char| matches!(c, '"' | '\'')),
+        let arg = if raw_arg.starts_with('-') {
+            match raw_arg.split_once('=') {
+                Some((_, val)) => val,
                 None => continue,
             }
         } else {
-            trimmed
+            raw_arg.as_str()
         };
         if has_env_dir_component(arg) && is_outside_worktree(arg, norm_wt) {
             return true;
         }
     }
     false
+}
+
+/// Splits a shell command segment into words, honouring single quotes, double quotes, and backslash escapes.
+pub fn shell_words(part: &str) -> Vec<String> {
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quote = Quote::None;
+    let mut chars = part.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match quote {
+            Quote::None => match c {
+                c if c.is_whitespace() => {
+                    if in_word {
+                        words.push(std::mem::take(&mut current));
+                        in_word = false;
+                    }
+                }
+                '\'' => {
+                    quote = Quote::Single;
+                    in_word = true;
+                }
+                '"' => {
+                    quote = Quote::Double;
+                    in_word = true;
+                }
+                '\\' => {
+                    in_word = true;
+                    match chars.next() {
+                        Some(next) => current.push(next),
+                        None => current.push('\\'),
+                    }
+                }
+                _ => {
+                    in_word = true;
+                    current.push(c);
+                }
+            },
+            Quote::Single => {
+                if c == '\'' {
+                    quote = Quote::None;
+                } else {
+                    current.push(c);
+                }
+            }
+            Quote::Double => match c {
+                '"' => quote = Quote::None,
+                '\\' => {
+                    if matches!(chars.peek(), Some('"' | '\\')) {
+                        if let Some(next) = chars.next() {
+                            current.push(next);
+                        }
+                    } else {
+                        current.push('\\');
+                    }
+                }
+                _ => current.push(c),
+            },
+        }
+    }
+
+    if in_word {
+        words.push(current);
+    }
+    words
 }
 
 fn is_env_assignment(token: &str) -> bool {
@@ -133,20 +203,21 @@ fn is_outside_worktree(arg: &str, norm_wt: &Path) -> bool {
     !resolved.starts_with(norm_wt)
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
+/// Lexically normalises a path without filesystem access, keeping leading `..` components on relative paths.
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut stack: Vec<Component<'_>> = Vec::new();
     for comp in path.components() {
         match comp {
-            Component::Prefix(p) => out.push(p.as_os_str()),
-            Component::RootDir => out.push(comp.as_os_str()),
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => stack.push(comp),
             Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() && !out.has_root() {
-                    out.push("..");
+            Component::ParentDir => match stack.last() {
+                Some(Component::Normal(_)) => {
+                    stack.pop();
                 }
-            }
-            Component::Normal(c) => out.push(c),
+                Some(Component::RootDir) => {}
+                _ => stack.push(comp),
+            },
         }
     }
-    out
+    stack.into_iter().collect()
 }

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use blyte_cli::dispatch::DISPATCH_RULES;
-use blyte_cli::outside_env::{borrowed_env_commands, flag};
+use blyte_cli::outside_env::{borrowed_env_commands, flag, normalize_path, shell_words};
 
 fn wt() -> &'static Path {
     Path::new("/r/.wt/T1")
@@ -214,5 +214,72 @@ fn review_flags_borrowed_env_and_errors_when_summary_lacks_worktree() {
     assert!(
         missing_stdout.contains("missing `worktree` field in summary"),
         "expected == checks to report missing `worktree` field, got:\n{missing_stdout}"
+    );
+}
+
+#[test]
+fn normalize_path_handles_parent_and_cur_components() {
+    assert_eq!(normalize_path(Path::new("../..")), PathBuf::from("../.."));
+    assert_eq!(
+        normalize_path(Path::new("a/../../b")),
+        PathBuf::from("../b")
+    );
+    assert_eq!(normalize_path(Path::new("/a/../../b")), PathBuf::from("/b"));
+    assert_eq!(normalize_path(Path::new("a/./b/..")), PathBuf::from("a"));
+    assert_eq!(normalize_path(Path::new("./a")), PathBuf::from("a"));
+    assert_eq!(normalize_path(Path::new("/..")), PathBuf::from("/"));
+}
+
+#[test]
+fn shell_words_handles_quotes_and_escapes() {
+    assert_eq!(
+        shell_words(r#"cp -r "/a b/.venv" ."#),
+        vec!["cp", "-r", "/a b/.venv", "."]
+    );
+    assert_eq!(
+        shell_words("cp '/a b/.venv' x"),
+        vec!["cp", "/a b/.venv", "x"]
+    );
+    assert_eq!(
+        shell_words(r"cp /a\ b/.venv x"),
+        vec!["cp", "/a b/.venv", "x"]
+    );
+    assert_eq!(
+        shell_words(r#"--from="/a b/.venv""#),
+        vec!["--from=/a b/.venv"]
+    );
+    assert_eq!(shell_words(r#""a \"b\" c""#), vec![r#"a "b" c"#]);
+    assert_eq!(shell_words(r#""a \\b\\ c""#), vec![r"a \b\ c"]);
+    assert_eq!(shell_words(r#"cp "/a b/.venv"#), vec!["cp", "/a b/.venv"]);
+    assert!(shell_words("").is_empty());
+}
+
+#[test]
+fn borrowed_env_commands_handles_quoted_and_escaped_paths_with_spaces() {
+    let worktree = Path::new("/work/repo/.wt/T1");
+    let quoted_outside = r#"cp -r "/Users/me/my repo/.venv" ."#;
+    let escaped_outside = r"cp -r /Users/me/my\ repo/.venv .";
+    let quoted_inside = r#"cp -r "sub dir/.venv" backup"#;
+    let log = format!(
+        "{}{}{}",
+        log_line(quoted_outside),
+        log_line(escaped_outside),
+        log_line(quoted_inside)
+    );
+    assert_eq!(
+        borrowed_env_commands(&log, worktree),
+        vec![quoted_outside.to_string(), escaped_outside.to_string()]
+    );
+}
+
+#[test]
+fn borrowed_env_commands_resolves_relative_worktree_parent_traversal() {
+    let worktree = Path::new(".wt/T1");
+    let leaves_repo = "cp -r ../../../.venv .";
+    let stays_in_wt = "cp -r ../T1/.venv x";
+    let log = format!("{}{}", log_line(leaves_repo), log_line(stays_in_wt));
+    assert_eq!(
+        borrowed_env_commands(&log, worktree),
+        vec![leaves_repo.to_string()]
     );
 }
