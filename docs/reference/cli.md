@@ -140,6 +140,7 @@ Options:
       --no-path-check              Start even if the task names paths outside the workspace and --allow-read
       --no-brief-check             Research runs: no warning for missing brief sections, and allow a question that names an unverified report
       --no-claim-check             Skip the model claim check on report.md for research runs
+      --no-base-check              Skip the pre-run gate check on the untouched worktree
       --pass-env <PASS_ENV>        Pass this environment variable to commands (repeatable)
   -h, --help                       Print help
 ```

@@ -85,6 +85,7 @@ max_turns = 300
 |---|---|---|
 | `gate` | string | the check command; several lines are several steps |
 | `setup` | string | a command run once in each new dispatch worktree before the implementer starts, outside the sandbox, with `[dispatch.env]` and `BLYTE_MAIN_CHECKOUT` set; a failure ends the run as `blocked` |
+| `base_check` | boolean | default `true`: the gate is run once on the untouched worktree before the implementer starts, and a failure ends the run as `blocked` with no model call; set `false` (or pass `--no-base-check`) for a task meant to fix a check that already fails |
 | `allow_read` | array of strings | extra paths the sandbox may read, for every dispatch; `~/` and `$BLYTE_MAIN_CHECKOUT/` are expanded, otherwise absolute |
 | `model` | string | model identifier or provider selection |
 | `max_seconds` | integer | wall-clock budget in seconds (default 3600) |
@@ -93,6 +94,10 @@ max_turns = 300
 | `fold_budget` | integer | approximate token budget for verbatim tail before folding |
 | `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
+
+**The environment is checked before the model starts.** After `setup`, a dispatch runs the gate once on the untouched worktree. If a step fails (dependencies that cannot be installed, a missing service, a base commit that is already broken), the run ends as `blocked` with zero turns and names the step and the end of its output. The implementer is also told never to copy, link or use a dependency environment from outside the worktree, and `blyte review` flags a run whose log shows it did: its gate may have passed in a borrowed environment, so do not accept it on the gate alone.
+
+On macOS a dispatch holds `caffeinate -i` while it runs, so idle sleep does not stall a model call. A closed lid on battery still sleeps the machine.
 
 The two usual forms for `setup`: `setup = "uv sync"` (a virtualenv per worktree; safe when tasks change dependencies) and `setup = "ln -s \"$BLYTE_MAIN_CHECKOUT/.venv\" .venv"` (share the main checkout's; instant, but runs that change dependencies affect each other). The sandbox must then be allowed to read the shared virtualenv: `allow_read = ["$BLYTE_MAIN_CHECKOUT/.venv"]`. If a dispatched task names existing absolute paths outside the repository and every `--allow-read` / `allow_read` root, `blyte dispatch --research` refuses to start (and other dispatches warn on stderr) unless `--no-path-check` is passed.
 

@@ -184,6 +184,8 @@ verbatim) when the gate failed or the budget ran out, when the change is risky (
 handling, migrations, a public interface), or when the diff surprises you.
 
 - `blocked` means the check already fails at the base commit, so the task cannot pass until that is fixed: confirm it, then fix the base (or tell the user) before redispatching, rather than redispatching as it is.
+- A dispatch runs the gate on the untouched worktree before the model starts, so `blocked` with zero turns means the environment or the base commit is broken: read the step it names. For a task meant to fix a check that already fails, dispatch with `--no-base-check`.
+- A review flag "the gate may have run in an environment from outside the worktree" means the implementer copied or linked a `.venv`, `node_modules` or cache entry from elsewhere: do not accept that run on the gate alone.
 
 **Record your verdict** once you have checked it, so the repository keeps an honest record of
 how blyte does:
