@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use blyte_cli::env_file::parse;
-use blyte_cli::skill::{configure_model, SKILL_MD};
+use blyte_cli::skill::{configure_model, RECOMMENDED_MODEL, SKILL_MD};
 
 fn blyte(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_blyte"))
@@ -107,25 +107,65 @@ fn print_writes_the_skill_to_stdout() {
 
 #[test]
 fn prompt_logic_chooses_default_flash_typed_id_reasks_once_and_sets_argon_timeout() {
+    assert_eq!(RECOMMENDED_MODEL, "gemini-4-neon");
     let dir = tempfile::tempdir().unwrap();
 
-    // Empty answer -> gemini-4-argon + timeout 600.
     let env1 = dir.path().join("env1");
     let mut reader = Cursor::new(b"\n".as_slice());
     let mut writer = Vec::new();
     let chosen = configure_model(&env1, None, true, &mut reader, &mut writer).unwrap();
+    assert_eq!(chosen.as_deref(), Some("gemini-4-neon"));
+    let env1_text = std::fs::read_to_string(&env1).unwrap();
+    assert_eq!(
+        parse(&env1_text),
+        vec![("BLYTE_MODEL".to_string(), "gemini-4-neon".to_string())]
+    );
+    assert!(
+        !env1_text.contains("BLYTE_MODEL_TIMEOUT_SECS"),
+        "{env1_text}"
+    );
+    let out1 = String::from_utf8(writer).unwrap();
+    assert!(out1.contains("gemini-4-neon (recommended"), "{out1}");
+    assert!(out1.contains("BLYTE_MODEL=gemini-4-neon"), "{out1}");
+    assert!(!out1.contains("BLYTE_MODEL_TIMEOUT_SECS"), "{out1}");
+    assert!(out1.contains(&env1.display().to_string()), "{out1}");
+
+    let env1b = dir.path().join("env1b");
+    let mut reader = Cursor::new(b"1\n".as_slice());
+    let mut writer = Vec::new();
+    let chosen = configure_model(&env1b, None, true, &mut reader, &mut writer).unwrap();
+    assert_eq!(chosen.as_deref(), Some("gemini-4-neon"));
+    let env1b_text = std::fs::read_to_string(&env1b).unwrap();
+    assert_eq!(
+        parse(&env1b_text),
+        vec![("BLYTE_MODEL".to_string(), "gemini-4-neon".to_string())]
+    );
+    assert!(
+        !env1b_text.contains("BLYTE_MODEL_TIMEOUT_SECS"),
+        "{env1b_text}"
+    );
+
+    let env_argon = dir.path().join("env_argon");
+    let mut reader = Cursor::new(b"gemini-4-argon\n".as_slice());
+    let mut writer = Vec::new();
+    let chosen = configure_model(&env_argon, None, true, &mut reader, &mut writer).unwrap();
     assert_eq!(chosen.as_deref(), Some("gemini-4-argon"));
     assert_eq!(
-        parse(&std::fs::read_to_string(&env1).unwrap()),
+        parse(&std::fs::read_to_string(&env_argon).unwrap()),
         vec![
             ("BLYTE_MODEL".to_string(), "gemini-4-argon".to_string()),
             ("BLYTE_MODEL_TIMEOUT_SECS".to_string(), "600".to_string()),
         ]
     );
-    let out1 = String::from_utf8(writer).unwrap();
-    assert!(out1.contains("BLYTE_MODEL=gemini-4-argon"), "{out1}");
-    assert!(out1.contains("BLYTE_MODEL_TIMEOUT_SECS=600"), "{out1}");
-    assert!(out1.contains(&env1.display().to_string()), "{out1}");
+    let out_argon = String::from_utf8(writer).unwrap();
+    assert!(
+        out_argon.contains("BLYTE_MODEL=gemini-4-argon"),
+        "{out_argon}"
+    );
+    assert!(
+        out_argon.contains("BLYTE_MODEL_TIMEOUT_SECS=600"),
+        "{out_argon}"
+    );
 
     // "2" -> gemini-3.8-flash-high (no timeout).
     let env2 = dir.path().join("env2");

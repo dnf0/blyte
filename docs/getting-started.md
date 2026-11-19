@@ -29,7 +29,7 @@ versions; `--rollback` restores the previous build, kept as `blyte.prev`). `blyt
 ## 2. Give it a model
 
 blyte's model does the implementation, so pick one that follows instructions well. `blyte skill
-install` asks for your default model (`gemini-4-argon` recommended, `gemini-3.8-flash-high` built-in
+install` asks for your default model (`gemini-4-neon` recommended, `gemini-3.8-flash-high` built-in
 default, or any model id) and writes `BLYTE_MODEL` to `~/.config/blyte/env` (or pass `blyte skill
 install --model <id>`); for an Argon model it also writes `BLYTE_MODEL_TIMEOUT_SECS=600`:
 

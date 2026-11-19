@@ -160,14 +160,14 @@ The model name (`--model` or `BLYTE_MODEL`) picks the provider:
 
 | model name | provider | credentials |
 |---|---|---|
-| `gemini-4-argon` (recommended), `gemini-3.8-flash-high` (built-in default) | Google Gemini (`-low`/`-medium`/`-high` thinking) | `GEMINI_API_KEY` |
+| `gemini-4-neon` (recommended), `gemini-4-argon`, `gemini-3.8-flash-high` (built-in default) | Google Gemini (`-low`/`-medium`/`-high` thinking) | `GEMINI_API_KEY` |
 | `claude-…`, `anthropic/…` | Anthropic, with prompt caching | `ANTHROPIC_API_KEY` |
 | `openai/<model>` | any OpenAI-compatible API, including local vLLM / LM Studio | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
 | `openrouter/<vendor>/<model>` | OpenRouter | `OPENROUTER_API_KEY` |
 | `<name>:<tag>`, `ollama/…` | Ollama, local or cloud | `OLLAMA_HOST` or `OLLAMA_API_KEY` |
 | `chatgpt/<model>` | a ChatGPT subscription, via the Codex CLI's login | `~/.codex/auth.json` (read only) |
 
-`blyte skill install` asks for your default model (`gemini-4-argon` recommended,
+`blyte skill install` asks for your default model (`gemini-4-neon` recommended,
 `gemini-3.8-flash-high`, or any model id) and writes `BLYTE_MODEL` to `~/.config/blyte/env` (or pass
 `blyte skill install --model <id>`); for an Argon model it also writes `BLYTE_MODEL_TIMEOUT_SECS=600`. Credentials are read by blyte and never reach the commands the
 model runs. Details: [docs/providers.md](docs/providers.md).
