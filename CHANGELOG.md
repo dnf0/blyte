@@ -1,3 +1,9 @@
+## v0.50.0 (2026-11-20)
+
+### Feat
+
+- **mock**: system and data map trial, with a guide to the surface (#372)
+
 ## v0.49.0 (2026-11-20)
 
 ### Feat
