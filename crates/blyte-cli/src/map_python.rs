@@ -69,20 +69,31 @@ pub fn extract(root: &Path) -> Result<Part, String> {
         return Ok(Part::default());
     }
 
-    let has_src_dir = root.join("src").is_dir();
-
     let mut unit_infos: Vec<PyUnitInfo> = Vec::with_capacity(py_files.len());
     let mut units: Vec<Unit> = Vec::with_capacity(py_files.len());
     let mut groups_map: HashMap<(String, String), Group> = HashMap::new();
     let mut unit_set: HashSet<String> = HashSet::new();
+    let mut unit_to_file: HashMap<String, String> = HashMap::new();
     let mut unit_to_group: HashMap<String, String> = HashMap::new();
     let mut init_units: HashSet<String> = HashSet::new();
     let mut top_level_names: HashSet<String> = HashSet::new();
 
     for rel in py_files {
-        let Some(info) = build_unit_info(root, &rel, has_src_dir) else {
+        let Some(info) = build_unit_info(root, &rel) else {
             continue;
         };
+
+        if let Some(existing) = unit_to_file.insert(info.id.clone(), info.file_rel.clone()) {
+            let (first, second) = if existing <= info.file_rel {
+                (existing, info.file_rel)
+            } else {
+                (info.file_rel, existing)
+            };
+            return Err(format!(
+                "two Python files have the module name {}: {} and {}",
+                info.id, first, second
+            ));
+        }
 
         let group_path = dir_rel_to_string(rel.parent().unwrap_or_else(|| Path::new("")));
         groups_map
@@ -321,10 +332,10 @@ fn has_excluded_dir_component(rel: &Path) -> bool {
     false
 }
 
-fn build_unit_info(root: &Path, rel: &Path, has_src_dir: bool) -> Option<PyUnitInfo> {
+fn build_unit_info(root: &Path, rel: &Path) -> Option<PyUnitInfo> {
     let stem = rel.file_stem()?.to_str()?.to_string();
     let parent = rel.parent().unwrap_or_else(|| Path::new(""));
-    let mut dir_segs: Vec<String> = parent
+    let all_dir_segs: Vec<String> = parent
         .components()
         .filter_map(|c| match c {
             Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
@@ -332,14 +343,17 @@ fn build_unit_info(root: &Path, rel: &Path, has_src_dir: bool) -> Option<PyUnitI
         })
         .collect();
 
-    if has_src_dir && dir_segs.first().map(|s| s.as_str()) == Some("src") {
-        dir_segs.remove(0);
-    }
+    let dir_segs: Vec<String> = match all_dir_segs.iter().rposition(|s| s == "src") {
+        Some(idx) => all_dir_segs[idx + 1..].to_vec(),
+        None => all_dir_segs.clone(),
+    };
 
-    let group_id = if dir_segs.is_empty() {
-        ".".to_string()
-    } else {
+    let group_id = if !dir_segs.is_empty() {
         dir_segs.join(".")
+    } else if !all_dir_segs.is_empty() {
+        all_dir_segs.join(".")
+    } else {
+        ".".to_string()
     };
 
     let is_init = stem == "__init__";

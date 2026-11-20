@@ -461,3 +461,108 @@ fn build_python_only_and_mixed() {
         )
     );
 }
+
+#[test]
+fn nested_src_directories_name_modules() {
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "service-a/src/service_a/__init__.py", "");
+    write_file(dir.path(), "service-a/src/service_a/api.py", "");
+    write_file(dir.path(), "shared/src/shared_utils/geo.py", "");
+
+    let m = map::build(dir.path(), "multi").unwrap();
+    let ids: Vec<&str> = m.units.iter().map(|u| u.id.as_str()).collect();
+    assert_eq!(ids, vec!["service_a", "service_a.api", "shared_utils.geo"]);
+
+    let svc_group = m.groups.iter().find(|g| g.id == "service_a").unwrap();
+    assert_eq!(svc_group.path, "service-a/src/service_a");
+}
+
+#[test]
+fn imports_resolve_across_projects() {
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "service-a/src/service_a/__init__.py", "");
+    write_file(
+        dir.path(),
+        "service-a/src/service_a/api.py",
+        concat!(
+            "from shared_utils.geo import area\n",
+            "from shared_utils import geo\n",
+        ),
+    );
+    write_file(
+        dir.path(),
+        "shared/src/shared_utils/geo.py",
+        "def area():\n    return 0\n",
+    );
+
+    let m = map::build(dir.path(), "cross").unwrap();
+    let unit_edges: Vec<&Edge> = m.edges.iter().filter(|e| e.level == "unit").collect();
+    assert_eq!(
+        unit_edges,
+        vec![&Edge {
+            from: "service_a.api".to_string(),
+            to: "shared_utils.geo".to_string(),
+            level: "unit".to_string(),
+        }]
+    );
+    let group_edges: Vec<&Edge> = m.edges.iter().filter(|e| e.level == "group").collect();
+    assert_eq!(
+        group_edges,
+        vec![&Edge {
+            from: "service_a".to_string(),
+            to: "shared_utils".to_string(),
+            level: "group".to_string(),
+        }]
+    );
+    assert!(m.unresolved.is_empty());
+}
+
+#[test]
+fn file_directly_in_nested_src() {
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "svc/src/main.py", "x = 1\n");
+
+    let m = map::build(dir.path(), "direct_src").unwrap();
+    assert_eq!(
+        m.units,
+        vec![Unit {
+            id: "main".to_string(),
+            group: "svc.src".to_string(),
+            file: "svc/src/main.py".to_string(),
+            lang: "python".to_string(),
+        }]
+    );
+    assert_eq!(
+        m.groups,
+        vec![Group {
+            id: "svc.src".to_string(),
+            kind: "package".to_string(),
+            path: "svc/src".to_string(),
+            lang: "python".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn duplicate_module_names_are_an_error() {
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "a/src/pkg/x.py", "");
+    write_file(dir.path(), "b/src/pkg/x.py", "");
+
+    let err = map::build(dir.path(), "dup").unwrap_err();
+    assert_eq!(
+        err,
+        "two Python files have the module name pkg.x: a/src/pkg/x.py and b/src/pkg/x.py"
+    );
+}
+
+#[test]
+fn root_src_and_no_src_unchanged() {
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "src/pkg/a.py", "");
+    write_file(dir.path(), "tool.py", "");
+
+    let m = map::build(dir.path(), "mixed_layout").unwrap();
+    let ids: Vec<&str> = m.units.iter().map(|u| u.id.as_str()).collect();
+    assert_eq!(ids, vec!["pkg.a", "tool"]);
+}
