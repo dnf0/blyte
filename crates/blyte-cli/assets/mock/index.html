@@ -774,6 +774,7 @@
       border: 1px solid var(--color-line);
       border-radius: 6px;
       overflow: hidden;
+      flex-shrink: 0;
     }
 
     .queue-group.focused {
@@ -1244,7 +1245,7 @@
             <span class="brand-word">blyte</span>
             <span class="brand-sub">mock</span>
           </span>
-          <span id="clock-display" class="clock-readout nums">--</span>
+          <span id="clock-display" class="clock-readout nums">loading runs</span>
           <button type="button" id="play" class="btn">Play</button>
           <select id="speed" class="ctrl-select" aria-label="Replay speed">
             <option value="60">60x</option>
