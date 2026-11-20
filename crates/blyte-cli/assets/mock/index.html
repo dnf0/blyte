@@ -1,0 +1,2631 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>blyte mock</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    @font-face {
+      font-family: "Archivo";
+      src: url("/fonts/archivo.woff2") format("woff2");
+      font-weight: 400 900;
+      font-stretch: 62% 125%;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("/fonts/plex-mono-400.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("/fonts/plex-mono-500.woff2") format("woff2");
+      font-weight: 500;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    :root {
+      --color-page: #ECEFF0;
+      --color-card: #F4F6F7;
+      --color-line: #C9D0D4;
+      --color-line-dark: #B3BCC1;
+      --color-text: #2A3238;
+      --color-strong: #141A1E;
+      --color-muted: #56616A;
+      --color-faint: #8A959C;
+
+      --status-running: #A6441A;
+      --status-amber: #8A6A12;
+      --status-jade: #2E7A4D;
+      --status-jade-label: #2E7A4D;
+      --status-red: #A93A36;
+      --status-red-label: #A93A36;
+      --status-grey: #8A959C;
+
+      --focus-ring: #A6441A;
+      --brand-rust: #A6441A;
+      --brand-rust-soft: #E8C8B7;
+
+      --font-sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+      --page: #ECEFF0;
+      --card: #F4F6F7;
+      --line: #C9D0D4;
+      --line-2: #B3BCC1;
+      --text: #2A3238;
+      --strong: #141A1E;
+      --muted: #56616A;
+      --faint: #8A959C;
+      --rust: #A6441A;
+      --rust-soft: #E8C8B7;
+      --pass: #2E7A4D;
+      --pass-soft: #CFE3D6;
+      --fail: #A93A36;
+      --fail-soft: #F0D3D1;
+      --amber: #8A6A12;
+      --amber-soft: #EFE3BF;
+      --merged: #3E6D64;
+      --merged-soft: #C3D6D1;
+      --lane: #E6EAEC;
+      --ink: #141A1E;
+      --sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-page: #0F1315;
+        --color-card: #171D20;
+        --color-line: #283136;
+        --color-line-dark: #36414A;
+        --color-text: #C9D1D5;
+        --color-strong: #E2E7E9;
+        --color-muted: #93A0A7;
+        --color-faint: #5F6C73;
+
+        --status-running: #E27A44;
+        --status-amber: #D9B45A;
+        --status-jade: #6CC08E;
+        --status-jade-label: #6CC08E;
+        --status-red: #E27B76;
+        --status-red-label: #E27B76;
+        --status-grey: #5F6C73;
+
+        --focus-ring: #E27A44;
+        --brand-rust: #E27A44;
+        --brand-rust-soft: #4A2B1D;
+
+        --page: #0F1315;
+        --card: #171D20;
+        --line: #283136;
+        --line-2: #36414A;
+        --text: #C9D1D5;
+        --strong: #E2E7E9;
+        --muted: #93A0A7;
+        --faint: #5F6C73;
+        --rust: #E27A44;
+        --rust-soft: #4A2B1D;
+        --pass: #6CC08E;
+        --pass-soft: #1E3428;
+        --fail: #E27B76;
+        --fail-soft: #3A2120;
+        --amber: #D9B45A;
+        --amber-soft: #3A3218;
+        --merged: #7FB2A6;
+        --merged-soft: #1F3431;
+        --lane: #131A1D;
+        --ink: #E2E7E9;
+      }
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background-color: var(--color-page);
+      color: var(--color-text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    button, input, select {
+      font-family: inherit;
+      font-size: inherit;
+      color: inherit;
+    }
+
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: 2px;
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+    }
+
+    .nums {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .fatal-error {
+      max-width: 680px;
+      margin: 64px auto;
+      padding: 20px 24px;
+      background: var(--fail-soft);
+      border: 1px solid var(--fail);
+      border-radius: 6px;
+      color: var(--strong);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .shell {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #bar {
+      background: var(--color-card);
+      border-bottom: 1px solid var(--color-line);
+      padding: 10px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .bar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .bar-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-right: 6px;
+    }
+
+    .m-i { fill: var(--color-strong); }
+    .m-s { fill: var(--brand-rust-soft); }
+    .m-r { fill: var(--brand-rust); }
+
+    .brand-word {
+      font-weight: 900;
+      font-variation-settings: "wdth" 125;
+      letter-spacing: -0.02em;
+      font-size: 17px;
+      color: var(--color-strong);
+      line-height: 1;
+    }
+
+    .brand-sub {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+    }
+
+    .btn {
+      padding: 5px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      line-height: 1.3;
+    }
+
+    .btn:hover:not(:disabled) {
+      border-color: var(--brand-rust);
+    }
+
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    .btn-primary {
+      background: var(--brand-rust);
+      border-color: var(--brand-rust);
+      color: #FFFFFF;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      filter: brightness(1.08);
+    }
+
+    .btn-pass {
+      background: var(--pass-soft);
+      border-color: var(--pass);
+      color: var(--color-strong);
+    }
+
+    .btn-warn {
+      background: var(--amber-soft);
+      border-color: var(--amber);
+      color: var(--color-strong);
+    }
+
+    .btn-danger {
+      background: var(--fail-soft);
+      border-color: var(--fail);
+      color: var(--color-strong);
+    }
+
+    .btn-ghost {
+      background: transparent;
+      border-color: var(--color-line);
+      color: var(--color-muted);
+    }
+
+    .btn-ghost:hover:not(:disabled) {
+      color: var(--color-strong);
+      border-color: var(--color-line-dark);
+    }
+
+    select.ctrl-select {
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .clock-readout {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      padding: 4px 8px;
+      background: var(--color-page);
+      border: 1px solid var(--color-line);
+      border-radius: 4px;
+      min-width: 156px;
+      text-align: center;
+    }
+
+    .slider-wrap {
+      flex: 1;
+      min-width: 180px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #clock {
+      flex: 1;
+      accent-color: var(--brand-rust);
+      cursor: pointer;
+      margin: 0;
+    }
+
+    .metric {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-text);
+    }
+
+    .metric-label {
+      color: var(--color-muted);
+      font-size: 11px;
+    }
+
+    .metric-val {
+      font-weight: 500;
+      color: var(--color-strong);
+    }
+
+    .metric.over-limit {
+      background: var(--amber-soft);
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+
+    .metric.over-limit .metric-label,
+    .metric.over-limit .metric-val {
+      color: var(--amber);
+      font-weight: 600;
+    }
+
+    .metric-btn {
+      cursor: pointer;
+    }
+
+    .metric-btn:hover {
+      border-color: var(--brand-rust);
+    }
+
+    .skipped-popover {
+      position: relative;
+    }
+
+    .skipped-panel {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      z-index: 40;
+      width: 360px;
+      max-height: 280px;
+      overflow-y: auto;
+      background: var(--color-card);
+      border: 1px solid var(--color-line-dark);
+      border-radius: 6px;
+      padding: 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+      font-size: 12px;
+    }
+
+    .skipped-panel h3 {
+      margin: 0 0 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+    }
+
+    .skipped-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .skipped-list li {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      border-top: 1px solid var(--color-line);
+      padding-top: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+
+    .skipped-list li:first-child {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    #save {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .log-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .workspace {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
+      gap: 0;
+    }
+
+    .pane-left {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-right: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .pane-right {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--lane);
+    }
+
+    .pane-head {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--color-card);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    #mode {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .mode-btn {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 5px 12px;
+      border: 1px solid var(--color-line-dark);
+      border-radius: 4px;
+      color: var(--color-muted);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .mode-btn:hover {
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+    }
+
+    .mode-btn.active {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+      font-weight: 500;
+    }
+
+    .focus-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      color: var(--color-strong);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .focus-chip button {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      padding: 0 2px;
+      color: var(--color-strong);
+      font-weight: 700;
+    }
+
+    #conversation {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .thread {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .thread-empty {
+      color: var(--color-muted);
+      font-size: 13px;
+      padding: 24px 0;
+      text-align: center;
+    }
+
+    .msg-line {
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.45;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+    }
+
+    .msg-line.dispatch {
+      background: transparent;
+      border: none;
+      border-left: 2px solid var(--color-line-dark);
+      border-radius: 0;
+      padding: 3px 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    .msg-line.user {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+      align-self: flex-end;
+      max-width: 85%;
+    }
+
+    .msg-line.assistant {
+      background: var(--color-card);
+      border-color: var(--color-line);
+      color: var(--color-text);
+      align-self: flex-start;
+      max-width: 85%;
+    }
+
+    .msg-meta {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--color-muted);
+      margin-bottom: 2px;
+    }
+
+    #offer {
+      margin: 0 16px 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: var(--amber-soft);
+      border: 1px solid var(--amber);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    #offer[hidden] {
+      display: none;
+    }
+
+    .offer-text {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--color-strong);
+    }
+
+    .offer-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .composer {
+      border-top: 1px solid var(--color-line);
+      background: var(--color-card);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .composer-about {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      color: var(--color-strong);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .composer input[type="text"] {
+      flex: 1;
+      min-width: 0;
+      padding: 7px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-size: 13px;
+    }
+
+    .review-wrap {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    #checkin {
+      padding: 20px 24px;
+      margin: 16px;
+      border-radius: 8px;
+      background: var(--color-card);
+      border: 1px solid var(--brand-rust);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      flex-shrink: 0;
+    }
+
+    #checkin[hidden] {
+      display: none;
+    }
+
+    .checkin-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--color-strong);
+    }
+
+    .checkin-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .checkin-label {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--color-strong);
+      min-width: 96px;
+    }
+
+    .scale-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .scale-btn {
+      width: 34px;
+      height: 32px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .scale-btn:hover {
+      border-color: var(--brand-rust);
+    }
+
+    .scale-btn.selected {
+      background: var(--brand-rust);
+      border-color: var(--brand-rust);
+      color: #FFFFFF;
+      font-weight: 600;
+    }
+
+    .checkin-pause {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 4px;
+      background: var(--color-page);
+      border: 1px solid var(--color-line);
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    .checkin-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    #queue {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .queue-group {
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .queue-group.focused {
+      border-color: var(--brand-rust);
+      box-shadow: 0 0 0 1px var(--brand-rust);
+    }
+
+    .group-head {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--lane);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .group-name {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--color-strong);
+    }
+
+    .group-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .group-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .group-body {
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .clean-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 7px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .clean-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .run-id {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .run-title {
+      font-size: 13px;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .row-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .exception-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .exception-card {
+      height: 184px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line-dark);
+      border-left: 3px solid var(--amber);
+      background: var(--color-page);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      overflow: hidden;
+    }
+
+    .exception-card.is-failed {
+      border-left-color: var(--fail);
+    }
+
+    .exception-card.is-held {
+      border-left-color: var(--brand-rust);
+    }
+
+    .hold-note-first {
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 3px;
+      background: var(--brand-rust-soft);
+      color: var(--color-strong);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 4px;
+      flex-shrink: 0;
+    }
+
+    .exc-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .exc-title-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .outcome-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--color-card);
+      border: 1px solid var(--color-line-dark);
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .outcome-pill.verified {
+      background: var(--pass-soft);
+      border-color: var(--pass);
+    }
+
+    .outcome-pill.failed {
+      background: var(--fail-soft);
+      border-color: var(--fail);
+    }
+
+    .exc-flags {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 2px;
+      margin: 4px 0;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--color-muted);
+    }
+
+    .exc-flag-item {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--color-text);
+    }
+
+    .exc-flag-more {
+      color: var(--color-muted);
+      font-style: italic;
+    }
+
+    .exc-not-recorded {
+      color: var(--amber);
+      font-weight: 500;
+    }
+
+    .exc-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .recorded-verdict {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      white-space: nowrap;
+    }
+
+    .note-prompt {
+      margin-top: 4px;
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--brand-rust);
+      background: var(--color-card);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .note-prompt input[type="text"] {
+      flex: 1;
+      min-width: 180px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-size: 12px;
+    }
+
+    .note-error {
+      width: 100%;
+      font-size: 11px;
+      color: var(--fail);
+      font-family: var(--font-mono);
+    }
+
+    .decided-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px dashed var(--color-line);
+      background: transparent;
+      color: var(--color-muted);
+      font-size: 12px;
+    }
+
+    .decided-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+      flex-wrap: wrap;
+    }
+
+    .decision-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--merged-soft);
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .details-box {
+      margin-top: 6px;
+      padding: 10px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .details-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+      margin-bottom: 2px;
+    }
+
+    .details-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--color-page);
+      border: 1px solid var(--color-line);
+      border-radius: 4px;
+      padding: 6px 8px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: var(--font-sans);
+      font-size: 12px;
+      color: var(--color-text);
+    }
+
+    .details-list {
+      margin: 0;
+      padding-left: 16px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-text);
+    }
+
+    .group-thread {
+      border-top: 1px solid var(--color-line);
+      padding: 10px 14px;
+      background: var(--color-page);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .group-thread-msgs {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 140px;
+      overflow-y: auto;
+    }
+
+    .group-thread-msg {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+    }
+
+    .group-thread-msg.user {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+    }
+
+    .group-thread-form {
+      display: flex;
+      gap: 6px;
+    }
+
+    .group-thread-form input[type="text"] {
+      flex: 1;
+      min-width: 0;
+      padding: 5px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-strong);
+      font-size: 12px;
+    }
+
+    .map-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--color-muted);
+      margin: 0;
+    }
+
+    #map {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      align-content: start;
+      gap: 10px;
+    }
+
+    .map-box {
+      text-align: left;
+      padding: 12px;
+      border-radius: 6px;
+      border: 1.5px solid var(--color-line-dark);
+      background: var(--color-card);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: border-color 0.12s, background 0.12s;
+    }
+
+    .map-box:hover {
+      border-color: var(--brand-rust);
+    }
+
+    .map-box.focused {
+      border-color: var(--brand-rust);
+      background: var(--brand-rust-soft);
+    }
+
+    .map-box-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      word-break: break-word;
+    }
+
+    .map-box-stats {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .map-stat-running {
+      color: var(--status-running);
+      font-weight: 500;
+    }
+
+    .map-stat-waiting {
+      color: var(--amber);
+      font-weight: 500;
+    }
+
+    @media (max-width: 900px) {
+      .shell {
+        height: auto;
+        min-height: 100vh;
+        overflow: visible;
+      }
+
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .pane-left {
+        border-right: none;
+        border-bottom: 1px solid var(--color-line);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="shell">
+    <header id="bar">
+      <div class="bar-row">
+        <div class="bar-group">
+          <span class="brand">
+            <svg viewBox="0 0 100 100" width="20" height="20" aria-hidden="true">
+              <rect class="m-i" x="10" y="10" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="38" y="10" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="66" y="10" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="10" y="38" width="24" height="24" rx="3"/>
+              <rect class="m-s" x="38" y="38" width="24" height="24" rx="3"/>
+              <rect class="m-r" x="66" y="38" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="10" y="66" width="24" height="24" rx="3"/>
+              <rect class="m-r" x="38" y="66" width="24" height="24" rx="3"/>
+              <rect class="m-r" x="66" y="66" width="24" height="24" rx="3"/>
+            </svg>
+            <span class="brand-word">blyte</span>
+            <span class="brand-sub">mock</span>
+          </span>
+          <span id="clock-display" class="clock-readout nums">--</span>
+          <button type="button" id="play" class="btn">Play</button>
+          <select id="speed" class="ctrl-select" aria-label="Replay speed">
+            <option value="60">60x</option>
+            <option value="600" selected>600x</option>
+            <option value="3600">3600x</option>
+          </select>
+          <button type="button" id="next" class="btn">Next arrival</button>
+        </div>
+
+        <div class="bar-group">
+          <div id="wip" class="metric nums"><span class="metric-label">wip</span><span class="metric-val">0 / 3</span></div>
+          <div id="waiting" class="metric nums"><span class="metric-label">waiting</span><span class="metric-val">0 / 7</span></div>
+          <div id="session" class="metric nums"><span class="metric-label">session</span><span class="metric-val">00:00</span></div>
+          <div class="skipped-popover">
+            <button type="button" id="skipped" class="metric metric-btn nums"><span class="metric-label">skipped</span><span class="metric-val">0</span></button>
+            <div id="skipped-panel" class="skipped-panel" hidden></div>
+          </div>
+          <div id="save">
+            <button type="button" id="save-btn" class="btn">Save record</button>
+            <button type="button" id="clear-btn" class="btn btn-ghost">Clear record</button>
+            <span id="log-count" class="log-count nums">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bar-row">
+        <div class="slider-wrap">
+          <input type="range" id="clock" min="0" max="1" step="1" value="0" aria-label="Replay timeline">
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <section class="pane-left" aria-label="Work surface">
+        <div class="pane-head">
+          <div id="mode" role="tablist" aria-label="Mode">
+            <button type="button" id="mode-design" class="mode-btn active" role="tab" aria-selected="true">Design</button>
+            <button type="button" id="mode-review" class="mode-btn" role="tab" aria-selected="false">Review (0)</button>
+          </div>
+          <div id="focus-indicator"></div>
+        </div>
+
+        <div id="conversation">
+          <div id="conversation-thread" class="thread"></div>
+          <div id="offer" hidden></div>
+          <form id="conversation-form" class="composer">
+            <span id="composer-about" class="composer-about" hidden></span>
+            <input type="text" id="conversation-input" placeholder="Message the orchestrator..." autocomplete="off">
+            <button type="submit" class="btn btn-primary">Send</button>
+          </form>
+        </div>
+
+        <div id="review-wrap" class="review-wrap" hidden>
+          <div id="checkin" hidden>
+            <h2 class="checkin-title">Check-in before review</h2>
+            <div class="checkin-row">
+              <span class="checkin-label">focus</span>
+              <div class="scale-group" data-scale="focus">
+                <button type="button" class="scale-btn" data-val="1">1</button>
+                <button type="button" class="scale-btn" data-val="2">2</button>
+                <button type="button" class="scale-btn" data-val="3">3</button>
+                <button type="button" class="scale-btn" data-val="4">4</button>
+                <button type="button" class="scale-btn" data-val="5">5</button>
+              </div>
+            </div>
+            <div class="checkin-row">
+              <span class="checkin-label">tiredness</span>
+              <div class="scale-group" data-scale="tiredness">
+                <button type="button" class="scale-btn" data-val="1">1</button>
+                <button type="button" class="scale-btn" data-val="2">2</button>
+                <button type="button" class="scale-btn" data-val="3">3</button>
+                <button type="button" class="scale-btn" data-val="4">4</button>
+                <button type="button" class="scale-btn" data-val="5">5</button>
+              </div>
+            </div>
+            <div class="checkin-pause">
+              <span id="pause-status">Optional one-minute pause before starting review.</span>
+              <button type="button" id="pause-btn" class="btn">One-minute pause</button>
+            </div>
+            <div class="checkin-actions">
+              <button type="button" id="checkin-skip" class="btn btn-ghost">Skip</button>
+              <button type="button" id="checkin-continue" class="btn btn-primary">Continue</button>
+            </div>
+          </div>
+          <div id="queue"></div>
+        </div>
+      </section>
+
+      <aside class="pane-right" aria-label="System map">
+        <div class="pane-head">
+          <h2 class="map-title">Map · groups in window</h2>
+          <span class="mono" style="font-size: 11px; color: var(--color-muted);">click to focus</span>
+        </div>
+        <div id="map"></div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const WIP_CAP = 3;
+    const QUEUE_BOUND = 7;
+    const LOG_STORAGE_KEY = "blyte-mock-log";
+    const NO_FILES_GROUP = "no files changed";
+    const FIXED_REPLY = "(mock) the orchestrator would answer here";
+
+    let replayData = null;
+    let allGroups = [];
+    let windowStart = 0;
+    let windowEnd = 1;
+    let replayTime = 0;
+    let playing = false;
+    let speed = 600;
+    let lastTickRealMs = null;
+    let playRafId = null;
+
+    let mode = "design";
+    let checkinOpen = false;
+    let checkinFocus = null;
+    let checkinTiredness = null;
+    let pauseTimerId = null;
+    let pauseRemaining = 0;
+    let pauseElapsed = 0;
+    let pendingScrollGroup = null;
+
+    let focusedGroup = null;
+    let activeOffer = null;
+    const dismissedOffers = new Set();
+
+    const decisions = new Map();
+    const firstShownAt = new Map();
+    const openDetails = new Set();
+    const pendingNoteAction = new Map();
+    const noteDrafts = new Map();
+    const noteErrors = new Map();
+
+    const designMessages = [];
+    const groupThreads = new Map();
+    const groupInputDrafts = new Map();
+    let msgSeq = 0;
+
+    let skippedOpen = false;
+    let lastQueueSig = "";
+    let lastDesignSig = "";
+    let lastMapSig = "";
+
+    const sessionOpenedMs = Date.now();
+    let logEntries = loadLog();
+
+    function loadLog() {
+      try {
+        const raw = localStorage.getItem(LOG_STORAGE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function persistLog(entries) {
+      try {
+        localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(entries));
+      } catch (_) {}
+    }
+
+    function appendLog(entry) {
+      const full = Object.assign({}, entry, {
+        real_time: new Date().toISOString(),
+        replay_time: Math.floor(replayTime)
+      });
+      logEntries.push(full);
+      persistLog(logEntries);
+      updateLogCount();
+    }
+
+    function updateLogCount() {
+      const el = document.getElementById("log-count");
+      if (el) el.textContent = String(logEntries.length);
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function isPlainObject(v) {
+      return v !== null && typeof v === "object" && !Array.isArray(v);
+    }
+
+    function hasOwn(obj, key) {
+      return Object.prototype.hasOwnProperty.call(obj, key);
+    }
+
+    function validateContract(data) {
+      if (!isPlainObject(data)) {
+        return "Invalid /api/replay contract: root payload must be a JSON object.";
+      }
+      if (typeof data.exported_at !== "number" || !Number.isFinite(data.exported_at)) {
+        return "Invalid /api/replay contract: missing or non-numeric exported_at.";
+      }
+      if (typeof data.window_days !== "number" || !Number.isFinite(data.window_days)) {
+        return "Invalid /api/replay contract: missing or non-numeric window_days.";
+      }
+      if (!Array.isArray(data.skipped)) {
+        return "Invalid /api/replay contract: skipped must be an array.";
+      }
+      for (let i = 0; i < data.skipped.length; i++) {
+        const s = data.skipped[i];
+        if (!isPlainObject(s) || typeof s.key !== "string" || typeof s.reason !== "string") {
+          return "Invalid /api/replay contract: skipped[" + i + "] must have string key and reason.";
+        }
+      }
+      if (!Array.isArray(data.runs)) {
+        return "Invalid /api/replay contract: runs must be an array.";
+      }
+      const requiredStrings = ["key", "id", "repo", "title", "task", "outcome"];
+      const requiredBooleans = ["research", "checks_recorded"];
+      const requiredNumbers = ["started_at", "finished_at", "turns"];
+      const nullableStrings = ["plan_file", "plan_task", "final_message", "group", "verdict", "verdict_notes"];
+      const nullableNumbers = ["cost_usd", "verdict_ts"];
+
+      for (let i = 0; i < data.runs.length; i++) {
+        const r = data.runs[i];
+        if (!isPlainObject(r)) {
+          return "Invalid /api/replay contract: runs[" + i + "] must be an object.";
+        }
+        for (const f of requiredStrings) {
+          if (typeof r[f] !== "string") {
+            return "Invalid /api/replay contract: runs[" + i + "]." + f + " must be a string.";
+          }
+        }
+        for (const f of requiredBooleans) {
+          if (typeof r[f] !== "boolean") {
+            return "Invalid /api/replay contract: runs[" + i + "]." + f + " must be a boolean.";
+          }
+        }
+        for (const f of requiredNumbers) {
+          if (typeof r[f] !== "number" || !Number.isFinite(r[f])) {
+            return "Invalid /api/replay contract: runs[" + i + "]." + f + " must be a number.";
+          }
+        }
+        for (const f of nullableStrings) {
+          if (!hasOwn(r, f) || (r[f] !== null && typeof r[f] !== "string")) {
+            return "Invalid /api/replay contract: runs[" + i + "]." + f + " must be a string or null.";
+          }
+        }
+        for (const f of nullableNumbers) {
+          if (!hasOwn(r, f) || (r[f] !== null && (typeof r[f] !== "number" || !Number.isFinite(r[f])))) {
+            return "Invalid /api/replay contract: runs[" + i + "]." + f + " must be a number or null.";
+          }
+        }
+        if (r.card !== "clean" && r.card !== "exception") {
+          return "Invalid /api/replay contract: runs[" + i + "].card must be \"clean\" or \"exception\".";
+        }
+        if (!Array.isArray(r.flags) || !r.flags.every(x => typeof x === "string")) {
+          return "Invalid /api/replay contract: runs[" + i + "].flags must be an array of strings.";
+        }
+        if (!Array.isArray(r.changed_files) || !r.changed_files.every(x => typeof x === "string")) {
+          return "Invalid /api/replay contract: runs[" + i + "].changed_files must be an array of strings.";
+        }
+        if (!Array.isArray(r.commits)) {
+          return "Invalid /api/replay contract: runs[" + i + "].commits must be an array.";
+        }
+        for (let j = 0; j < r.commits.length; j++) {
+          const c = r.commits[j];
+          if (!isPlainObject(c) || typeof c.sha !== "string" || typeof c.subject !== "string") {
+            return "Invalid /api/replay contract: runs[" + i + "].commits[" + j + "] must have string sha and subject.";
+          }
+        }
+      }
+      return null;
+    }
+
+    function showFatalError(msg) {
+      document.body.innerHTML = "";
+      const box = document.createElement("main");
+      box.className = "fatal-error";
+      box.textContent = msg;
+      document.body.appendChild(box);
+    }
+
+    function runGroupName(run) {
+      return run.group === null ? NO_FILES_GROUP : run.group;
+    }
+
+    function isInProgress(run, t) {
+      return run.started_at <= t && t < run.finished_at;
+    }
+
+    function isArrived(run, t) {
+      return run.finished_at <= t;
+    }
+
+    function isResolved(runKey) {
+      const dec = decisions.get(runKey);
+      return Boolean(dec && dec.action !== "hold");
+    }
+
+    function isHeld(runKey) {
+      const dec = decisions.get(runKey);
+      return Boolean(dec && dec.action === "hold");
+    }
+
+    function isUndecidedArrived(run, t) {
+      return isArrived(run, t) && !isResolved(run.key);
+    }
+
+    function pad2(n) {
+      return String(n).padStart(2, "0");
+    }
+
+    function formatReplayDateTime(epochSec) {
+      const d = new Date(epochSec * 1000);
+      return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) +
+        " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+    }
+
+    function formatDuration(sec) {
+      const total = Math.max(0, Math.floor(sec));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      if (h > 0) {
+        return h + ":" + pad2(m) + ":" + pad2(s);
+      }
+      return pad2(m) + ":" + pad2(s);
+    }
+
+    function computeState(t) {
+      const runs = replayData.runs;
+      const inProgress = [];
+      const arrived = [];
+      const undecidedArrived = [];
+      const waitingGroupSet = new Set();
+
+      for (const r of runs) {
+        if (isInProgress(r, t)) {
+          inProgress.push(r);
+        }
+        if (isArrived(r, t)) {
+          arrived.push(r);
+          if (!isResolved(r.key)) {
+            undecidedArrived.push(r);
+            waitingGroupSet.add(runGroupName(r));
+          }
+        }
+      }
+
+      return {
+        inProgress,
+        arrived,
+        undecidedArrived,
+        waitingGroupsCount: waitingGroupSet.size
+      };
+    }
+
+    function updateClockBar(state) {
+      const clockDisplay = document.getElementById("clock-display");
+      clockDisplay.textContent = formatReplayDateTime(replayTime);
+
+      const slider = document.getElementById("clock");
+      slider.value = String(Math.floor(replayTime));
+
+      const playBtn = document.getElementById("play");
+      playBtn.textContent = playing ? "Pause" : "Play";
+
+      const nextBtn = document.getElementById("next");
+      const hasNext = replayData.runs.some(r => r.finished_at > replayTime);
+      nextBtn.disabled = !hasNext;
+
+      const wipEl = document.getElementById("wip");
+      wipEl.querySelector(".metric-val").textContent = state.inProgress.length + " / " + WIP_CAP;
+      wipEl.classList.toggle("over-limit", state.inProgress.length > WIP_CAP);
+
+      const waitEl = document.getElementById("waiting");
+      waitEl.querySelector(".metric-val").textContent = state.waitingGroupsCount + " / " + QUEUE_BOUND;
+      waitEl.classList.toggle("over-limit", state.waitingGroupsCount > QUEUE_BOUND);
+
+      const skippedEl = document.getElementById("skipped");
+      skippedEl.querySelector(".metric-val").textContent = String(replayData.skipped.length);
+
+      const reviewTab = document.getElementById("mode-review");
+      reviewTab.textContent = "Review (" + state.undecidedArrived.length + ")";
+    }
+
+    function renderSkippedPanel() {
+      const panel = document.getElementById("skipped-panel");
+      if (!skippedOpen) {
+        panel.hidden = true;
+        return;
+      }
+      panel.hidden = false;
+      if (replayData.skipped.length === 0) {
+        panel.innerHTML = '<h3>Skipped runs</h3><div class="mono" style="color: var(--color-muted);">None skipped.</div>';
+        return;
+      }
+      const items = replayData.skipped.map(s =>
+        '<li><span>' + escapeHtml(s.key) + '</span><span style="color: var(--color-muted);">' + escapeHtml(s.reason) + '</span></li>'
+      ).join("");
+      panel.innerHTML = '<h3>Skipped runs (' + replayData.skipped.length + ')</h3><ul class="skipped-list">' + items + '</ul>';
+    }
+
+    function updateFocusIndicator() {
+      const holder = document.getElementById("focus-indicator");
+      if (focusedGroup === null) {
+        holder.innerHTML = "";
+      } else {
+        holder.innerHTML = '<span class="focus-chip">focus: ' + escapeHtml(focusedGroup) +
+          ' <button type="button" data-clear-focus="1" aria-label="Clear focus">×</button></span>';
+      }
+
+      const aboutEl = document.getElementById("composer-about");
+      const inputEl = document.getElementById("conversation-input");
+      if (focusedGroup === null) {
+        aboutEl.hidden = true;
+        aboutEl.textContent = "";
+        inputEl.placeholder = "Message the orchestrator...";
+      } else {
+        aboutEl.hidden = false;
+        aboutEl.textContent = "about " + focusedGroup;
+        inputEl.placeholder = "about " + focusedGroup;
+      }
+    }
+
+    function renderOffer() {
+      const offerEl = document.getElementById("offer");
+      if (mode !== "design" || !activeOffer) {
+        offerEl.hidden = true;
+        offerEl.innerHTML = "";
+        return;
+      }
+      const run = replayData.runs.find(r => r.key === activeOffer.key);
+      if (!run || !isArrived(run, replayTime) || isResolved(run.key) || focusedGroup !== activeOffer.group) {
+        activeOffer = null;
+        offerEl.hidden = true;
+        offerEl.innerHTML = "";
+        return;
+      }
+      offerEl.hidden = false;
+      offerEl.innerHTML =
+        '<span class="offer-text">' + escapeHtml(run.id + " touches " + activeOffer.group + " and needs a decision") + '</span>' +
+        '<div class="offer-actions">' +
+          '<button type="button" class="btn btn-primary" data-offer-choice="now">Now</button>' +
+          '<button type="button" class="btn btn-ghost" data-offer-choice="later">Later</button>' +
+        '</div>';
+    }
+
+    function renderConversation(force) {
+      const dispatched = replayData.runs.filter(r => r.started_at <= replayTime);
+      const sig = dispatched.length + "|" + designMessages.length;
+      if (!force && sig === lastDesignSig) return;
+      lastDesignSig = sig;
+
+      const threadEl = document.getElementById("conversation-thread");
+      const atBottom = threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight < 40;
+
+      const entries = [];
+      for (const r of dispatched) {
+        entries.push({
+          sortTime: r.started_at,
+          seq: -1,
+          kind: "dispatch",
+          text: "dispatched " + r.id + ": " + r.title,
+          meta: formatReplayDateTime(r.started_at)
+        });
+      }
+      for (const m of designMessages) {
+        entries.push({
+          sortTime: m.replayTime,
+          seq: m.seq,
+          kind: m.role,
+          text: m.text,
+          meta: m.meta
+        });
+      }
+      entries.sort((a, b) => {
+        if (a.sortTime !== b.sortTime) return a.sortTime - b.sortTime;
+        return a.seq - b.seq;
+      });
+
+      if (entries.length === 0) {
+        threadEl.innerHTML = '<div class="thread-empty">No runs dispatched at this replay time yet.</div>';
+        return;
+      }
+
+      threadEl.innerHTML = entries.map(e => {
+        if (e.kind === "dispatch") {
+          return '<div class="msg-line dispatch">' + escapeHtml(e.meta) + " · " + escapeHtml(e.text) + '</div>';
+        }
+        return '<div class="msg-line ' + e.kind + '">' +
+          '<div class="msg-meta">' + escapeHtml(e.meta) + '</div>' +
+          '<div>' + escapeHtml(e.text) + '</div>' +
+          '</div>';
+      }).join("");
+
+      if (atBottom) {
+        threadEl.scrollTop = threadEl.scrollHeight;
+      }
+    }
+
+    function renderDetailsHtml(run) {
+      if (!openDetails.has(run.key)) return "";
+      const finalMsg = run.final_message !== null ? run.final_message : "(not recorded)";
+      const filesHtml = run.changed_files.length > 0
+        ? '<ul class="details-list">' + run.changed_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") + '</ul>'
+        : '<div class="mono" style="color: var(--color-muted);">None</div>';
+      const commitsHtml = run.commits.length > 0
+        ? '<ul class="details-list">' + run.commits.map(c => '<li><strong>' + escapeHtml(c.sha.slice(0, 7)) + '</strong> ' + escapeHtml(c.subject) + '</li>').join("") + '</ul>'
+        : '<div class="mono" style="color: var(--color-muted);">None</div>';
+      const extraFlagsHtml = run.checks_recorded && run.flags.length > 3
+        ? '<div><div class="details-label">all flags (' + run.flags.length + ')</div><ul class="details-list">' +
+          run.flags.map(fl => '<li>' + escapeHtml(fl) + '</li>').join("") + '</ul></div>'
+        : "";
+      return '<div class="details-box">' +
+        '<div><div class="details-label">final_message</div><pre class="details-pre">' + escapeHtml(finalMsg) + '</pre></div>' +
+        '<div><div class="details-label">task</div><pre class="details-pre">' + escapeHtml(run.task) + '</pre></div>' +
+        extraFlagsHtml +
+        '<div><div class="details-label">changed_files</div>' + filesHtml + '</div>' +
+        '<div><div class="details-label">commits</div>' + commitsHtml + '</div>' +
+        '</div>';
+    }
+
+    function renderExceptionFlagsHtml(run) {
+      if (!run.checks_recorded) {
+        return '<div class="exc-not-recorded">checks not recorded</div>';
+      }
+      if (run.flags.length === 0) {
+        return '<div class="exc-flag-item">outcome: ' + escapeHtml(run.outcome) + '</div>';
+      }
+      const shown = run.flags.slice(0, 3).map(fl =>
+        '<div class="exc-flag-item" title="' + escapeHtml(fl) + '">• ' + escapeHtml(fl) + '</div>'
+      ).join("");
+      const more = run.flags.length > 3
+        ? '<div class="exc-flag-more">+' + (run.flags.length - 3) + ' more</div>'
+        : "";
+      return shown + more;
+    }
+
+    function renderQueue(state, force) {
+      if (mode !== "review") return;
+
+      const arrivedKeys = state.arrived.map(r => r.key).join(",");
+      const decisionSig = Array.from(decisions.entries()).map(([k, v]) => k + ":" + v.action + ":" + v.note).join(",");
+      const detailsSig = Array.from(openDetails).join(",");
+      const pendingSig = Array.from(pendingNoteAction.entries()).map(([k, v]) => k + ":" + v).join(",");
+      const errSig = Array.from(noteErrors.entries()).map(([k, v]) => k + ":" + v).join(",");
+      const threadSig = Array.from(groupThreads.entries()).map(([k, v]) => k + ":" + v.length).join(",");
+      const sig = [arrivedKeys, decisionSig, detailsSig, pendingSig, errSig, threadSig, focusedGroup || "", checkinOpen ? "1" : "0"].join("||");
+
+      if (!force && sig === lastQueueSig) return;
+      lastQueueSig = sig;
+
+      const queueEl = document.getElementById("queue");
+      if (checkinOpen) {
+        queueEl.hidden = true;
+        return;
+      }
+      queueEl.hidden = false;
+
+      const nowMs = Date.now();
+      for (const r of state.undecidedArrived) {
+        if (!firstShownAt.has(r.key)) {
+          firstShownAt.set(r.key, nowMs);
+        }
+      }
+
+      const activeInput = document.activeElement;
+      const activeInputId = activeInput && activeInput.dataset ? activeInput.dataset.preserveId : null;
+      const activeSelStart = activeInput && typeof activeInput.selectionStart === "number" ? activeInput.selectionStart : null;
+
+      const byGroup = new Map();
+      for (const r of state.arrived) {
+        const g = runGroupName(r);
+        if (!byGroup.has(g)) byGroup.set(g, { undecided: [], decided: [] });
+        if (isResolved(r.key)) {
+          byGroup.get(g).decided.push(r);
+        } else {
+          byGroup.get(g).undecided.push(r);
+        }
+      }
+
+      if (byGroup.size === 0) {
+        queueEl.innerHTML = '<div class="thread-empty">No arrived runs yet. Advance the clock or click Next arrival.</div>';
+        return;
+      }
+
+      const orderedGroups = allGroups.filter(g => byGroup.has(g));
+      for (const g of byGroup.keys()) {
+        if (!orderedGroups.includes(g)) orderedGroups.push(g);
+      }
+
+      const groupsHtml = orderedGroups.map(groupName => {
+        const bucket = byGroup.get(groupName);
+        const undecided = bucket.undecided;
+        const decided = bucket.decided;
+        const cleanRuns = undecided.filter(r => r.card === "clean");
+        const exceptionRuns = undecided.filter(r => r.card === "exception");
+        const isFocused = focusedGroup === groupName;
+
+        let headActions = '<span class="group-count">' +
+          (undecided.length > 0 ? undecided.length + ' undecided' : 'all decided') +
+          '</span>';
+        if (cleanRuns.length >= 2) {
+          headActions = '<button type="button" class="btn btn-pass" data-accept-all-clean="' + escapeHtml(groupName) + '">Accept all clean (' + cleanRuns.length + ')</button>' + headActions;
+        }
+
+        const cleanHtml = cleanRuns.map(r => {
+          const isOpen = openDetails.has(r.key);
+          return '<div>' +
+            '<div class="clean-row">' +
+              '<div class="clean-main">' +
+                '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+                '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+              '</div>' +
+              '<div class="row-actions">' +
+                '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
+                '<button type="button" class="btn btn-pass" data-action="accept" data-run-key="' + escapeHtml(r.key) + '">Accept</button>' +
+              '</div>' +
+            '</div>' +
+            renderDetailsHtml(r) +
+          '</div>';
+        }).join("");
+
+        const excHtml = exceptionRuns.map(r => {
+          const dec = decisions.get(r.key);
+          const held = isHeld(r.key);
+          const isOpen = openDetails.has(r.key);
+          const pending = pendingNoteAction.get(r.key) || null;
+          const draft = noteDrafts.get(r.key) || "";
+          const err = noteErrors.get(r.key) || "";
+          const outcomeClass = r.outcome === "verified" ? "verified" : "failed";
+          const cardClass = "exception-card" + (held ? " is-held" : (r.outcome !== "verified" ? " is-failed" : ""));
+          const verdictHtml = held && r.verdict !== null
+            ? '<span class="recorded-verdict">recorded then: ' + escapeHtml(r.verdict) + '</span>'
+            : "";
+
+          let promptHtml = "";
+          if (pending === "send_back" || pending === "hold") {
+            const label = pending === "send_back" ? "Send back" : "Hold";
+            promptHtml = '<form class="note-prompt" data-note-form="' + escapeHtml(r.key) + '" data-note-action="' + pending + '">' +
+              '<input type="text" data-note-input="' + escapeHtml(r.key) + '" data-preserve-id="note:' + escapeHtml(r.key) + '" value="' + escapeHtml(draft) + '" placeholder="One-line note required for ' + label + '..." autocomplete="off">' +
+              '<button type="submit" class="btn btn-primary">' + label + '</button>' +
+              '<button type="button" class="btn btn-ghost" data-cancel-note="' + escapeHtml(r.key) + '">Cancel</button>' +
+              (err ? '<div class="note-error">' + escapeHtml(err) + '</div>' : "") +
+              '</form>';
+          }
+
+          return '<div class="exception-wrap">' +
+            '<div class="' + cardClass + '">' +
+              (held ? '<div class="hold-note-first" title="' + escapeHtml(dec.note) + '">Held: ' + escapeHtml(dec.note) + '</div>' : "") +
+              '<div class="exc-top">' +
+                '<div class="exc-title-group">' +
+                  '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+                  '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+                '</div>' +
+                '<span class="outcome-pill ' + outcomeClass + '">' + escapeHtml(r.outcome) + '</span>' +
+              '</div>' +
+              '<div class="exc-flags">' + renderExceptionFlagsHtml(r) + '</div>' +
+              '<div class="exc-footer">' +
+                '<div class="row-actions">' +
+                  '<button type="button" class="btn btn-pass" data-action="accept" data-run-key="' + escapeHtml(r.key) + '">Accept</button>' +
+                  '<button type="button" class="btn btn-warn" data-action="send_back" data-run-key="' + escapeHtml(r.key) + '">Send back</button>' +
+                  '<button type="button" class="btn btn-danger" data-action="redo" data-run-key="' + escapeHtml(r.key) + '">Redo</button>' +
+                  '<button type="button" class="btn" data-action="hold" data-run-key="' + escapeHtml(r.key) + '">Hold</button>' +
+                '</div>' +
+                '<div class="row-actions">' +
+                  verdictHtml +
+                  '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            promptHtml +
+            renderDetailsHtml(r) +
+          '</div>';
+        }).join("");
+
+        const decidedHtml = decided.map(r => {
+          const dec = decisions.get(r.key);
+          const isOpen = openDetails.has(r.key);
+          const actionLabel = dec.action === "accept" ? "Accepted"
+            : dec.action === "send_back" ? "Sent back"
+            : dec.action === "redo" ? "Redo"
+            : dec.action;
+          const noteSnippet = dec.note ? ' — "' + escapeHtml(dec.note) + '"' : "";
+          const recordedHtml = r.verdict !== null
+            ? '<span class="recorded-verdict">recorded then: ' + escapeHtml(r.verdict) + '</span>'
+            : "";
+
+          return '<div>' +
+            '<div class="decided-row">' +
+              '<div class="decided-main">' +
+                '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+                '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+                '<span class="decision-badge">' + escapeHtml(actionLabel) + noteSnippet + '</span>' +
+                recordedHtml +
+              '</div>' +
+              '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
+            '</div>' +
+            renderDetailsHtml(r) +
+          '</div>';
+        }).join("");
+
+        let threadHtml = "";
+        if (undecided.length > 0) {
+          const msgs = groupThreads.get(groupName) || [];
+          const inputVal = groupInputDrafts.get(groupName) || "";
+          const msgsHtml = msgs.length > 0
+            ? '<div class="group-thread-msgs">' + msgs.map(m =>
+                '<div class="group-thread-msg ' + m.role + '">' + escapeHtml(m.text) + '</div>'
+              ).join("") + '</div>'
+            : "";
+          threadHtml = '<div class="group-thread">' +
+            msgsHtml +
+            '<form class="group-thread-form" data-group-thread="' + escapeHtml(groupName) + '">' +
+              '<input type="text" data-group-input="' + escapeHtml(groupName) + '" data-preserve-id="gthread:' + escapeHtml(groupName) + '" value="' + escapeHtml(inputVal) + '" placeholder="Thread for ' + escapeHtml(groupName) + '..." autocomplete="off">' +
+              '<button type="submit" class="btn">Send</button>' +
+            '</form>' +
+          '</div>';
+        }
+
+        return '<section class="queue-group' + (isFocused ? " focused" : "") + '" data-group="' + escapeHtml(groupName) + '">' +
+          '<div class="group-head">' +
+            '<span class="group-name">' + escapeHtml(groupName) + '</span>' +
+            '<div class="group-meta">' + headActions + '</div>' +
+          '</div>' +
+          '<div class="group-body">' +
+            excHtml +
+            cleanHtml +
+            decidedHtml +
+          '</div>' +
+          threadHtml +
+        '</section>';
+      }).join("");
+
+      queueEl.innerHTML = groupsHtml;
+
+      if (activeInputId) {
+        const restored = queueEl.querySelector('[data-preserve-id="' + CSS.escape(activeInputId) + '"]');
+        if (restored) {
+          restored.focus();
+          if (activeSelStart !== null) {
+            try { restored.setSelectionRange(activeSelStart, activeSelStart); } catch (_) {}
+          }
+        }
+      }
+
+      if (pendingScrollGroup) {
+        const target = pendingScrollGroup;
+        pendingScrollGroup = null;
+        scrollQueueToGroup(target);
+      }
+    }
+
+    function scrollQueueToGroup(groupName) {
+      if (mode !== "review" || checkinOpen) return;
+      const queueEl = document.getElementById("queue");
+      const target = queueEl.querySelector('[data-group="' + CSS.escape(groupName) + '"]');
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }
+
+    function renderMap(state, force) {
+      const counts = new Map();
+      for (const g of allGroups) {
+        counts.set(g, { running: 0, waiting: 0 });
+      }
+      for (const r of state.inProgress) {
+        const g = runGroupName(r);
+        if (!counts.has(g)) counts.set(g, { running: 0, waiting: 0 });
+        counts.get(g).running += 1;
+      }
+      for (const r of state.undecidedArrived) {
+        const g = runGroupName(r);
+        if (!counts.has(g)) counts.set(g, { running: 0, waiting: 0 });
+        counts.get(g).waiting += 1;
+      }
+
+      const sig = Array.from(counts.entries()).map(([g, c]) => g + ":" + c.running + ":" + c.waiting).join("|") + "||" + (focusedGroup || "");
+      if (!force && sig === lastMapSig) return;
+      lastMapSig = sig;
+
+      const mapEl = document.getElementById("map");
+      if (allGroups.length === 0) {
+        mapEl.innerHTML = '<div class="thread-empty">No groups in this replay window.</div>';
+        return;
+      }
+
+      mapEl.innerHTML = allGroups.map(g => {
+        const c = counts.get(g) || { running: 0, waiting: 0 };
+        const isFocused = focusedGroup === g;
+        return '<button type="button" class="map-box' + (isFocused ? " focused" : "") + '" data-map-group="' + escapeHtml(g) + '" aria-pressed="' + (isFocused ? "true" : "false") + '">' +
+          '<span class="map-box-name">' + escapeHtml(g) + '</span>' +
+          '<span class="map-box-stats nums">' +
+            '<span class="' + (c.running > 0 ? "map-stat-running" : "") + '">' + c.running + ' in progress</span>' +
+            '<span class="' + (c.waiting > 0 ? "map-stat-waiting" : "") + '">' + c.waiting + ' waiting</span>' +
+          '</span>' +
+        '</button>';
+      }).join("");
+    }
+
+    function checkArrivalsForOffer(prevT, nextT) {
+      if (mode !== "design" || focusedGroup === null || activeOffer !== null) return;
+      if (nextT <= prevT) return;
+      for (const r of replayData.runs) {
+        if (r.finished_at > prevT && r.finished_at <= nextT) {
+          if (r.card === "exception" && runGroupName(r) === focusedGroup && !isResolved(r.key) && !dismissedOffers.has(r.key)) {
+            activeOffer = { key: r.key, id: r.id, group: focusedGroup };
+            return;
+          }
+        }
+      }
+    }
+
+    function setReplayTime(nextT) {
+      const clamped = Math.max(windowStart, Math.min(windowEnd, nextT));
+      const prevT = replayTime;
+      replayTime = clamped;
+      checkArrivalsForOffer(prevT, replayTime);
+      renderAll(false);
+    }
+
+    function renderModeChrome() {
+      const designTab = document.getElementById("mode-design");
+      const reviewTab = document.getElementById("mode-review");
+      const convEl = document.getElementById("conversation");
+      const reviewWrap = document.getElementById("review-wrap");
+      const checkinEl = document.getElementById("checkin");
+
+      const isDesign = mode === "design";
+      designTab.classList.toggle("active", isDesign);
+      designTab.setAttribute("aria-selected", isDesign ? "true" : "false");
+      reviewTab.classList.toggle("active", !isDesign);
+      reviewTab.setAttribute("aria-selected", !isDesign ? "true" : "false");
+
+      convEl.hidden = !isDesign;
+      reviewWrap.hidden = isDesign;
+      checkinEl.hidden = !(!isDesign && checkinOpen);
+    }
+
+    function renderAll(force) {
+      if (!replayData) return;
+      const state = computeState(replayTime);
+      updateClockBar(state);
+      renderModeChrome();
+      updateFocusIndicator();
+      renderMap(state, force);
+      renderConversation(force);
+      renderOffer();
+      renderQueue(state, force);
+    }
+
+    function resetCheckinControls() {
+      checkinFocus = null;
+      checkinTiredness = null;
+      stopPauseTimer();
+      pauseElapsed = 0;
+      document.getElementById("pause-status").textContent = "Optional one-minute pause before starting review.";
+      document.getElementById("pause-btn").textContent = "One-minute pause";
+      document.querySelectorAll("#checkin .scale-btn").forEach(btn => {
+        btn.classList.remove("selected");
+      });
+    }
+
+    function stopPauseTimer() {
+      if (pauseTimerId !== null) {
+        clearInterval(pauseTimerId);
+        pauseTimerId = null;
+      }
+      pauseRemaining = 0;
+    }
+
+    function switchMode(targetMode, scrollToGroup) {
+      if (targetMode === mode) {
+        if (targetMode === "review" && scrollToGroup) {
+          scrollQueueToGroup(scrollToGroup);
+        }
+        return;
+      }
+      const prevMode = mode;
+      mode = targetMode;
+      appendLog({ type: "mode_switch", from: prevMode, to: targetMode });
+
+      if (targetMode === "review") {
+        activeOffer = null;
+        checkinOpen = true;
+        pendingScrollGroup = scrollToGroup || focusedGroup || null;
+        resetCheckinControls();
+      } else {
+        stopPauseTimer();
+        checkinOpen = false;
+      }
+      renderAll(true);
+    }
+
+    function applyDecision(runKey, action, note) {
+      const trimmedNote = (note || "").trim();
+      if ((action === "send_back" || action === "hold") && trimmedNote.length === 0) {
+        noteErrors.set(runKey, "A one-line note is required.");
+        renderAll(true);
+        return;
+      }
+      const shownAt = firstShownAt.get(runKey);
+      const secondsSinceShown = shownAt != null
+        ? Math.round(((Date.now() - shownAt) / 1000) * 10) / 10
+        : 0;
+
+      decisions.set(runKey, {
+        action,
+        note: trimmedNote,
+        at: Date.now()
+      });
+      pendingNoteAction.delete(runKey);
+      noteDrafts.delete(runKey);
+      noteErrors.delete(runKey);
+
+      appendLog({
+        type: "decision",
+        run_key: runKey,
+        action,
+        note: trimmedNote,
+        seconds_in_queue: secondsSinceShown
+      });
+
+      renderAll(true);
+    }
+
+    function acceptAllCleanInGroup(groupName) {
+      const state = computeState(replayTime);
+      const targets = state.undecidedArrived.filter(r => r.card === "clean" && runGroupName(r) === groupName);
+      for (const r of targets) {
+        const shownAt = firstShownAt.get(r.key);
+        const secondsSinceShown = shownAt != null
+          ? Math.round(((Date.now() - shownAt) / 1000) * 10) / 10
+          : 0;
+        decisions.set(r.key, { action: "accept", note: "", at: Date.now() });
+        appendLog({
+          type: "decision",
+          run_key: r.key,
+          action: "accept",
+          note: "",
+          seconds_in_queue: secondsSinceShown
+        });
+      }
+      renderAll(true);
+    }
+
+    function setFocusGroup(groupName) {
+      const next = focusedGroup === groupName ? null : groupName;
+      focusedGroup = next;
+      if (activeOffer && activeOffer.group !== focusedGroup) {
+        activeOffer = null;
+      }
+      appendLog({ type: "focus_change", group: focusedGroup });
+      renderAll(true);
+      if (focusedGroup !== null && mode === "review" && !checkinOpen) {
+        scrollQueueToGroup(focusedGroup);
+      }
+    }
+
+    function startPlayback() {
+      if (playing) return;
+      if (replayTime >= windowEnd) {
+        setReplayTime(windowStart);
+      }
+      playing = true;
+      lastTickRealMs = performance.now();
+      renderAll(false);
+      playRafId = requestAnimationFrame(playbackStep);
+    }
+
+    function stopPlayback() {
+      playing = false;
+      lastTickRealMs = null;
+      if (playRafId !== null) {
+        cancelAnimationFrame(playRafId);
+        playRafId = null;
+      }
+      renderAll(false);
+    }
+
+    function playbackStep(nowMs) {
+      if (!playing) return;
+      const dtSec = Math.min(0.25, Math.max(0, (nowMs - lastTickRealMs) / 1000));
+      lastTickRealMs = nowMs;
+      const nextT = replayTime + dtSec * speed;
+      if (nextT >= windowEnd) {
+        setReplayTime(windowEnd);
+        stopPlayback();
+        return;
+      }
+      setReplayTime(nextT);
+      playRafId = requestAnimationFrame(playbackStep);
+    }
+
+    function jumpToNextArrival() {
+      let nextFinished = null;
+      for (const r of replayData.runs) {
+        if (r.finished_at > replayTime) {
+          if (nextFinished === null || r.finished_at < nextFinished) {
+            nextFinished = r.finished_at;
+          }
+        }
+      }
+      if (nextFinished !== null) {
+        setReplayTime(nextFinished);
+      }
+    }
+
+    function updateSessionTimer() {
+      const el = document.getElementById("session");
+      if (!el) return;
+      const elapsedSec = (Date.now() - sessionOpenedMs) / 1000;
+      const val = el.querySelector(".metric-val");
+      if (val) val.textContent = formatDuration(elapsedSec);
+    }
+
+    function bindEvents() {
+      document.getElementById("play").addEventListener("click", () => {
+        if (playing) stopPlayback();
+        else startPlayback();
+      });
+
+      document.getElementById("speed").addEventListener("change", (e) => {
+        const v = Number(e.target.value);
+        if (v === 60 || v === 600 || v === 3600) {
+          speed = v;
+        }
+      });
+
+      document.getElementById("next").addEventListener("click", () => {
+        jumpToNextArrival();
+      });
+
+      document.getElementById("clock").addEventListener("input", (e) => {
+        const val = Number(e.target.value);
+        if (Number.isFinite(val)) {
+          setReplayTime(val);
+        }
+      });
+
+      document.getElementById("skipped").addEventListener("click", (e) => {
+        e.stopPropagation();
+        skippedOpen = !skippedOpen;
+        renderSkippedPanel();
+      });
+
+      document.addEventListener("click", (e) => {
+        if (skippedOpen && !e.target.closest(".skipped-popover")) {
+          skippedOpen = false;
+          renderSkippedPanel();
+        }
+      });
+
+      document.getElementById("save-btn").addEventListener("click", () => {
+        const blob = new Blob([JSON.stringify(logEntries, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "blyte-mock-log.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
+
+      document.getElementById("clear-btn").addEventListener("click", () => {
+        logEntries = [];
+        try {
+          localStorage.removeItem(LOG_STORAGE_KEY);
+        } catch (_) {}
+        updateLogCount();
+      });
+
+      document.getElementById("mode-design").addEventListener("click", () => {
+        switchMode("design", null);
+      });
+
+      document.getElementById("mode-review").addEventListener("click", () => {
+        switchMode("review", null);
+      });
+
+      document.getElementById("focus-indicator").addEventListener("click", (e) => {
+        if (e.target.closest("[data-clear-focus]")) {
+          setFocusGroup(focusedGroup);
+        }
+      });
+
+      document.getElementById("conversation-form").addEventListener("submit", (e) => {
+        e.preventDefault();
+        const input = document.getElementById("conversation-input");
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        const prefix = focusedGroup !== null ? "about " + focusedGroup + " · " : "";
+        designMessages.push({
+          seq: ++msgSeq,
+          replayTime,
+          role: "user",
+          meta: prefix + formatReplayDateTime(replayTime),
+          text
+        });
+        designMessages.push({
+          seq: ++msgSeq,
+          replayTime,
+          role: "assistant",
+          meta: "orchestrator",
+          text: FIXED_REPLY
+        });
+        appendLog({
+          type: "conversation_message",
+          group: focusedGroup,
+          text
+        });
+        renderConversation(true);
+      });
+
+      document.getElementById("offer").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-offer-choice]");
+        if (!btn || !activeOffer) return;
+        const choice = btn.dataset.offerChoice;
+        const offerSnapshot = activeOffer;
+        appendLog({
+          type: "offer",
+          choice,
+          run_key: offerSnapshot.key,
+          group: offerSnapshot.group
+        });
+        if (choice === "now") {
+          activeOffer = null;
+          switchMode("review", offerSnapshot.group);
+        } else {
+          dismissedOffers.add(offerSnapshot.key);
+          activeOffer = null;
+          renderOffer();
+        }
+      });
+
+      document.getElementById("checkin").addEventListener("click", (e) => {
+        const scaleBtn = e.target.closest(".scale-btn");
+        if (scaleBtn) {
+          const group = scaleBtn.closest(".scale-group");
+          const scale = group.dataset.scale;
+          const val = Number(scaleBtn.dataset.val);
+          if (scale === "focus") checkinFocus = val;
+          if (scale === "tiredness") checkinTiredness = val;
+          group.querySelectorAll(".scale-btn").forEach(b => {
+            b.classList.toggle("selected", Number(b.dataset.val) === val);
+          });
+          return;
+        }
+
+        if (e.target.id === "pause-btn") {
+          if (pauseTimerId !== null) {
+            stopPauseTimer();
+            document.getElementById("pause-btn").textContent = "One-minute pause";
+            document.getElementById("pause-status").textContent = "Pause stopped (" + pauseElapsed + "s).";
+          } else {
+            pauseRemaining = 60;
+            document.getElementById("pause-btn").textContent = "Stop pause";
+            document.getElementById("pause-status").textContent = "One-minute pause: 01:00 remaining";
+            pauseTimerId = setInterval(() => {
+              pauseRemaining -= 1;
+              pauseElapsed += 1;
+              if (pauseRemaining <= 0) {
+                stopPauseTimer();
+                document.getElementById("pause-btn").textContent = "One-minute pause";
+                document.getElementById("pause-status").textContent = "One-minute pause complete.";
+              } else {
+                document.getElementById("pause-status").textContent =
+                  "One-minute pause: " + formatDuration(pauseRemaining) + " remaining";
+              }
+            }, 1000);
+          }
+          return;
+        }
+
+        if (e.target.id === "checkin-continue") {
+          stopPauseTimer();
+          appendLog({
+            type: "checkin",
+            skipped: false,
+            focus: checkinFocus,
+            tiredness: checkinTiredness,
+            paused_seconds: pauseElapsed
+          });
+          checkinOpen = false;
+          renderAll(true);
+          return;
+        }
+
+        if (e.target.id === "checkin-skip") {
+          stopPauseTimer();
+          appendLog({
+            type: "checkin",
+            skipped: true,
+            focus: null,
+            tiredness: null,
+            paused_seconds: pauseElapsed
+          });
+          checkinOpen = false;
+          renderAll(true);
+        }
+      });
+
+      document.getElementById("map").addEventListener("click", (e) => {
+        const box = e.target.closest("[data-map-group]");
+        if (!box) return;
+        setFocusGroup(box.dataset.mapGroup);
+      });
+
+      const queueEl = document.getElementById("queue");
+      queueEl.addEventListener("click", (e) => {
+        const acceptAllBtn = e.target.closest("[data-accept-all-clean]");
+        if (acceptAllBtn) {
+          acceptAllCleanInGroup(acceptAllBtn.dataset.acceptAllClean);
+          return;
+        }
+
+        const detailsBtn = e.target.closest("[data-toggle-details]");
+        if (detailsBtn) {
+          const key = detailsBtn.dataset.toggleDetails;
+          if (openDetails.has(key)) {
+            openDetails.delete(key);
+          } else {
+            openDetails.add(key);
+            appendLog({ type: "details_opened", run_key: key });
+          }
+          renderAll(true);
+          return;
+        }
+
+        const cancelNoteBtn = e.target.closest("[data-cancel-note]");
+        if (cancelNoteBtn) {
+          const key = cancelNoteBtn.dataset.cancelNote;
+          pendingNoteAction.delete(key);
+          noteErrors.delete(key);
+          renderAll(true);
+          return;
+        }
+
+        const actionBtn = e.target.closest("[data-action][data-run-key]");
+        if (actionBtn) {
+          const key = actionBtn.dataset.runKey;
+          const action = actionBtn.dataset.action;
+          if (action === "accept" || action === "redo") {
+            applyDecision(key, action, "");
+          } else if (action === "send_back" || action === "hold") {
+            pendingNoteAction.set(key, action);
+            noteErrors.delete(key);
+            renderAll(true);
+            const inp = queueEl.querySelector('[data-note-input="' + CSS.escape(key) + '"]');
+            if (inp) inp.focus();
+          }
+        }
+      });
+
+      queueEl.addEventListener("input", (e) => {
+        const noteInp = e.target.closest("[data-note-input]");
+        if (noteInp) {
+          const key = noteInp.dataset.noteInput;
+          noteDrafts.set(key, noteInp.value);
+          noteErrors.delete(key);
+          return;
+        }
+        const gInp = e.target.closest("[data-group-input]");
+        if (gInp) {
+          groupInputDrafts.set(gInp.dataset.groupInput, gInp.value);
+        }
+      });
+
+      queueEl.addEventListener("submit", (e) => {
+        const noteForm = e.target.closest("[data-note-form]");
+        if (noteForm) {
+          e.preventDefault();
+          const key = noteForm.dataset.noteForm;
+          const action = noteForm.dataset.noteAction;
+          const val = noteDrafts.get(key) || "";
+          applyDecision(key, action, val);
+          return;
+        }
+
+        const gForm = e.target.closest("[data-group-thread]");
+        if (gForm) {
+          e.preventDefault();
+          const gName = gForm.dataset.groupThread;
+          const text = (groupInputDrafts.get(gName) || "").trim();
+          if (!text) return;
+          groupInputDrafts.set(gName, "");
+          if (!groupThreads.has(gName)) groupThreads.set(gName, []);
+          groupThreads.get(gName).push({ role: "user", text });
+          groupThreads.get(gName).push({ role: "assistant", text: FIXED_REPLY });
+          appendLog({ type: "group_message", group: gName, text });
+          renderAll(true);
+          const inp = queueEl.querySelector('[data-group-input="' + CSS.escape(gName) + '"]');
+          if (inp) inp.focus();
+        }
+      });
+    }
+
+    async function init() {
+      updateLogCount();
+      updateSessionTimer();
+      setInterval(updateSessionTimer, 1000);
+
+      let response;
+      try {
+        response = await fetch("/api/replay");
+      } catch (err) {
+        showFatalError("Failed to fetch /api/replay: " + (err && err.message ? err.message : String(err)));
+        return;
+      }
+
+      if (!response.ok) {
+        let bodyText = "";
+        try { bodyText = await response.text(); } catch (_) {}
+        showFatalError("Failed to load /api/replay: HTTP " + response.status + (bodyText ? "\n" + bodyText : ""));
+        return;
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (err) {
+        showFatalError("Invalid JSON from /api/replay: " + (err && err.message ? err.message : String(err)));
+        return;
+      }
+
+      const validationErr = validateContract(data);
+      if (validationErr) {
+        showFatalError(validationErr);
+        return;
+      }
+
+      replayData = data;
+
+      const namedGroups = new Set();
+      let hasNoFiles = false;
+      for (const r of replayData.runs) {
+        if (r.group === null) {
+          hasNoFiles = true;
+        } else {
+          namedGroups.add(r.group);
+        }
+      }
+      allGroups = Array.from(namedGroups).sort();
+      if (hasNoFiles) {
+        allGroups.push(NO_FILES_GROUP);
+      }
+
+      if (replayData.runs.length > 0) {
+        let minS = replayData.runs[0].started_at;
+        let maxF = replayData.runs[0].finished_at;
+        for (const r of replayData.runs) {
+          if (r.started_at < minS) minS = r.started_at;
+          if (r.finished_at > maxF) maxF = r.finished_at;
+        }
+        windowStart = minS;
+        windowEnd = Math.max(maxF, minS + 1);
+        replayTime = windowStart;
+      } else {
+        windowEnd = replayData.exported_at;
+        windowStart = Math.max(0, replayData.exported_at - replayData.window_days * 86400);
+        if (windowEnd <= windowStart) windowEnd = windowStart + 1;
+        replayTime = windowStart;
+      }
+
+      const slider = document.getElementById("clock");
+      slider.min = String(windowStart);
+      slider.max = String(windowEnd);
+      slider.value = String(replayTime);
+
+      bindEvents();
+      renderAll(true);
+    }
+
+    init();
+  </script>
+</body>
+</html>
