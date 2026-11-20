@@ -1,3 +1,9 @@
+## v0.48.1 (2026-11-20)
+
+### Fix
+
+- **review**: three environment-guard defects left in main (#368)
+
 ## v0.48.0 (2026-11-19)
 
 ### Feat
