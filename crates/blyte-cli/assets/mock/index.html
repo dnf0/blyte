@@ -1759,6 +1759,80 @@
       color: var(--color-muted);
     }
 
+    .guide-target {
+      outline: 2px solid var(--brand-rust);
+      outline-offset: -2px;
+      box-shadow: inset 0 0 0 2px var(--brand-rust-soft);
+    }
+
+    #wip.guide-target,
+    #save.guide-target {
+      outline-offset: 2px;
+      box-shadow: 0 0 0 3px var(--brand-rust-soft);
+    }
+
+    #guide-panel {
+      position: fixed;
+      z-index: 100;
+      width: 340px;
+      max-width: calc(100vw - 24px);
+      background: var(--color-card);
+      color: var(--color-text);
+      border: 1.5px solid var(--brand-rust);
+      border-radius: 8px;
+      padding: 14px 16px;
+      box-shadow: 0 0 0 4px var(--brand-rust-soft);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    #guide-panel[hidden] {
+      display: none;
+    }
+
+    #guide-panel.centered {
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    .guide-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .guide-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .guide-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--color-strong);
+      line-height: 1.3;
+    }
+
+    .guide-text {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--color-text);
+    }
+
+    .guide-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-top: 4px;
+    }
+
     @media (max-width: 900px) {
       .shell {
         height: auto;
@@ -1821,6 +1895,7 @@
             <button type="button" id="clear-btn" class="btn btn-ghost">Clear record</button>
             <span id="log-count" class="log-count nums">0</span>
           </div>
+          <button type="button" id="guide" class="btn" aria-expanded="false">Guide</button>
         </div>
       </div>
 
@@ -1917,12 +1992,98 @@
     </div>
   </div>
 
+  <div id="guide-panel" role="dialog" aria-modal="false" aria-labelledby="guide-title" hidden>
+    <div class="guide-head">
+      <span id="guide-count" class="guide-count nums"></span>
+      <button type="button" id="guide-close" class="btn btn-ghost" aria-label="Close guide">×</button>
+    </div>
+    <h2 id="guide-title" class="guide-title"></h2>
+    <p id="guide-text" class="guide-text"></p>
+    <div class="guide-actions">
+      <button type="button" id="guide-back" class="btn">Back</button>
+      <button type="button" id="guide-next" class="btn btn-primary">Next</button>
+    </div>
+  </div>
+
   <script>
     const WIP_CAP = 3;
     const QUEUE_BOUND = 7;
     const LOG_STORAGE_KEY = "blyte-mock-log";
+    const GUIDE_SEEN_KEY = "blyte-mock-guide-seen";
     const NO_FILES_GROUP = "no files changed";
     const FIXED_REPLY = "(mock) the orchestrator would answer here";
+    const GUIDE_STEPS = [
+      {
+        id: "replay",
+        target: "#bar",
+        tab: null,
+        title: "The replay",
+        text: "This is a week of your real blyte runs, played back. Play, change the speed, or jump to the next event. Nothing here changes a repository."
+      },
+      {
+        id: "conversation",
+        target: "#conversation",
+        tab: null,
+        title: "The conversation",
+        text: "Where you talk with the orchestrator. Results do not interrupt you here: they wait in the queue until you reach a stopping point."
+      },
+      {
+        id: "queue",
+        target: "#queue",
+        tab: null,
+        title: "The review queue",
+        text: "Finished work, grouped by the part of the system it touches. Clean results fold into one line. Only exceptions ask for your attention."
+      },
+      {
+        id: "offer",
+        target: "#offer",
+        tab: null,
+        title: "Now or later",
+        text: "When a result arrives while you are mid-thought, blyte offers it once. Take it now or leave it; it stays in the queue."
+      },
+      {
+        id: "runs",
+        target: "#map",
+        tab: "runs",
+        title: "Runs by area",
+        text: "Each box is an area of the code with work in progress or waiting. Click one to focus the queue on it."
+      },
+      {
+        id: "system",
+        target: "#map-system",
+        tab: "system",
+        title: "The system map",
+        text: "Crates or packages, and the dependencies between them, read from the code. Open one to see its modules. Lit boxes are being changed right now."
+      },
+      {
+        id: "data",
+        target: "#map-data",
+        tab: "data",
+        title: "The data map",
+        text: "The data structures the code defines, with their fields and the modules that name them."
+      },
+      {
+        id: "limits",
+        target: "#wip",
+        tab: null,
+        title: "Load limits",
+        text: "How much is in progress and how much is waiting for you. Past the limit blyte warns you; it never blocks you."
+      },
+      {
+        id: "checkin",
+        target: "#checkin",
+        tab: null,
+        title: "Check-ins",
+        text: "At a natural boundary blyte asks two short questions about how you are doing. Skip them whenever you like."
+      },
+      {
+        id: "record",
+        target: "#save",
+        tab: null,
+        title: "Your record",
+        text: "What you do in this mock is recorded in your browser only. Save it to tell us what worked."
+      }
+    ];
 
     let replayData = null;
     let allGroups = [];
@@ -1979,6 +2140,11 @@
     let lastDataSig = "";
     let lastMetaSig = "";
     let renderedSysEdges = [];
+
+    let guideOpen = false;
+    let guideStepIndex = 0;
+    let guideWasPlaying = false;
+    let guideTargetEl = null;
 
     const sessionOpenedMs = Date.now();
     let logEntries = loadLog();
@@ -3672,6 +3838,173 @@
       if (val) val.textContent = formatDuration(elapsedSec);
     }
 
+    function setMapTab(nextTab, logChange) {
+      if (nextTab === mapTab) return;
+      mapTab = nextTab;
+      hoveredMapUnit = null;
+      if (logChange) {
+        appendLog({ type: "map_tab", tab: mapTab });
+      }
+      if ((mapTab === "system" || mapTab === "data") && selectedRepo) {
+        ensureRepoMapLoaded(selectedRepo);
+      }
+      renderAll(true);
+    }
+
+    function shouldAutoOpenGuide() {
+      try {
+        if (typeof localStorage === "undefined" || localStorage === null) {
+          return false;
+        }
+        if (localStorage.getItem(GUIDE_SEEN_KEY)) {
+          return false;
+        }
+        localStorage.setItem(GUIDE_SEEN_KEY, "1");
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function markGuideSeen() {
+      try {
+        if (typeof localStorage !== "undefined" && localStorage !== null) {
+          localStorage.setItem(GUIDE_SEEN_KEY, "1");
+        }
+      } catch (_) {}
+    }
+
+    function clearGuideTarget() {
+      if (guideTargetEl) {
+        guideTargetEl.classList.remove("guide-target");
+        guideTargetEl = null;
+      }
+    }
+
+    function isGuideTargetVisible(el) {
+      if (!el || el.hidden || el.closest("[hidden]")) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 || rect.height > 0;
+    }
+
+    function positionGuidePanel() {
+      const panel = document.getElementById("guide-panel");
+      if (!guideOpen || !panel) return;
+      if (!guideTargetEl || !isGuideTargetVisible(guideTargetEl)) {
+        clearGuideTarget();
+        panel.classList.add("centered");
+        panel.style.top = "";
+        panel.style.left = "";
+        return;
+      }
+
+      panel.classList.remove("centered");
+      const rect = guideTargetEl.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const pw = panelRect.width || 340;
+      const ph = panelRect.height || 180;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const margin = 12;
+      const gap = 12;
+
+      const clampX = (x) => Math.max(margin, Math.min(vw - pw - margin, x));
+      const clampY = (y) => Math.max(margin, Math.min(vh - ph - margin, y));
+
+      let top;
+      let left;
+      if (rect.bottom + gap + ph + margin <= vh) {
+        top = rect.bottom + gap;
+        left = clampX(rect.left + (rect.width - pw) / 2);
+      } else if (rect.top - gap - ph >= margin) {
+        top = rect.top - gap - ph;
+        left = clampX(rect.left + (rect.width - pw) / 2);
+      } else if (rect.right + gap + pw + margin <= vw) {
+        left = rect.right + gap;
+        top = clampY(rect.top + 16);
+      } else if (rect.left - gap - pw >= margin) {
+        left = rect.left - gap - pw;
+        top = clampY(rect.top + 16);
+      } else {
+        left = clampX((vw - pw) / 2);
+        top = clampY(rect.top + 24);
+      }
+
+      panel.style.top = Math.round(top) + "px";
+      panel.style.left = Math.round(left) + "px";
+    }
+
+    function showGuideStep(index) {
+      if (index < 0 || index >= GUIDE_STEPS.length) return;
+      guideStepIndex = index;
+      const step = GUIDE_STEPS[guideStepIndex];
+
+      clearGuideTarget();
+      if (step.tab) {
+        setMapTab(step.tab, false);
+      }
+
+      const panel = document.getElementById("guide-panel");
+      document.getElementById("guide-count").textContent = (guideStepIndex + 1) + " of " + GUIDE_STEPS.length;
+      document.getElementById("guide-title").textContent = step.title;
+      document.getElementById("guide-text").textContent = step.text;
+
+      const backBtn = document.getElementById("guide-back");
+      backBtn.disabled = guideStepIndex === 0;
+
+      const nextBtn = document.getElementById("guide-next");
+      nextBtn.textContent = guideStepIndex === GUIDE_STEPS.length - 1 ? "Done" : "Next";
+
+      panel.hidden = false;
+
+      const targetEl = document.querySelector(step.target);
+      if (isGuideTargetVisible(targetEl)) {
+        if (typeof targetEl.scrollIntoView === "function") {
+          targetEl.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
+        targetEl.classList.add("guide-target");
+        guideTargetEl = targetEl;
+      }
+
+      positionGuidePanel();
+      appendLog({ type: "guide_step", step: step.id });
+    }
+
+    function openGuide() {
+      if (guideOpen) return;
+      guideWasPlaying = playing;
+      if (playing) {
+        stopPlayback();
+      }
+      guideOpen = true;
+      guideStepIndex = 0;
+      markGuideSeen();
+      const guideBtn = document.getElementById("guide");
+      if (guideBtn) guideBtn.setAttribute("aria-expanded", "true");
+      appendLog({ type: "guide_open" });
+      showGuideStep(0);
+      const nextBtn = document.getElementById("guide-next");
+      if (nextBtn) nextBtn.focus();
+    }
+
+    function closeGuide() {
+      if (!guideOpen) return;
+      const step = GUIDE_STEPS[guideStepIndex];
+      clearGuideTarget();
+      const panel = document.getElementById("guide-panel");
+      if (panel) panel.hidden = true;
+      const guideBtn = document.getElementById("guide");
+      if (guideBtn) guideBtn.setAttribute("aria-expanded", "false");
+      guideOpen = false;
+      markGuideSeen();
+      appendLog({ type: "guide_close", step: step ? step.id : null });
+      const shouldResume = guideWasPlaying;
+      guideWasPlaying = false;
+      if (shouldResume && !playing) {
+        startPlayback();
+      }
+    }
+
     function bindEvents() {
       document.getElementById("play").addEventListener("click", () => {
         if (playing) stopPlayback();
@@ -3869,15 +4202,7 @@
       document.getElementById("map-tabs").addEventListener("click", (e) => {
         const btn = e.target.closest("[data-map-tab]");
         if (!btn) return;
-        const nextTab = btn.dataset.mapTab;
-        if (nextTab === mapTab) return;
-        mapTab = nextTab;
-        hoveredMapUnit = null;
-        appendLog({ type: "map_tab", tab: mapTab });
-        if ((mapTab === "system" || mapTab === "data") && selectedRepo) {
-          ensureRepoMapLoaded(selectedRepo);
-        }
-        renderAll(true);
+        setMapTab(btn.dataset.mapTab, true);
       });
 
       document.getElementById("map-repo").addEventListener("change", (e) => {
@@ -4003,10 +4328,58 @@
       });
 
       window.addEventListener("resize", () => {
+        if (guideOpen) {
+          positionGuidePanel();
+        }
         if (mapTab !== "system" || !selectedRepo) return;
         const entry = mapCache.get(selectedRepo);
         if (entry && entry.status === "ok") {
           drawSystemEdges(entry.data);
+        }
+      });
+
+      document.getElementById("guide").addEventListener("click", () => {
+        if (guideOpen) closeGuide();
+        else openGuide();
+      });
+
+      document.getElementById("guide-close").addEventListener("click", () => {
+        closeGuide();
+      });
+
+      document.getElementById("guide-back").addEventListener("click", () => {
+        if (guideStepIndex > 0) {
+          showGuideStep(guideStepIndex - 1);
+        }
+      });
+
+      document.getElementById("guide-next").addEventListener("click", () => {
+        if (guideStepIndex >= GUIDE_STEPS.length - 1) {
+          closeGuide();
+        } else {
+          showGuideStep(guideStepIndex + 1);
+        }
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (!guideOpen) return;
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeGuide();
+          return;
+        }
+        const tag = e.target && e.target.tagName ? e.target.tagName.toLowerCase() : "";
+        if (tag === "input" || tag === "textarea" || tag === "select") return;
+        if (e.key === "ArrowRight") {
+          e.preventDefault();
+          if (guideStepIndex < GUIDE_STEPS.length - 1) {
+            showGuideStep(guideStepIndex + 1);
+          }
+        } else if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          if (guideStepIndex > 0) {
+            showGuideStep(guideStepIndex - 1);
+          }
         }
       });
 
@@ -4194,6 +4567,9 @@
 
       bindEvents();
       renderAll(true);
+      if (shouldAutoOpenGuide()) {
+        openGuide();
+      }
     }
 
     init();
