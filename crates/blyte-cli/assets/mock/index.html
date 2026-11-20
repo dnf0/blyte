@@ -73,6 +73,8 @@
       --amber-soft: #EFE3BF;
       --merged: #3E6D64;
       --merged-soft: #C3D6D1;
+      --research: #3B6EA5;
+      --research-soft: #D6E4F0;
       --lane: #E6EAEC;
       --ink: #141A1E;
       --sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -120,6 +122,8 @@
         --amber-soft: #3A3218;
         --merged: #7FB2A6;
         --merged-soft: #1F3431;
+        --research: #6FA3D8;
+        --research-soft: #1E2E3E;
         --lane: #131A1D;
         --ink: #E2E7E9;
       }
@@ -865,14 +869,14 @@
       flex-shrink: 0;
     }
 
-    .exception-wrap {
+    .exception-wrap,
+    .research-wrap {
       display: flex;
       flex-direction: column;
       gap: 0;
     }
 
     .exception-card {
-      height: 184px;
       padding: 10px 12px;
       border-radius: 6px;
       border: 1px solid var(--color-line-dark);
@@ -880,7 +884,7 @@
       background: var(--color-page);
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
+      gap: 6px;
       overflow: hidden;
     }
 
@@ -890,6 +894,51 @@
 
     .exception-card.is-held {
       border-left-color: var(--brand-rust);
+    }
+
+    .research-card {
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line-dark);
+      border-left: 3px solid var(--research);
+      background: var(--color-page);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .research-card.is-held {
+      border-left-color: var(--brand-rust);
+    }
+
+    .research-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--research-soft);
+      border: 1px solid var(--research);
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .research-summary {
+      margin: 2px 0;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .research-hint {
+      margin: 2px 0;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--color-muted);
     }
 
     .hold-note-first {
@@ -943,14 +992,12 @@
     }
 
     .exc-flags {
-      flex: 1;
       min-height: 0;
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      justify-content: center;
       gap: 2px;
-      margin: 4px 0;
+      margin: 2px 0;
       font-family: var(--font-mono);
       font-size: 11px;
       line-height: 1.35;
@@ -1085,6 +1132,11 @@
       font-family: var(--font-sans);
       font-size: 12px;
       color: var(--color-text);
+    }
+
+    .report-pre {
+      max-height: 420px;
+      white-space: pre-wrap;
     }
 
     .details-list {
@@ -2011,6 +2063,7 @@
     const LOG_STORAGE_KEY = "blyte-mock-log";
     const GUIDE_SEEN_KEY = "blyte-mock-guide-seen";
     const NO_FILES_GROUP = "no files changed";
+    const RESEARCH_GROUP = "research reports";
     const FIXED_REPLY = "(mock) the orchestrator would answer here";
     const GUIDE_STEPS = [
       {
@@ -2223,7 +2276,7 @@
       const requiredStrings = ["key", "id", "repo", "title", "task", "outcome"];
       const requiredBooleans = ["research", "checks_recorded"];
       const requiredNumbers = ["started_at", "finished_at", "turns"];
-      const nullableStrings = ["plan_file", "plan_task", "final_message", "group", "verdict", "verdict_notes"];
+      const nullableStrings = ["plan_file", "plan_task", "final_message", "group", "verdict", "verdict_notes", "report"];
       const nullableNumbers = ["cost_usd", "verdict_ts"];
 
       for (let i = 0; i < data.runs.length; i++) {
@@ -2256,8 +2309,8 @@
             return "Invalid /api/replay contract: runs[" + i + "]." + f + " must be a number or null.";
           }
         }
-        if (r.card !== "clean" && r.card !== "exception") {
-          return "Invalid /api/replay contract: runs[" + i + "].card must be \"clean\" or \"exception\".";
+        if (r.card !== "clean" && r.card !== "exception" && r.card !== "research") {
+          return "Invalid /api/replay contract: runs[" + i + "].card must be \"clean\", \"exception\", or \"research\".";
         }
         if (!Array.isArray(r.flags) || !r.flags.every(x => typeof x === "string")) {
           return "Invalid /api/replay contract: runs[" + i + "].flags must be an array of strings.";
@@ -2287,6 +2340,9 @@
     }
 
     function runGroupName(run) {
+      if (run.card === "research") {
+        return RESEARCH_GROUP;
+      }
       return run.group === null ? NO_FILES_GROUP : run.group;
     }
 
@@ -2507,6 +2563,24 @@
 
     function renderDetailsHtml(run) {
       if (!openDetails.has(run.key)) return "";
+      if (run.card === "research") {
+        const reportHtml = run.report !== null && run.report.length > 0
+          ? '<pre class="details-pre report-pre">' + escapeHtml(run.report) + '</pre>'
+          : '<div class="mono" style="color: var(--color-muted);">No report file recorded for this run.</div>';
+        const finalMsgHtml = run.final_message !== null && run.final_message.length > 0
+          ? '<div><div class="details-label">final_message</div><pre class="details-pre">' + escapeHtml(run.final_message) + '</pre></div>'
+          : "";
+        const flagsHtml = run.flags.length > 0
+          ? '<div><div class="details-label">flags (' + run.flags.length + ')</div><ul class="details-list">' +
+            run.flags.map(fl => '<li>' + escapeHtml(fl) + '</li>').join("") + '</ul></div>'
+          : "";
+        return '<div class="details-box">' +
+          '<div><div class="details-label">report</div>' + reportHtml + '</div>' +
+          finalMsgHtml +
+          flagsHtml +
+          '<div><div class="details-label">task</div><pre class="details-pre">' + escapeHtml(run.task) + '</pre></div>' +
+          '</div>';
+      }
       const finalMsg = run.final_message !== null ? run.final_message : "(not recorded)";
       const filesHtml = run.changed_files.length > 0
         ? '<ul class="details-list">' + run.changed_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") + '</ul>'
@@ -2525,6 +2599,27 @@
         '<div><div class="details-label">changed_files</div>' + filesHtml + '</div>' +
         '<div><div class="details-label">commits</div>' + commitsHtml + '</div>' +
         '</div>';
+    }
+
+    function renderResearchPreviewHtml(run) {
+      const trimmedMsg = run.final_message !== null ? run.final_message.trim() : "";
+      if (trimmedMsg.length > 0) {
+        const firstLine = trimmedMsg.split(/\r?\n/)[0].trim();
+        return '<div class="research-summary" title="' + escapeHtml(firstLine) + '">' + escapeHtml(firstLine) + '</div>';
+      }
+      if (run.flags.length > 0) {
+        const shown = run.flags.slice(0, 3).map(fl =>
+          '<div class="exc-flag-item" title="' + escapeHtml(fl) + '">• ' + escapeHtml(fl) + '</div>'
+        ).join("");
+        const more = run.flags.length > 3
+          ? '<div class="exc-flag-more">+' + (run.flags.length - 3) + ' more</div>'
+          : "";
+        return '<div class="exc-flags">' + shown + more + '</div>';
+      }
+      const hint = run.report !== null && run.report.length > 0
+        ? "Report ready to read"
+        : "No report file recorded";
+      return '<div class="research-hint">' + hint + '</div>';
     }
 
     function renderExceptionFlagsHtml(run) {
@@ -2600,8 +2695,9 @@
         const bucket = byGroup.get(groupName);
         const undecided = bucket.undecided;
         const decided = bucket.decided;
-        const cleanRuns = undecided.filter(r => r.card === "clean");
+        const researchRuns = undecided.filter(r => r.card === "research");
         const exceptionRuns = undecided.filter(r => r.card === "exception");
+        const cleanRuns = undecided.filter(r => r.card === "clean");
         const isFocused = focusedGroup === groupName;
 
         let headActions = '<span class="group-count">' +
@@ -2610,6 +2706,59 @@
         if (cleanRuns.length >= 2) {
           headActions = '<button type="button" class="btn btn-pass" data-accept-all-clean="' + escapeHtml(groupName) + '">Accept all clean (' + cleanRuns.length + ')</button>' + headActions;
         }
+
+        const researchHtml = researchRuns.map(r => {
+          const dec = decisions.get(r.key);
+          const held = isHeld(r.key);
+          const isOpen = openDetails.has(r.key);
+          const pending = pendingNoteAction.get(r.key) || null;
+          const draft = noteDrafts.get(r.key) || "";
+          const err = noteErrors.get(r.key) || "";
+          const outcomeClass = r.outcome === "verified" ? "verified" : "failed";
+          const cardClass = "research-card" + (held ? " is-held" : "");
+          const verdictHtml = held && r.verdict !== null
+            ? '<span class="recorded-verdict">recorded then: ' + escapeHtml(r.verdict) + '</span>'
+            : "";
+
+          let promptHtml = "";
+          if (pending === "hold") {
+            promptHtml = '<form class="note-prompt" data-note-form="' + escapeHtml(r.key) + '" data-note-action="hold">' +
+              '<input type="text" data-note-input="' + escapeHtml(r.key) + '" data-preserve-id="note:' + escapeHtml(r.key) + '" value="' + escapeHtml(draft) + '" placeholder="One-line note required for Hold..." autocomplete="off">' +
+              '<button type="submit" class="btn btn-primary">Hold</button>' +
+              '<button type="button" class="btn btn-ghost" data-cancel-note="' + escapeHtml(r.key) + '">Cancel</button>' +
+              (err ? '<div class="note-error">' + escapeHtml(err) + '</div>' : "") +
+              '</form>';
+          }
+
+          return '<div class="research-wrap">' +
+            '<div class="' + cardClass + '">' +
+              (held ? '<div class="hold-note-first" title="' + escapeHtml(dec.note) + '">Held: ' + escapeHtml(dec.note) + '</div>' : "") +
+              '<div class="exc-top">' +
+                '<div class="exc-title-group">' +
+                  '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+                  '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+                '</div>' +
+                '<div class="row-actions">' +
+                  '<span class="research-pill">research</span>' +
+                  '<span class="outcome-pill ' + outcomeClass + '">' + escapeHtml(r.outcome) + '</span>' +
+                '</div>' +
+              '</div>' +
+              renderResearchPreviewHtml(r) +
+              '<div class="exc-footer">' +
+                '<div class="row-actions">' +
+                  '<button type="button" class="btn btn-pass" data-action="read" data-run-key="' + escapeHtml(r.key) + '">Mark read</button>' +
+                  '<button type="button" class="btn" data-action="hold" data-run-key="' + escapeHtml(r.key) + '">Hold</button>' +
+                '</div>' +
+                '<div class="row-actions">' +
+                  verdictHtml +
+                  '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide report" : "Read report") + '</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            promptHtml +
+            renderDetailsHtml(r) +
+          '</div>';
+        }).join("");
 
         const cleanHtml = cleanRuns.map(r => {
           const isOpen = openDetails.has(r.key);
@@ -2685,6 +2834,7 @@
           const dec = decisions.get(r.key);
           const isOpen = openDetails.has(r.key);
           const actionLabel = dec.action === "accept" ? "Accepted"
+            : dec.action === "read" ? "Read"
             : dec.action === "send_back" ? "Sent back"
             : dec.action === "redo" ? "Redo"
             : dec.action;
@@ -2692,6 +2842,9 @@
           const recordedHtml = r.verdict !== null
             ? '<span class="recorded-verdict">recorded then: ' + escapeHtml(r.verdict) + '</span>'
             : "";
+          const toggleLabel = r.card === "research"
+            ? (isOpen ? "Hide report" : "Read report")
+            : (isOpen ? "Hide details" : "Details");
 
           return '<div>' +
             '<div class="decided-row">' +
@@ -2701,7 +2854,7 @@
                 '<span class="decision-badge">' + escapeHtml(actionLabel) + noteSnippet + '</span>' +
                 recordedHtml +
               '</div>' +
-              '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
+              '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + toggleLabel + '</button>' +
             '</div>' +
             renderDetailsHtml(r) +
           '</div>';
@@ -2731,6 +2884,7 @@
             '<div class="group-meta">' + headActions + '</div>' +
           '</div>' +
           '<div class="group-body">' +
+            researchHtml +
             excHtml +
             cleanHtml +
             decidedHtml +
@@ -4417,7 +4571,7 @@
         if (actionBtn) {
           const key = actionBtn.dataset.runKey;
           const action = actionBtn.dataset.action;
-          if (action === "accept" || action === "redo") {
+          if (action === "accept" || action === "redo" || action === "read") {
             applyDecision(key, action, "");
           } else if (action === "send_back" || action === "hold") {
             pendingNoteAction.set(key, action);
@@ -4509,15 +4663,21 @@
       replayData = data;
 
       const namedGroups = new Set();
+      let hasResearch = false;
       let hasNoFiles = false;
       for (const r of replayData.runs) {
-        if (r.group === null) {
+        if (r.card === "research") {
+          hasResearch = true;
+        } else if (r.group === null) {
           hasNoFiles = true;
         } else {
           namedGroups.add(r.group);
         }
       }
       allGroups = Array.from(namedGroups).sort();
+      if (hasResearch) {
+        allGroups.push(RESEARCH_GROUP);
+      }
       if (hasNoFiles) {
         allGroups.push(NO_FILES_GROUP);
       }

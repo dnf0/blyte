@@ -241,3 +241,56 @@ fn mock_page_guide_records_and_remembers() {
         assert!(PAGE.contains(token), "missing guide token {token}");
     }
 }
+
+fn extract_css_rule_block<'a>(page: &'a str, selector: &str) -> &'a str {
+    let header = format!("{selector} {{");
+    let start = page
+        .find(&header)
+        .unwrap_or_else(|| panic!("missing CSS rule {selector}"));
+    let body_start = start + header.len();
+    let end = page[body_start..]
+        .find('}')
+        .unwrap_or_else(|| panic!("unterminated CSS rule {selector}"));
+    &page[body_start..body_start + end]
+}
+
+fn assert_no_fixed_px_height(selector: &str, block: &str) {
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix("height:") {
+            assert!(
+                !val.contains("px"),
+                "unexpected fixed pixel height declaration in {selector}: {trimmed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mock_page_handles_research_card_kind_and_report_field() {
+    for token in [
+        "report",
+        "research",
+        "research reports",
+        "research-card",
+        "Mark read",
+        "Read report",
+        "Hide report",
+        "data-action=\"read\"",
+    ] {
+        assert!(PAGE.contains(token), "missing research token {token}");
+    }
+}
+
+#[test]
+fn mock_page_exception_cards_do_not_have_hardcoded_fixed_height() {
+    let exc_block = extract_css_rule_block(PAGE, ".exception-card");
+    assert!(
+        !exc_block.contains("height: 184px"),
+        ".exception-card must not hardcode height: 184px"
+    );
+    assert_no_fixed_px_height(".exception-card", exc_block);
+
+    let research_block = extract_css_rule_block(PAGE, ".research-card");
+    assert_no_fixed_px_height(".research-card", research_block);
+}
