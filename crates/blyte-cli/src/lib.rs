@@ -19,6 +19,7 @@ pub mod plans;
 pub mod provenance;
 pub mod registry;
 pub mod repl;
+pub mod replay;
 pub mod report;
 pub mod research_breadth;
 pub mod research_brief;
