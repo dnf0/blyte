@@ -90,3 +90,66 @@ fn mock_page_contains_no_placeholder_text() {
     assert!(!lower.contains("sample"));
     assert!(!lower.contains("lorem"));
 }
+
+#[test]
+fn mock_page_has_map_ids() {
+    for id in [
+        "id=\"map-tabs\"",
+        "id=\"map-repo\"",
+        "id=\"map-wide\"",
+        "id=\"map-system\"",
+        "id=\"map-data\"",
+        "id=\"map-data-all\"",
+        "id=\"map-detail\"",
+        "id=\"map-notes\"",
+        "id=\"map-outside\"",
+    ] {
+        assert_eq!(
+            PAGE.matches(id).count(),
+            1,
+            "expected {id} to appear exactly once"
+        );
+    }
+}
+
+#[test]
+fn mock_page_reads_map_contract_fields() {
+    for token in [
+        "/api/map?repo=",
+        "encodeURIComponent",
+        "referenced_by",
+        "serialisable",
+        "unparsed",
+        "unresolved",
+        "level",
+    ] {
+        assert!(PAGE.contains(token), "missing map contract field {token}");
+    }
+}
+
+#[test]
+fn mock_page_has_map_copy() {
+    for text in [
+        "reading the code",
+        "files outside the code",
+        "files not parsed",
+        "references not resolved",
+        "Shows references written in the code. Uses through an inferred type are not shown.",
+    ] {
+        assert!(PAGE.contains(text), "missing map copy {text}");
+    }
+}
+
+#[test]
+fn mock_page_records_map_actions() {
+    for action in [
+        "map_tab",
+        "map_repo",
+        "map_group",
+        "map_unit",
+        "map_structure",
+        "map_wide",
+    ] {
+        assert!(PAGE.contains(action), "missing map action {action}");
+    }
+}
