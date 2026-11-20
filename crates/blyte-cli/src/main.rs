@@ -38,6 +38,9 @@ fn main() {
             blyte_cli::cli::Command::Dashboard(args) => {
                 std::process::exit(blyte_cli::dashboard::run(&args));
             }
+            blyte_cli::cli::Command::Mock(args) => {
+                std::process::exit(blyte_cli::mock::run(&args));
+            }
             blyte_cli::cli::Command::Dispatch(args) => {
                 blyte_cli::update_notice::print_notice();
                 std::process::exit(blyte_cli::dispatch::run_dispatch(&args));

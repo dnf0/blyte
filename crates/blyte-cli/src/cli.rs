@@ -9,6 +9,8 @@ pub enum Command {
     Init(InitArgs),
     /// Serve a local dashboard of running and recent jobs
     Dashboard(DashboardArgs),
+    /// Serve a local replay of recent runs
+    Mock(MockArgs),
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
     Dispatch(DispatchArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
@@ -102,6 +104,26 @@ pub struct DashboardArgs {
     /// Open the dashboard in the default browser
     #[arg(long)]
     pub open: bool,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct MockArgs {
+    /// Port to listen on (0 for a free port)
+    #[arg(long, default_value = "7272", value_name = "N")]
+    pub port: u16,
+
+    /// How many days back to include finished runs (1 to 31)
+    #[arg(
+        long,
+        default_value = "7",
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..=31)
+    )]
+    pub days: u64,
+
+    /// Directory holding repositories or worktrees (repeatable)
+    #[arg(long = "root", value_name = "DIR")]
+    pub roots: Vec<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]

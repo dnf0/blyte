@@ -1314,28 +1314,40 @@ pub fn collect(src: &Sources, now: u64) -> serde_json::Value {
     serde_json::to_value(&response).unwrap()
 }
 
+pub(crate) fn shared_asset(clean_path: &str) -> Option<(u16, &'static str, Vec<u8>)> {
+    match clean_path {
+        "/favicon.svg" => {
+            let svg = include_bytes!("../assets/dashboard/favicon.svg");
+            Some((200, "image/svg+xml", svg.to_vec()))
+        }
+        "/fonts/archivo.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/archivo.woff2");
+            Some((200, "font/woff2", font.to_vec()))
+        }
+        "/fonts/plex-mono-400.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-400.woff2");
+            Some((200, "font/woff2", font.to_vec()))
+        }
+        "/fonts/plex-mono-500.woff2" => {
+            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-500.woff2");
+            Some((200, "font/woff2", font.to_vec()))
+        }
+        _ => None,
+    }
+}
+
 pub fn route(path: &str, src: &Sources) -> (u16, &'static str, Vec<u8>) {
-    let clean_path = path.split('?').next().unwrap_or(path);
+    let clean_path = match path.split_once('?') {
+        Some((p, _)) => p,
+        None => path,
+    };
+    if let Some(asset) = shared_asset(clean_path) {
+        return asset;
+    }
     match clean_path {
         "/" | "/index.html" => {
             let html = include_str!("../assets/dashboard/index.html");
             (200, "text/html; charset=utf-8", html.as_bytes().to_vec())
-        }
-        "/favicon.svg" => {
-            let svg = include_bytes!("../assets/dashboard/favicon.svg");
-            (200, "image/svg+xml", svg.to_vec())
-        }
-        "/fonts/archivo.woff2" => {
-            let font = include_bytes!("../assets/dashboard/fonts/archivo.woff2");
-            (200, "font/woff2", font.to_vec())
-        }
-        "/fonts/plex-mono-400.woff2" => {
-            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-400.woff2");
-            (200, "font/woff2", font.to_vec())
-        }
-        "/fonts/plex-mono-500.woff2" => {
-            let font = include_bytes!("../assets/dashboard/fonts/plex-mono-500.woff2");
-            (200, "font/woff2", font.to_vec())
         }
         "/api/jobs" => {
             let now = std::time::SystemTime::now()
@@ -1363,7 +1375,26 @@ pub fn route(path: &str, src: &Sources) -> (u16, &'static str, Vec<u8>) {
     }
 }
 
-fn handle_connection(mut stream: std::net::TcpStream, src: &Sources) {
+pub(crate) fn serve_http<F>(
+    listener: std::net::TcpListener,
+    no_store_paths: &'static [&'static str],
+    handler: F,
+) where
+    F: Fn(&str) -> (u16, &'static str, Vec<u8>) + Send + Sync + 'static,
+{
+    let handler = std::sync::Arc::new(handler);
+    for stream in listener.incoming().flatten() {
+        let handler = std::sync::Arc::clone(&handler);
+        std::thread::spawn(move || {
+            handle_http_connection(stream, no_store_paths, handler.as_ref());
+        });
+    }
+}
+
+fn handle_http_connection<F>(mut stream: std::net::TcpStream, no_store_paths: &[&str], handler: &F)
+where
+    F: Fn(&str) -> (u16, &'static str, Vec<u8>),
+{
     let mut reader = std::io::BufReader::new(&mut stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -1385,14 +1416,18 @@ fn handle_connection(mut stream: std::net::TcpStream, src: &Sources) {
     }
 
     let path = parts[1];
-    let (code, ctype, body) = route(path, src);
-    let clean_path = path.split('?').next().unwrap_or(path);
+    let (code, ctype, body) = handler(path);
+    let clean_path = match path.split_once('?') {
+        Some((p, _)) => p,
+        None => path,
+    };
     let reason = match code {
         200 => "OK",
         404 => "Not Found",
+        500 => "Internal Server Error",
         _ => "OK",
     };
-    let extra = if clean_path == "/api/jobs" || clean_path == "/api/plans" {
+    let extra = if no_store_paths.contains(&clean_path) {
         "Cache-Control: no-store\r\n"
     } else {
         ""
@@ -1451,27 +1486,15 @@ pub fn run(args: &crate::cli::DashboardArgs) -> i32 {
     }
 
     let live = args.roots.is_empty() && args.runs_dirs.is_empty();
-    let fixed_src = std::sync::Arc::new(sources);
-    let args = std::sync::Arc::new(args.clone());
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let fixed = std::sync::Arc::clone(&fixed_src);
-                let args = std::sync::Arc::clone(&args);
-                std::thread::spawn(move || {
-                    if live {
-                        let src = Sources::from_args(&args);
-                        handle_connection(stream, &src);
-                    } else {
-                        handle_connection(stream, &fixed);
-                    }
-                });
-            }
-            Err(_) => {
-                // Ignore transient errors
-            }
+    let args = args.clone();
+    serve_http(listener, &["/api/jobs", "/api/plans"], move |path| {
+        if live {
+            let src = Sources::from_args(&args);
+            route(path, &src)
+        } else {
+            route(path, &sources)
         }
-    }
+    });
 
     0
 }
