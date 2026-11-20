@@ -1,3 +1,9 @@
+## v0.49.0 (2026-11-20)
+
+### Feat
+
+- **mock**: blyte mock replays real runs through the V1 surface (#371)
+
 ## v0.48.1 (2026-11-20)
 
 ### Fix
