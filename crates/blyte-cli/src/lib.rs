@@ -11,6 +11,8 @@ pub mod fallback_check;
 pub mod gate_drift;
 pub mod init;
 pub mod keep_awake;
+pub mod map;
+pub mod map_rust;
 pub mod mock;
 pub mod model_review;
 pub mod outside_env;
