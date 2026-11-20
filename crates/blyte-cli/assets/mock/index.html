@@ -1486,7 +1486,7 @@
       font-size: 12px;
       font-weight: 500;
       color: var(--color-strong);
-      word-break: break-word;
+      overflow-wrap: break-word;
     }
 
     .sys-group-kind {
@@ -3485,7 +3485,7 @@
         return '<div class="' + classes.join(" ") + '"' + nodeAttr + '>' +
           '<button type="button" class="sys-group-head" data-sys-group="' + escapeHtml(g.id) + '" aria-expanded="' + (isOpen ? "true" : "false") + '">' +
             '<span class="sys-group-top">' +
-              '<span class="sys-group-id">' + escapeHtml(g.id) + '</span>' +
+              '<span class="sys-group-id">' + escapeHtml(g.id).replace(/\./g, ".<wbr>") + '</span>' +
               '<span class="sys-group-kind">' + escapeHtml(g.kind) + '</span>' +
             '</span>' +
             '<span class="sys-group-meta nums">' + statsParts.join("") + '</span>' +
