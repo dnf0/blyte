@@ -1,12 +1,76 @@
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::cli::{DashboardArgs, MockArgs};
 use crate::dashboard::Sources;
 
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn query_param(query: &str, name: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+fn json_error(message: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({ "error": message })).unwrap_or_default()
+}
+
+fn pick_root<'a>(roots: &'a [PathBuf], name: &str) -> Option<&'a Path> {
+    let mut candidates: Vec<&'a Path> = roots
+        .iter()
+        .map(PathBuf::as_path)
+        .filter(|root| crate::dashboard::repo_name(root) == name)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let git_dirs: Vec<&'a Path> = candidates
+        .iter()
+        .copied()
+        .filter(|root| root.join(".git").is_dir())
+        .collect();
+    if git_dirs.len() == 1 {
+        return Some(git_dirs[0]);
+    }
+    candidates.sort();
+    Some(candidates[0])
+}
+
 pub fn route(path: &str, src: &Sources, now: u64, days: u64) -> (u16, &'static str, Vec<u8>) {
-    let clean_path = match path.split_once('?') {
-        Some((p, _)) => p,
-        None => path,
+    let (clean_path, query) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path, None),
     };
     if let Some(asset) = crate::dashboard::shared_asset(clean_path) {
         return asset;
@@ -25,6 +89,38 @@ pub fn route(path: &str, src: &Sources, now: u64, days: u64) -> (u16, &'static s
                     "text/plain; charset=utf-8",
                     format!("failed to serialise replay data: {e}\n").into_bytes(),
                 ),
+            }
+        }
+        "/api/map" => {
+            let name = query
+                .and_then(|q| query_param(q, "repo"))
+                .unwrap_or_default();
+            if name.is_empty() {
+                return (
+                    400,
+                    "application/json",
+                    json_error("missing query parameter: repo"),
+                );
+            }
+            let Some(root) = pick_root(&src.roots, &name) else {
+                return (
+                    404,
+                    "application/json",
+                    json_error(&format!(
+                        "no repository named {name} under the mock's roots"
+                    )),
+                );
+            };
+            match crate::map::build(root, &name) {
+                Ok(data) => match serde_json::to_vec(&data) {
+                    Ok(body) => (200, "application/json", body),
+                    Err(e) => (
+                        500,
+                        "text/plain; charset=utf-8",
+                        format!("failed to serialise map data: {e}\n").into_bytes(),
+                    ),
+                },
+                Err(e) => (422, "application/json", json_error(&e)),
             }
         }
         _ => (404, "text/plain; charset=utf-8", b"Not Found\n".to_vec()),
@@ -82,7 +178,7 @@ pub fn run(args: &MockArgs) -> i32 {
 
     let live = args.roots.is_empty();
     let days = args.days;
-    crate::dashboard::serve_http(listener, &["/api/replay"], move |path| {
+    crate::dashboard::serve_http(listener, &["/api/replay", "/api/map"], move |path| {
         let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             Ok(d) => d.as_secs(),
             Err(e) => {

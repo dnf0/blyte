@@ -202,3 +202,209 @@ fn cli_serves_replay_with_no_store_and_get_only() {
         "{post_resp}"
     );
 }
+
+fn git_init(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+fn write_rust_crate(dir: &Path, crate_name: &str) {
+    write_file(
+        &dir.join("Cargo.toml"),
+        &format!("[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\n"),
+    );
+    write_file(&dir.join("src/lib.rs"), "pub fn hello() {}\n");
+}
+
+#[test]
+fn route_api_map_returns_the_map() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo");
+    git_init(&repo);
+    write_rust_crate(&repo, "demo");
+
+    let src = Sources {
+        roots: vec![repo],
+        runs_dirs: vec![],
+        hours: 0,
+    };
+
+    let (code, ctype, body) = route("/api/map?repo=demo", &src, now(), 7);
+    assert_eq!(code, 200);
+    assert_eq!(ctype, "application/json");
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["repo"], "demo");
+    assert_eq!(parsed["units"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn route_api_map_without_repo_is_400() {
+    let src = empty_sources();
+    for path in ["/api/map", "/api/map?repo="] {
+        let (code, ctype, body) = route(path, &src, now(), 7);
+        assert_eq!(code, 400, "{path}");
+        assert_eq!(ctype, "application/json", "{path}");
+        assert_eq!(
+            body, br#"{"error":"missing query parameter: repo"}"#,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn route_api_map_unknown_repo_is_404() {
+    let src = empty_sources();
+    let (code, ctype, body) = route("/api/map?repo=ghost", &src, now(), 7);
+    assert_eq!(code, 404);
+    assert_eq!(ctype, "application/json");
+    assert_eq!(
+        body,
+        br#"{"error":"no repository named ghost under the mock's roots"}"#
+    );
+}
+
+#[test]
+fn route_api_map_unsupported_repo_is_422() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("docs-only");
+    git_init(&repo);
+    write_file(&repo.join("README.md"), "# docs\n");
+
+    let src = Sources {
+        roots: vec![repo],
+        runs_dirs: vec![],
+        hours: 0,
+    };
+
+    let (code, ctype, body) = route("/api/map?repo=docs-only", &src, now(), 7);
+    assert_eq!(code, 422);
+    assert_eq!(ctype, "application/json");
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err = parsed["error"].as_str().unwrap();
+    assert!(
+        err.starts_with("no supported language in"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn route_api_map_decodes_the_name() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("my repo");
+    git_init(&repo);
+    write_rust_crate(&repo, "my_repo");
+
+    let src = Sources {
+        roots: vec![repo],
+        runs_dirs: vec![],
+        hours: 0,
+    };
+
+    let (code, ctype, body) = route("/api/map?repo=my%20repo", &src, now(), 7);
+    assert_eq!(code, 200);
+    assert_eq!(ctype, "application/json");
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["repo"], "my repo");
+}
+
+#[test]
+fn route_api_map_prefers_git_dir_then_path_order() {
+    let d = tempfile::tempdir().unwrap();
+    let repo_a = d.path().join("a/demo");
+    let repo_b = d.path().join("b/demo");
+    write_rust_crate(&repo_a, "from_a");
+    git_init(&repo_b);
+    write_rust_crate(&repo_b, "from_b");
+
+    let src = Sources {
+        roots: vec![repo_a.clone(), repo_b.clone()],
+        runs_dirs: vec![],
+        hours: 0,
+    };
+    let (code, _, body) = route("/api/map?repo=demo", &src, now(), 7);
+    assert_eq!(code, 200);
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["units"][0]["id"], "from_b");
+
+    git_init(&repo_a);
+    let src_both = Sources {
+        roots: vec![repo_b, repo_a],
+        runs_dirs: vec![],
+        hours: 0,
+    };
+    let (code, _, body) = route("/api/map?repo=demo", &src_both, now(), 7);
+    assert_eq!(code, 200);
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["units"][0]["id"], "from_a");
+
+    let plain_x = d.path().join("x/plain");
+    let plain_y = d.path().join("y/plain");
+    write_rust_crate(&plain_x, "from_x");
+    write_rust_crate(&plain_y, "from_y");
+    let src_none = Sources {
+        roots: vec![plain_y, plain_x],
+        runs_dirs: vec![],
+        hours: 0,
+    };
+    let (code, _, body) = route("/api/map?repo=plain", &src_none, now(), 7);
+    assert_eq!(code, 200);
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["units"][0]["id"], "from_x");
+}
+
+#[test]
+fn cli_serves_map_with_no_store() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo");
+    git_init(&repo);
+    write_rust_crate(&repo, "demo");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["mock", "--port", "0", "--root", repo.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let addr = line
+        .trim()
+        .strip_prefix("blyte mock: http://")
+        .unwrap_or_else(|| panic!("unexpected stdout line: {line:?}"))
+        .to_string();
+
+    let mut s = TcpStream::connect(&addr).unwrap();
+    s.write_all(b"GET /api/map?repo=demo HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+
+    let mut s_post = TcpStream::connect(&addr).unwrap();
+    s_post
+        .write_all(b"POST /api/map?repo=demo HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let mut post_resp = String::new();
+    s_post.read_to_string(&mut post_resp).unwrap();
+
+    child.kill().unwrap();
+    let _ = child.wait();
+
+    assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"), "{resp}");
+    assert!(resp.contains("Cache-Control: no-store\r\n"), "{resp}");
+    assert!(resp.contains("\"repo\":\"demo\""), "{resp}");
+    assert!(
+        post_resp.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{post_resp}"
+    );
+}
