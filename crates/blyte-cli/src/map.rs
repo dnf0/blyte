@@ -81,14 +81,29 @@ pub struct Part {
 }
 
 pub fn build(root: &Path, repo: &str) -> Result<Map, String> {
+    let mut languages = Vec::new();
+    let mut parts = Vec::new();
+
     if root.join("Cargo.toml").exists() {
         let part = crate::map_rust::extract(root)?;
-        return Ok(finish(repo, vec!["rust".to_string()], vec![part]));
+        languages.push("rust".to_string());
+        parts.push(part);
     }
-    Err(format!(
-        "no supported language in {}: no Cargo.toml at the root",
-        root.display()
-    ))
+
+    let py_part = crate::map_python::extract(root)?;
+    if !py_part.units.is_empty() {
+        languages.push("python".to_string());
+        parts.push(py_part);
+    }
+
+    if languages.is_empty() {
+        return Err(format!(
+            "no supported language in {}: no Cargo.toml at the root and no Python modules",
+            root.display()
+        ));
+    }
+
+    Ok(finish(repo, languages, parts))
 }
 
 pub fn finish(repo: &str, languages: Vec<String>, parts: Vec<Part>) -> Map {

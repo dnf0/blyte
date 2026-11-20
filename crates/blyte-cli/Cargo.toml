@@ -25,6 +25,7 @@ blyte-provider = { path = "../blyte-provider", version = "0.49.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ignore.workspace = true
 toml = "0.8"
 ureq = { version = "2.12", features = ["json"] }
 syn = { version = "2", features = ["full", "visit"] }

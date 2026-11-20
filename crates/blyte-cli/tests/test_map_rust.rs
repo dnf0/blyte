@@ -618,7 +618,7 @@ fn build_without_cargo_toml_is_an_error() {
     assert_eq!(
         err,
         format!(
-            "no supported language in {}: no Cargo.toml at the root",
+            "no supported language in {}: no Cargo.toml at the root and no Python modules",
             dir.path().display()
         )
     );

@@ -12,6 +12,7 @@ pub mod gate_drift;
 pub mod init;
 pub mod keep_awake;
 pub mod map;
+pub mod map_python;
 pub mod map_rust;
 pub mod mock;
 pub mod model_review;
