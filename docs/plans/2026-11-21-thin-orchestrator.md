@@ -122,6 +122,8 @@ the machine".
   functions. Both require the per-start secret like every `POST`. The result (pushed; the pull
   request's URL; or the error) is shown and written to the session log.
 - A request that is not `combined` cannot be pushed: `409`.
+- A finished run with no `.wt/<id>.checks.json` (T5's post-dispatch check could not be computed or
+  written) counts as waiting in the review queue, never as clean: its request is not combined.
 
 **Tests** for: the trigger conditions (all passed; one flagged; one on hold; one failed); the
 failure message reaches the orchestrator once; the two routes refuse without the secret, refuse a
