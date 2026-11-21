@@ -16,6 +16,7 @@ pub const DISPATCH_RULES: &str = r#"Rules:
 - Commit locally before you stop, with the exact commit message the task gives (or a conventional one if it gives none).
 - When you believe the task is done and committed, stop calling tools: the harness then runs the check. Before that, run the check's quick steps (formatting, lint, the tests for your change) yourself; the full run happens at the gate.
 - Do not run the full test suite or the whole check yourself, not before you start and not while you work: the gate runs it when you stop, and each extra run costs minutes. Run the tests for the code you change.
+- Read the code before you change it. If the task is already satisfied, or is smaller or larger than it says, do what is actually needed and say so at the top of your final report: what you found and what you did instead. Nobody has read the code for you first.
 - Finish with a short report: what you changed, what you ran, and anything that deviated from the task."#;
 
 /// Writes a start record as pretty JSON plus a newline, through a temporary file renamed
