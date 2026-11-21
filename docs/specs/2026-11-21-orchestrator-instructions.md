@@ -72,6 +72,9 @@ In this order:
    one-shot run it says nobody will answer and the run ends when the model stops.
 2. **Process.** The user's file if there is one, otherwise the default
    (`crates/blyte-cli/assets/orchestrator/process.md`), under a heading that names its source.
+   The default is written for dispatching with `blyte dispatch`. With the `dispatch` tool configured
+   there is no default process: the user's file is used if there is one, and the start line says
+   `process: none` otherwise.
 3. **Repository rules for the orchestrator**, if the repository has `.blyte/orchestrator.md`, under a
    heading that names the file. Added to the process, not replacing it: a process is how a person
    works, and a repository's file holds what is particular to that repository.
@@ -96,11 +99,11 @@ default process. The release note says so, and the start line makes it visible.
 - The implementer's repository rules from the orchestrator's prompt.
 - The skill as an injected block. `crates/blyte-cli/assets/blyte-implementer/SKILL.md` stays as the
   skill installed into other harnesses; the reference and the default process are written from it,
-  and a test fails when a `blyte` command or flag named in one is missing from the other.
+  and a test fails when either names a `blyte` command or flag the command line does not have.
 
-Reminders the orchestrator shares with the implementer (turns left, time left, read volume, repeated
-reads, cut-off replies, folded context) protect the run and stay. Where their wording assumes an
-implementer ("make your change", "committed"), it is made neutral.
+"Change nothing outside the repository yourself" stays built in: it is a boundary, not a way of
+working. Reminders the orchestrator shares with the implementer (turns left, time left, read volume,
+repeated reads, cut-off replies, folded context) protect the run and stay as they are.
 
 ### What is corrected
 
@@ -112,8 +115,9 @@ the reference and the tool description say that one thing.
 
 - **At start**, in the terminal and on the surface: `process: default (built in)` or
   `process: <path>`, and `repository rules: <path>` or `repository rules: none`.
-- **`blyte instructions`** prints the full text the orchestrator would be given in the current
-  repository, each part under its source. `blyte instructions --default-process` prints the default
+- **`blyte instructions`** prints the text the orchestrator would be given in the current
+  repository, each part under its source, with the tool descriptions. The request and the
+  description of the environment are added when a run starts and are not printed. `blyte instructions --default-process` prints the default
   process file, to copy and edit.
 - The default process file begins by saying it is blyte's default, that it is a starting point, and
   how to replace it.
