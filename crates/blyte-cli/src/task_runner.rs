@@ -313,6 +313,101 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
     run_task_with_event_callback(config, state, &on_event)
 }
 
+fn build_usage_entry(
+    config: &TaskConfig,
+    model_id: &str,
+    outcome: String,
+    turns: u32,
+    usage: &blyte_provider::Usage,
+) -> crate::usage_log::Entry {
+    crate::usage_log::Entry {
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        repo: crate::usage_log::repo_of(&config.root),
+        session: crate::usage_log::session_from(
+            std::env::var("BLYTE_SESSION").ok(),
+            std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+        ),
+        dispatch: std::env::var("BLYTE_DISPATCH_ID")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        research: config.research,
+        model: model_id.to_string(),
+        outcome,
+        turns,
+        input: usage.input,
+        cached: usage.cached,
+        output: usage.output,
+        thinking: usage.thinking,
+        cost_usd: blyte_provider::pricing(model_id).map(|p| p.cost(usage)),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ExceededField {
+    field: &'static str,
+    written: u64,
+    total: u64,
+}
+
+fn usage_remainder(
+    total_turns: u32,
+    total_usage: &blyte_provider::Usage,
+    written_turns: u32,
+    written_usage: &blyte_provider::Usage,
+) -> Result<(u32, blyte_provider::Usage), Vec<ExceededField>> {
+    let mut exceeded = Vec::new();
+    if written_turns > total_turns {
+        exceeded.push(ExceededField {
+            field: "turns",
+            written: u64::from(written_turns),
+            total: u64::from(total_turns),
+        });
+    }
+    if written_usage.input > total_usage.input {
+        exceeded.push(ExceededField {
+            field: "input",
+            written: written_usage.input,
+            total: total_usage.input,
+        });
+    }
+    if written_usage.cached > total_usage.cached {
+        exceeded.push(ExceededField {
+            field: "cached",
+            written: written_usage.cached,
+            total: total_usage.cached,
+        });
+    }
+    if written_usage.output > total_usage.output {
+        exceeded.push(ExceededField {
+            field: "output",
+            written: written_usage.output,
+            total: total_usage.output,
+        });
+    }
+    if written_usage.thinking > total_usage.thinking {
+        exceeded.push(ExceededField {
+            field: "thinking",
+            written: written_usage.thinking,
+            total: total_usage.thinking,
+        });
+    }
+    if !exceeded.is_empty() {
+        return Err(exceeded);
+    }
+    Ok((
+        total_turns - written_turns,
+        blyte_provider::Usage {
+            input: total_usage.input - written_usage.input,
+            cached: total_usage.cached - written_usage.cached,
+            output: total_usage.output - written_usage.output,
+            thinking: total_usage.thinking - written_usage.thinking,
+        },
+    ))
+}
+
 fn run_task_with_event_callback(
     config: &TaskConfig,
     state: &mut blyte_agent::state::State,
@@ -461,7 +556,30 @@ fn run_task_with_event_callback(
         None => &local_fs,
     };
 
-    let runner_on_event = |event: blyte_agent::run::Event<'_>| on_event(&event);
+    let usage_path = crate::usage_log::default_path();
+    let written = Mutex::new((0u32, blyte_provider::Usage::default()));
+    let runner_on_event = |event: blyte_agent::run::Event<'_>| {
+        if let blyte_agent::run::Event::Turn { usage, .. } = &event {
+            if let Some(path) = &usage_path {
+                let entry = build_usage_entry(config, &model_id, "turn".to_string(), 1, usage);
+                match crate::usage_log::append(path, &entry) {
+                    Ok(()) => {
+                        let mut w = match written.lock() {
+                            Ok(g) => g,
+                            Err(e) => e.into_inner(),
+                        };
+                        w.0 += 1;
+                        w.1.input += usage.input;
+                        w.1.cached += usage.cached;
+                        w.1.output += usage.output;
+                        w.1.thinking += usage.thinking;
+                    }
+                    Err(err) => eprintln!("warning: usage log: {err}"),
+                }
+            }
+        }
+        on_event(&event);
+    };
 
     let runner = blyte_agent::run::Runner {
         provider: provider.as_ref(),
@@ -482,33 +600,41 @@ fn run_task_with_event_callback(
     };
 
     let (outcome, report) = runner.run(state);
-    let model_id = provider.model_id();
 
-    let entry = crate::usage_log::Entry {
-        ts: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        repo: crate::usage_log::repo_of(&config.root),
-        session: crate::usage_log::session_from(
-            std::env::var("BLYTE_SESSION").ok(),
-            std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
-        ),
-        dispatch: std::env::var("BLYTE_DISPATCH_ID")
-            .ok()
-            .filter(|s| !s.is_empty()),
-        research: config.research,
-        model: model_id.clone(),
-        outcome: format!("{outcome:?}").to_lowercase(),
-        turns: report.outcome_turns,
-        input: report.usage.input,
-        cached: report.usage.cached,
-        output: report.usage.output,
-        thinking: report.usage.thinking,
-        cost_usd: blyte_provider::pricing(&model_id).map(|p| p.cost(&report.usage)),
-    };
-    if let Some(path) = crate::usage_log::default_path() {
-        if let Err(err) = crate::usage_log::append(&path, &entry) {
+    if let Some(path) = &usage_path {
+        let (written_turns, written_usage) = match written.lock() {
+            Ok(g) => *g,
+            Err(e) => *e.into_inner(),
+        };
+        let (closing_turns, closing_usage) = match usage_remainder(
+            report.outcome_turns,
+            &report.usage,
+            written_turns,
+            &written_usage,
+        ) {
+            Ok(rem) => rem,
+            Err(exceeded) => {
+                for ExceededField {
+                    field,
+                    written,
+                    total,
+                } in exceeded
+                {
+                    eprintln!(
+                        "error: usage log: turn lines exceed the run's total ({field}: {written} > {total})"
+                    );
+                }
+                (0, blyte_provider::Usage::default())
+            }
+        };
+        let entry = build_usage_entry(
+            config,
+            &model_id,
+            format!("{outcome:?}").to_lowercase(),
+            closing_turns,
+            &closing_usage,
+        );
+        if let Err(err) = crate::usage_log::append(path, &entry) {
             eprintln!("warning: usage log: {err}");
         }
     }
@@ -526,4 +652,78 @@ fn run_task_with_event_callback(
         crate::report::write(path, &record)?;
     }
     Ok((outcome, report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_remainder_computes_exact_and_partial_remainders() {
+        let total = blyte_provider::Usage {
+            input: 600,
+            cached: 150,
+            output: 90,
+            thinking: 75,
+        };
+        let exact = usage_remainder(3, &total, 3, &total).unwrap();
+        assert_eq!(exact, (0, blyte_provider::Usage::default()));
+
+        let written = blyte_provider::Usage {
+            input: 500,
+            cached: 100,
+            output: 80,
+            thinking: 50,
+        };
+        let partial = usage_remainder(3, &total, 2, &written).unwrap();
+        assert_eq!(
+            partial,
+            (
+                1,
+                blyte_provider::Usage {
+                    input: 100,
+                    cached: 50,
+                    output: 10,
+                    thinking: 25,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn usage_remainder_reports_exceeding_fields() {
+        let total = blyte_provider::Usage {
+            input: 100,
+            cached: 20,
+            output: 30,
+            thinking: 10,
+        };
+        let written = blyte_provider::Usage {
+            input: 120,
+            cached: 20,
+            output: 35,
+            thinking: 10,
+        };
+        let err = usage_remainder(2, &total, 3, &written).unwrap_err();
+        assert_eq!(
+            err,
+            vec![
+                ExceededField {
+                    field: "turns",
+                    written: 3,
+                    total: 2,
+                },
+                ExceededField {
+                    field: "input",
+                    written: 120,
+                    total: 100,
+                },
+                ExceededField {
+                    field: "output",
+                    written: 35,
+                    total: 30,
+                },
+            ]
+        );
+    }
 }
