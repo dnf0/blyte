@@ -1,6 +1,6 @@
 # Sandbox the orchestrator's shell, and stop it pushing
 
-Date: 2026-11-21. Status: draft for the user's decision. Nothing here is planned or built yet.
+Date: 2026-11-21. Status: decisions agreed with the user on 2026-11-21; the facts below are still to be checked before planning.
 
 ## The problem
 
@@ -37,7 +37,7 @@ already: with `--dispatch-cmd`, dispatch is a tool the harness runs on the host,
 Nothing in the code blocks a push today. Implementers cannot push only because their sandbox hides
 the credentials and the network; `blyte review` flags `git push` in a log after the fact.
 
-## Decisions asked for
+## Decisions
 
 1. **The orchestrator's shell is sandboxed like an implementer's**, with the repository's main
    checkout as its root: writes only there (and `.wt/`, the git directory and temporary
@@ -48,23 +48,26 @@ the credentials and the network; `blyte review` flags `git push` in a log after 
    `review`, `plan`, `init` and `clean`; anything else is refused with a message that names the
    list. `dispatch` can be started in the background so that several run at once, and `wait` works
    as now. The reference describes this one way of dispatching; `--dispatch-cmd` and its tool go.
-3. **Pushing is something the user does, not something the model can do.** The shell cannot push:
-   it has no network and no credentials, which the operating system enforces. The model is given no
-   push tool either. On the surface the user types a command, `/pr`, and blyte's own code pushes the
-   current branch and opens a pull request for it, with a title and description the orchestrator
-   has drafted to a file the user can read first. `/pr` refuses the default branch and never merges.
-   A one-shot run has no such command and always ends at a local branch.
+3. **A command leaves the sandbox only with the user's yes.** The model uses ordinary commands
+   (`git push -u origin <branch>`, `gh pr create …`), as in other harnesses. The `bash` tool takes
+   an `unsandboxed` flag with a one-line reason. Such a command does not run until the user has
+   approved that exact text on the surface; a refusal is returned to the model as an error. In a
+   one-shot run nobody can approve, so it is always refused. No flag lets an unattended run push.
+4. **The user can allow commands in advance.** `[orchestrator] allow_unsandboxed` in the user's
+   `~/.config/blyte/config.toml` (not the repository's `blyte.toml`, which the model can edit) lists
+   command prefixes that run without a question, for example `git push -u origin`. A rule matches
+   only one simple command: anything with a pipe, `;`, `&&`, a substitution or a redirect is always
+   asked about. There are no built-in rules.
 
-   The user can also ask in plain words ("open the PR"). The model then calls a `propose_pr` tool,
-   which pushes nothing: it makes the surface show the branch, the title and a yes-or-no question.
-   blyte's code pushes only on the user's keypress. The model never decides whether permission was
-   given, so a sentence in the chat or in a file cannot stand in for it. In a one-shot run the tool
-   is refused.
+Agreed with the user on 2026-11-21, after considering two alternatives: no pushing from blyte at all,
+and special tools (`/pr`, a `propose_pr` tool) in place of ordinary commands. The second was dropped
+because models are trained on `git` and `gh`, and one general mechanism also covers anything else
+that needs the host. A third, leaving the shell unsandboxed as Pi does, has the least friction and
+no protection.
 
-   Not chosen: a flag that lets an unattended run push.
-
-   Outside blyte, and recommended whatever is built here: protect the default branch on GitHub, so
-   that a direct push or an unreviewed merge is refused by the server.
+Outside blyte, and recommended whatever is built here: protect the default branch on GitHub, so that
+a direct push or an unreviewed merge is refused by the server. An allow rule cannot tell `main` from
+another branch reliably; the server can.
 
 ## What this does not stop
 
@@ -83,10 +86,12 @@ the credentials and the network; `blyte review` flags `git push` in a log after 
 2. What the package caches need: a check that downloads dependencies has no network in the shell.
 3. That `git cherry-pick`, `git merge` and `git commit` in the main checkout and in a linked
    worktree work inside the sandbox on macOS and Linux.
-4. How the surface (PR #377) handles a command the user types, which `/pr` would be added to, and whether it can ask the user a yes-or-no question mid-run, which `propose_pr` needs.
+4. Whether the surface (PR #377) can ask the user a yes-or-no question while a run is going, and
+   what a conversation without the surface (`blyte --orchestrate` at a terminal) can do.
+5. Where user-level configuration is read today, and whether `~/.config/blyte/config.toml` exists.
 
 ## Out of scope
 
 - The implementer's sandbox.
-- Approval prompts for anything other than pushing.
+- Approval prompts for commands inside the sandbox.
 - Windows.
