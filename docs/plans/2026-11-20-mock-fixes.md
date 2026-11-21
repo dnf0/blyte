@@ -210,3 +210,81 @@ Run with: `cargo test -p blyte-cli --test test_mock_page --test test_mock` (and 
 **Siblings:** MF1 (`crates/blyte-cli/src/dashboard.rs`, `crates/blyte-cli/tests/test_collect_fast.rs`) and MF2 (`crates/blyte-cli/src/replay.rs`, `crates/blyte-cli/tests/test_replay.rs`) run in parallel in separate worktrees; do not touch their files.
 
 **Commit message:** `feat(mock): render research runs as reports to read and fit cards to content`
+
+### Task MF4: a reader for research reports, and "Use in conversation"
+
+**Depends on:** MF2 and MF3 (both already on this branch). **Siblings:** none running.
+
+**Goal.** A research report is long reading. Today "Read report" shows it inside the card's
+details view in the narrow left column, as one `<pre>` block. Open it instead in a reader that
+takes the place of the map on the right, and let the developer pass a report to the conversation.
+
+**Files.** Change `crates/blyte-cli/assets/mock/index.html` and
+`crates/blyte-cli/tests/test_mock_page.rs` (add tests; existing tests pass unmodified unless one
+asserts the "Hide report" label or the report inside the details view, in which case change only
+that assertion and say so in the final message). Change no other file.
+
+**What to build.**
+
+1. **The reader.** A new element `<div id="report-reader" hidden>` inside the map column, a
+   sibling of `#map`. While a report is open: the reader is shown; `#map`, `#map-system`,
+   `#map-data`, `#map-detail`, `#map-meta-bar`, `#map-tabs` and the map controls are hidden; and
+   the workspace has the `map-wide` class, whatever the Wide button's own state. Closing the
+   reader restores exactly what was shown before, including the Wide state and the selected map
+   tab. Only one report is open at a time; opening another replaces it.
+2. **Reader contents.** A header with the run id, the title, a `research` pill, and four buttons
+   in this order: `Mark read` (`data-action="read"`), `Hold` (`data-action="hold"`),
+   `Use in conversation` (`data-report-use="<run key>"`), `Close` (`id="report-close"`). Below it
+   the task text (collapsed under a `<details>` with the summary `Question`), then the report
+   body, then the run's flags if it has any. The body column is at most 76 characters wide
+   (`max-width: 76ch`) and scrolls inside the reader.
+3. **Rendering the report.** A function `renderReportMarkdown(text)` that returns HTML for these
+   constructs only: `#` to `####` headings, paragraphs, unordered and ordered lists (one level),
+   fenced code blocks, pipe tables with a header row, and within a line: inline code, `**bold**`
+   and links written as `[text](url)` shown as their text followed by the url in brackets, not as
+   an anchor. Every piece of report text passes through the existing `escapeHtml` before it is
+   placed in the HTML; the report can contain anything. Anything else is shown as plain escaped
+   text. No external script, style or font is loaded.
+4. **A run with no report** (`report` is `null` or empty): the reader shows
+   `No report file was recorded for this run.` and the run's `final_message`, and
+   `Use in conversation` is disabled.
+5. **Opening and closing.** On a research card the button `Read report` opens the reader
+   (`data-report-open="<run key>"`); it no longer toggles the card's details view, and a research
+   card has no details view. While that report is open the card's button reads `Reading` and is
+   disabled, and the card has the class `is-reading`. `Close`, the Escape key, `Mark read` and
+   `Hold` close the reader. `Mark read` and `Hold` do what they do on the card.
+6. **Use in conversation.** Marks the run read (the same decision as `Mark read`), closes the
+   reader, switches to the Design tab, and adds a chip above the message box, in an element
+   `id="attached-reports"`: `report <run id>` with a remove button (`data-report-detach="<run key>"`).
+   Several reports can be attached; the same report is not attached twice. When a message is sent
+   with reports attached, the message's line in the conversation ends with
+   `with report <id>` (or `with reports <id>, <id>`), and the chips are cleared. With no reports
+   attached, sending behaves as now.
+7. **The record.** Using the page's existing record function, log `report_open`, `report_close`
+   (with the seconds it was open), `report_use` and `report_detach`, each with the run key. A
+   message sent with reports attached records their run keys.
+8. **Guide.** In the existing guide step that describes the review queue, add one sentence:
+   `A research report opens in a reader in place of the map.` Do not add a step.
+
+No fallbacks: if a run key passed to the reader is not in the loaded runs, throw an `Error` naming
+the key; do not open an empty reader. Add no comments to code. Nothing here needs to be resumable.
+Keep to the page's existing colour variables, fonts and button classes; add no new colours.
+
+**Tests** (added to `test_mock_page.rs`, following the pattern of the tests already there; run
+with `cargo test -p blyte --test test_mock_page`):
+
+1. `report_reader_element_exists`: the page contains `id="report-reader"`, `id="report-close"`,
+   `id="attached-reports"`, `data-report-open=`, `data-report-use=` and `data-report-detach=`.
+2. `report_markdown_renderer_escapes`: the page defines `function renderReportMarkdown(` and the
+   body of that function (from its opening line to the next line that starts a top-level
+   `function `) contains `escapeHtml(` and does not contain `<a ` or `innerHTML`.
+3. `research_card_has_no_details_toggle`: the page does not contain the text `Hide report`.
+4. `report_events_recorded`: the page contains each of `"report_open"`, `"report_close"`,
+   `"report_use"` and `"report_detach"`.
+5. `reader_has_no_external_resources`: the existing check that the page loads nothing from the
+   network still passes (do not weaken it).
+
+Also run `node --check` on the page's inline script if `node` is installed, and say in the final
+message whether you did.
+
+**Commit message:** `feat(mock): open research reports in a reader and attach them to the conversation`
