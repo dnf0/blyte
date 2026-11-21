@@ -594,6 +594,35 @@ impl Session {
         self.guard.shared.log_cv.notify_all();
         Ok(seq)
     }
+
+    pub fn queue_for_request(&self, request_id: &str, text: &str) -> Result<u64, String> {
+        if text.trim().is_empty() {
+            return Err("a message needs text".to_string());
+        }
+        let mut state = self.guard.shared.lock_state();
+        let queued = state.busy || !state.queue.is_empty();
+        let seq = state.push_entry(EntryBody::UserMessage {
+            text: text.to_string(),
+            reports: Vec::new(),
+            queued,
+        });
+        state.queue.push_back(QueuedMessage {
+            request_id: request_id.to_string(),
+            prompt: text.to_string(),
+        });
+        self.guard.shared.work_cv.notify_one();
+        self.guard.shared.log_cv.notify_all();
+        Ok(seq)
+    }
+
+    pub fn record_error(&self, message: &str) -> u64 {
+        let mut state = self.guard.shared.lock_state();
+        let seq = state.push_entry(EntryBody::Error {
+            message: message.to_string(),
+        });
+        self.guard.shared.log_cv.notify_all();
+        seq
+    }
 }
 
 struct RequestGuard;

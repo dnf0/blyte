@@ -208,6 +208,8 @@ fn make_surface(
         started_at: 1_700_000_000,
         days: 14,
         token: generate_token().unwrap(),
+        requests: Arc::new(blyte_cli::requests::RequestsState::new()),
+        publisher: Arc::new(blyte_cli::requests::RealPublisher),
     };
     (surface, calls)
 }

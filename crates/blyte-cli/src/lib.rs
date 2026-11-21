@@ -33,6 +33,7 @@ pub mod registry;
 pub mod repl;
 pub mod replay;
 pub mod report;
+pub mod requests;
 pub mod research_breadth;
 pub mod research_brief;
 pub mod review_checks;

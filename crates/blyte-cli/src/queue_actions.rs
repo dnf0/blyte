@@ -73,6 +73,35 @@ pub fn record_verdict(
     Ok(())
 }
 
+pub fn read_verdict(root: &Path, id: &str) -> Result<Option<ReviewVerdict>, String> {
+    let verdict_path = root.join(".wt").join(format!("{id}.verdict.json"));
+    let raw = match std::fs::read_to_string(&verdict_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!("error reading {}: {e}", verdict_path.display()));
+        }
+    };
+    let val: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("could not parse {}: {e}", verdict_path.display()))?;
+    let verdict_str = val
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{} is missing string verdict", verdict_path.display()))?;
+    let parsed = match verdict_str {
+        "accepted" => ReviewVerdict::Accepted,
+        "fixed" => ReviewVerdict::Fixed,
+        "redone" => ReviewVerdict::Redone,
+        other => {
+            return Err(format!(
+                "{} has unknown verdict '{other}'",
+                verdict_path.display()
+            ));
+        }
+    };
+    Ok(Some(parsed))
+}
+
 pub(crate) fn compute_review(
     root: &Path,
     id: &str,
@@ -830,9 +859,7 @@ pub fn decide(
                 now,
             )?;
             clear_hold(root, id)?;
-            Some(format!(
-                "Accepted run {id}. Combine it onto the working branch and run the gate."
-            ))
+            None
         }
         Action::SendBack => {
             let Some(ref text) = trimmed_note else {

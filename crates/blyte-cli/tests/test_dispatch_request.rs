@@ -266,6 +266,8 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
         started_at: now,
         days: 14,
         token: TEST_TOKEN.to_string(),
+        requests: Arc::new(blyte_cli::requests::RequestsState::new()),
+        publisher: Arc::new(blyte_cli::requests::RealPublisher),
     };
 
     let r1 = route(

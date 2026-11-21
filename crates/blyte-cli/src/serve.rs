@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use crate::cli::SurfaceArgs;
 use crate::http::{Request, Response};
 use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
+use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsState};
 use crate::session::{AgentRunner, AnswerError, ApprovalAnswer, Attachment, Session};
 
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
@@ -30,6 +32,8 @@ pub struct Surface {
     pub started_at: u64,
     pub days: u64,
     pub token: String,
+    pub requests: Arc<RequestsState>,
+    pub publisher: Arc<dyn Publisher>,
 }
 
 pub fn generate_token() -> Result<String, String> {
@@ -395,6 +399,18 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
         runs_with_hold.push(RunWithHold { run, hold });
     }
 
+    let mut triggered = BTreeSet::new();
+    for run in &live.runs {
+        if run.research {
+            continue;
+        }
+        if let Some(ref req_id) = run.request {
+            if triggered.insert(req_id.clone()) {
+                let _ = crate::requests::maybe_combine(surface, req_id);
+            }
+        }
+    }
+
     let payload = LiveRunsResponse {
         generated_at: live.generated_at,
         repo: &live.repo,
@@ -488,6 +504,15 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
         Ok(s) => s,
         Err(e) => return json_error(500, e),
     };
+    if action == Action::Accept {
+        match crate::requests::run_request_id(&surface.root, &decision.run) {
+            Ok(Some(req_id)) => {
+                let _ = crate::requests::maybe_combine(surface, &req_id);
+            }
+            Ok(None) => {}
+            Err(e) => return json_error(500, e),
+        }
+    }
     Response::json(
         200,
         &serde_json::json!({
@@ -509,6 +534,58 @@ fn handle_map(surface: &Surface) -> Response {
             Err(e) => json_error(500, format!("failed to serialize map: {e}")),
         },
         Err(e) => json_error(422, e),
+    }
+}
+
+fn handle_requests(surface: &Surface) -> Response {
+    match crate::requests::list_requests(surface) {
+        Ok(list) => match serde_json::to_value(&list) {
+            Ok(val) => Response::json(200, &val),
+            Err(e) => json_error(500, format!("failed to serialize requests: {e}")),
+        },
+        Err(e) => json_error(500, e),
+    }
+}
+
+fn request_action_error_response(err: RequestActionError) -> Response {
+    match err {
+        RequestActionError::BadRequest(msg) => json_error(400, msg),
+        RequestActionError::Conflict(msg) => json_error(409, msg),
+        RequestActionError::Internal(msg) => json_error(500, msg),
+    }
+}
+
+fn handle_request_push(surface: &Surface, id: &str) -> Response {
+    match crate::requests::push_request(surface, id) {
+        Ok(()) => Response::json(200, &serde_json::json!({ "pushed": true })),
+        Err(err) => request_action_error_response(err),
+    }
+}
+
+fn handle_request_pull_request(surface: &Surface, id: &str, req: &Request) -> Response {
+    if let Err(e) = crate::dispatch::validate_request_id(id) {
+        return json_error(400, e);
+    }
+    let obj = match parse_json_object(&req.body) {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    let title = match obj.get("title") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(serde_json::Value::String(_)) => {
+            return json_error(400, "field title must not be empty");
+        }
+        Some(_) => return json_error(400, "field title must be a string"),
+        None => return json_error(400, "missing required field: title"),
+    };
+    let body = match obj.get("body") {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(_) => return json_error(400, "field body must be a string"),
+    };
+    match crate::requests::open_request_pull_request(surface, id, &title, &body) {
+        Ok(url) => Response::json(200, &serde_json::json!({ "url": url })),
+        Err(err) => request_action_error_response(err),
     }
 }
 
@@ -580,6 +657,12 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
             }
             handle_runs(surface, now)
         }
+        "/api/requests" => {
+            if req.method != "GET" {
+                return method_not_allowed(req);
+            }
+            handle_requests(surface)
+        }
         "/api/map" => {
             if req.method != "GET" {
                 return method_not_allowed(req);
@@ -611,6 +694,20 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
                         }
                         return handle_run_decision(surface, id, req, now);
                     }
+                }
+            }
+            if let Some(rest) = path.strip_prefix("/api/requests/") {
+                if let Some(id) = rest.strip_suffix("/push") {
+                    if req.method != "POST" {
+                        return method_not_allowed(req);
+                    }
+                    return handle_request_push(surface, id);
+                }
+                if let Some(id) = rest.strip_suffix("/pull-request") {
+                    if req.method != "POST" {
+                        return method_not_allowed(req);
+                    }
+                    return handle_request_pull_request(surface, id, req);
                 }
             }
             json_error(404, format!("not found: {}", req.path))
@@ -871,6 +968,8 @@ pub fn run_with_io(
         started_at,
         days: args.days,
         token,
+        requests: Arc::new(RequestsState::new()),
+        publisher: Arc::new(RealPublisher),
     });
 
     let serve_result = crate::http::serve(listener, move |req| match now_duration() {

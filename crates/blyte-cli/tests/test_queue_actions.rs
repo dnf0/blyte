@@ -112,9 +112,7 @@ fn accept_verified_code_run() {
             run: "T1".to_string(),
             action: Action::Accept,
             note: Some("ship it".to_string()),
-            orchestrator_message: Some(
-                "Accepted run T1. Combine it onto the working branch and run the gate.".to_string()
-            ),
+            orchestrator_message: None,
         }
     );
 

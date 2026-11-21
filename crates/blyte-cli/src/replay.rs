@@ -159,7 +159,7 @@ fn read_summary(path: &Path) -> Result<DispatchSummaryFields, SummaryReadError> 
     })
 }
 
-fn read_checks(path: &Path) -> Result<(bool, Vec<String>), String> {
+pub(crate) fn read_checks(path: &Path) -> Result<(bool, Vec<String>), String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok((false, Vec::new())),
