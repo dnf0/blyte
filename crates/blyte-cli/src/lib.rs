@@ -16,6 +16,7 @@ pub mod map_python;
 pub mod map_rust;
 pub mod mock;
 pub mod model_review;
+pub mod orchestrator_text;
 pub mod outside_env;
 pub mod plan_cmd;
 pub mod plan_section;
