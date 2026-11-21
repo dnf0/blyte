@@ -144,15 +144,16 @@ fn compute_review_inner(
             };
 
         let base = if let Some(sha) = start_base_sha {
-            let has_base = Command::new("git")
+            let out = Command::new("git")
                 .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
                 .current_dir(&wt)
                 .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !has_base {
+                .map_err(|e| format!("cannot run git cat-file in {}: {e}", wt.display()))?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 return Err(format!(
-                    "run {id} started from {sha}, which is not in this repository"
+                    "run {id} started from {sha}, which is not in this repository (git cat-file in {}: {stderr})",
+                    wt.display()
                 ));
             }
             sha

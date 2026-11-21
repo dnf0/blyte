@@ -162,11 +162,22 @@ fn run_surface_script(harness: &str) {
     let html = load_surface_html();
     let script = extract_inline_script(&html);
     let combined = format!("{script}\n{harness}\n");
-    let output = std::process::Command::new("node")
-        .arg("-e")
-        .arg(&combined)
-        .output()
+    // The script goes in on stdin: as an argument it is longer than Linux allows for one argument.
+    use std::io::Write;
+    let mut child = std::process::Command::new("node")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("node must be available to run surface script tests");
+    let mut stdin = child.stdin.take().expect("node stdin");
+    let writer = std::thread::spawn(move || stdin.write_all(combined.as_bytes()));
+    let output = child.wait_with_output().expect("wait for node");
+    writer
+        .join()
+        .expect("stdin writer thread")
+        .expect("write the script to node");
     assert!(
         output.status.success(),
         "node test failed:\nstdout:\n{}\nstderr:\n{}",
