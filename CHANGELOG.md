@@ -1,3 +1,9 @@
+## v0.53.0 (2026-11-21)
+
+### Feat
+
+- **surface**: bare blyte starts a live surface (#377)
+
 ## v0.52.0 (2026-11-21)
 
 ### Feat
