@@ -48,15 +48,19 @@ the credentials and the network; `blyte review` flags `git push` in a log after 
    `review`, `plan`, `init` and `clean`; anything else is refused with a message that names the
    list. `dispatch` can be started in the background so that several run at once, and `wait` works
    as now. The reference describes this one way of dispatching; `--dispatch-cmd` and its tool go.
-3. **Pushing is a tool with the user's yes, not a shell command.** The shell cannot push: it has no
-   network and no credentials, which the operating system enforces. A `push` tool pushes the current
-   branch and can open a pull request for it. It refuses the default branch, never merges a pull
-   request, and runs only after the user confirms that call on the surface. In a one-shot run nobody
-   can confirm, so it is refused unless the run was started with `--allow-push`.
+3. **Pushing is something the user does, not something the model can do.** The shell cannot push:
+   it has no network and no credentials, which the operating system enforces. The model is given no
+   push tool either. On the surface the user types a command, `/pr`, and blyte's own code pushes the
+   current branch and opens a pull request for it, with a title and description the orchestrator
+   has drafted to a file the user can read first. `/pr` refuses the default branch and never merges.
+   A one-shot run has no such command and always ends at a local branch.
 
-Decision 3 is the one with a real alternative: leave pushing out entirely and have the user push by
-hand. That is simpler and safer, but the user's own rule is that every change goes in by pull
-request, so a surface that cannot open one sends them back to another tool for every change.
+   Considered and not chosen: a `push` tool the model calls and the user confirms each time. It
+   needs a way to ask a question mid-run, and a habit of confirming is weaker than the model not
+   having the capability at all. Also not chosen: a flag that lets an unattended run push.
+
+   Outside blyte, and recommended whatever is built here: protect the default branch on GitHub, so
+   that a direct push or an unreviewed merge is refused by the server.
 
 ## What this does not stop
 
@@ -75,10 +79,10 @@ request, so a surface that cannot open one sends them back to another tool for e
 2. What the package caches need: a check that downloads dependencies has no network in the shell.
 3. That `git cherry-pick`, `git merge` and `git commit` in the main checkout and in a linked
    worktree work inside the sandbox on macOS and Linux.
-4. How the surface (PR #377) asks the user a yes-or-no question mid-run, which the `push` tool needs.
+4. How the surface (PR #377) handles a command the user types, which `/pr` would be added to.
 
 ## Out of scope
 
 - The implementer's sandbox.
-- Approval prompts for anything other than pushing.
+- Approval prompts of any kind.
 - Windows.
