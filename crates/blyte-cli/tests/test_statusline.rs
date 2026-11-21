@@ -153,6 +153,7 @@ fn test_binary_with_usage_log() {
     cmd.arg("statusline")
         .env("BLYTE_USAGE_LOG", log_path.as_os_str())
         .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -189,6 +190,7 @@ fn test_after_flag() {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
         cmd.args(["statusline", "--after", "echo mine"])
             .env("HOME", tmp.path())
+            .env("XDG_CONFIG_HOME", tmp.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -211,6 +213,7 @@ fn test_after_flag() {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
         cmd.args(["statusline", "--after", "exit 1"])
             .env("HOME", tmp.path())
+            .env("XDG_CONFIG_HOME", tmp.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -231,6 +234,7 @@ fn test_after_flag() {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
         cmd.args(["statusline", "--after", "sleep 5"])
             .env("HOME", tmp.path())
+            .env("XDG_CONFIG_HOME", tmp.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -259,6 +263,7 @@ fn test_malformed_stdin() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
     cmd.arg("statusline")
         .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -285,6 +290,7 @@ fn test_after_command_that_does_not_read_stdin() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
     cmd.args(["statusline", "--after", "exec 0<&-; echo mine"])
         .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

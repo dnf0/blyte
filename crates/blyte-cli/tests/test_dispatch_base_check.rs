@@ -52,6 +52,7 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
     cmd.current_dir(repo_dir)
         .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
         .env("BLYTE_USAGE_LOG", "off")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")

@@ -45,6 +45,7 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
         .arg(&report)
         .current_dir(&repo)
         .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")

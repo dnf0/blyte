@@ -184,6 +184,7 @@ fn model_review_skipped_when_no_api_key() {
         .env_remove("OLLAMA_API_KEY")
         .env_remove("BLYTE_ENV_FILE")
         .env("HOME", r.path())
+        .env("XDG_CONFIG_HOME", r.path())
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));

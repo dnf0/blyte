@@ -15,6 +15,7 @@ fn blyte(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(cwd)
         .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
         .output()
         .unwrap()
 }
@@ -207,6 +208,7 @@ fn update_warns_about_superseded_skill_after_refresh() {
         .arg("update")
         .env("BLYTE_GH", &gh)
         .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
         .output()
         .unwrap();
 

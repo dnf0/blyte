@@ -10,6 +10,7 @@ fn install(home: &Path, args: &[&str]) {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(args)
         .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
         .output()
         .unwrap();
     assert!(

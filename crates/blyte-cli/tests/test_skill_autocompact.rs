@@ -11,6 +11,7 @@ fn blyte(cwd: &Path, home: &Path, state_dir: &Path, args: &[&str]) -> std::proce
         .args(args)
         .current_dir(cwd)
         .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
         .env("BLYTE_STATE_DIR", state_dir)
         .env("BLYTE_ENV_FILE", home.join(".config/blyte/env"))
         .output()

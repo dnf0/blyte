@@ -41,6 +41,7 @@ fn dispatch(r: &Path, id: &str, extra: &[&str]) -> std::process::Output {
         .env("BLYTE_USAGE_LOG", "off")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env("HOME", r)
+        .env("XDG_CONFIG_HOME", r)
         .env_remove("BLYTE_ENV_FILE")
         .env_remove("BLYTE_MODEL")
         .env_remove("GEMINI_API_KEY")
@@ -66,6 +67,7 @@ fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("OLLAMA_API_KEY")
         .env_remove("BLYTE_ENV_FILE")
         .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir)
         .output()
         .unwrap()
 }
