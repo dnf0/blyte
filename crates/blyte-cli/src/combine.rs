@@ -107,13 +107,21 @@ pub fn combine_in(root: &Path, request: &str, out: &mut impl Write, err: &mut im
 
     match run_combine_inner(root, request) {
         Ok(record) => {
-            if let Ok(json) = serde_json::to_string_pretty(&record) {
-                let _ = writeln!(out, "{json}");
-            }
+            let json = match serde_json::to_string_pretty(&record) {
+                Ok(j) => j,
+                Err(e) => {
+                    let _ = writeln!(err, "error: failed to serialize combine record: {e}");
+                    return 2;
+                }
+            };
+            let _ = writeln!(out, "{json}");
             match record.state {
                 CombineState::Combined => 0,
                 CombineState::Conflict => {
-                    let run_id = record.conflicting_run.as_deref().unwrap_or("unknown");
+                    let Some(run_id) = record.conflicting_run.as_deref() else {
+                        let _ = writeln!(err, "error: combine record is missing conflicting_run");
+                        return 2;
+                    };
                     let _ = writeln!(
                         err,
                         "combine conflict while applying run {run_id}: {}",
@@ -122,7 +130,10 @@ pub fn combine_in(root: &Path, request: &str, out: &mut impl Write, err: &mut im
                     1
                 }
                 CombineState::CheckFailed => {
-                    let step = record.failing_step.as_deref().unwrap_or("unknown");
+                    let Some(step) = record.failing_step.as_deref() else {
+                        let _ = writeln!(err, "error: combine record is missing failing_step");
+                        return 2;
+                    };
                     let _ = writeln!(err, "combine check failed at step: {step}");
                     1
                 }
@@ -146,7 +157,7 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
     let mut tips: HashMap<String, String> = HashMap::new();
     let mut combined_runs: Vec<CombinedRun> = Vec::with_capacity(ordered.len());
     for run in &ordered {
-        let tip = resolve_run_tip(root, &wt_dir, run)?;
+        let tip = resolve_run_tip(root, run)?;
         tips.insert(run.id.clone(), tip.clone());
         combined_runs.push(CombinedRun {
             id: run.id.clone(),
@@ -169,13 +180,22 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
         ));
     }
 
+    let expected_existing_tip = existing_record
+        .as_ref()
+        .map(|rec| rec.commits.last().unwrap_or(&rec.base).as_str());
+
     if let Some(ref rec) = existing_record {
         if rec.state == CombineState::Combined
             && branch_exists
             && rec.runs == combined_runs
             && rec.base == group_base
         {
-            return Ok(rec.clone());
+            let actual_tip = git_rev_parse(root, &format!("refs/heads/{branch}^{{commit}}"))
+                .map_err(|e| format!("cannot resolve existing branch {branch}: {e}"))?;
+            let expected_tip = rec.commits.last().unwrap_or(&rec.base).as_str();
+            if actual_tip == expected_tip {
+                return Ok(rec.clone());
+            }
         }
     }
 
@@ -191,7 +211,13 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
     std::fs::create_dir_all(&combined_dir)
         .map_err(|e| format!("failed to create {}: {e}", combined_dir.display()))?;
 
-    prepare_worktree(root, &worktree_dir, &branch, &group_base)?;
+    prepare_worktree(
+        root,
+        &worktree_dir,
+        &branch,
+        &group_base,
+        expected_existing_tip,
+    )?;
 
     let mut last_good_head = group_base.clone();
     for run in &ordered {
@@ -205,24 +231,32 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
             continue;
         }
         for sha in &commits {
-            if let Err(conflict_files) = git_cherry_pick_x(&worktree_dir, sha)? {
-                let _ = git_cmd(&worktree_dir, &["cherry-pick", "--abort"]);
-                git_reset_hard(&worktree_dir, &last_good_head)?;
-                let applied_commits = git_rev_list_range(&worktree_dir, &group_base, "HEAD")?;
-                let record = CombineRecord {
-                    request: request.to_string(),
-                    state: CombineState::Conflict,
-                    branch,
-                    base: group_base,
-                    runs: combined_runs,
-                    commits: applied_commits,
-                    conflicting_run: Some(run.id.clone()),
-                    conflicting_files: conflict_files,
-                    failing_step: None,
-                    output_tail: None,
-                };
-                write_record(&record_path, &record)?;
-                return Ok(record);
+            match git_cherry_pick_x(&worktree_dir, &run.id, sha) {
+                Ok(Ok(())) => {}
+                Ok(Err(conflict_files)) => {
+                    let _ = git_cmd(&worktree_dir, &["cherry-pick", "--abort"]);
+                    git_reset_hard(&worktree_dir, &last_good_head)?;
+                    let applied_commits = git_rev_list_range(&worktree_dir, &group_base, "HEAD")?;
+                    let record = CombineRecord {
+                        request: request.to_string(),
+                        state: CombineState::Conflict,
+                        branch,
+                        base: group_base,
+                        runs: combined_runs,
+                        commits: applied_commits,
+                        conflicting_run: Some(run.id.clone()),
+                        conflicting_files: conflict_files,
+                        failing_step: None,
+                        output_tail: None,
+                    };
+                    write_record(&record_path, &record)?;
+                    return Ok(record);
+                }
+                Err(err_msg) => {
+                    let _ = git_cmd(&worktree_dir, &["cherry-pick", "--abort"]);
+                    git_reset_hard(&worktree_dir, &last_good_head)?;
+                    return Err(err_msg);
+                }
             }
         }
         last_good_head = git_rev_parse(&worktree_dir, "HEAD")?;
@@ -315,31 +349,53 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
         return Err(format!("no runs found for request {request}"));
     }
 
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(wt_dir)
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(wt_dir)
         .map_err(|e| format!("failed to read {}: {e}", wt_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".start.json"))
-        })
-        .collect();
+    {
+        let entry =
+            entry.map_err(|e| format!("failed to read entry in {}: {e}", wt_dir.display()))?;
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".start.json"))
+        {
+            entries.push(path);
+        }
+    }
     entries.sort();
 
     let mut found = Vec::new();
     let mut bad_runs = Vec::new();
 
     for path in entries {
-        let content = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let val: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let val: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
         if val.get("request").and_then(|v| v.as_str()) != Some(request) {
             continue;
+        }
+        let file_id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".start.json"))
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("invalid start file name: {}", path.display()))?;
+        if let Some(id_val) = val.get("id") {
+            let field_id = id_val.as_str().ok_or_else(|| {
+                format!(
+                    "start file {} has non-string id {id_val}, expected {file_id}",
+                    path.display()
+                )
+            })?;
+            if field_id != file_id {
+                return Err(format!(
+                    "start file {} has id {field_id} which differs from file name id {file_id}",
+                    path.display()
+                ));
+            }
         }
         let is_research = val
             .get("research")
@@ -352,18 +408,16 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
         if is_research {
             continue;
         }
-        let fallback_id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".start.json"))
-            .unwrap_or("")
-            .to_string();
-        let id = val
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
-            .unwrap_or(fallback_id);
-        let started_at = val.get("started_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = file_id.to_string();
+        let started_at = val
+            .get("started_at")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                format!(
+                    "start file {} is missing numeric started_at",
+                    path.display()
+                )
+            })?;
         let base = val
             .get("base")
             .and_then(|v| v.as_str())
@@ -374,9 +428,17 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
             .map(ToString::to_string);
 
         let summary_path = wt_dir.join(format!("{id}.json"));
-        let summary: Option<serde_json::Value> = std::fs::read_to_string(&summary_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
+        let summary: Option<serde_json::Value> = match std::fs::read_to_string(&summary_path) {
+            Ok(s) => {
+                let parsed: serde_json::Value = serde_json::from_str(&s)
+                    .map_err(|e| format!("failed to parse {}: {e}", summary_path.display()))?;
+                Some(parsed)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(format!("failed to read {}: {e}", summary_path.display()));
+            }
+        };
 
         let mut reasons = Vec::new();
         let mut branch_hint = None;
@@ -385,26 +447,45 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
                 reasons.push("unfinished".to_string());
             }
             Some(ref s) => {
-                let outcome = s
-                    .get("outcome")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
+                let outcome = s.get("outcome").and_then(|v| v.as_str()).ok_or_else(|| {
+                    format!(
+                        "summary file {} is missing string outcome",
+                        summary_path.display()
+                    )
+                })?;
                 if outcome != "verified" {
                     reasons.push(outcome.to_string());
                 }
-                branch_hint = s
-                    .get("branch")
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string);
+                if let Some(branch_val) = s.get("branch").filter(|v| !v.is_null()) {
+                    let branch_str = branch_val.as_str().ok_or_else(|| {
+                        format!(
+                            "summary file {} has non-string branch",
+                            summary_path.display()
+                        )
+                    })?;
+                    branch_hint = Some(branch_str.to_string());
+                }
             }
         }
 
         let verdict_path = wt_dir.join(format!("{id}.verdict.json"));
-        if let Ok(vs) = std::fs::read_to_string(&verdict_path) {
-            if let Ok(vv) = serde_json::from_str::<serde_json::Value>(&vs) {
-                if vv.get("verdict").and_then(|v| v.as_str()) == Some("redone") {
+        match std::fs::read_to_string(&verdict_path) {
+            Ok(vs) => {
+                let vv: serde_json::Value = serde_json::from_str(&vs)
+                    .map_err(|e| format!("failed to parse {}: {e}", verdict_path.display()))?;
+                let verdict = vv.get("verdict").and_then(|v| v.as_str()).ok_or_else(|| {
+                    format!(
+                        "verdict file {} is missing string verdict",
+                        verdict_path.display()
+                    )
+                })?;
+                if verdict == "redone" {
                     reasons.push("verdict: redone".to_string());
                 }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!("failed to read {}: {e}", verdict_path.display()));
             }
         }
 
@@ -518,10 +599,10 @@ fn resolve_group_base(
         let spec = run
             .base_sha
             .as_deref()
-            .or(run.base.as_deref())
-            .ok_or_else(|| format!("run {} has no base or base_sha in start.json", run.id))?;
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("run {} has no base_sha in start.json", run.id))?;
         let sha = git_rev_parse(root, &format!("{spec}^{{commit}}"))
-            .map_err(|e| format!("cannot resolve base {spec} for run {}: {e}", run.id))?;
+            .map_err(|e| format!("cannot resolve base_sha {spec} for run {}: {e}", run.id))?;
         root_bases.push((run.id.clone(), sha));
     }
 
@@ -545,29 +626,18 @@ fn resolve_group_base(
     Ok(first_sha.clone())
 }
 
-fn resolve_run_tip(root: &Path, wt_dir: &Path, run: &RunMeta) -> Result<String, String> {
-    let mut candidates = vec![format!("refs/heads/wip/{}", run.id)];
-    if let Some(ref b) = run.branch_hint {
-        let full = format!("refs/heads/{b}");
-        if !candidates.contains(&full) {
-            candidates.push(full);
-        }
-    }
-    for cand in &candidates {
-        if let Ok(sha) = git_rev_parse(root, &format!("{cand}^{{commit}}")) {
-            return Ok(sha);
-        }
-    }
-    let run_wt = wt_dir.join(&run.id);
-    if run_wt.is_dir() {
-        if let Ok(sha) = git_rev_parse(&run_wt, "HEAD^{commit}") {
-            return Ok(sha);
-        }
-    }
-    Err(format!(
-        "cannot resolve tip commit for run {} (expected branch wip/{})",
-        run.id, run.id
-    ))
+fn resolve_run_tip(root: &Path, run: &RunMeta) -> Result<String, String> {
+    let branch = match run.branch_hint.as_deref() {
+        Some(b) => b.to_string(),
+        None => format!("wip/{}", run.id),
+    };
+    let rev = format!("refs/heads/{branch}^{{commit}}");
+    git_rev_parse(root, &rev).map_err(|e| {
+        format!(
+            "cannot resolve tip commit for run {} on branch {branch}: {e}",
+            run.id
+        )
+    })
 }
 
 fn load_gate_config(root: &Path) -> Result<crate::config::DispatchConfig, String> {
@@ -600,18 +670,31 @@ fn prepare_worktree(
     worktree_dir: &Path,
     branch: &str,
     base_commit: &str,
+    expected_existing_tip: Option<&str>,
 ) -> Result<(), String> {
+    let wt_str = worktree_dir
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 worktree path: {}", worktree_dir.display()))?;
+
+    let branch_exists = git_branch_exists(root, branch)?;
+    if branch_exists {
+        let expected = expected_existing_tip.ok_or_else(|| {
+            format!(
+                "branch {branch} already exists without an expected commit from a combine record; refusing to delete it"
+            )
+        })?;
+        let actual = git_rev_parse(root, &format!("refs/heads/{branch}^{{commit}}"))
+            .map_err(|e| format!("cannot resolve existing branch {branch}: {e}"))?;
+        if actual != expected {
+            return Err(format!(
+                "branch {branch} has changed since blyte combined it (expected {expected}, actual {actual}); refusing to delete it"
+            ));
+        }
+    }
+
     if worktree_dir.exists() {
         let _ = git_cmd(worktree_dir, &["cherry-pick", "--abort"]);
-        let _ = git_cmd(
-            root,
-            &[
-                "worktree",
-                "remove",
-                "--force",
-                worktree_dir.to_str().unwrap_or_default(),
-            ],
-        );
+        let _ = git_cmd(root, &["worktree", "remove", "--force", wt_str]);
         if worktree_dir.exists() {
             std::fs::remove_dir_all(worktree_dir).map_err(|e| {
                 format!(
@@ -623,14 +706,11 @@ fn prepare_worktree(
     }
     let _ = git_cmd(root, &["worktree", "prune"]);
 
-    if git_branch_exists(root, branch)? {
+    if branch_exists {
         git_cmd(root, &["branch", "-D", branch])
             .map_err(|e| format!("failed to reset branch {branch}: {e}"))?;
     }
 
-    let wt_str = worktree_dir
-        .to_str()
-        .ok_or_else(|| format!("non-UTF-8 worktree path: {}", worktree_dir.display()))?;
     git_cmd(
         root,
         &["worktree", "add", "-b", branch, wt_str, base_commit],
@@ -710,28 +790,53 @@ fn git_rev_list_range(dir: &Path, base: &str, tip: &str) -> Result<Vec<String>, 
         .collect())
 }
 
-fn git_cherry_pick_x(worktree_dir: &Path, sha: &str) -> Result<Result<(), Vec<String>>, String> {
+fn git_cherry_pick_x(
+    worktree_dir: &Path,
+    run_id: &str,
+    sha: &str,
+) -> Result<Result<(), Vec<String>>, String> {
     let out = Command::new("git")
         .args(["cherry-pick", "-x", sha])
         .current_dir(worktree_dir)
         .output()
-        .map_err(|e| format!("failed to execute git cherry-pick -x {sha}: {e}"))?;
+        .map_err(|e| format!("failed to execute git cherry-pick -x {sha} for run {run_id}: {e}"))?;
     if out.status.success() {
         return Ok(Ok(()));
     }
-    let unmerged = Command::new("git")
+    let cp_stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let cp_stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let cp_detail = if !cp_stderr.is_empty() {
+        cp_stderr
+    } else {
+        cp_stdout
+    };
+
+    let diff_out = Command::new("git")
         .args(["diff", "--name-only", "--diff-filter=U"])
         .current_dir(worktree_dir)
         .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        .map_err(|e| {
+            format!(
+                "git cherry-pick -x {sha} for run {run_id} failed ({cp_detail}); failed to list unmerged files: {e}"
+            )
+        })?;
+    if !diff_out.status.success() {
+        let diff_stderr = String::from_utf8_lossy(&diff_out.stderr).trim().to_string();
+        return Err(format!(
+            "git cherry-pick -x {sha} for run {run_id} failed ({cp_detail}); git diff --name-only --diff-filter=U failed: {diff_stderr}"
+        ));
+    }
+    let unmerged: Vec<String> = String::from_utf8_lossy(&diff_out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    if unmerged.is_empty() {
+        return Err(format!(
+            "git cherry-pick -x {sha} for run {run_id} failed without unmerged files: {cp_detail}"
+        ));
+    }
     Ok(Err(unmerged))
 }
 
@@ -1373,5 +1478,315 @@ mod tests {
         .unwrap();
         assert_eq!(record.runs.len(), 1);
         assert_eq!(record.runs[0].id, "T1");
+    }
+
+    #[test]
+    fn unparseable_start_file_errors_with_file_name() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-bad-start",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        std::fs::write(root.join(".wt/broken.start.json"), "{not valid json").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-bad-start", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("broken.start.json"), "{err_str}");
+    }
+
+    #[test]
+    fn start_file_with_mismatched_id_errors_naming_both() {
+        let (dir, base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-id-mismatch",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        let bad_start = serde_json::json!({
+            "id": "T99",
+            "request": "req-id-mismatch",
+            "base": "main",
+            "base_sha": base_sha,
+            "started_at": 100,
+            "research": false,
+        });
+        std::fs::write(
+            root.join(".wt/T1.start.json"),
+            serde_json::to_string_pretty(&bad_start).unwrap(),
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-id-mismatch", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(
+            err_str.contains("T1") && err_str.contains("T99") && err_str.contains("T1.start.json"),
+            "{err_str}"
+        );
+    }
+
+    #[test]
+    fn start_file_without_started_at_errors_with_file_name() {
+        let (dir, base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-no-ts",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        let no_ts_start = serde_json::json!({
+            "id": "T1",
+            "request": "req-no-ts",
+            "base": "main",
+            "base_sha": base_sha,
+            "research": false,
+        });
+        std::fs::write(
+            root.join(".wt/T1.start.json"),
+            serde_json::to_string_pretty(&no_ts_start).unwrap(),
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-no-ts", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("T1.start.json"), "{err_str}");
+    }
+
+    #[test]
+    fn unparseable_summary_file_errors_with_file_name() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-bad-summary",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        std::fs::write(root.join(".wt/T1.json"), "{broken summary").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-bad-summary", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = std::str::from_utf8(&err).unwrap();
+        assert!(err_str.contains("T1.json"), "{err_str}");
+        assert!(!err_str.contains("unfinished"), "{err_str}");
+
+        std::fs::write(root.join(".wt/T1.json"), r#"{"id":"T1","branch":"wip/T1"}"#).unwrap();
+        out.clear();
+        err.clear();
+        let code = combine_in(root, "req-bad-summary", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = std::str::from_utf8(&err).unwrap();
+        assert!(err_str.contains("T1.json"), "{err_str}");
+    }
+
+    #[test]
+    fn unparseable_verdict_file_errors_with_file_name() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-bad-verdict",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        std::fs::write(root.join(".wt/T1.verdict.json"), "not json").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-bad-verdict", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = std::str::from_utf8(&err).unwrap();
+        assert!(err_str.contains("T1.verdict.json"), "{err_str}");
+
+        std::fs::write(root.join(".wt/T1.verdict.json"), r#"{"notes":"missing"}"#).unwrap();
+        out.clear();
+        err.clear();
+        let code = combine_in(root, "req-bad-verdict", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = std::str::from_utf8(&err).unwrap();
+        assert!(err_str.contains("T1.verdict.json"), "{err_str}");
+    }
+
+    #[test]
+    fn root_run_with_base_but_no_base_sha_errors_naming_run() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-no-sha",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        let start_without_sha = serde_json::json!({
+            "id": "T1",
+            "request": "req-no-sha",
+            "base": "main",
+            "started_at": 100,
+            "research": false,
+        });
+        std::fs::write(
+            root.join(".wt/T1.start.json"),
+            serde_json::to_string_pretty(&start_without_sha).unwrap(),
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-no-sha", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("T1"), "{err_str}");
+    }
+
+    #[test]
+    fn missing_run_branch_errors_even_when_worktree_head_exists() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-no-branch",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        let t1_wt = root.join(".wt/T1");
+        git(&t1_wt, &["checkout", "--detach", "HEAD"]);
+        git(root, &["branch", "-D", "wip/T1"]);
+        assert!(t1_wt.is_dir());
+        assert!(!git(&t1_wt, &["rev-parse", "HEAD"]).is_empty());
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-no-branch", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(
+            err_str.contains("T1") && err_str.contains("wip/T1"),
+            "{err_str}"
+        );
+    }
+
+    #[test]
+    fn empty_cherry_pick_fails_with_exit_2_not_conflict() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-empty-pick",
+            "main",
+            100,
+            &[("shared.txt", "identical change\n", "T1 identical")],
+            Some("verified"),
+        );
+        let tip_t2 = create_run_branch(
+            root,
+            "T2",
+            "req-empty-pick",
+            "main",
+            200,
+            &[("shared.txt", "identical change\n", "T2 identical")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-empty-pick", &mut out, &mut err);
+        assert_eq!(code, 2, "stderr: {}", String::from_utf8_lossy(&err));
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(
+            err_str.contains("T2") && err_str.contains(&tip_t2),
+            "{err_str}"
+        );
+        assert!(!root.join(".wt/combined/req-empty-pick.json").exists());
+
+        let combine_wt = root.join(".wt/combine-req-empty-pick");
+        let status = git(&combine_wt, &["status", "--porcelain"]);
+        assert!(status.is_empty(), "worktree should be clean: {status}");
+    }
+
+    #[test]
+    fn manually_modified_combined_branch_refuses_rebuild_and_preserves_commit() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-moved",
+            "main",
+            100,
+            &[("a.txt", "v1\n", "v1")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(combine_in(root, "req-moved", &mut out, &mut err), 0);
+        let combined_sha = git(root, &["rev-parse", "blyte/req-moved"]);
+
+        let combine_wt = root.join(".wt/combine-req-moved");
+        std::fs::write(combine_wt.join("manual.txt"), "hand-made\n").unwrap();
+        git(&combine_wt, &["add", "manual.txt"]);
+        git(
+            &combine_wt,
+            &["commit", "--no-gpg-sign", "-m", "hand-made commit"],
+        );
+        let hand_sha = git(root, &["rev-parse", "blyte/req-moved"]);
+        assert_ne!(hand_sha, combined_sha);
+
+        let t1_wt = root.join(".wt/T1");
+        std::fs::write(t1_wt.join("a.txt"), "v2\n").unwrap();
+        git(&t1_wt, &["add", "a.txt"]);
+        git(&t1_wt, &["commit", "--no-gpg-sign", "-m", "v2"]);
+
+        out.clear();
+        err.clear();
+        let code = combine_in(root, "req-moved", &mut out, &mut err);
+        assert_eq!(code, 2, "stderr: {}", String::from_utf8_lossy(&err));
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(
+            err_str.contains("blyte/req-moved")
+                && err_str.contains(&combined_sha)
+                && err_str.contains(&hand_sha),
+            "{err_str}"
+        );
+        assert_eq!(git(root, &["rev-parse", "blyte/req-moved"]), hand_sha);
+        assert!(combine_wt.join("manual.txt").exists());
     }
 }
