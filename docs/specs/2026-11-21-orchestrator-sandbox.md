@@ -53,9 +53,8 @@ the credentials and the network; `blyte review` flags `git push` in a log after 
    an `unsandboxed` flag with a one-line reason. Such a command does not run until the user has
    approved that exact text on the surface; a refusal is returned to the model as an error. In a
    one-shot run nobody can approve, so it is always refused. No flag lets an unattended run push.
-4. **The user can allow commands in advance.** `[orchestrator] allow_unsandboxed` in the user's
-   `~/.config/blyte/config.toml` (not the repository's `blyte.toml`, which the model can edit) lists
-   command prefixes that run without a question, for example `git push -u origin`. A rule matches
+4. **The user can allow commands in advance.** The file `~/.config/blyte/allow-unsandboxed` (the user's own, not the repository's `blyte.toml`,
+   which the model can edit) lists command prefixes, one per line, that run without a question, for example `git push -u origin`. A rule matches
    only one simple command: anything with a pipe, `;`, `&&`, a substitution or a redirect is always
    asked about. There are no built-in rules.
 
