@@ -171,17 +171,18 @@ fn create_run_branch(
     git(&wt, &["rev-parse", "HEAD"])
 }
 
-fn write_start_file(
+fn write_start_file_with_base(
     root: &Path,
     id: &str,
     request: Option<&str>,
+    base_ref: &str,
     base_sha: &str,
     started_at: u64,
     research: bool,
 ) {
     let mut obj = json!({
         "id": id,
-        "base": "main",
+        "base": base_ref,
         "base_sha": base_sha,
         "started_at": started_at,
         "research": research,
@@ -194,6 +195,17 @@ fn write_start_file(
         serde_json::to_string_pretty(&obj).unwrap() + "\n",
     )
     .unwrap();
+}
+
+fn write_start_file(
+    root: &Path,
+    id: &str,
+    request: Option<&str>,
+    base_sha: &str,
+    started_at: u64,
+    research: bool,
+) {
+    write_start_file_with_base(root, id, request, "main", base_sha, started_at, research);
 }
 
 fn write_summary(root: &Path, id: &str, outcome: &str, branch: Option<&str>) {
@@ -392,12 +404,20 @@ fn readiness_cases() {
     write_summary(root, "T8", "verified", Some("wip/T8"));
     write_checks(root, "T8", &[]);
     record_verdict(root, "T8", ReviewVerdict::Redone, "redo", 200).unwrap();
-    match request_readiness(root, "req-redone").unwrap() {
-        Readiness::Waiting { reasons } => {
-            assert!(reasons.iter().any(|r| r.contains("redone")), "{reasons:?}");
+    assert_eq!(
+        request_readiness(root, "req-redone").unwrap(),
+        Readiness::Waiting {
+            reasons: vec!["every run was redone".to_string()],
         }
-        Readiness::Ready => panic!("expected waiting for redone run"),
-    }
+    );
+
+    write_start_file(root, "T9", Some("req-redone"), &base, 109, false);
+    write_summary(root, "T9", "verified", Some("wip/T9"));
+    write_checks(root, "T9", &[]);
+    assert_eq!(
+        request_readiness(root, "req-redone").unwrap(),
+        Readiness::Ready
+    );
 }
 
 #[test]
@@ -1241,4 +1261,219 @@ fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file(
         .as_str()
         .unwrap()
         .contains("req-old-pub.published.json"));
+}
+
+#[test]
+fn redone_runs_left_out_regardless_of_outcome_and_reported_in_api() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "L1", &base, "a.txt", "a\n", "feat: keep a");
+    write_start_file(root, "L1", Some("req-leftout"), &base, now, false);
+    write_summary(root, "L1", "verified", Some("wip/L1"));
+    write_checks(root, "L1", &[]);
+
+    create_run_branch(root, "L2", &base, "b.txt", "b\n", "feat: drop verified");
+    write_start_file(root, "L2", Some("req-leftout"), &base, now + 1, false);
+    write_summary(root, "L2", "verified", Some("wip/L2"));
+    write_checks(root, "L2", &[]);
+    record_verdict(root, "L2", ReviewVerdict::Redone, "replaced", now + 2).unwrap();
+
+    create_run_branch(root, "L3", &base, "c.txt", "c\n", "feat: drop gate_failed");
+    write_start_file(root, "L3", Some("req-leftout"), &base, now + 3, false);
+    write_summary(root, "L3", "gate_failed", Some("wip/L3"));
+    record_verdict(root, "L3", ReviewVerdict::Redone, "replaced", now + 4).unwrap();
+
+    create_run_branch(root, "L4", &base, "d.txt", "d\n", "feat: drop unfinished");
+    write_start_file(root, "L4", Some("req-leftout"), &base, now + 5, false);
+    record_verdict(root, "L4", ReviewVerdict::Redone, "replaced", now + 6).unwrap();
+
+    create_run_branch(root, "N1", &base, "n.txt", "n\n", "feat: normal");
+    write_start_file(root, "N1", Some("req-normal"), &base, now + 7, false);
+    write_summary(root, "N1", "verified", Some("wip/N1"));
+    write_checks(root, "N1", &[]);
+
+    assert_eq!(
+        request_readiness(root, "req-leftout").unwrap(),
+        Readiness::Ready
+    );
+
+    let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(maybe_combine(&surface, "req-leftout").unwrap());
+    surface.requests.wait_for_idle("req-leftout");
+
+    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 10));
+    let items = reqs.as_array().unwrap();
+
+    let leftout_item = items
+        .iter()
+        .find(|v| v["request"] == "req-leftout")
+        .unwrap();
+    assert_eq!(leftout_item["state"], "combined");
+    assert_eq!(leftout_item["runs"], json!(["L1", "L2", "L3", "L4"]));
+    assert_eq!(leftout_item["left_out"], json!(["L2", "L3", "L4"]));
+    let commits = leftout_item["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["subject"], "feat: keep a");
+
+    let combine_wt = root.join(".wt/combine-req-leftout");
+    assert!(combine_wt.join("a.txt").exists());
+    assert!(!combine_wt.join("b.txt").exists());
+    assert!(!combine_wt.join("c.txt").exists());
+    assert!(!combine_wt.join("d.txt").exists());
+
+    let normal_item = items.iter().find(|v| v["request"] == "req-normal").unwrap();
+    assert_eq!(normal_item["left_out"], json!([]));
+}
+
+#[test]
+fn run_based_on_left_out_run_is_readiness_and_api_error() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    let t1_tip = create_run_branch(root, "D1", &base, "a.txt", "a\n", "feat: base run");
+    write_start_file(root, "D1", Some("req-dep-redone"), &base, now, false);
+    write_summary(root, "D1", "verified", Some("wip/D1"));
+    write_checks(root, "D1", &[]);
+    record_verdict(root, "D1", ReviewVerdict::Redone, "replaced", now + 1).unwrap();
+
+    create_run_branch(root, "D2", &t1_tip, "b.txt", "b\n", "feat: child run");
+    write_start_file_with_base(
+        root,
+        "D2",
+        Some("req-dep-redone"),
+        "wip/D1",
+        &t1_tip,
+        now + 2,
+        false,
+    );
+    write_summary(root, "D2", "verified", Some("wip/D2"));
+    write_checks(root, "D2", &[]);
+
+    let err = request_readiness(root, "req-dep-redone").unwrap_err();
+    assert!(err.contains("D1") && err.contains("D2"), "{err}");
+
+    let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 3));
+    let item = &reqs.as_array().unwrap()[0];
+    assert_eq!(item["request"], "req-dep-redone");
+    assert_eq!(item["state"], "error");
+    assert_eq!(item["left_out"], json!(["D1"]));
+    let api_err = item["error"].as_str().unwrap();
+    assert!(
+        api_err.contains("D1") && api_err.contains("D2"),
+        "{api_err}"
+    );
+}
+
+#[test]
+fn every_run_redone_is_waiting_in_readiness_and_api() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "AR1", &base, "a.txt", "a\n", "feat: a");
+    write_start_file(root, "AR1", Some("req-all-redone"), &base, now, false);
+    write_summary(root, "AR1", "verified", Some("wip/AR1"));
+    write_checks(root, "AR1", &[]);
+    record_verdict(root, "AR1", ReviewVerdict::Redone, "redo", now + 1).unwrap();
+
+    create_run_branch(root, "AR2", &base, "b.txt", "b\n", "feat: b");
+    write_start_file(root, "AR2", Some("req-all-redone"), &base, now + 2, false);
+    record_verdict(root, "AR2", ReviewVerdict::Redone, "redo", now + 3).unwrap();
+
+    assert_eq!(
+        request_readiness(root, "req-all-redone").unwrap(),
+        Readiness::Waiting {
+            reasons: vec!["every run was redone".to_string()],
+        }
+    );
+
+    let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&surface, "req-all-redone").unwrap());
+
+    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let item = &reqs.as_array().unwrap()[0];
+    assert_eq!(item["request"], "req-all-redone");
+    assert_eq!(item["state"], "waiting");
+    assert_eq!(item["waiting_reasons"], json!(["every run was redone"]));
+    assert_eq!(item["runs"], json!(["AR1", "AR2"]));
+    assert_eq!(item["left_out"], json!(["AR1", "AR2"]));
+}
+
+#[test]
+fn recording_redone_on_combined_run_triggers_recombine() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "RC1", &base, "a.txt", "a\n", "feat: add a");
+    write_start_file(root, "RC1", Some("req-recombine"), &base, now, false);
+    write_summary(root, "RC1", "verified", Some("wip/RC1"));
+    write_checks(root, "RC1", &[]);
+
+    create_run_branch(root, "RC2", &base, "b.txt", "b\n", "feat: add b");
+    write_start_file(root, "RC2", Some("req-recombine"), &base, now + 1, false);
+    write_summary(root, "RC2", "verified", Some("wip/RC2"));
+    write_checks(root, "RC2", &[]);
+
+    let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(maybe_combine(&surface, "req-recombine").unwrap());
+    surface.requests.wait_for_idle("req-recombine");
+
+    let reqs1 = parse_json(&route(&surface, &get("/api/requests"), now + 2));
+    let item1 = &reqs1.as_array().unwrap()[0];
+    assert_eq!(item1["state"], "combined");
+    assert_eq!(item1["left_out"], json!([]));
+    assert_eq!(item1["commits"].as_array().unwrap().len(), 2);
+
+    record_verdict(root, "RC2", ReviewVerdict::Redone, "replaced", now + 3).unwrap();
+
+    let reqs_stale = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let item_stale = &reqs_stale.as_array().unwrap()[0];
+    assert_eq!(item_stale["state"], "waiting");
+    assert_eq!(item_stale["left_out"], json!(["RC2"]));
+
+    assert!(maybe_combine(&surface, "req-recombine").unwrap());
+    surface.requests.wait_for_idle("req-recombine");
+
+    let reqs2 = parse_json(&route(&surface, &get("/api/requests"), now + 5));
+    let item2 = &reqs2.as_array().unwrap()[0];
+    assert_eq!(item2["state"], "combined");
+    assert_eq!(item2["runs"], json!(["RC1", "RC2"]));
+    assert_eq!(item2["left_out"], json!(["RC2"]));
+    let commits = item2["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["subject"], "feat: add a");
+
+    let combine_wt = root.join(".wt/combine-req-recombine");
+    assert!(combine_wt.join("a.txt").exists());
+    assert!(!combine_wt.join("b.txt").exists());
+
+    assert!(!maybe_combine(&surface, "req-recombine").unwrap());
+}
+
+#[test]
+fn unreadable_verdict_file_is_error_in_readiness_and_api() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "BV1", &base, "a.txt", "a\n", "feat: a");
+    write_start_file(root, "BV1", Some("req-bad-verdict"), &base, now, false);
+    write_summary(root, "BV1", "verified", Some("wip/BV1"));
+    write_checks(root, "BV1", &[]);
+    std::fs::write(root.join(".wt/BV1.verdict.json"), "{broken json").unwrap();
+
+    let err = request_readiness(root, "req-bad-verdict").unwrap_err();
+    assert!(err.contains("BV1.verdict.json"), "{err}");
+
+    let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let item = &reqs.as_array().unwrap()[0];
+    assert_eq!(item["request"], "req-bad-verdict");
+    assert_eq!(item["state"], "error");
+    assert!(item["error"].as_str().unwrap().contains("BV1.verdict.json"));
 }

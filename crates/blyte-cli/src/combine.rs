@@ -10,7 +10,41 @@ use blyte_agent::run::{gate_steps, run_gate_steps};
 use blyte_agent::shell::{LocalShell, Output, Shell};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::CombineArgs;
+use crate::cli::{CombineArgs, ReviewVerdict};
+
+pub(crate) fn is_left_out_verdict(verdict: Option<ReviewVerdict>) -> bool {
+    verdict == Some(ReviewVerdict::Redone)
+}
+
+pub(crate) fn is_run_left_out(root: &Path, id: &str) -> Result<bool, String> {
+    Ok(is_left_out_verdict(crate::queue_actions::read_verdict(
+        root, id,
+    )?))
+}
+
+pub(crate) fn base_run_id(base: Option<&str>) -> Option<&str> {
+    let base = base?;
+    let clean = base.strip_prefix("refs/heads/").unwrap_or(base);
+    clean.strip_prefix("wip/")
+}
+
+pub(crate) fn check_not_based_on_left_out(
+    root: &Path,
+    run_id: &str,
+    base: Option<&str>,
+    left_out_ids: &BTreeSet<&str>,
+) -> Result<(), String> {
+    let Some(parent_id) = base_run_id(base) else {
+        return Ok(());
+    };
+    let parent_left_out = left_out_ids.contains(parent_id) || is_run_left_out(root, parent_id)?;
+    if parent_left_out {
+        return Err(format!(
+            "run {run_id} was dispatched from left-out run {parent_id} (branch wip/{parent_id})"
+        ));
+    }
+    Ok(())
+}
 
 /// Final state recorded in `.wt/combined/<request>.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,7 +182,7 @@ pub fn combine_in(root: &Path, request: &str, out: &mut impl Write, err: &mut im
 
 fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String> {
     let wt_dir = root.join(".wt");
-    let runs = discover_and_validate_runs(&wt_dir, request)?;
+    let runs = discover_and_validate_runs(root, request)?;
     let ordered = order_runs(runs)?;
     let run_id_set: BTreeSet<&str> = ordered.iter().map(|r| r.id.as_str()).collect();
 
@@ -344,13 +378,14 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
     Ok(record)
 }
 
-fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMeta>, String> {
+fn discover_and_validate_runs(root: &Path, request: &str) -> Result<Vec<RunMeta>, String> {
+    let wt_dir = root.join(".wt");
     if !wt_dir.is_dir() {
         return Err(format!("no runs found for request {request}"));
     }
 
     let mut entries: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(wt_dir)
+    for entry in std::fs::read_dir(&wt_dir)
         .map_err(|e| format!("failed to read {}: {e}", wt_dir.display()))?
     {
         let entry =
@@ -368,6 +403,8 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
 
     let mut found = Vec::new();
     let mut bad_runs = Vec::new();
+    let mut active_bases: Vec<(String, Option<String>)> = Vec::new();
+    let mut left_out_ids: BTreeSet<String> = BTreeSet::new();
 
     for path in entries {
         let content = std::fs::read_to_string(&path)
@@ -409,6 +446,10 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
             continue;
         }
         let id = file_id.to_string();
+        if is_run_left_out(root, &id)? {
+            left_out_ids.insert(id);
+            continue;
+        }
         let started_at = val
             .get("started_at")
             .and_then(|v| v.as_u64())
@@ -426,6 +467,7 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
             .get("base_sha")
             .and_then(|v| v.as_str())
             .map(ToString::to_string);
+        active_bases.push((id.clone(), base.clone()));
 
         let summary_path = wt_dir.join(format!("{id}.json"));
         let summary: Option<serde_json::Value> = match std::fs::read_to_string(&summary_path) {
@@ -468,27 +510,6 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
             }
         }
 
-        let verdict_path = wt_dir.join(format!("{id}.verdict.json"));
-        match std::fs::read_to_string(&verdict_path) {
-            Ok(vs) => {
-                let vv: serde_json::Value = serde_json::from_str(&vs)
-                    .map_err(|e| format!("failed to parse {}: {e}", verdict_path.display()))?;
-                let verdict = vv.get("verdict").and_then(|v| v.as_str()).ok_or_else(|| {
-                    format!(
-                        "verdict file {} is missing string verdict",
-                        verdict_path.display()
-                    )
-                })?;
-                if verdict == "redone" {
-                    reasons.push("verdict: redone".to_string());
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(format!("failed to read {}: {e}", verdict_path.display()));
-            }
-        }
-
         if !reasons.is_empty() {
             bad_runs.push((started_at, id, reasons.join(", ")));
         } else {
@@ -500,6 +521,11 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
                 branch_hint,
             });
         }
+    }
+
+    let left_out_refs: BTreeSet<&str> = left_out_ids.iter().map(String::as_str).collect();
+    for (id, base) in &active_bases {
+        check_not_based_on_left_out(root, id, base.as_deref(), &left_out_refs)?;
     }
 
     if !bad_runs.is_empty() {
@@ -515,6 +541,11 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
     }
 
     if found.is_empty() {
+        if !left_out_ids.is_empty() {
+            return Err(format!(
+                "cannot combine request {request}: every run was redone"
+            ));
+        }
         return Err(format!("no runs found for request {request}"));
     }
 
@@ -522,8 +553,7 @@ fn discover_and_validate_runs(wt_dir: &Path, request: &str) -> Result<Vec<RunMet
 }
 
 fn parent_run_id<'a>(run: &'a RunMeta, run_ids: &BTreeSet<&str>) -> Option<&'a str> {
-    let base = run.base.as_deref()?;
-    let other = base.strip_prefix("wip/")?;
+    let other = base_run_id(run.base.as_deref())?;
     if run_ids.contains(other) {
         Some(other)
     } else {
@@ -1191,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_unverified_and_redone_runs_are_refused_by_name() {
+    fn unfinished_and_unverified_runs_are_refused_while_redone_is_left_out() {
         let (dir, _base_sha) = init_repo("true");
         let root = dir.path();
         create_run_branch(
@@ -1230,7 +1260,7 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = combine_in(root, "req-bad", &mut out, &mut err);
-        assert_ne!(code, 0);
+        assert_eq!(code, 2);
 
         let err_str = String::from_utf8(err).unwrap();
         assert!(
@@ -1241,10 +1271,7 @@ mod tests {
             err_str.contains("T2") && err_str.contains("gate_failed"),
             "{err_str}"
         );
-        assert!(
-            err_str.contains("T3") && err_str.contains("redone"),
-            "{err_str}"
-        );
+        assert!(!err_str.contains("T3"), "{err_str}");
     }
 
     #[test]
@@ -1788,5 +1815,214 @@ mod tests {
         );
         assert_eq!(git(root, &["rev-parse", "blyte/req-moved"]), hand_sha);
         assert!(combine_wt.join("manual.txt").exists());
+    }
+
+    #[test]
+    fn redone_runs_are_left_out_regardless_of_outcome() {
+        let (dir, _base_sha) =
+            init_repo("test -f a.txt && test ! -f b.txt && test ! -f c.txt && test ! -f d.txt");
+        let root = dir.path();
+        let tip_t1 = create_run_branch(
+            root,
+            "T1",
+            "req-redone-mix",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        create_run_branch(
+            root,
+            "T2",
+            "req-redone-mix",
+            "main",
+            200,
+            &[("b.txt", "b\n", "add b")],
+            Some("verified"),
+        );
+        create_run_branch(
+            root,
+            "T3",
+            "req-redone-mix",
+            "main",
+            300,
+            &[("c.txt", "c\n", "add c")],
+            Some("gate_failed"),
+        );
+        create_run_branch(
+            root,
+            "T4",
+            "req-redone-mix",
+            "main",
+            400,
+            &[("d.txt", "d\n", "add d")],
+            None,
+        );
+        for id in ["T2", "T3", "T4"] {
+            std::fs::write(
+                root.join(format!(".wt/{id}.verdict.json")),
+                r#"{"verdict":"redone","notes":"replaced","ts":10}"#,
+            )
+            .unwrap();
+        }
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-redone-mix", &mut out, &mut err);
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
+
+        let record: CombineRecord = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".wt/combined/req-redone-mix.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.state, CombineState::Combined);
+        assert_eq!(
+            record.runs,
+            vec![CombinedRun {
+                id: "T1".to_string(),
+                tip: tip_t1,
+            }]
+        );
+        let combine_wt = root.join(".wt/combine-req-redone-mix");
+        assert!(combine_wt.join("a.txt").exists());
+        assert!(!combine_wt.join("b.txt").exists());
+        assert!(!combine_wt.join("c.txt").exists());
+        assert!(!combine_wt.join("d.txt").exists());
+    }
+
+    #[test]
+    fn run_based_on_left_out_run_errors_naming_both() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-dep-redone",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        create_run_branch(
+            root,
+            "T2",
+            "req-dep-redone",
+            "wip/T1",
+            200,
+            &[("b.txt", "b\n", "add b")],
+            Some("verified"),
+        );
+        std::fs::write(
+            root.join(".wt/T1.verdict.json"),
+            r#"{"verdict":"redone","notes":"replaced","ts":10}"#,
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-dep-redone", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(
+            err_str.contains("T1") && err_str.contains("T2"),
+            "{err_str}"
+        );
+        assert!(!root.join(".wt/combined/req-dep-redone.json").exists());
+    }
+
+    #[test]
+    fn every_run_redone_exits_2_saying_so() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-all-redone",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        create_run_branch(
+            root,
+            "T2",
+            "req-all-redone",
+            "main",
+            200,
+            &[("b.txt", "b\n", "add b")],
+            Some("gate_failed"),
+        );
+        for id in ["T1", "T2"] {
+            std::fs::write(
+                root.join(format!(".wt/{id}.verdict.json")),
+                r#"{"verdict":"redone","notes":"replaced","ts":10}"#,
+            )
+            .unwrap();
+        }
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-all-redone", &mut out, &mut err);
+        assert_eq!(code, 2);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("every run was redone"), "{err_str}");
+        assert!(!root.join(".wt/combined/req-all-redone.json").exists());
+    }
+
+    #[test]
+    fn recording_redone_on_combined_run_rebuilds_without_it() {
+        let (dir, _base_sha) = init_repo("true");
+        let root = dir.path();
+        let tip_t1 = create_run_branch(
+            root,
+            "T1",
+            "req-recombine",
+            "main",
+            100,
+            &[("a.txt", "a\n", "add a")],
+            Some("verified"),
+        );
+        create_run_branch(
+            root,
+            "T2",
+            "req-recombine",
+            "main",
+            200,
+            &[("b.txt", "b\n", "add b")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(combine_in(root, "req-recombine", &mut out, &mut err), 0);
+        let first_head = git(root, &["rev-parse", "blyte/req-recombine"]);
+        let combine_wt = root.join(".wt/combine-req-recombine");
+        assert!(combine_wt.join("a.txt").exists());
+        assert!(combine_wt.join("b.txt").exists());
+
+        std::fs::write(
+            root.join(".wt/T2.verdict.json"),
+            r#"{"verdict":"redone","notes":"replaced","ts":10}"#,
+        )
+        .unwrap();
+
+        out.clear();
+        err.clear();
+        assert_eq!(combine_in(root, "req-recombine", &mut out, &mut err), 0);
+        let second_head = git(root, &["rev-parse", "blyte/req-recombine"]);
+        assert_ne!(second_head, first_head);
+        let record: CombineRecord = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".wt/combined/req-recombine.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            record.runs,
+            vec![CombinedRun {
+                id: "T1".to_string(),
+                tip: tip_t1,
+            }]
+        );
+        assert!(combine_wt.join("a.txt").exists());
+        assert!(!combine_wt.join("b.txt").exists());
     }
 }

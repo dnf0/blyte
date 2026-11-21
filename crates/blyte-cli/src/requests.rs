@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -133,6 +133,7 @@ pub struct AttemptRecord {
 pub struct RequestStatus {
     pub request: String,
     pub runs: Vec<String>,
+    pub left_out: Vec<String>,
     pub state: String,
     pub waiting_reasons: Vec<String>,
     pub branch: Option<String>,
@@ -159,6 +160,7 @@ pub enum RequestActionError {
 struct StartRunInfo {
     id: String,
     request: Option<String>,
+    base: Option<String>,
     started_at: u64,
     is_research: bool,
 }
@@ -209,6 +211,16 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartRunInfo, String> 
             ));
         }
     };
+    let base = match val.get("base") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(format!(
+                "start file {} has non-string base field",
+                path.display()
+            ));
+        }
+    };
     let is_research = is_research_start(wt_dir, file_id, &val);
     let started_at = match val.get("started_at") {
         Some(v) => v
@@ -219,6 +231,7 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartRunInfo, String> 
     Ok(StartRunInfo {
         id: file_id.to_string(),
         request,
+        base,
         started_at,
         is_research,
     })
@@ -285,8 +298,35 @@ pub fn request_readiness(root: &Path, request: &str) -> Result<Readiness, String
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    let mut reasons = Vec::new();
+    let mut active_runs = Vec::new();
+    let mut left_out_ids: BTreeSet<String> = BTreeSet::new();
     for run in matched_runs {
+        let verdict = crate::queue_actions::read_verdict(root, &run.id)?;
+        if crate::combine::is_left_out_verdict(verdict) {
+            left_out_ids.insert(run.id);
+        } else {
+            active_runs.push((run, verdict));
+        }
+    }
+
+    if active_runs.is_empty() {
+        return Ok(Readiness::Waiting {
+            reasons: vec!["every run was redone".to_string()],
+        });
+    }
+
+    let left_out_refs: BTreeSet<&str> = left_out_ids.iter().map(String::as_str).collect();
+    for (run, _) in &active_runs {
+        crate::combine::check_not_based_on_left_out(
+            root,
+            &run.id,
+            run.base.as_deref(),
+            &left_out_refs,
+        )?;
+    }
+
+    let mut reasons = Vec::new();
+    for (run, verdict) in active_runs {
         let id = &run.id;
         let summary_path = wt_dir.join(format!("{id}.json"));
         let outcome = match std::fs::read_to_string(&summary_path) {
@@ -321,11 +361,6 @@ pub fn request_readiness(root: &Path, request: &str) -> Result<Readiness, String
         let (checks_recorded, flags) = crate::replay::read_checks(&checks_path)
             .map_err(|e| format!("{}: {e}", checks_path.display()))?;
 
-        let verdict = crate::queue_actions::read_verdict(root, id)?;
-        if verdict == Some(ReviewVerdict::Redone) {
-            reasons.push(format!("{id}: verdict redone"));
-        }
-
         if crate::queue_actions::read_hold(root, id)?.is_some() {
             reasons.push(format!("{id}: on hold"));
         }
@@ -341,10 +376,7 @@ pub fn request_readiness(root: &Path, request: &str) -> Result<Readiness, String
                         verdict,
                         Some(ReviewVerdict::Accepted | ReviewVerdict::Fixed)
                     );
-                    if card != "clean"
-                        && !cleared_by_verdict
-                        && verdict != Some(ReviewVerdict::Redone)
-                    {
+                    if card != "clean" && !cleared_by_verdict {
                         reasons.push(format!("{id}: flagged ({})", flags.join("; ")));
                     }
                 }
@@ -490,6 +522,9 @@ fn resolve_current_run_tips(root: &Path, request: &str) -> Result<Vec<CombinedRu
     for path in entries {
         let info = parse_start_file(&wt_dir, &path)?;
         if info.is_research || info.request.as_deref() != Some(request) {
+            continue;
+        }
+        if crate::combine::is_run_left_out(root, &info.id)? {
             continue;
         }
         let summary_path = wt_dir.join(format!("{}.json", info.id));
@@ -907,6 +942,17 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
     let record_res = load_combine_record(&surface.root, &request);
     let published_res = load_published_record(&surface.root, &request);
     let attempt_res = load_attempt_record(&surface.root, &request);
+    let left_out_res: Result<Vec<String>, String> = runs
+        .iter()
+        .filter_map(
+            |id| match crate::combine::is_run_left_out(&surface.root, id) {
+                Ok(true) => Some(Ok(id.clone())),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            },
+        )
+        .collect();
+    let left_out = left_out_res.as_ref().ok().cloned().unwrap_or_default();
 
     let (pushed, pull_request_url) = match (&published_res, &record_res) {
         (Ok(p), Ok(Some(rec))) => (
@@ -920,6 +966,7 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
     let mut status = RequestStatus {
         request: request.clone(),
         runs,
+        left_out,
         state: String::new(),
         waiting_reasons: Vec::new(),
         branch: None,
@@ -941,6 +988,12 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
         if let Ok(Some(rec)) = record_res {
             populate_record_metadata(&surface.root, &rec, &mut status);
         }
+        return status;
+    }
+
+    if let Err(e) = left_out_res {
+        status.state = "error".to_string();
+        status.error = Some(e);
         return status;
     }
 
