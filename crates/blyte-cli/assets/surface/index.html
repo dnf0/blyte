@@ -1,0 +1,5094 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>blyte</title>
+  <style>
+    :root {
+      --color-page: #ECEFF0;
+      --color-card: #F4F6F7;
+      --color-line: #C9D0D4;
+      --color-line-dark: #B3BCC1;
+      --color-text: #2A3238;
+      --color-strong: #141A1E;
+      --color-muted: #56616A;
+      --color-faint: #8A959C;
+
+      --status-running: #A6441A;
+      --status-amber: #8A6A12;
+      --status-jade: #2E7A4D;
+      --status-jade-label: #2E7A4D;
+      --status-red: #A93A36;
+      --status-red-label: #A93A36;
+      --status-grey: #8A959C;
+
+      --focus-ring: #A6441A;
+      --brand-rust: #A6441A;
+      --brand-rust-soft: #E8C8B7;
+
+      --font-sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+      --page: #ECEFF0;
+      --card: #F4F6F7;
+      --line: #C9D0D4;
+      --line-2: #B3BCC1;
+      --text: #2A3238;
+      --strong: #141A1E;
+      --muted: #56616A;
+      --faint: #8A959C;
+      --rust: #A6441A;
+      --rust-soft: #E8C8B7;
+      --pass: #2E7A4D;
+      --pass-soft: #CFE3D6;
+      --fail: #A93A36;
+      --fail-soft: #F0D3D1;
+      --amber: #8A6A12;
+      --amber-soft: #EFE3BF;
+      --merged: #3E6D64;
+      --merged-soft: #C3D6D1;
+      --research: #3B6EA5;
+      --research-soft: #D6E4F0;
+      --lane: #E6EAEC;
+      --ink: #141A1E;
+      --sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-page: #0F1315;
+        --color-card: #171D20;
+        --color-line: #283136;
+        --color-line-dark: #36414A;
+        --color-text: #C9D1D5;
+        --color-strong: #E2E7E9;
+        --color-muted: #93A0A7;
+        --color-faint: #5F6C73;
+
+        --status-running: #E27A44;
+        --status-amber: #D9B45A;
+        --status-jade: #6CC08E;
+        --status-jade-label: #6CC08E;
+        --status-red: #E27B76;
+        --status-red-label: #E27B76;
+        --status-grey: #5F6C73;
+
+        --focus-ring: #E27A44;
+        --brand-rust: #E27A44;
+        --brand-rust-soft: #4A2B1D;
+
+        --page: #0F1315;
+        --card: #171D20;
+        --line: #283136;
+        --line-2: #36414A;
+        --text: #C9D1D5;
+        --strong: #E2E7E9;
+        --muted: #93A0A7;
+        --faint: #5F6C73;
+        --rust: #E27A44;
+        --rust-soft: #4A2B1D;
+        --pass: #6CC08E;
+        --pass-soft: #1E3428;
+        --fail: #E27B76;
+        --fail-soft: #3A2120;
+        --amber: #D9B45A;
+        --amber-soft: #3A3218;
+        --merged: #7FB2A6;
+        --merged-soft: #1F3431;
+        --research: #6FA3D8;
+        --research-soft: #1E2E3E;
+        --lane: #131A1D;
+        --ink: #E2E7E9;
+      }
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background-color: var(--color-page);
+      color: var(--color-text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    button, input, select {
+      font-family: inherit;
+      font-size: inherit;
+      color: inherit;
+    }
+
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: 2px;
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+    }
+
+    .nums {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .fatal-error {
+      max-width: 680px;
+      margin: 64px auto;
+      padding: 20px 24px;
+      background: var(--fail-soft);
+      border: 1px solid var(--fail);
+      border-radius: 6px;
+      color: var(--strong);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .shell {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #bar {
+      background: var(--color-card);
+      border-bottom: 1px solid var(--color-line);
+      padding: 10px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .bar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .bar-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-right: 6px;
+    }
+
+    .m-i { fill: var(--color-strong); }
+    .m-s { fill: var(--brand-rust-soft); }
+    .m-r { fill: var(--brand-rust); }
+
+    .brand-word {
+      font-weight: 900;
+      font-variation-settings: "wdth" 125;
+      letter-spacing: -0.02em;
+      font-size: 17px;
+      color: var(--color-strong);
+      line-height: 1;
+    }
+
+    .brand-sub {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+    }
+
+    .btn {
+      padding: 5px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      line-height: 1.3;
+    }
+
+    .btn:hover:not(:disabled) {
+      border-color: var(--brand-rust);
+    }
+
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    .btn-primary {
+      background: var(--brand-rust);
+      border-color: var(--brand-rust);
+      color: #FFFFFF;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      filter: brightness(1.08);
+    }
+
+    .btn-pass {
+      background: var(--pass-soft);
+      border-color: var(--pass);
+      color: var(--color-strong);
+    }
+
+    .btn-warn {
+      background: var(--amber-soft);
+      border-color: var(--amber);
+      color: var(--color-strong);
+    }
+
+    .btn-danger {
+      background: var(--fail-soft);
+      border-color: var(--fail);
+      color: var(--color-strong);
+    }
+
+    .btn-ghost {
+      background: transparent;
+      border-color: var(--color-line);
+      color: var(--color-muted);
+    }
+
+    .btn-ghost:hover:not(:disabled) {
+      color: var(--color-strong);
+      border-color: var(--color-line-dark);
+    }
+
+    select.ctrl-select {
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .lost-server {
+      background: var(--status-red);
+      color: #FFFFFF;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .lost-server[hidden] {
+      display: none;
+    }
+
+    .repo-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-muted);
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .working-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      border: 1px solid var(--brand-rust);
+      color: var(--brand-rust);
+    }
+
+    .working-pill[hidden] {
+      display: none;
+    }
+
+    .inline-error {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--status-red);
+    }
+
+    .inline-error[hidden] {
+      display: none;
+    }
+
+    .metric {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-text);
+    }
+
+    .metric-label {
+      color: var(--color-muted);
+      font-size: 11px;
+    }
+
+    .metric-val {
+      font-weight: 500;
+      color: var(--color-strong);
+    }
+
+    .metric.over-limit {
+      background: var(--amber-soft);
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+
+    .metric.over-limit .metric-label,
+    .metric.over-limit .metric-val {
+      color: var(--amber);
+      font-weight: 600;
+    }
+
+    .workspace {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
+      gap: 0;
+    }
+
+    .workspace.map-wide {
+      grid-template-columns: minmax(0, 2fr) minmax(300px, 3fr);
+    }
+
+    .pane-left {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-right: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .pane-right {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--lane);
+    }
+
+    .pane-head {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--color-card);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    #mode {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .mode-btn {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 5px 12px;
+      border: 1px solid var(--color-line-dark);
+      border-radius: 4px;
+      color: var(--color-muted);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .mode-btn:hover {
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+    }
+
+    .mode-btn.active {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+      font-weight: 500;
+    }
+
+    .focus-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      color: var(--color-strong);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .focus-chip button {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      padding: 0 2px;
+      color: var(--color-strong);
+      font-weight: 700;
+    }
+
+    #conversation {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .thread {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .thread-empty {
+      color: var(--color-muted);
+      font-size: 13px;
+      padding: 24px 0;
+      text-align: center;
+    }
+
+    .msg-line {
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.45;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+    }
+
+    .msg-line.dispatch {
+      background: transparent;
+      border: none;
+      border-left: 2px solid var(--color-line-dark);
+      border-radius: 0;
+      padding: 3px 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    .msg-line.user {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+      align-self: flex-end;
+      max-width: 85%;
+    }
+
+    .msg-line.assistant {
+      background: var(--color-card);
+      border-color: var(--color-line);
+      color: var(--color-text);
+      align-self: flex-start;
+      max-width: 85%;
+    }
+
+    .msg-meta {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--color-muted);
+      margin-bottom: 2px;
+    }
+
+    .msg-report-tag {
+      display: inline-block;
+      margin-top: 4px;
+      margin-right: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-muted);
+    }
+
+    .msg-queued-badge {
+      display: inline-block;
+      margin-left: 6px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--amber-soft);
+      border: 1px solid var(--amber);
+      color: var(--amber);
+    }
+
+    .turn-body.report-body {
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .entry-tool {
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--color-text);
+    }
+
+    .entry-tool + .entry-tool,
+    .entry-tool + .entry-tool-matched + .entry-tool {
+      margin-top: -5px;
+    }
+
+    .entry-tool-matched[hidden] {
+      display: none;
+    }
+
+    .tool-details {
+      width: 100%;
+    }
+
+    .tool-summary {
+      list-style: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 9px;
+      min-width: 0;
+    }
+
+    .tool-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .tool-name {
+      font-weight: 600;
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .tool-input-first {
+      color: var(--color-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .tool-status {
+      flex-shrink: 0;
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      max-width: 45%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tool-running {
+      background: var(--brand-rust-soft);
+      color: var(--brand-rust);
+    }
+
+    .tool-done {
+      background: var(--color-page);
+      color: var(--color-muted);
+    }
+
+    .tool-error {
+      background: var(--red-soft);
+      color: var(--status-red);
+      font-weight: 600;
+    }
+
+    .tool-input-full {
+      margin: 0;
+      padding: 6px 10px 8px;
+      border-top: 1px solid var(--color-line);
+      background: var(--color-page);
+      color: var(--color-text);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    .entry-retry {
+      padding: 5px 10px;
+      border-radius: 4px;
+      background: var(--amber-soft);
+      border: 1px solid var(--amber);
+      color: var(--amber);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+    }
+
+    .entry-error {
+      padding: 6px 10px;
+      border-radius: 4px;
+      background: var(--red-soft);
+      border: 1px solid var(--status-red);
+      color: var(--status-red);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .entry-quiet {
+      padding: 2px 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .composer-error {
+      padding: 6px 16px 0;
+      background: var(--color-card);
+    }
+
+    .attached-reports {
+      border-top: 1px solid var(--color-line);
+      background: var(--color-card);
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .attached-report-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--research-soft);
+      border: 1px solid var(--research);
+      color: var(--color-strong);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .attached-report-chip button {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      padding: 0 2px;
+      color: var(--color-strong);
+      font-weight: 700;
+    }
+
+    .composer {
+      border-top: 1px solid var(--color-line);
+      background: var(--color-card);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .composer-about {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      color: var(--color-strong);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .composer input[type="text"] {
+      flex: 1;
+      min-width: 0;
+      padding: 7px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-size: 13px;
+    }
+
+    .review-wrap {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .queue-error {
+      margin: 10px 16px 0;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: var(--red-soft);
+      border: 1px solid var(--status-red);
+      color: var(--status-red);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .queue-error[hidden] {
+      display: none;
+    }
+
+    #queue {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      transition: opacity 0.15s ease;
+    }
+
+    #queue.queue-dimmed {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
+    .running-section {
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .running-list {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .running-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 14px;
+      border-top: 1px solid var(--color-line);
+      font-size: 12px;
+      min-width: 0;
+    }
+
+    .running-row:first-child {
+      border-top: none;
+    }
+
+    .running-turns {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      flex-shrink: 0;
+    }
+
+    .running-activity {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .gate-pill {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--amber-soft);
+      border: 1px solid var(--amber);
+      color: var(--amber);
+      flex-shrink: 0;
+    }
+
+    .held-section {
+      border-top: 1px solid var(--color-line);
+      padding-top: 6px;
+    }
+
+    .held-heading {
+      padding: 4px 14px 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+    }
+
+    .card-error {
+      margin-top: 6px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      background: var(--red-soft);
+      border: 1px solid var(--status-red);
+      color: var(--status-red);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .diff-pre {
+      max-height: 360px;
+    }
+
+    .queue-group {
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .queue-group.focused {
+      border-color: var(--brand-rust);
+      box-shadow: 0 0 0 1px var(--brand-rust);
+    }
+
+    .group-head {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--lane);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .group-name {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--color-strong);
+    }
+
+    .group-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .group-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .group-body {
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .clean-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 7px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .clean-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .run-id {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .run-title {
+      font-size: 13px;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .row-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .exception-wrap,
+    .research-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .exception-card {
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line-dark);
+      border-left: 3px solid var(--amber);
+      background: var(--color-page);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .exception-card.is-failed {
+      border-left-color: var(--fail);
+    }
+
+    .exception-card.is-held {
+      border-left-color: var(--brand-rust);
+    }
+
+    .research-card {
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line-dark);
+      border-left: 3px solid var(--research);
+      background: var(--color-page);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .research-card.is-held {
+      border-left-color: var(--brand-rust);
+    }
+
+    .research-card.is-reading {
+      border-color: var(--research);
+      box-shadow: 0 0 0 1px var(--research);
+      background: var(--research-soft);
+    }
+
+    .decided-row.is-reading {
+      border-style: solid;
+      border-color: var(--research);
+      background: var(--research-soft);
+      color: var(--color-strong);
+    }
+
+    .research-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--research-soft);
+      border: 1px solid var(--research);
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .research-summary {
+      margin: 2px 0;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .research-hint {
+      margin: 2px 0;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--color-muted);
+    }
+
+    .hold-note-first {
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 3px;
+      background: var(--brand-rust-soft);
+      color: var(--color-strong);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 4px;
+      flex-shrink: 0;
+    }
+
+    .exc-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .exc-title-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .outcome-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--color-card);
+      border: 1px solid var(--color-line-dark);
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .outcome-pill.verified {
+      background: var(--pass-soft);
+      border-color: var(--pass);
+    }
+
+    .outcome-pill.failed {
+      background: var(--fail-soft);
+      border-color: var(--fail);
+    }
+
+    .exc-flags {
+      min-height: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin: 2px 0;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--color-muted);
+    }
+
+    .exc-flag-item {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--color-text);
+    }
+
+    .exc-flag-more {
+      color: var(--color-muted);
+      font-style: italic;
+    }
+
+    .exc-not-recorded {
+      color: var(--amber);
+      font-weight: 500;
+    }
+
+    .exc-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .recorded-verdict {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      white-space: nowrap;
+    }
+
+    .note-prompt {
+      margin-top: 4px;
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--brand-rust);
+      background: var(--color-card);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .note-prompt input[type="text"] {
+      flex: 1;
+      min-width: 180px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-size: 12px;
+    }
+
+    .note-error {
+      width: 100%;
+      font-size: 11px;
+      color: var(--fail);
+      font-family: var(--font-mono);
+    }
+
+    .decided-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px dashed var(--color-line);
+      background: transparent;
+      color: var(--color-muted);
+      font-size: 12px;
+    }
+
+    .decided-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+      flex-wrap: wrap;
+    }
+
+    .decision-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--merged-soft);
+      color: var(--color-strong);
+      flex-shrink: 0;
+    }
+
+    .details-box {
+      margin-top: 6px;
+      padding: 10px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .details-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+      margin-bottom: 2px;
+    }
+
+    .details-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--color-page);
+      border: 1px solid var(--color-line);
+      border-radius: 4px;
+      padding: 6px 8px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: var(--font-sans);
+      font-size: 12px;
+      color: var(--color-text);
+    }
+
+    .details-list {
+      margin: 0;
+      padding-left: 16px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-text);
+    }
+
+    .map-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--color-muted);
+      margin: 0;
+    }
+
+    #map {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      align-content: start;
+      gap: 10px;
+    }
+
+    .map-box {
+      text-align: left;
+      padding: 12px;
+      border-radius: 6px;
+      border: 1.5px solid var(--color-line-dark);
+      background: var(--color-card);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: border-color 0.12s, background 0.12s;
+    }
+
+    .map-box:hover {
+      border-color: var(--brand-rust);
+    }
+
+    .map-box.focused {
+      border-color: var(--brand-rust);
+      background: var(--brand-rust-soft);
+    }
+
+    .map-box-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      word-break: break-word;
+    }
+
+    .map-box-stats {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .map-stat-running {
+      color: var(--status-running);
+      font-weight: 500;
+    }
+
+    .map-stat-waiting {
+      color: var(--amber);
+      font-weight: 500;
+    }
+
+    .map-pane-head {
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    #map-tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    #map-tabs .mode-btn {
+      padding: 4px 10px;
+    }
+
+    .map-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+    }
+
+    #map-wide.active {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+    }
+
+    .map-meta-bar {
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--color-card);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .map-outside {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--amber);
+    }
+
+    .map-notes {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .map-notes-toggle {
+      align-self: flex-start;
+      padding: 3px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .map-notes-toggle:hover {
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+    }
+
+    .map-notes-list {
+      max-height: 160px;
+      overflow-y: auto;
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+
+    .map-notes-section-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+      margin-bottom: 2px;
+    }
+
+    .map-notes-items {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .map-notes-items li {
+      color: var(--color-text);
+      word-break: break-word;
+    }
+
+    .map-notes-reason {
+      color: var(--color-muted);
+    }
+
+    .map-panel {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .map-loading {
+      padding: 24px 0;
+      text-align: center;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    .map-error {
+      padding: 12px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--fail);
+      background: var(--fail-soft);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .sys-canvas {
+      position: relative;
+      z-index: 0;
+      min-width: min-content;
+      min-height: 100%;
+    }
+
+    .sys-svg {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+      overflow: visible;
+    }
+
+    .sys-edge {
+      fill: none;
+      stroke: var(--color-line-dark);
+      stroke-width: 1.25;
+      opacity: 0.45;
+      transition: opacity 0.12s, stroke 0.12s, stroke-width 0.12s;
+    }
+
+    .sys-edge.edge-strong {
+      stroke: var(--brand-rust);
+      stroke-width: 2.2;
+      opacity: 1;
+    }
+
+    .sys-edge.edge-dim {
+      opacity: 0.1;
+    }
+
+    .sys-arrow-faint {
+      fill: var(--color-line-dark);
+    }
+
+    .sys-arrow-strong {
+      fill: var(--brand-rust);
+    }
+
+    .sys-groups-cols {
+      display: flex;
+      align-items: flex-start;
+      gap: 28px;
+    }
+
+    .sys-group-col {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .sys-groups-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+      gap: 14px;
+      align-items: start;
+    }
+
+    .sys-group {
+      border-radius: 6px;
+      border: 1.5px solid var(--color-line-dark);
+      background: var(--color-card);
+      transition: border-color 0.12s, background 0.12s, opacity 0.12s;
+    }
+
+    .sys-group.collapsed {
+      position: relative;
+      z-index: 3;
+      min-width: 175px;
+    }
+
+    .sys-group.open {
+      background: var(--color-page);
+      border-color: var(--color-line-dark);
+    }
+
+    .sys-groups-grid .sys-group.open {
+      grid-column: 1 / -1;
+    }
+
+    .sys-group.focused {
+      border-color: var(--brand-rust);
+    }
+
+    .sys-group.collapsed.focused {
+      background: var(--brand-rust-soft);
+    }
+
+    .sys-group.has-running {
+      border-color: var(--status-running);
+    }
+
+    .sys-group.has-waiting:not(.has-running) {
+      border-color: var(--amber);
+    }
+
+    .sys-group-head {
+      position: relative;
+      z-index: 3;
+      width: 100%;
+      text-align: left;
+      border: none;
+      background: transparent;
+      padding: 10px 12px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .sys-group.open .sys-group-head {
+      background: var(--color-card);
+      border-bottom: 1px solid var(--color-line);
+      border-radius: 4px 4px 0 0;
+    }
+
+    .sys-group-head:hover .sys-group-id {
+      color: var(--brand-rust);
+    }
+
+    .sys-group-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .sys-group-id {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      overflow-wrap: break-word;
+    }
+
+    .sys-group-kind {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 3px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+      color: var(--color-muted);
+      flex-shrink: 0;
+    }
+
+    .sys-group-meta {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .sys-units-cols {
+      display: flex;
+      align-items: flex-start;
+      gap: 24px;
+      padding: 12px;
+    }
+
+    .sys-unit-col {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 110px;
+    }
+
+    .sys-unit {
+      position: relative;
+      z-index: 3;
+      text-align: left;
+      padding: 7px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      transition: border-color 0.12s, background 0.12s, opacity 0.12s;
+    }
+
+    .sys-unit:hover,
+    .sys-unit.node-active {
+      border-color: var(--brand-rust);
+      background: var(--brand-rust-soft);
+    }
+
+    .sys-unit.has-running {
+      border-left: 3px solid var(--status-running);
+    }
+
+    .sys-unit.has-waiting:not(.has-running) {
+      border-left: 3px solid var(--amber);
+    }
+
+    .sys-unit.node-related,
+    .sys-group.node-related {
+      border-color: var(--brand-rust);
+    }
+
+    .node-dim {
+      opacity: 0.35;
+    }
+
+    .sys-unit-label {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      white-space: nowrap;
+    }
+
+    .sys-unit-overlay {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+
+    .sys-empty-units {
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .map-data-head {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--color-line);
+      flex-shrink: 0;
+    }
+
+    .map-data-note {
+      margin: 0;
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    .map-data-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-text);
+      cursor: pointer;
+      align-self: flex-start;
+    }
+
+    .map-data-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .data-unit-group {
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .data-unit-head {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--lane);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--color-strong);
+    }
+
+    .data-unit-list {
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .data-struct-row {
+      width: 100%;
+      text-align: left;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .data-struct-row:hover,
+    .data-struct-row.selected {
+      border-color: var(--brand-rust);
+      background: var(--brand-rust-soft);
+    }
+
+    .data-struct-main {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .data-struct-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--color-strong);
+      word-break: break-word;
+    }
+
+    .data-struct-kind {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      color: var(--color-muted);
+      flex-shrink: 0;
+    }
+
+    .data-struct-refs {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      flex-shrink: 0;
+    }
+
+    .map-detail {
+      flex-shrink: 0;
+      max-height: 38%;
+      overflow-y: auto;
+      border-top: 1px solid var(--color-line);
+      background: var(--color-card);
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .map-detail-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .map-detail-id {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-strong);
+      word-break: break-all;
+    }
+
+    .map-detail-file {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      word-break: break-all;
+    }
+
+    .map-detail-section {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .map-detail-list {
+      margin: 0;
+      padding-left: 16px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-text);
+    }
+
+    .map-detail-empty {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .map-detail-type {
+      color: var(--color-muted);
+    }
+
+    #report-reader {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--color-page);
+    }
+
+    .report-reader-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--color-card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .report-reader-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .report-reader-ident {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .report-reader-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--color-strong);
+      line-height: 1.3;
+      word-break: break-word;
+    }
+
+    .report-reader-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .report-reader-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 18px 24px 32px;
+    }
+
+    .report-reader-col {
+      max-width: 76ch;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .report-question {
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      background: var(--color-card);
+      padding: 8px 12px;
+    }
+
+    .report-question summary {
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+      font-weight: 500;
+    }
+
+    .report-question-body {
+      margin: 8px 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--color-text);
+    }
+
+    .report-body {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--color-text);
+    }
+
+    .report-body h1,
+    .report-body h2,
+    .report-body h3,
+    .report-body h4 {
+      color: var(--color-strong);
+      margin: 1.25em 0 0.5em;
+      line-height: 1.3;
+    }
+
+    .report-body h1:first-child,
+    .report-body h2:first-child,
+    .report-body h3:first-child,
+    .report-body h4:first-child {
+      margin-top: 0;
+    }
+
+    .report-body h1 {
+      font-size: 19px;
+      font-weight: 700;
+    }
+
+    .report-body h2 {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .report-body h3 {
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .report-body h4 {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .report-body p {
+      margin: 0 0 0.85em;
+    }
+
+    .report-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    .report-body ul,
+    .report-body ol {
+      margin: 0 0 0.85em;
+      padding-left: 22px;
+    }
+
+    .report-body li {
+      margin: 0.25em 0;
+    }
+
+    .report-body code {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      color: var(--color-strong);
+    }
+
+    .report-body pre.report-code {
+      margin: 0 0 1em;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      overflow-x: auto;
+      line-height: 1.45;
+    }
+
+    .report-body pre.report-code code {
+      padding: 0;
+      border: none;
+      background: transparent;
+      font-size: 12px;
+      white-space: pre;
+    }
+
+    .report-table-wrap {
+      margin: 0 0 1em;
+      overflow-x: auto;
+    }
+
+    .report-body table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .report-body th,
+    .report-body td {
+      text-align: left;
+      padding: 6px 10px;
+      border: 1px solid var(--color-line);
+      vertical-align: top;
+    }
+
+    .report-body th {
+      background: var(--color-card);
+      color: var(--color-strong);
+      font-weight: 600;
+    }
+
+    .report-link-url {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-muted);
+      word-break: break-all;
+    }
+
+    .report-missing {
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      color: var(--color-muted);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .report-fallback-msg {
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--color-text);
+    }
+
+    .report-flags {
+      border-top: 1px solid var(--color-line);
+      padding-top: 12px;
+    }
+
+    @media (max-width: 900px) {
+      .shell {
+        height: auto;
+        min-height: 100vh;
+        overflow: visible;
+      }
+
+      .workspace,
+      .workspace.map-wide {
+        grid-template-columns: 1fr;
+      }
+
+      .pane-left {
+        border-right: none;
+        border-bottom: 1px solid var(--color-line);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="shell">
+    <div id="lost-server" class="lost-server" role="status" hidden>No answer from blyte. Trying again.</div>
+    <header id="bar">
+      <div class="bar-row">
+        <div class="bar-group">
+          <span class="brand">
+            <svg viewBox="0 0 100 100" width="20" height="20" aria-hidden="true">
+              <rect class="m-i" x="10" y="10" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="38" y="10" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="66" y="10" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="10" y="38" width="24" height="24" rx="3"/>
+              <rect class="m-s" x="38" y="38" width="24" height="24" rx="3"/>
+              <rect class="m-r" x="66" y="38" width="24" height="24" rx="3"/>
+              <rect class="m-i" x="10" y="66" width="24" height="24" rx="3"/>
+              <rect class="m-r" x="38" y="66" width="24" height="24" rx="3"/>
+              <rect class="m-r" x="66" y="66" width="24" height="24" rx="3"/>
+            </svg>
+            <span class="brand-word">blyte</span>
+          </span>
+          <span id="repo-name" class="repo-name"></span>
+          <span id="working-indicator" class="working-pill" hidden>working</span>
+        </div>
+
+        <div class="bar-group">
+          <select id="model-select" class="ctrl-select" aria-label="Model"></select>
+          <select id="effort-select" class="ctrl-select" aria-label="Effort">
+            <option value="">effort: default</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+          <span id="header-error" class="inline-error" hidden></span>
+          <div id="wip" class="metric nums"><span class="metric-label">wip</span><span class="metric-val">0 / 3</span></div>
+          <div id="waiting" class="metric nums"><span class="metric-label">waiting</span><span class="metric-val">0 / 7</span></div>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <section class="pane-left" aria-label="Work surface">
+        <div class="pane-head">
+          <div id="mode" role="tablist" aria-label="Mode">
+            <button type="button" id="mode-design" class="mode-btn active" role="tab" aria-selected="true">Design</button>
+            <button type="button" id="mode-review" class="mode-btn" role="tab" aria-selected="false">Review (0)</button>
+          </div>
+          <div id="focus-indicator"></div>
+        </div>
+
+        <div id="conversation">
+          <div id="conversation-thread" class="thread"></div>
+          <div id="attached-reports" class="attached-reports" hidden></div>
+          <div id="composer-error" class="inline-error composer-error" hidden></div>
+          <form id="conversation-form" class="composer">
+            <input type="text" id="conversation-input" placeholder="Message the orchestrator..." autocomplete="off">
+            <button type="submit" id="conversation-send" class="btn btn-primary">Send</button>
+          </form>
+        </div>
+
+        <div id="review-wrap" class="review-wrap" hidden>
+          <div id="queue-error" class="queue-error" hidden></div>
+          <div id="queue"></div>
+        </div>
+      </section>
+
+      <aside class="pane-right" aria-label="System map">
+        <div class="pane-head map-pane-head">
+          <div id="map-tabs" role="tablist" aria-label="Map view">
+            <button type="button" class="mode-btn active" data-map-tab="runs" role="tab" aria-selected="true">Runs</button>
+            <button type="button" class="mode-btn" data-map-tab="system" role="tab" aria-selected="false">System</button>
+            <button type="button" class="mode-btn" data-map-tab="data" role="tab" aria-selected="false">Data</button>
+          </div>
+          <div class="map-controls">
+            <button type="button" id="map-wide" class="btn btn-ghost" aria-pressed="false">Wide</button>
+          </div>
+        </div>
+        <div id="map-meta-bar" class="map-meta-bar" hidden>
+          <div id="map-outside" class="map-outside nums" hidden></div>
+          <div id="map-notes" class="map-notes" hidden></div>
+        </div>
+        <div id="map"></div>
+        <div id="map-system" class="map-panel" hidden></div>
+        <div id="map-data" class="map-panel" hidden>
+          <div id="map-data-head" class="map-data-head" hidden>
+            <p class="map-data-note">Shows references written in the code. Uses through an inferred type are not shown.</p>
+            <label class="map-data-toggle"><input type="checkbox" id="map-data-all"> Show all structures</label>
+          </div>
+          <div id="map-data-body" class="map-data-body"></div>
+        </div>
+        <div id="map-detail" class="map-detail" hidden></div>
+        <div id="report-reader" hidden></div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const WIP_CAP = 3;
+    const QUEUE_BOUND = 7;
+    const NO_FILES_GROUP = "no files changed";
+    const RESEARCH_GROUP = "research reports";
+    const IN_PROGRESS_GROUP = "in progress";
+    const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+    const RUNS_POLL_MS = 5000;
+
+    let sessionState = null;
+    let modelsList = [];
+    let sessionBusy = false;
+    let lastSeqSeen = 0;
+    let initialEventsLoaded = false;
+
+    const seenSeqs = new Set();
+    const logEntries = [];
+    const queuedUserSeqs = [];
+    const openToolsByName = new Map();
+
+    let liveRuns = { generated_at: 0, repo: "", running: [], runs: [], skipped: [] };
+    let allGroups = [];
+    let runsFetchInFlight = false;
+    let runsRefetchNeeded = false;
+    let runsPollTimer = null;
+
+    let serverLost = false;
+    let mode = "design";
+    let focusedGroup = null;
+    const openDetails = new Set();
+    const runDiffs = new Map();
+    const pendingNoteAction = new Map();
+    const noteDrafts = new Map();
+    const noteErrors = new Map();
+    const cardErrors = new Map();
+
+    let lastQueueSig = "";
+    let lastMapSig = "";
+
+    let mapTab = "runs";
+    let mapWide = false;
+    let mapState = null;
+    let openMapGroup = null;
+    let selectedMapUnit = null;
+    let hoveredMapUnit = null;
+    let selectedMapStructure = null;
+    let showAllStructures = false;
+    let mapNotesOpen = false;
+    let lastSystemSig = "";
+    let lastDataSig = "";
+    let lastMetaSig = "";
+    let renderedSysEdges = [];
+
+    let openReportKey = null;
+    let lastReportReaderKey = null;
+    let reportReaderError = "";
+    const attachedReports = [];
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function isPlainObject(v) {
+      return v !== null && typeof v === "object" && !Array.isArray(v);
+    }
+
+    function hasOwn(obj, key) {
+      return Object.prototype.hasOwnProperty.call(obj, key);
+    }
+
+    function isTimestamp(v) {
+      return typeof v === "string" || (typeof v === "number" && Number.isFinite(v));
+    }
+
+    function setServerLost(lost) {
+      serverLost = lost;
+      if (typeof document === "undefined") return;
+      const bar = document.getElementById("lost-server");
+      if (bar) bar.hidden = !lost;
+      const queueEl = document.getElementById("queue");
+      if (queueEl) queueEl.classList.toggle("queue-dimmed", lost);
+    }
+
+    async function fetchWithRetry(url, options) {
+      let attempt = 0;
+      while (true) {
+        try {
+          const res = await fetch(url, options);
+          setServerLost(false);
+          return res;
+        } catch (_) {
+          setServerLost(true);
+          const delay = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+          attempt += 1;
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    async function parseErrorPayload(res, route) {
+      try {
+        const data = await res.json();
+        if (isPlainObject(data) && typeof data.error === "string") {
+          return data.error;
+        }
+        return route + " failed with HTTP " + res.status + " (missing error field in response)";
+      } catch (_) {
+        return route + " failed with HTTP " + res.status + " (response is not JSON with error field)";
+      }
+    }
+
+    function validateSession(data, route) {
+      if (!isPlainObject(data)) return route + ": response must be a JSON object";
+      const strFields = ["session_id", "repo", "model"];
+      for (const f of strFields) {
+        if (typeof data[f] !== "string") return route + ": missing or invalid field " + f;
+      }
+      if (!hasOwn(data, "started_at") || !isTimestamp(data.started_at)) {
+        return route + ": missing or invalid field started_at";
+      }
+      if (!hasOwn(data, "effort") || (data.effort !== null && typeof data.effort !== "string")) {
+        return route + ": missing or invalid field effort";
+      }
+      if (typeof data.effort_supported !== "boolean") {
+        return route + ": missing or invalid field effort_supported";
+      }
+      if (typeof data.busy !== "boolean") {
+        return route + ": missing or invalid field busy";
+      }
+      if (typeof data.queued !== "number" || !Number.isFinite(data.queued)) {
+        return route + ": missing or invalid field queued";
+      }
+      if (typeof data.last_seq !== "number" || !Number.isFinite(data.last_seq)) {
+        return route + ": missing or invalid field last_seq";
+      }
+      return null;
+    }
+
+    function validateModels(data) {
+      if (!isPlainObject(data) || !Array.isArray(data.models)) {
+        return "/api/models: missing models array";
+      }
+      for (let i = 0; i < data.models.length; i++) {
+        const m = data.models[i];
+        if (!isPlainObject(m) || typeof m.id !== "string" || typeof m.effort_supported !== "boolean") {
+          return "/api/models: invalid models[" + i + "]";
+        }
+      }
+      return null;
+    }
+
+    function validateEvents(data) {
+      if (!isPlainObject(data)) return "/api/session/events: response must be a JSON object";
+      if (!Array.isArray(data.entries)) return "/api/session/events: missing entries array";
+      if (typeof data.last_seq !== "number" || !Number.isFinite(data.last_seq)) {
+        return "/api/session/events: missing or invalid field last_seq";
+      }
+      return null;
+    }
+
+    function validateRuns(data) {
+      if (!isPlainObject(data)) return "/api/runs: response must be a JSON object";
+      if (typeof data.generated_at !== "number" || !Number.isFinite(data.generated_at)) {
+        return "/api/runs: missing or invalid field generated_at";
+      }
+      if (typeof data.repo !== "string") return "/api/runs: missing or invalid field repo";
+      if (!Array.isArray(data.running)) return "/api/runs: missing running array";
+      for (let i = 0; i < data.running.length; i++) {
+        const r = data.running[i];
+        if (!isPlainObject(r)) return "/api/runs: running[" + i + "] must be an object";
+        for (const f of ["key", "id", "title", "task", "activity"]) {
+          if (typeof r[f] !== "string") return "/api/runs: running[" + i + "] missing or invalid field " + f;
+        }
+        if (typeof r.research !== "boolean") return "/api/runs: running[" + i + "] missing or invalid field research";
+        if (typeof r.gate_running !== "boolean") return "/api/runs: running[" + i + "] missing or invalid field gate_running";
+        if (typeof r.turns !== "number" || !Number.isFinite(r.turns)) {
+          return "/api/runs: running[" + i + "] missing or invalid field turns";
+        }
+        for (const f of ["plan_file", "plan_task"]) {
+          if (!hasOwn(r, f) || (r[f] !== null && typeof r[f] !== "string")) {
+            return "/api/runs: running[" + i + "] missing or invalid field " + f;
+          }
+        }
+        if (!hasOwn(r, "started_at") || (r.started_at !== null && (typeof r.started_at !== "number" || !Number.isFinite(r.started_at)))) {
+          return "/api/runs: running[" + i + "] missing or invalid field started_at";
+        }
+      }
+      if (!Array.isArray(data.runs)) return "/api/runs: missing runs array";
+      const reqStr = ["key", "id", "repo", "title", "task", "outcome"];
+      const reqBool = ["research", "checks_recorded"];
+      const reqNum = ["started_at", "finished_at", "turns"];
+      const nullStr = ["plan_file", "plan_task", "final_message", "group", "verdict", "verdict_notes", "report"];
+      const nullNum = ["cost_usd", "verdict_ts"];
+      for (let i = 0; i < data.runs.length; i++) {
+        const r = data.runs[i];
+        if (!isPlainObject(r)) return "/api/runs: runs[" + i + "] must be an object";
+        for (const f of reqStr) {
+          if (typeof r[f] !== "string") return "/api/runs: runs[" + i + "] missing or invalid field " + f;
+        }
+        for (const f of reqBool) {
+          if (typeof r[f] !== "boolean") return "/api/runs: runs[" + i + "] missing or invalid field " + f;
+        }
+        for (const f of reqNum) {
+          if (typeof r[f] !== "number" || !Number.isFinite(r[f])) {
+            return "/api/runs: runs[" + i + "] missing or invalid field " + f;
+          }
+        }
+        for (const f of nullStr) {
+          if (!hasOwn(r, f) || (r[f] !== null && typeof r[f] !== "string")) {
+            return "/api/runs: runs[" + i + "] missing or invalid field " + f;
+          }
+        }
+        for (const f of nullNum) {
+          if (!hasOwn(r, f) || (r[f] !== null && (typeof r[f] !== "number" || !Number.isFinite(r[f])))) {
+            return "/api/runs: runs[" + i + "] missing or invalid field " + f;
+          }
+        }
+        if (r.card !== "clean" && r.card !== "exception" && r.card !== "research") {
+          return "/api/runs: runs[" + i + "] invalid field card";
+        }
+        if (!Array.isArray(r.flags) || !r.flags.every(x => typeof x === "string")) {
+          return "/api/runs: runs[" + i + "] invalid field flags";
+        }
+        if (!Array.isArray(r.changed_files) || !r.changed_files.every(x => typeof x === "string")) {
+          return "/api/runs: runs[" + i + "] invalid field changed_files";
+        }
+        if (!Array.isArray(r.commits)) return "/api/runs: runs[" + i + "] invalid field commits";
+        for (let j = 0; j < r.commits.length; j++) {
+          const c = r.commits[j];
+          if (!isPlainObject(c) || typeof c.sha !== "string" || typeof c.subject !== "string") {
+            return "/api/runs: runs[" + i + "].commits[" + j + "] invalid";
+          }
+        }
+        if (!hasOwn(r, "hold")) return "/api/runs: runs[" + i + "] missing field hold";
+        if (r.hold !== null) {
+          if (!isPlainObject(r.hold) || typeof r.hold.note !== "string" || !hasOwn(r.hold, "ts") || !isTimestamp(r.hold.ts)) {
+            return "/api/runs: runs[" + i + "] invalid field hold";
+          }
+        }
+      }
+      if (!Array.isArray(data.skipped)) return "/api/runs: missing skipped array";
+      for (let i = 0; i < data.skipped.length; i++) {
+        const s = data.skipped[i];
+        if (!isPlainObject(s) || typeof s.key !== "string" || typeof s.reason !== "string") {
+          return "/api/runs: skipped[" + i + "] invalid";
+        }
+      }
+      return null;
+    }
+
+    function validateDecisionResponse(data) {
+      if (!isPlainObject(data)) return "decision response must be a JSON object";
+      if (typeof data.seq !== "number" || !Number.isFinite(data.seq)) {
+        return "decision response missing or invalid field seq";
+      }
+      if (!isPlainObject(data.decision)) return "decision response missing field decision";
+      const d = data.decision;
+      if (typeof d.run !== "string") return "decision response missing field decision.run";
+      if (typeof d.action !== "string") return "decision response missing field decision.action";
+      if (!hasOwn(d, "note") || (d.note !== null && typeof d.note !== "string")) {
+        return "decision response missing field decision.note";
+      }
+      if (!hasOwn(d, "orchestrator_message") || (d.orchestrator_message !== null && typeof d.orchestrator_message !== "string")) {
+        return "decision response missing field decision.orchestrator_message";
+      }
+      return null;
+    }
+
+    function runGroupName(run) {
+      if (run.card === "research") {
+        return RESEARCH_GROUP;
+      }
+      return run.group === null ? NO_FILES_GROUP : run.group;
+    }
+
+    function runningGroupName(run) {
+      return run.research ? RESEARCH_GROUP : IN_PROGRESS_GROUP;
+    }
+
+    function isUndecided(run) {
+      return run.verdict === null;
+    }
+
+    function isHeld(run) {
+      return run.verdict === null && run.hold !== null;
+    }
+
+    function computeGroups() {
+      const named = new Set();
+      let hasNoFiles = false;
+      let hasResearch = false;
+      let hasInProgressCode = false;
+      for (const r of liveRuns.running) {
+        if (r.research) hasResearch = true;
+        else hasInProgressCode = true;
+      }
+      for (const r of liveRuns.runs) {
+        if (!isUndecided(r)) continue;
+        if (r.card === "research") hasResearch = true;
+        else if (r.group === null) hasNoFiles = true;
+        else named.add(r.group);
+      }
+      const list = Array.from(named).sort();
+      if (hasResearch) list.push(RESEARCH_GROUP);
+      if (hasNoFiles) list.push(NO_FILES_GROUP);
+      if (hasInProgressCode && !list.includes(IN_PROGRESS_GROUP)) list.push(IN_PROGRESS_GROUP);
+      return list;
+    }
+
+    function computeState() {
+      const inProgress = liveRuns.running.slice();
+      const undecidedArrived = [];
+      const waitingGroupSet = new Set();
+
+      for (const r of liveRuns.runs) {
+        if (isUndecided(r)) {
+          undecidedArrived.push(r);
+          waitingGroupSet.add(runGroupName(r));
+        }
+      }
+
+      return {
+        inProgress,
+        undecidedArrived,
+        waitingGroupsCount: waitingGroupSet.size
+      };
+    }
+
+    function updateHeaderCounters(state) {
+      const wipEl = document.getElementById("wip");
+      wipEl.querySelector(".metric-val").textContent = state.inProgress.length + " / " + WIP_CAP;
+      wipEl.classList.toggle("over-limit", state.inProgress.length > WIP_CAP);
+
+      const waitEl = document.getElementById("waiting");
+      waitEl.querySelector(".metric-val").textContent = state.waitingGroupsCount + " / " + QUEUE_BOUND;
+      waitEl.classList.toggle("over-limit", state.waitingGroupsCount > QUEUE_BOUND);
+
+      const reviewTab = document.getElementById("mode-review");
+      reviewTab.textContent = "Review (" + state.undecidedArrived.length + ")";
+    }
+
+    function updateWorkingState() {
+      if (typeof document === "undefined") return;
+      const workingEl = document.getElementById("working-indicator");
+      if (workingEl) workingEl.hidden = !sessionBusy;
+      const sendBtn = document.getElementById("conversation-send");
+      if (sendBtn) sendBtn.textContent = sessionBusy ? "Queue" : "Send";
+    }
+
+    function renderModelsSelect() {
+      if (typeof document === "undefined") return;
+      const select = document.getElementById("model-select");
+      if (!select) return;
+      const ids = modelsList.map(m => m.id);
+      if (sessionState && sessionState.model && !ids.includes(sessionState.model)) {
+        ids.unshift(sessionState.model);
+      }
+      select.innerHTML = ids.map(id =>
+        '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + '</option>'
+      ).join("");
+      if (sessionState && sessionState.model) {
+        select.value = sessionState.model;
+      }
+    }
+
+    function applySessionState(data, syncBusy) {
+      sessionState = data;
+      if (syncBusy) {
+        sessionBusy = data.busy;
+      }
+      if (typeof document === "undefined") return;
+      const repoEl = document.getElementById("repo-name");
+      if (repoEl) repoEl.textContent = data.repo;
+      renderModelsSelect();
+      const effortEl = document.getElementById("effort-select");
+      if (effortEl) {
+        effortEl.value = data.effort === null ? "" : data.effort;
+        effortEl.disabled = !data.effort_supported;
+      }
+      updateWorkingState();
+    }
+
+    function updateFocusIndicator() {
+      const holder = document.getElementById("focus-indicator");
+      if (focusedGroup === null) {
+        holder.innerHTML = "";
+      } else {
+        holder.innerHTML = '<span class="focus-chip">focus: ' + escapeHtml(focusedGroup) +
+          ' <button type="button" data-clear-focus="1" aria-label="Clear focus">×</button></span>';
+      }
+    }
+
+    function renderEntryError(seq, msg) {
+      return '<div class="entry entry-error" data-seq="' + escapeHtml(String(seq == null ? "" : seq)) + '">' +
+        escapeHtml(msg) + '</div>';
+    }
+
+    function renderTurn(entry) {
+      if (typeof entry.n !== "number" || !Number.isFinite(entry.n)) {
+        return renderEntryError(entry.seq, "turn entry missing or invalid field n");
+      }
+      if (typeof entry.text !== "string") {
+        return renderEntryError(entry.seq, "turn entry missing or invalid field text");
+      }
+      if (typeof entry.input_tokens !== "number" || !Number.isFinite(entry.input_tokens)) {
+        return renderEntryError(entry.seq, "turn entry missing or invalid field input_tokens");
+      }
+      if (typeof entry.output_tokens !== "number" || !Number.isFinite(entry.output_tokens)) {
+        return renderEntryError(entry.seq, "turn entry missing or invalid field output_tokens");
+      }
+      if (!hasOwn(entry, "cost_usd") || (entry.cost_usd !== null && (typeof entry.cost_usd !== "number" || !Number.isFinite(entry.cost_usd)))) {
+        return renderEntryError(entry.seq, "turn entry missing or invalid field cost_usd");
+      }
+      return '<div class="entry msg-line assistant" data-seq="' + escapeHtml(String(entry.seq)) + '">' +
+        '<div class="msg-meta">orchestrator · turn ' + escapeHtml(String(entry.n)) + '</div>' +
+        '<div class="turn-body report-body">' + renderReportMarkdown(entry.text) + '</div>' +
+        '</div>';
+    }
+
+    function formatToolInput(input) {
+      if (typeof input === "string") return input;
+      return JSON.stringify(input, null, 2);
+    }
+
+    function renderEntry(entry, opts) {
+      if (!isPlainObject(entry)) {
+        return renderEntryError("", "invalid entry: expected object");
+      }
+      if (typeof entry.seq !== "number" || !Number.isFinite(entry.seq)) {
+        return renderEntryError("", "entry missing or invalid field seq");
+      }
+      if (!hasOwn(entry, "ts") || !isTimestamp(entry.ts)) {
+        return renderEntryError(entry.seq, "entry missing or invalid field ts");
+      }
+      if (typeof entry.kind !== "string") {
+        return renderEntryError(entry.seq, "entry missing or invalid field kind");
+      }
+      const seqAttr = escapeHtml(String(entry.seq));
+      switch (entry.kind) {
+        case "user_message": {
+          if (typeof entry.text !== "string") {
+            return renderEntryError(entry.seq, "user_message entry missing or invalid field text");
+          }
+          if (!Array.isArray(entry.reports) || !entry.reports.every(r => typeof r === "string")) {
+            return renderEntryError(entry.seq, "user_message entry missing or invalid field reports");
+          }
+          if (typeof entry.queued !== "boolean") {
+            return renderEntryError(entry.seq, "user_message entry missing or invalid field queued");
+          }
+          const stillQueued = (opts && typeof opts.stillQueued === "boolean") ? opts.stillQueued : entry.queued;
+          const queuedBadge = stillQueued ? '<span class="msg-queued-badge">queued</span>' : "";
+          const reportsHtml = entry.reports.length > 0
+            ? '<div>' + entry.reports.map(id => '<span class="msg-report-tag">with report ' + escapeHtml(id) + '</span>').join("") + '</div>'
+            : "";
+          return '<div class="entry msg-line user" data-seq="' + seqAttr + '">' +
+            '<div class="msg-meta">you' + queuedBadge + '</div>' +
+            '<div>' + escapeHtml(entry.text) + '</div>' +
+            reportsHtml +
+            '</div>';
+        }
+        case "turn":
+          return renderTurn(entry);
+        case "tool_started": {
+          if (typeof entry.name !== "string") {
+            return renderEntryError(entry.seq, "tool_started entry missing or invalid field name");
+          }
+          if (!hasOwn(entry, "input")) {
+            return renderEntryError(entry.seq, "tool_started entry missing field input");
+          }
+          const fullInput = formatToolInput(entry.input);
+          const firstLine = fullInput.split(/\r?\n/)[0];
+          const matched = opts && opts.matchedFinish;
+          const statusHtml = matched
+            ? '<span class="tool-status ' + (matched.is_error ? "tool-error" : "tool-done") + '">' + escapeHtml(matched.summary) + '</span>'
+            : '<span class="tool-status tool-running">running</span>';
+          return '<div class="entry entry-tool" data-seq="' + seqAttr + '" data-tool-name="' + escapeHtml(entry.name) + '">' +
+            '<details class="tool-details">' +
+              '<summary class="tool-summary">' +
+                '<span class="tool-name">' + escapeHtml(entry.name) + '</span>' +
+                '<span class="tool-input-first">' + escapeHtml(firstLine) + '</span>' +
+                statusHtml +
+              '</summary>' +
+              '<pre class="tool-input-full">' + escapeHtml(fullInput) + '</pre>' +
+            '</details>' +
+            '</div>';
+        }
+        case "tool_finished": {
+          if (typeof entry.name !== "string") {
+            return renderEntryError(entry.seq, "tool_finished entry missing or invalid field name");
+          }
+          if (typeof entry.summary !== "string") {
+            return renderEntryError(entry.seq, "tool_finished entry missing or invalid field summary");
+          }
+          if (typeof entry.is_error !== "boolean") {
+            return renderEntryError(entry.seq, "tool_finished entry missing or invalid field is_error");
+          }
+          if (opts && opts.matched) {
+            return '<div class="entry entry-tool-matched" data-seq="' + seqAttr + '" hidden></div>';
+          }
+          const cls = entry.is_error ? "tool-error" : "tool-done";
+          return '<div class="entry entry-tool entry-tool-finished" data-seq="' + seqAttr + '">' +
+            '<div class="tool-summary">' +
+              '<span class="tool-name">' + escapeHtml(entry.name) + '</span>' +
+              '<span class="tool-status ' + cls + '">' + escapeHtml(entry.summary) + '</span>' +
+            '</div>' +
+            '</div>';
+        }
+        case "retry": {
+          if (typeof entry.attempt !== "number" || !Number.isFinite(entry.attempt)) {
+            return renderEntryError(entry.seq, "retry entry missing or invalid field attempt");
+          }
+          if (typeof entry.max !== "number" || !Number.isFinite(entry.max)) {
+            return renderEntryError(entry.seq, "retry entry missing or invalid field max");
+          }
+          if (typeof entry.wait_ms !== "number" || !Number.isFinite(entry.wait_ms)) {
+            return renderEntryError(entry.seq, "retry entry missing or invalid field wait_ms");
+          }
+          if (typeof entry.reason !== "string") {
+            return renderEntryError(entry.seq, "retry entry missing or invalid field reason");
+          }
+          const seconds = entry.wait_ms % 1000 === 0
+            ? String(entry.wait_ms / 1000)
+            : String(Math.round(entry.wait_ms / 100) / 10);
+          const msg = "model call failed (" + entry.reason + "); retry " + entry.attempt + " of " + entry.max + " in " + seconds + " s";
+          return '<div class="entry entry-retry" data-seq="' + seqAttr + '">' + escapeHtml(msg) + '</div>';
+        }
+        case "error": {
+          if (typeof entry.message !== "string") {
+            return renderEntryError(entry.seq, "error entry missing or invalid field message");
+          }
+          return '<div class="entry entry-error" data-seq="' + seqAttr + '">' + escapeHtml(entry.message) + '</div>';
+        }
+        case "idle": {
+          if (typeof entry.turns !== "number" || !Number.isFinite(entry.turns)) {
+            return renderEntryError(entry.seq, "idle entry missing or invalid field turns");
+          }
+          if (!hasOwn(entry, "cost_usd") || (entry.cost_usd !== null && (typeof entry.cost_usd !== "number" || !Number.isFinite(entry.cost_usd)))) {
+            return renderEntryError(entry.seq, "idle entry missing or invalid field cost_usd");
+          }
+          const costStr = entry.cost_usd === null ? "cost not known" : "USD " + entry.cost_usd.toFixed(2);
+          const line = entry.turns + " turns · " + costStr;
+          return '<div class="entry entry-quiet" data-seq="' + seqAttr + '">' + escapeHtml(line) + '</div>';
+        }
+        case "model_changed": {
+          if (typeof entry.model !== "string") {
+            return renderEntryError(entry.seq, "model_changed entry missing or invalid field model");
+          }
+          return '<div class="entry entry-quiet" data-seq="' + seqAttr + '">' + escapeHtml("model changed to " + entry.model) + '</div>';
+        }
+        case "effort_changed": {
+          if (!hasOwn(entry, "effort") || (entry.effort !== null && typeof entry.effort !== "string")) {
+            return renderEntryError(entry.seq, "effort_changed entry missing or invalid field effort");
+          }
+          const label = entry.effort === null ? "default" : entry.effort;
+          return '<div class="entry entry-quiet" data-seq="' + seqAttr + '">' + escapeHtml("effort changed to " + label) + '</div>';
+        }
+        case "decision": {
+          if (typeof entry.run !== "string") {
+            return renderEntryError(entry.seq, "decision entry missing or invalid field run");
+          }
+          if (typeof entry.action !== "string") {
+            return renderEntryError(entry.seq, "decision entry missing or invalid field action");
+          }
+          if (!hasOwn(entry, "note") || (entry.note !== null && typeof entry.note !== "string")) {
+            return renderEntryError(entry.seq, "decision entry missing or invalid field note");
+          }
+          const suffix = entry.note ? " — " + entry.note : "";
+          const line = "decision on " + entry.run + ": " + entry.action + suffix;
+          return '<div class="entry entry-quiet" data-seq="' + seqAttr + '">' + escapeHtml(line) + '</div>';
+        }
+        default:
+          return renderEntryError(entry.seq, "unknown entry kind " + entry.kind);
+      }
+    }
+
+    function appendConversationError(msg) {
+      if (typeof document === "undefined") return;
+      const threadEl = document.getElementById("conversation-thread");
+      if (!threadEl) return;
+      const atBottom = threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight < 40;
+      const emptyEl = threadEl.querySelector(".thread-empty");
+      if (emptyEl) emptyEl.remove();
+      const wrap = document.createElement("div");
+      wrap.className = "entry entry-error";
+      wrap.textContent = msg;
+      threadEl.appendChild(wrap);
+      if (atBottom) threadEl.scrollTop = threadEl.scrollHeight;
+    }
+
+    function insertEntryHtml(threadEl, seq, html) {
+      const emptyEl = threadEl.querySelector(".thread-empty");
+      if (emptyEl) emptyEl.remove();
+      const tpl = document.createElement("template");
+      tpl.innerHTML = html.trim();
+      const node = tpl.content.firstElementChild;
+      if (!node) return;
+      if (typeof seq === "number" && Number.isFinite(seq)) {
+        const children = threadEl.children;
+        for (let i = children.length - 1; i >= 0; i--) {
+          const existingSeq = Number(children[i].getAttribute("data-seq"));
+          if (Number.isFinite(existingSeq) && existingSeq <= seq) {
+            if (i === children.length - 1) {
+              threadEl.appendChild(node);
+            } else {
+              threadEl.insertBefore(node, children[i + 1]);
+            }
+            return;
+          }
+        }
+        if (children.length > 0 && children[0].hasAttribute("data-seq")) {
+          threadEl.insertBefore(node, children[0]);
+          return;
+        }
+      }
+      threadEl.appendChild(node);
+    }
+
+    function applyLogEntries(entries) {
+      const threadEl = document.getElementById("conversation-thread");
+      const atBottom = threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight < 40;
+      const sorted = entries.slice().sort((a, b) => {
+        const sa = isPlainObject(a) && typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
+        const sb = isPlainObject(b) && typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
+        return sa - sb;
+      });
+      let sawDecision = false;
+      for (const entry of sorted) {
+        const hasValidSeq = isPlainObject(entry) && typeof entry.seq === "number" && Number.isFinite(entry.seq);
+        if (hasValidSeq) {
+          if (seenSeqs.has(entry.seq)) continue;
+          seenSeqs.add(entry.seq);
+          if (entry.seq > lastSeqSeen) lastSeqSeen = entry.seq;
+        }
+        logEntries.push(entry);
+
+        if (isPlainObject(entry) && entry.kind === "tool_started" && typeof entry.name === "string" && hasOwn(entry, "input") && hasValidSeq && isTimestamp(entry.ts)) {
+          if (!openToolsByName.has(entry.name)) openToolsByName.set(entry.name, []);
+          openToolsByName.get(entry.name).push(entry.seq);
+          insertEntryHtml(threadEl, entry.seq, renderEntry(entry));
+          continue;
+        }
+
+        if (isPlainObject(entry) && entry.kind === "tool_finished" && typeof entry.name === "string" && typeof entry.summary === "string" && typeof entry.is_error === "boolean" && hasValidSeq && isTimestamp(entry.ts)) {
+          const queue = openToolsByName.get(entry.name);
+          if (queue && queue.length > 0) {
+            const startedSeq = queue.shift();
+            const startedEl = threadEl.querySelector('[data-seq="' + String(startedSeq) + '"]');
+            if (startedEl) {
+              const statusEl = startedEl.querySelector(".tool-status");
+              if (statusEl) {
+                statusEl.className = "tool-status " + (entry.is_error ? "tool-error" : "tool-done");
+                statusEl.textContent = entry.summary;
+              }
+            }
+            insertEntryHtml(threadEl, entry.seq, renderEntry(entry, { matched: true }));
+            continue;
+          }
+        }
+
+        insertEntryHtml(threadEl, hasValidSeq ? entry.seq : null, renderEntry(entry));
+
+        if (!isPlainObject(entry) || typeof entry.kind !== "string") continue;
+        if (entry.kind === "user_message" && typeof entry.queued === "boolean") {
+          if (entry.queued && hasValidSeq) {
+            queuedUserSeqs.push(entry.seq);
+          }
+          sessionBusy = true;
+          updateWorkingState();
+        } else if (entry.kind === "idle" && typeof entry.turns === "number") {
+          if (queuedUserSeqs.length > 0) {
+            const startedSeq = queuedUserSeqs.shift();
+            const userEl = threadEl.querySelector('[data-seq="' + String(startedSeq) + '"]');
+            if (userEl) {
+              const badge = userEl.querySelector(".msg-queued-badge");
+              if (badge) badge.remove();
+            }
+            sessionBusy = true;
+          } else {
+            sessionBusy = false;
+          }
+          updateWorkingState();
+        } else if (entry.kind === "model_changed" && typeof entry.model === "string") {
+          if (sessionState) {
+            sessionState.model = entry.model;
+            const found = modelsList.find(m => m.id === entry.model);
+            if (found) sessionState.effort_supported = found.effort_supported;
+            applySessionState(sessionState, false);
+          }
+        } else if (entry.kind === "effort_changed" && (entry.effort === null || typeof entry.effort === "string")) {
+          if (sessionState) {
+            sessionState.effort = entry.effort;
+            applySessionState(sessionState, false);
+          }
+        } else if (entry.kind === "decision") {
+          sawDecision = true;
+        }
+      }
+      if (threadEl.children.length === 0) {
+        threadEl.innerHTML = '<div class="thread-empty">Conversation with the orchestrator will appear here.</div>';
+      }
+      if (atBottom) {
+        threadEl.scrollTop = threadEl.scrollHeight;
+      }
+      if (sawDecision && initialEventsLoaded) {
+        fetchRuns();
+      }
+    }
+
+    function renderReportMarkdown(text) {
+      const renderInline = (raw) => {
+        let out = "";
+        let plain = "";
+        const flush = () => {
+          if (plain.length > 0) {
+            out += escapeHtml(plain);
+            plain = "";
+          }
+        };
+        let i = 0;
+        while (i < raw.length) {
+          if (raw[i] === "`") {
+            const end = raw.indexOf("`", i + 1);
+            if (end > i + 1) {
+              flush();
+              out += "<code>" + escapeHtml(raw.slice(i + 1, end)) + "</code>";
+              i = end + 1;
+              continue;
+            }
+          }
+          if (raw[i] === "*" && raw[i + 1] === "*") {
+            const end = raw.indexOf("**", i + 2);
+            if (end > i + 2) {
+              flush();
+              out += "<strong>" + renderInline(raw.slice(i + 2, end)) + "</strong>";
+              i = end + 2;
+              continue;
+            }
+          }
+          if (raw[i] === "[" && (i === 0 || raw[i - 1] !== "!")) {
+            const closeBracket = raw.indexOf("]", i + 1);
+            if (closeBracket > i + 1 && raw[closeBracket + 1] === "(") {
+              let depth = 1;
+              let p = closeBracket + 2;
+              while (p < raw.length && depth > 0) {
+                if (raw[p] === "(") depth += 1;
+                else if (raw[p] === ")") depth -= 1;
+                if (depth > 0) p += 1;
+              }
+              const closeParen = depth === 0 ? p : -1;
+              if (closeParen > closeBracket + 2) {
+                const linkText = raw.slice(i + 1, closeBracket);
+                const linkUrl = raw.slice(closeBracket + 2, closeParen).trim();
+                if (linkUrl.length > 0 && !linkText.includes("[")) {
+                  flush();
+                  out += renderInline(linkText) + ' <span class="report-link-url">(' + escapeHtml(linkUrl) + ")</span>";
+                  i = closeParen + 1;
+                  continue;
+                }
+              }
+            }
+          }
+          plain += raw[i];
+          i += 1;
+        }
+        flush();
+        return out;
+      };
+
+      const splitTableRow = (line) => {
+        let trimmed = line.trim();
+        if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+        if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+        return trimmed.split("|").map(cell => cell.trim());
+      };
+
+      const isTableSep = (line) => {
+        if (!line || !line.includes("|")) return false;
+        const cells = splitTableRow(line);
+        return cells.length > 0 && cells.every(c => /^:?-{1,}:?$/.test(c));
+      };
+
+      const isTableStart = (lines, idx) => {
+        if (idx + 1 >= lines.length) return false;
+        const head = lines[idx];
+        const sep = lines[idx + 1];
+        if (!head.includes("|") || !isTableSep(sep)) return false;
+        return splitTableRow(head).length > 0;
+      };
+
+      const isHeading = (line) => /^(#{1,4})\s+(.+)$/.test(line);
+      const isFence = (line) => /^```/.test(line);
+      const isUl = (line) => /^ {0,3}[-*+]\s+(.+)$/.test(line);
+      const isOl = (line) => /^ {0,3}\d+\.\s+(.+)$/.test(line);
+
+      const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+      const blocks = [];
+      let i = 0;
+
+      while (i < lines.length) {
+        const line = lines[i];
+
+        if (line.trim() === "") {
+          i += 1;
+          continue;
+        }
+
+        if (isFence(line)) {
+          i += 1;
+          const codeLines = [];
+          while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+            codeLines.push(lines[i]);
+            i += 1;
+          }
+          if (i < lines.length) i += 1;
+          blocks.push('<pre class="report-code"><code>' + escapeHtml(codeLines.join("\n")) + "</code></pre>");
+          continue;
+        }
+
+        const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          const content = headingMatch[2].replace(/\s+#+\s*$/, "").trim();
+          blocks.push("<h" + level + ">" + renderInline(content) + "</h" + level + ">");
+          i += 1;
+          continue;
+        }
+
+        if (isTableStart(lines, i)) {
+          const headers = splitTableRow(lines[i]);
+          i += 2;
+          const rows = [];
+          while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|") && !isFence(lines[i])) {
+            rows.push(splitTableRow(lines[i]));
+            i += 1;
+          }
+          const headHtml = "<thead><tr>" +
+            headers.map(h => "<th>" + renderInline(h) + "</th>").join("") +
+            "</tr></thead>";
+          const bodyHtml = rows.length > 0
+            ? "<tbody>" + rows.map(row => {
+                const cells = [];
+                for (let c = 0; c < headers.length; c++) {
+                  cells.push("<td>" + renderInline(c < row.length ? row[c] : "") + "</td>");
+                }
+                return "<tr>" + cells.join("") + "</tr>";
+              }).join("") + "</tbody>"
+            : "";
+          blocks.push('<div class="report-table-wrap"><table>' + headHtml + bodyHtml + "</table></div>");
+          continue;
+        }
+
+        if (isUl(line)) {
+          const items = [];
+          while (i < lines.length) {
+            const m = lines[i].match(/^ {0,3}[-*+]\s+(.+)$/);
+            if (!m) break;
+            items.push("<li>" + renderInline(m[1]) + "</li>");
+            i += 1;
+          }
+          blocks.push("<ul>" + items.join("") + "</ul>");
+          continue;
+        }
+
+        if (isOl(line)) {
+          const items = [];
+          while (i < lines.length) {
+            const m = lines[i].match(/^ {0,3}\d+\.\s+(.+)$/);
+            if (!m) break;
+            items.push("<li>" + renderInline(m[1]) + "</li>");
+            i += 1;
+          }
+          blocks.push("<ol>" + items.join("") + "</ol>");
+          continue;
+        }
+
+        const paraLines = [];
+        while (
+          i < lines.length &&
+          lines[i].trim() !== "" &&
+          !isFence(lines[i]) &&
+          !isHeading(lines[i]) &&
+          !isTableStart(lines, i) &&
+          !isUl(lines[i]) &&
+          !isOl(lines[i])
+        ) {
+          paraLines.push(lines[i].trim());
+          i += 1;
+        }
+        blocks.push("<p>" + renderInline(paraLines.join(" ")) + "</p>");
+      }
+
+      return blocks.join("");
+    }
+
+    function findRunByKey(runKey) {
+      if (!liveRuns || !Array.isArray(liveRuns.runs)) {
+        return null;
+      }
+      return liveRuns.runs.find(r => r.key === runKey) || null;
+    }
+
+    function renderReportReader() {
+      const readerEl = document.getElementById("report-reader");
+      if (openReportKey === null) {
+        if (lastReportReaderKey !== null) {
+          readerEl.innerHTML = "";
+          lastReportReaderKey = null;
+        }
+        return;
+      }
+      const run = findRunByKey(openReportKey);
+      if (!run) {
+        openReportKey = null;
+        lastReportReaderKey = null;
+        reportReaderError = "";
+        readerEl.innerHTML = "";
+        return;
+      }
+      const pending = pendingNoteAction.get(run.key) || null;
+      const draft = noteDrafts.get(run.key) || "";
+      const noteErr = noteErrors.get(run.key) || "";
+      const err = reportReaderError || cardErrors.get(run.key) || "";
+      const sig = [run.key, pending || "", noteErr, err, run.hold ? run.hold.note : ""].join("|");
+      if (sig === lastReportReaderKey) return;
+      lastReportReaderKey = sig;
+
+      const hasReport = run.report !== null && run.report.trim().length > 0;
+      const bodyHtml = hasReport
+        ? '<div class="report-body">' + renderReportMarkdown(run.report) + '</div>'
+        : '<div class="report-body">' +
+            '<div class="report-missing">No report file was recorded for this run.</div>' +
+            (run.final_message !== null && run.final_message.length > 0
+              ? '<pre class="report-fallback-msg">' + escapeHtml(run.final_message) + '</pre>'
+              : "") +
+          '</div>';
+
+      const flagsHtml = run.flags.length > 0
+        ? '<div class="report-flags">' +
+            '<div class="details-label">flags (' + run.flags.length + ')</div>' +
+            '<ul class="details-list">' +
+              run.flags.map(fl => '<li>' + escapeHtml(fl) + '</li>').join("") +
+            '</ul>' +
+          '</div>'
+        : "";
+
+      const questionHtml = '<details class="report-question">' +
+        '<summary>Question</summary>' +
+        '<pre class="report-question-body">' + escapeHtml(run.task) + '</pre>' +
+      '</details>';
+
+      const holdPromptHtml = pending === "hold"
+        ? '<form class="note-prompt" data-note-form="' + escapeHtml(run.key) + '" data-note-action="hold">' +
+            '<input type="text" data-note-input="' + escapeHtml(run.key) + '" value="' + escapeHtml(draft) + '" placeholder="One-line note required for Hold..." autocomplete="off">' +
+            '<button type="submit" class="btn btn-primary">Hold</button>' +
+            '<button type="button" class="btn btn-ghost" data-cancel-note="' + escapeHtml(run.key) + '">Cancel</button>' +
+            (noteErr ? '<div class="note-error">' + escapeHtml(noteErr) + '</div>' : "") +
+          '</form>'
+        : "";
+
+      const errHtml = err ? '<div class="card-error">' + escapeHtml(err) + '</div>' : "";
+
+      readerEl.innerHTML =
+        '<div class="report-reader-head">' +
+          '<div class="report-reader-title-row">' +
+            '<div class="report-reader-ident">' +
+              '<span class="run-id">' + escapeHtml(run.id) + '</span>' +
+              '<span class="report-reader-title">' + escapeHtml(run.title) + '</span>' +
+            '</div>' +
+            '<span class="research-pill">research</span>' +
+          '</div>' +
+          '<div class="report-reader-actions">' +
+            '<button type="button" class="btn btn-pass" data-action="mark_read" data-run-key="' + escapeHtml(run.key) + '">Mark read</button>' +
+            '<button type="button" class="btn" data-action="hold" data-run-key="' + escapeHtml(run.key) + '">Hold</button>' +
+            '<button type="button" class="btn btn-primary" data-report-use="' + escapeHtml(run.key) + '"' + (hasReport ? "" : " disabled") + '>Use in conversation</button>' +
+            '<button type="button" id="report-close" class="btn btn-ghost">Close</button>' +
+          '</div>' +
+          holdPromptHtml +
+          errHtml +
+        '</div>' +
+        '<div class="report-reader-scroll">' +
+          '<div class="report-reader-col">' +
+            questionHtml +
+            bodyHtml +
+            flagsHtml +
+          '</div>' +
+        '</div>';
+    }
+
+    function openReport(runKey) {
+      const run = findRunByKey(runKey);
+      if (!run || openReportKey === run.key) return;
+      openReportKey = run.key;
+      lastReportReaderKey = null;
+      reportReaderError = "";
+      renderAll(true);
+    }
+
+    function closeReport() {
+      if (openReportKey === null) return;
+      openReportKey = null;
+      lastReportReaderKey = null;
+      reportReaderError = "";
+      const readerEl = document.getElementById("report-reader");
+      if (readerEl) readerEl.innerHTML = "";
+      renderAll(true);
+    }
+
+    function useReportInConversation(runKey) {
+      const run = findRunByKey(runKey);
+      if (!run || run.report === null || run.report.trim().length === 0) return;
+      if (!attachedReports.some(item => item.key === run.key)) {
+        attachedReports.push({ key: run.key, id: run.id });
+      }
+      closeReport();
+      switchMode("design", null);
+      renderAttachedReports();
+      const input = document.getElementById("conversation-input");
+      if (input) input.focus();
+    }
+
+    function renderAttachedReports() {
+      const el = document.getElementById("attached-reports");
+      if (!el) return;
+      if (attachedReports.length === 0) {
+        el.hidden = true;
+        el.innerHTML = "";
+        return;
+      }
+      el.hidden = false;
+      el.innerHTML = attachedReports.map(item =>
+        '<span class="attached-report-chip">report ' + escapeHtml(item.id) +
+          ' <button type="button" data-report-detach="' + escapeHtml(item.key) + '" aria-label="Remove report ' + escapeHtml(item.id) + '">×</button>' +
+        '</span>'
+      ).join("");
+    }
+
+    async function loadRunDiff(run) {
+      const existing = runDiffs.get(run.key);
+      if (existing && (existing.loading || typeof existing.text === "string")) return;
+      runDiffs.set(run.key, { loading: true });
+      renderAll(true);
+      const url = "/api/runs/" + encodeURIComponent(run.id) + "/diff";
+      const res = await fetchWithRetry(url);
+      if (!res.ok) {
+        const msg = await parseErrorPayload(res, url);
+        runDiffs.set(run.key, { error: msg });
+        renderAll(true);
+        return;
+      }
+      const text = await res.text();
+      runDiffs.set(run.key, { text });
+      renderAll(true);
+    }
+
+    function renderDetailsHtml(run) {
+      if (run.card === "research") return "";
+      if (!openDetails.has(run.key)) return "";
+      const finalMsg = run.final_message !== null ? run.final_message : "(not recorded)";
+      const filesHtml = run.changed_files.length > 0
+        ? '<ul class="details-list">' + run.changed_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") + '</ul>'
+        : '<div class="mono" style="color: var(--color-muted);">None</div>';
+      const commitsHtml = run.commits.length > 0
+        ? '<ul class="details-list">' + run.commits.map(c => '<li><strong>' + escapeHtml(c.sha.slice(0, 7)) + '</strong> ' + escapeHtml(c.subject) + '</li>').join("") + '</ul>'
+        : '<div class="mono" style="color: var(--color-muted);">None</div>';
+      const extraFlagsHtml = run.checks_recorded && run.flags.length > 3
+        ? '<div><div class="details-label">all flags (' + run.flags.length + ')</div><ul class="details-list">' +
+          run.flags.map(fl => '<li>' + escapeHtml(fl) + '</li>').join("") + '</ul></div>'
+        : "";
+      const diffState = runDiffs.get(run.key);
+      let diffHtml = '<div class="mono" style="color: var(--color-muted);">Loading diff...</div>';
+      if (diffState && diffState.error) {
+        diffHtml = '<div class="card-error">' + escapeHtml(diffState.error) + '</div>';
+      } else if (diffState && typeof diffState.text === "string") {
+        diffHtml = diffState.text.length > 0
+          ? '<pre class="details-pre">' + escapeHtml(diffState.text) + '</pre>'
+          : '<div class="mono" style="color: var(--color-muted);">(empty diff)</div>';
+      }
+      return '<div class="details-box">' +
+        '<div><div class="details-label">diff</div>' + diffHtml + '</div>' +
+        '<div><div class="details-label">final_message</div><pre class="details-pre">' + escapeHtml(finalMsg) + '</pre></div>' +
+        '<div><div class="details-label">task</div><pre class="details-pre">' + escapeHtml(run.task) + '</pre></div>' +
+        extraFlagsHtml +
+        '<div><div class="details-label">changed_files</div>' + filesHtml + '</div>' +
+        '<div><div class="details-label">commits</div>' + commitsHtml + '</div>' +
+        '</div>';
+    }
+
+    function renderResearchPreviewHtml(run) {
+      const trimmedMsg = run.final_message !== null ? run.final_message.trim() : "";
+      if (trimmedMsg.length > 0) {
+        const firstLine = trimmedMsg.split(/\r?\n/)[0].trim();
+        return '<div class="research-summary" title="' + escapeHtml(firstLine) + '">' + escapeHtml(firstLine) + '</div>';
+      }
+      if (run.flags.length > 0) {
+        const shown = run.flags.slice(0, 3).map(fl =>
+          '<div class="exc-flag-item" title="' + escapeHtml(fl) + '">• ' + escapeHtml(fl) + '</div>'
+        ).join("");
+        const more = run.flags.length > 3
+          ? '<div class="exc-flag-more">+' + (run.flags.length - 3) + ' more</div>'
+          : "";
+        return '<div class="exc-flags">' + shown + more + '</div>';
+      }
+      const hint = run.report !== null && run.report.length > 0
+        ? "Report ready to read"
+        : "No report file recorded";
+      return '<div class="research-hint">' + hint + '</div>';
+    }
+
+    function renderExceptionFlagsHtml(run) {
+      if (!run.checks_recorded) {
+        return '<div class="exc-not-recorded">checks not recorded</div>';
+      }
+      if (run.flags.length === 0) {
+        return '<div class="exc-flag-item">outcome: ' + escapeHtml(run.outcome) + '</div>';
+      }
+      const shown = run.flags.slice(0, 3).map(fl =>
+        '<div class="exc-flag-item" title="' + escapeHtml(fl) + '">• ' + escapeHtml(fl) + '</div>'
+      ).join("");
+      const more = run.flags.length > 3
+        ? '<div class="exc-flag-more">+' + (run.flags.length - 3) + ' more</div>'
+        : "";
+      return shown + more;
+    }
+
+    function renderRunCard(r) {
+      const held = isHeld(r);
+      const holdNote = held ? r.hold.note : "";
+      const cardErr = cardErrors.get(r.key) || "";
+      const cardErrHtml = cardErr ? '<div class="card-error">' + escapeHtml(cardErr) + '</div>' : "";
+      const pending = pendingNoteAction.get(r.key) || null;
+      const draft = noteDrafts.get(r.key) || "";
+      const noteErr = noteErrors.get(r.key) || "";
+
+      if (r.card === "research") {
+        const isReading = openReportKey === r.key;
+        const outcomeClass = r.outcome === "verified" ? "verified" : "failed";
+        const cardClass = "research-card" + (held ? " is-held" : "") + (isReading ? " is-reading" : "");
+        const promptHtml = pending === "hold"
+          ? '<form class="note-prompt" data-note-form="' + escapeHtml(r.key) + '" data-note-action="hold">' +
+              '<input type="text" data-note-input="' + escapeHtml(r.key) + '" data-preserve-id="note:' + escapeHtml(r.key) + '" value="' + escapeHtml(draft) + '" placeholder="One-line note required for Hold..." autocomplete="off">' +
+              '<button type="submit" class="btn btn-primary">Hold</button>' +
+              '<button type="button" class="btn btn-ghost" data-cancel-note="' + escapeHtml(r.key) + '">Cancel</button>' +
+              (noteErr ? '<div class="note-error">' + escapeHtml(noteErr) + '</div>' : "") +
+            '</form>'
+          : "";
+
+        return '<div class="research-wrap">' +
+          '<div class="' + cardClass + '">' +
+            (held ? '<div class="hold-note-first" title="' + escapeHtml(holdNote) + '">Held: ' + escapeHtml(holdNote) + '</div>' : "") +
+            '<div class="exc-top">' +
+              '<div class="exc-title-group">' +
+                '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+                '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+              '</div>' +
+              '<div class="row-actions">' +
+                '<span class="research-pill">research</span>' +
+                '<span class="outcome-pill ' + outcomeClass + '">' + escapeHtml(r.outcome) + '</span>' +
+              '</div>' +
+            '</div>' +
+            renderResearchPreviewHtml(r) +
+            '<div class="exc-footer">' +
+              '<div class="row-actions">' +
+                '<button type="button" class="btn btn-pass" data-action="mark_read" data-run-key="' + escapeHtml(r.key) + '">Mark read</button>' +
+                '<button type="button" class="btn" data-action="hold" data-run-key="' + escapeHtml(r.key) + '">Hold</button>' +
+              '</div>' +
+              '<div class="row-actions">' +
+                '<button type="button" class="btn btn-ghost" data-report-open="' + escapeHtml(r.key) + '"' + (isReading ? " disabled" : "") + '>' + (isReading ? "Reading" : "Read report") + '</button>' +
+              '</div>' +
+            '</div>' +
+            cardErrHtml +
+          '</div>' +
+          promptHtml +
+        '</div>';
+      }
+
+      if (r.card === "clean" && !held) {
+        const isOpen = openDetails.has(r.key);
+        return '<div>' +
+          '<div class="clean-row">' +
+            '<div class="clean-main">' +
+              '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+              '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+            '</div>' +
+            '<div class="row-actions">' +
+              '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
+              '<button type="button" class="btn btn-pass" data-action="accept" data-run-key="' + escapeHtml(r.key) + '">Accept</button>' +
+            '</div>' +
+          '</div>' +
+          cardErrHtml +
+          renderDetailsHtml(r) +
+        '</div>';
+      }
+
+      const isOpen = openDetails.has(r.key);
+      const outcomeClass = r.outcome === "verified" ? "verified" : "failed";
+      const cardClass = "exception-card" + (held ? " is-held" : (r.outcome !== "verified" ? " is-failed" : ""));
+      let promptHtml = "";
+      if (pending === "send_back" || pending === "hold") {
+        const label = pending === "send_back" ? "Send back" : "Hold";
+        promptHtml = '<form class="note-prompt" data-note-form="' + escapeHtml(r.key) + '" data-note-action="' + pending + '">' +
+          '<input type="text" data-note-input="' + escapeHtml(r.key) + '" data-preserve-id="note:' + escapeHtml(r.key) + '" value="' + escapeHtml(draft) + '" placeholder="One-line note required for ' + label + '..." autocomplete="off">' +
+          '<button type="submit" class="btn btn-primary">' + label + '</button>' +
+          '<button type="button" class="btn btn-ghost" data-cancel-note="' + escapeHtml(r.key) + '">Cancel</button>' +
+          (noteErr ? '<div class="note-error">' + escapeHtml(noteErr) + '</div>' : "") +
+          '</form>';
+      }
+
+      return '<div class="exception-wrap">' +
+        '<div class="' + cardClass + '">' +
+          (held ? '<div class="hold-note-first" title="' + escapeHtml(holdNote) + '">Held: ' + escapeHtml(holdNote) + '</div>' : "") +
+          '<div class="exc-top">' +
+            '<div class="exc-title-group">' +
+              '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+              '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+            '</div>' +
+            '<span class="outcome-pill ' + outcomeClass + '">' + escapeHtml(r.outcome) + '</span>' +
+          '</div>' +
+          '<div class="exc-flags">' + renderExceptionFlagsHtml(r) + '</div>' +
+          '<div class="exc-footer">' +
+            '<div class="row-actions">' +
+              '<button type="button" class="btn btn-pass" data-action="accept" data-run-key="' + escapeHtml(r.key) + '">Accept</button>' +
+              '<button type="button" class="btn btn-warn" data-action="send_back" data-run-key="' + escapeHtml(r.key) + '">Send back</button>' +
+              '<button type="button" class="btn btn-danger" data-action="redo" data-run-key="' + escapeHtml(r.key) + '">Redo</button>' +
+              '<button type="button" class="btn" data-action="hold" data-run-key="' + escapeHtml(r.key) + '">Hold</button>' +
+            '</div>' +
+            '<div class="row-actions">' +
+              '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
+            '</div>' +
+          '</div>' +
+          cardErrHtml +
+        '</div>' +
+        promptHtml +
+        renderDetailsHtml(r) +
+      '</div>';
+    }
+
+    function renderQueue(state, force) {
+      if (mode !== "review") return;
+
+      const runningSig = state.inProgress.map(r => r.key + ":" + r.turns + ":" + r.activity + ":" + (r.gate_running ? "1" : "0")).join(",");
+      const runsSig = state.undecidedArrived.map(r => r.key + ":" + (r.hold ? r.hold.note : "")).join(",");
+      const detailsSig = Array.from(openDetails).map(k => {
+        const d = runDiffs.get(k);
+        return k + ":" + (d ? (d.loading ? "L" : (d.error ? "E" : "T")) : "N");
+      }).join(",");
+      const pendingSig = Array.from(pendingNoteAction.entries()).map(([k, v]) => k + ":" + v).join(",");
+      const noteErrSig = Array.from(noteErrors.entries()).map(([k, v]) => k + ":" + v).join(",");
+      const cardErrSig = Array.from(cardErrors.entries()).map(([k, v]) => k + ":" + v).join(",");
+      const sig = [runningSig, runsSig, detailsSig, pendingSig, noteErrSig, cardErrSig, focusedGroup || "", openReportKey || ""].join("||");
+
+      if (!force && sig === lastQueueSig) return;
+      lastQueueSig = sig;
+
+      const queueEl = document.getElementById("queue");
+      queueEl.hidden = false;
+
+      const activeInput = document.activeElement;
+      const activeInputId = activeInput && activeInput.dataset ? activeInput.dataset.preserveId : null;
+      const activeSelStart = activeInput && typeof activeInput.selectionStart === "number" ? activeInput.selectionStart : null;
+
+      let runningHtml = "";
+      if (state.inProgress.length > 0) {
+        const rows = state.inProgress.map(r =>
+          '<div class="running-row">' +
+            '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
+            '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
+            '<span class="running-turns">' + escapeHtml(String(r.turns)) + ' turns</span>' +
+            '<span class="running-activity" title="' + escapeHtml(r.activity) + '">' + escapeHtml(r.activity) + '</span>' +
+            (r.gate_running ? '<span class="running-gate">gate</span>' : "") +
+          '</div>'
+        ).join("");
+        runningHtml = '<section class="running-section">' +
+          '<div class="running-head">In progress (' + state.inProgress.length + ')</div>' +
+          '<div class="running-list">' + rows + '</div>' +
+        '</section>';
+      }
+
+      const byGroup = new Map();
+      for (const r of state.undecidedArrived) {
+        const g = runGroupName(r);
+        if (!byGroup.has(g)) byGroup.set(g, { active: [], held: [] });
+        if (isHeld(r)) {
+          byGroup.get(g).held.push(r);
+        } else {
+          byGroup.get(g).active.push(r);
+        }
+      }
+
+      if (state.inProgress.length === 0 && byGroup.size === 0) {
+        queueEl.innerHTML = '<div class="thread-empty">No runs in progress or waiting for review.</div>';
+        return;
+      }
+
+      const orderedGroups = allGroups.filter(g => byGroup.has(g));
+      for (const g of byGroup.keys()) {
+        if (!orderedGroups.includes(g)) orderedGroups.push(g);
+      }
+
+      const groupsHtml = orderedGroups.map(groupName => {
+        const bucket = byGroup.get(groupName);
+        const active = bucket.active;
+        const held = bucket.held;
+        const totalUndecided = active.length + held.length;
+        const researchRuns = active.filter(r => r.card === "research");
+        const exceptionRuns = active.filter(r => r.card === "exception");
+        const cleanRuns = active.filter(r => r.card === "clean");
+        const isFocused = focusedGroup === groupName;
+
+        let headActions = '<span class="group-count">' + totalUndecided + ' undecided</span>';
+        if (cleanRuns.length >= 2) {
+          headActions = '<button type="button" class="btn btn-pass" data-accept-all-clean="' + escapeHtml(groupName) + '">Accept all clean (' + cleanRuns.length + ')</button>' + headActions;
+        }
+
+        const activeHtml = researchRuns.map(renderRunCard).join("") +
+          exceptionRuns.map(renderRunCard).join("") +
+          cleanRuns.map(renderRunCard).join("");
+
+        const heldHtml = held.length > 0
+          ? '<div class="held-heading">Held</div>' + held.map(renderRunCard).join("")
+          : "";
+
+        return '<section class="queue-group' + (isFocused ? " focused" : "") + '" data-group="' + escapeHtml(groupName) + '">' +
+          '<div class="group-head">' +
+            '<span class="group-name">' + escapeHtml(groupName) + '</span>' +
+            '<div class="group-meta">' + headActions + '</div>' +
+          '</div>' +
+          '<div class="group-body">' +
+            activeHtml +
+            heldHtml +
+          '</div>' +
+        '</section>';
+      }).join("");
+
+      queueEl.innerHTML = runningHtml + groupsHtml;
+
+      if (activeInputId) {
+        const restored = queueEl.querySelector('[data-preserve-id="' + CSS.escape(activeInputId) + '"]');
+        if (restored) {
+          restored.focus();
+          if (activeSelStart !== null) {
+            try { restored.setSelectionRange(activeSelStart, activeSelStart); } catch (_) {}
+          }
+        }
+      }
+    }
+
+    function scrollQueueToGroup(groupName) {
+      if (mode !== "review") return;
+      const queueEl = document.getElementById("queue");
+      const target = queueEl.querySelector('[data-group="' + CSS.escape(groupName) + '"]');
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }
+
+    function renderMap(state, force) {
+      if (mapTab !== "runs") return;
+      const counts = new Map();
+      for (const g of allGroups) {
+        counts.set(g, { running: 0, waiting: 0 });
+      }
+      for (const r of state.inProgress) {
+        const g = runningGroupName(r);
+        if (!counts.has(g)) counts.set(g, { running: 0, waiting: 0 });
+        counts.get(g).running += 1;
+      }
+      for (const r of state.undecidedArrived) {
+        const g = runGroupName(r);
+        if (!counts.has(g)) counts.set(g, { running: 0, waiting: 0 });
+        counts.get(g).waiting += 1;
+      }
+
+      const sig = Array.from(counts.entries()).map(([g, c]) => g + ":" + c.running + ":" + c.waiting).join("|") + "||" + (focusedGroup || "");
+      if (!force && sig === lastMapSig) return;
+      lastMapSig = sig;
+
+      const mapEl = document.getElementById("map");
+      if (allGroups.length === 0) {
+        mapEl.innerHTML = '<div class="thread-empty">No active or waiting runs.</div>';
+        return;
+      }
+
+      mapEl.innerHTML = allGroups.map(g => {
+        const c = counts.get(g) || { running: 0, waiting: 0 };
+        const isFocused = focusedGroup === g;
+        return '<button type="button" class="map-box' + (isFocused ? " focused" : "") + '" data-map-group="' + escapeHtml(g) + '" aria-pressed="' + (isFocused ? "true" : "false") + '">' +
+          '<span class="map-box-name">' + escapeHtml(g) + '</span>' +
+          '<span class="map-box-stats nums">' +
+            '<span class="' + (c.running > 0 ? "map-stat-running" : "") + '">' + c.running + ' in progress</span>' +
+            '<span class="' + (c.waiting > 0 ? "map-stat-waiting" : "") + '">' + c.waiting + ' waiting</span>' +
+          '</span>' +
+        '</button>';
+      }).join("");
+    }
+
+    function unitShortName(id) {
+      if (id.includes("::")) {
+        const parts = id.split("::");
+        return parts[parts.length - 1];
+      }
+      if (id.includes(".")) {
+        const parts = id.split(".");
+        return parts[parts.length - 1];
+      }
+      return id;
+    }
+
+    function computeDependencyColumns(ids, edges) {
+      const sortedIds = Array.from(ids).sort();
+      const idSet = new Set(sortedIds);
+      const deps = new Map();
+      for (const id of sortedIds) {
+        deps.set(id, []);
+      }
+      for (const e of edges) {
+        if (e.from !== e.to && idSet.has(e.from) && idSet.has(e.to)) {
+          deps.get(e.from).push(e.to);
+        }
+      }
+      for (const list of deps.values()) {
+        list.sort();
+      }
+      const visiting = new Set();
+      const depth = new Map();
+
+      function visit(id) {
+        if (depth.has(id)) return depth.get(id);
+        visiting.add(id);
+        let maxDep = -1;
+        for (const dep of deps.get(id)) {
+          if (visiting.has(dep)) continue;
+          const d = visit(dep);
+          if (d > maxDep) maxDep = d;
+        }
+        visiting.delete(id);
+        const col = maxDep + 1;
+        depth.set(id, col);
+        return col;
+      }
+
+      for (const id of sortedIds) {
+        visit(id);
+      }
+
+      const cols = [];
+      for (const id of sortedIds) {
+        const c = depth.get(id) || 0;
+        while (cols.length <= c) cols.push([]);
+        cols[c].push(id);
+      }
+      return cols;
+    }
+
+    function addToSetMap(map, key, val) {
+      if (!map.has(key)) map.set(key, new Set());
+      map.get(key).add(val);
+    }
+
+    function computeOverlay(mapData, state) {
+      const repoWaiting = state.undecidedArrived;
+
+      const fileToUnit = new Map();
+      for (const u of mapData.units) {
+        fileToUnit.set(u.file, u);
+      }
+      const groupPrefixes = mapData.groups.map(g => ({
+        group: g,
+        prefix: g.path === "." ? "." : g.path.replace(/\/+$/, "")
+      }));
+
+      function placeFile(filePath) {
+        if (fileToUnit.has(filePath)) {
+          return { type: "unit", unit: fileToUnit.get(filePath) };
+        }
+        let best = null;
+        let bestLen = -1;
+        for (const gp of groupPrefixes) {
+          if (gp.prefix === ".") {
+            if (bestLen < 0) {
+              best = gp.group;
+              bestLen = 0;
+            }
+          } else if (filePath === gp.prefix || filePath.startsWith(gp.prefix + "/")) {
+            if (gp.prefix.length > bestLen) {
+              best = gp.group;
+              bestLen = gp.prefix.length;
+            }
+          }
+        }
+        if (best) return { type: "group", group: best };
+        return { type: "outside" };
+      }
+
+      const unitRunning = new Map();
+      const unitWaiting = new Map();
+      const groupRunning = new Map();
+      const groupWaiting = new Map();
+      const outsideFiles = new Set();
+
+      for (const r of repoWaiting) {
+        for (const f of r.changed_files) {
+          const loc = placeFile(f);
+          if (loc.type === "unit") {
+            addToSetMap(unitWaiting, loc.unit.id, r.key);
+            addToSetMap(groupWaiting, loc.unit.group, r.key);
+          } else if (loc.type === "group") {
+            addToSetMap(groupWaiting, loc.group.id, r.key);
+          } else {
+            outsideFiles.add(f);
+          }
+        }
+      }
+
+      const sig = repoWaiting.map(r => r.key).join(",");
+      return {
+        unitRunning,
+        unitWaiting,
+        groupRunning,
+        groupWaiting,
+        outsideCount: outsideFiles.size,
+        sig
+      };
+    }
+
+    function ensureMapLoaded() {
+      if (mapState !== null) return;
+      mapState = { status: "loading" };
+      renderAll(true);
+      (async () => {
+        const response = await fetchWithRetry("/api/map");
+        if (!response.ok) {
+          const errMsg = await parseErrorPayload(response, "/api/map");
+          mapState = { status: "error", error: errMsg };
+          renderAll(true);
+          return;
+        }
+        let data;
+        try {
+          data = await response.json();
+        } catch (err) {
+          mapState = {
+            status: "error",
+            error: "/api/map returned invalid JSON: " + (err && err.message ? err.message : String(err))
+          };
+          renderAll(true);
+          return;
+        }
+        if (!isPlainObject(data) || !Array.isArray(data.groups) || !Array.isArray(data.units) ||
+            !Array.isArray(data.edges) || !Array.isArray(data.structures) ||
+            !Array.isArray(data.unparsed) || !Array.isArray(data.unresolved)) {
+          mapState = { status: "error", error: "/api/map response missing required fields" };
+        } else {
+          mapState = { status: "ok", data };
+        }
+        renderAll(true);
+      })();
+    }
+
+    function renderMapChrome() {
+      const readerOpen = openReportKey !== null;
+      const paneHead = document.querySelector(".map-pane-head");
+      const tabsEl = document.getElementById("map-tabs");
+      const controlsEl = document.querySelector(".map-controls");
+      const metaBar = document.getElementById("map-meta-bar");
+      const detailEl = document.getElementById("map-detail");
+      const readerEl = document.getElementById("report-reader");
+
+      tabsEl.querySelectorAll("[data-map-tab]").forEach(btn => {
+        const isActive = btn.dataset.mapTab === mapTab;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", isActive ? "true" : "false");
+      });
+
+      if (paneHead) paneHead.hidden = readerOpen;
+      tabsEl.hidden = readerOpen;
+      if (controlsEl) controlsEl.hidden = readerOpen;
+      readerEl.hidden = !readerOpen;
+
+      if (readerOpen) {
+        document.getElementById("map").hidden = true;
+        document.getElementById("map-system").hidden = true;
+        document.getElementById("map-data").hidden = true;
+        metaBar.hidden = true;
+        detailEl.hidden = true;
+      } else {
+        document.getElementById("map").hidden = mapTab !== "runs";
+        document.getElementById("map-system").hidden = mapTab !== "system";
+        document.getElementById("map-data").hidden = mapTab !== "data";
+      }
+
+      const wideBtn = document.getElementById("map-wide");
+      wideBtn.classList.toggle("active", mapWide);
+      wideBtn.setAttribute("aria-pressed", mapWide ? "true" : "false");
+      wideBtn.textContent = mapWide ? "Narrow" : "Wide";
+      const ws = document.querySelector(".workspace");
+      if (ws) ws.classList.toggle("map-wide", readerOpen || mapWide);
+    }
+
+    function renderMapMeta(mapData, overlay, force) {
+      const barEl = document.getElementById("map-meta-bar");
+      const outsideEl = document.getElementById("map-outside");
+      const notesEl = document.getElementById("map-notes");
+
+      if (mapTab === "runs" || !mapData) {
+        barEl.hidden = true;
+        outsideEl.hidden = true;
+        notesEl.hidden = true;
+        lastMetaSig = "";
+        return;
+      }
+
+      const unparsedCount = mapData.unparsed.length;
+      const unresolvedCount = mapData.unresolved.length;
+      const sig = [overlay.outsideCount, unparsedCount, unresolvedCount, mapNotesOpen ? "1" : "0"].join("|");
+      if (!force && sig === lastMetaSig) return;
+      lastMetaSig = sig;
+
+      if (overlay.outsideCount > 0) {
+        outsideEl.hidden = false;
+        outsideEl.textContent = overlay.outsideCount + " files outside the code";
+      } else {
+        outsideEl.hidden = true;
+        outsideEl.textContent = "";
+      }
+
+      if (unparsedCount > 0 || unresolvedCount > 0) {
+        notesEl.hidden = false;
+        const parts = [];
+        if (unparsedCount > 0) parts.push(unparsedCount + " files not parsed");
+        if (unresolvedCount > 0) parts.push(unresolvedCount + " references not resolved");
+        let listHtml = "";
+        if (mapNotesOpen) {
+          let sections = "";
+          if (unparsedCount > 0) {
+            sections += '<div><div class="map-notes-section-title">files not parsed</div><ul class="map-notes-items">' +
+              mapData.unparsed.map(u =>
+                '<li><span>' + escapeHtml(u.file) + '</span> <span class="map-notes-reason">— ' + escapeHtml(u.reason) + '</span></li>'
+              ).join("") + '</ul></div>';
+          }
+          if (unresolvedCount > 0) {
+            sections += '<div><div class="map-notes-section-title">references not resolved</div><ul class="map-notes-items">' +
+              mapData.unresolved.map(u =>
+                '<li><span>' + escapeHtml(u.file) + ':' + escapeHtml(u.line) + '</span> <span class="map-notes-reason">— ' + escapeHtml(u.reference) + '</span></li>'
+              ).join("") + '</ul></div>';
+          }
+          listHtml = '<div class="map-notes-list">' + sections + '</div>';
+        }
+        notesEl.innerHTML =
+          '<button type="button" class="map-notes-toggle nums" data-toggle-notes="1" aria-expanded="' + (mapNotesOpen ? "true" : "false") + '">' +
+            escapeHtml(parts.join(" · ")) +
+          '</button>' + listHtml;
+      } else {
+        notesEl.hidden = true;
+        notesEl.innerHTML = "";
+      }
+
+      barEl.hidden = outsideEl.hidden && notesEl.hidden;
+    }
+
+    function renderMapDetail(mapData) {
+      const detailEl = document.getElementById("map-detail");
+      if (mapTab === "runs" || !mapData) {
+        detailEl.hidden = true;
+        detailEl.innerHTML = "";
+        return;
+      }
+
+      if (mapTab === "system") {
+        const activeUnit = hoveredMapUnit || selectedMapUnit;
+        if (!activeUnit) {
+          detailEl.hidden = true;
+          detailEl.innerHTML = "";
+          return;
+        }
+        const unit = mapData.units.find(u => u.id === activeUnit);
+        if (!unit) {
+          detailEl.hidden = true;
+          detailEl.innerHTML = "";
+          return;
+        }
+        const dependsOn = mapData.edges
+          .filter(e => e.level === "unit" && e.from === activeUnit)
+          .map(e => e.to);
+        const dependedBy = mapData.edges
+          .filter(e => e.level === "unit" && e.to === activeUnit)
+          .map(e => e.from);
+        const definedStructs = mapData.structures.filter(s => s.unit === activeUnit);
+
+        const depsHtml = dependsOn.length > 0
+          ? '<ul class="map-detail-list">' + dependsOn.map(id => '<li>' + escapeHtml(id) + '</li>').join("") + '</ul>'
+          : '<div class="map-detail-empty">None</div>';
+        const revDepsHtml = dependedBy.length > 0
+          ? '<ul class="map-detail-list">' + dependedBy.map(id => '<li>' + escapeHtml(id) + '</li>').join("") + '</ul>'
+          : '<div class="map-detail-empty">None</div>';
+        const structsHtml = definedStructs.length > 0
+          ? '<ul class="map-detail-list">' + definedStructs.map(s =>
+              '<li>' + escapeHtml(s.name) + ' <span class="map-detail-type">(' + escapeHtml(s.kind) + ')</span></li>'
+            ).join("") + '</ul>'
+          : '<div class="map-detail-empty">None</div>';
+
+        detailEl.hidden = false;
+        detailEl.innerHTML =
+          '<div class="map-detail-head">' +
+            '<div>' +
+              '<div class="map-detail-id">' + escapeHtml(unit.id) + '</div>' +
+              '<div class="map-detail-file">' + escapeHtml(unit.file) + '</div>' +
+            '</div>' +
+            '<button type="button" class="btn btn-ghost" data-close-detail="1" aria-label="Close detail">×</button>' +
+          '</div>' +
+          '<div class="map-detail-section"><div class="details-label">depends on (' + dependsOn.length + ')</div>' + depsHtml + '</div>' +
+          '<div class="map-detail-section"><div class="details-label">depended on by (' + dependedBy.length + ')</div>' + revDepsHtml + '</div>' +
+          '<div class="map-detail-section"><div class="details-label">structures (' + definedStructs.length + ')</div>' + structsHtml + '</div>';
+        return;
+      }
+
+      if (mapTab === "data") {
+        if (!selectedMapStructure) {
+          detailEl.hidden = true;
+          detailEl.innerHTML = "";
+          return;
+        }
+        const s = mapData.structures.find(x => x.id === selectedMapStructure);
+        if (!s) {
+          detailEl.hidden = true;
+          detailEl.innerHTML = "";
+          return;
+        }
+        const fieldsHtml = s.fields.length > 0
+          ? '<ul class="map-detail-list">' + s.fields.map(f =>
+              '<li>' + escapeHtml(f.name) + (f.type ? ': <span class="map-detail-type">' + escapeHtml(f.type) + '</span>' : "") + '</li>'
+            ).join("") + '</ul>'
+          : '<div class="map-detail-empty">None</div>';
+        const refsHtml = s.referenced_by.length > 0
+          ? '<ul class="map-detail-list">' + s.referenced_by.map(u => '<li>' + escapeHtml(u) + '</li>').join("") + '</ul>'
+          : '<div class="map-detail-empty">None</div>';
+
+        detailEl.hidden = false;
+        detailEl.innerHTML =
+          '<div class="map-detail-head">' +
+            '<div>' +
+              '<div class="map-detail-id">' + escapeHtml(s.id) + '</div>' +
+              '<div class="map-detail-file">' + escapeHtml(s.file + ":" + s.line) + ' · ' + escapeHtml(s.kind) + '</div>' +
+            '</div>' +
+            '<button type="button" class="btn btn-ghost" data-close-detail="1" aria-label="Close detail">×</button>' +
+          '</div>' +
+          '<div class="map-detail-section"><div class="details-label">fields (' + s.fields.length + ')</div>' + fieldsHtml + '</div>' +
+          '<div class="map-detail-section"><div class="details-label">referenced_by (' + s.referenced_by.length + ')</div>' + refsHtml + '</div>';
+      }
+    }
+
+    function applySystemHighlight() {
+      const entry = mapState;
+      const mapData = entry && entry.status === "ok" ? entry.data : null;
+      const sysEl = document.getElementById("map-system");
+      const activeUnit = hoveredMapUnit || selectedMapUnit;
+
+      const connectedNodes = new Set();
+      if (activeUnit) {
+        connectedNodes.add("unit:" + activeUnit);
+      }
+
+      const paths = sysEl.querySelectorAll(".sys-edge");
+      paths.forEach(p => {
+        const idx = Number(p.dataset.edgeIdx);
+        const edgeMeta = renderedSysEdges[idx];
+        if (!activeUnit || !edgeMeta) {
+          p.classList.remove("edge-strong", "edge-dim");
+          p.setAttribute("marker-end", "url(#sys-arrow-faint)");
+          return;
+        }
+        if (edgeMeta.units.has(activeUnit)) {
+          p.classList.add("edge-strong");
+          p.classList.remove("edge-dim");
+          p.setAttribute("marker-end", "url(#sys-arrow-strong)");
+          connectedNodes.add(edgeMeta.fromNode);
+          connectedNodes.add(edgeMeta.toNode);
+        } else {
+          p.classList.add("edge-dim");
+          p.classList.remove("edge-strong");
+          p.setAttribute("marker-end", "url(#sys-arrow-faint)");
+        }
+      });
+
+      const nodeEls = sysEl.querySelectorAll("[data-node-id]");
+      nodeEls.forEach(el => {
+        const nid = el.dataset.nodeId;
+        if (!activeUnit) {
+          el.classList.remove("node-active", "node-related", "node-dim");
+          return;
+        }
+        el.classList.toggle("node-active", nid === "unit:" + activeUnit);
+        el.classList.toggle("node-related", nid !== "unit:" + activeUnit && connectedNodes.has(nid));
+        el.classList.toggle("node-dim", !connectedNodes.has(nid));
+      });
+
+      renderMapDetail(mapData);
+    }
+
+    function buildEdgePath(a, b) {
+      const ax = a.x + a.w / 2;
+      const ay = a.y + a.h / 2;
+      const bx = b.x + b.w / 2;
+      const by = b.y + b.h / 2;
+      const dx = bx - ax;
+      const dy = by - ay;
+
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        const x1 = dx < 0 ? a.x : a.x + a.w;
+        const y1 = ay;
+        const x2 = dx < 0 ? b.x + b.w : b.x;
+        const y2 = by;
+        const span = Math.max(24, Math.abs(x2 - x1) * 0.45);
+        const cx1 = dx < 0 ? x1 - span : x1 + span;
+        const cx2 = dx < 0 ? x2 + span : x2 - span;
+        return "M " + x1.toFixed(1) + " " + y1.toFixed(1) +
+          " C " + cx1.toFixed(1) + " " + y1.toFixed(1) + ", " +
+          cx2.toFixed(1) + " " + y2.toFixed(1) + ", " +
+          x2.toFixed(1) + " " + y2.toFixed(1);
+      }
+
+      if (Math.abs(dx) < 20) {
+        const x1 = a.x + a.w;
+        const y1 = ay;
+        const x2 = b.x + b.w;
+        const y2 = by;
+        const bow = Math.min(34, 14 + Math.abs(dy) * 0.08);
+        const cx = Math.max(x1, x2) + bow;
+        return "M " + x1.toFixed(1) + " " + y1.toFixed(1) +
+          " C " + cx.toFixed(1) + " " + y1.toFixed(1) + ", " +
+          cx.toFixed(1) + " " + y2.toFixed(1) + ", " +
+          x2.toFixed(1) + " " + y2.toFixed(1);
+      }
+
+      const x1 = ax;
+      const y1 = dy < 0 ? a.y : a.y + a.h;
+      const x2 = bx;
+      const y2 = dy < 0 ? b.y + b.h : b.y;
+      const span = Math.max(20, Math.abs(y2 - y1) * 0.45);
+      const cy1 = dy < 0 ? y1 - span : y1 + span;
+      const cy2 = dy < 0 ? y2 + span : y2 - span;
+      return "M " + x1.toFixed(1) + " " + y1.toFixed(1) +
+        " C " + x1.toFixed(1) + " " + cy1.toFixed(1) + ", " +
+        x2.toFixed(1) + " " + cy2.toFixed(1) + ", " +
+        x2.toFixed(1) + " " + y2.toFixed(1);
+    }
+
+    function drawSystemEdges(mapData) {
+      const sysEl = document.getElementById("map-system");
+      const canvas = sysEl.querySelector(".sys-canvas");
+      const svg = sysEl.querySelector(".sys-svg");
+      if (!canvas || !svg || !mapData) return;
+
+      const canvasRect = canvas.getBoundingClientRect();
+      const width = Math.max(1, canvas.scrollWidth);
+      const height = Math.max(1, canvas.scrollHeight);
+      svg.setAttribute("width", String(width));
+      svg.setAttribute("height", String(height));
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+
+      const rects = new Map();
+      canvas.querySelectorAll("[data-node-id]").forEach(el => {
+        const r = el.getBoundingClientRect();
+        rects.set(el.dataset.nodeId, {
+          x: r.left - canvasRect.left,
+          y: r.top - canvasRect.top,
+          w: r.width,
+          h: r.height
+        });
+      });
+
+      const edgeMap = new Map();
+      function addEdge(fromNode, toNode, unitIds) {
+        if (!rects.has(fromNode) || !rects.has(toNode) || fromNode === toNode) return;
+        const key = fromNode + "->" + toNode;
+        if (!edgeMap.has(key)) {
+          edgeMap.set(key, { fromNode, toNode, units: new Set() });
+        }
+        const item = edgeMap.get(key);
+        for (const u of unitIds) {
+          item.units.add(u);
+        }
+      }
+
+      if (openMapGroup === null) {
+        for (const e of mapData.edges) {
+          if (e.level === "group") {
+            addEdge("group:" + e.from, "group:" + e.to, []);
+          }
+        }
+      } else {
+        const unitToGroup = new Map();
+        for (const u of mapData.units) {
+          unitToGroup.set(u.id, u.group);
+        }
+        for (const e of mapData.edges) {
+          if (e.level === "group" && e.from !== openMapGroup && e.to !== openMapGroup) {
+            addEdge("group:" + e.from, "group:" + e.to, []);
+          } else if (e.level === "unit") {
+            const fg = unitToGroup.get(e.from);
+            const tg = unitToGroup.get(e.to);
+            if (fg === openMapGroup && tg === openMapGroup) {
+              addEdge("unit:" + e.from, "unit:" + e.to, [e.from, e.to]);
+            } else if (fg === openMapGroup && tg && tg !== openMapGroup) {
+              addEdge("unit:" + e.from, "group:" + tg, [e.from]);
+            } else if (tg === openMapGroup && fg && fg !== openMapGroup) {
+              addEdge("group:" + fg, "unit:" + e.to, [e.to]);
+            }
+          }
+        }
+      }
+
+      renderedSysEdges = Array.from(edgeMap.values());
+      const defs =
+        '<defs>' +
+          '<marker id="sys-arrow-faint" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">' +
+            '<path d="M 0 1 L 7 4 L 0 7 z" class="sys-arrow-faint"></path>' +
+          '</marker>' +
+          '<marker id="sys-arrow-strong" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">' +
+            '<path d="M 0 1 L 7 4 L 0 7 z" class="sys-arrow-strong"></path>' +
+          '</marker>' +
+        '</defs>';
+
+      const pathsHtml = renderedSysEdges.map((edge, idx) => {
+        const d = buildEdgePath(rects.get(edge.fromNode), rects.get(edge.toNode));
+        return '<path class="sys-edge" data-edge-idx="' + idx + '" d="' + d + '" marker-end="url(#sys-arrow-faint)"></path>';
+      }).join("");
+
+      svg.innerHTML = defs + pathsHtml;
+      applySystemHighlight();
+    }
+
+    function renderSystemTab(state, force) {
+      if (mapTab !== "system") return;
+      const sysEl = document.getElementById("map-system");
+
+      const entry = mapState;
+      if (!entry) {
+        ensureMapLoaded();
+        return;
+      }
+      if (entry.status === "loading") {
+        renderMapMeta(null, null, force);
+        renderMapDetail(null);
+        sysEl.innerHTML = '<div class="map-loading">reading the code</div>';
+        lastSystemSig = "loading";
+        return;
+      }
+      if (entry.status === "error") {
+        renderMapMeta(null, null, force);
+        renderMapDetail(null);
+        sysEl.innerHTML = '<div class="map-error">' + escapeHtml(entry.error) + '</div>';
+        lastSystemSig = "error:" + entry.error;
+        return;
+      }
+
+      const mapData = entry.data;
+      const overlay = computeOverlay(mapData, state);
+      renderMapMeta(mapData, overlay, force);
+
+      const sig = [openMapGroup || "", focusedGroup || "", overlay.sig].join("||");
+      if (!force && sig === lastSystemSig) {
+        renderMapDetail(mapData);
+        return;
+      }
+      lastSystemSig = sig;
+
+      if (mapData.groups.length === 0) {
+        sysEl.innerHTML = '<div class="map-loading">No groups found.</div>';
+        renderMapDetail(mapData);
+        return;
+      }
+
+      const unitsByGroup = new Map();
+      for (const g of mapData.groups) {
+        unitsByGroup.set(g.id, []);
+      }
+      for (const u of mapData.units) {
+        if (!unitsByGroup.has(u.group)) unitsByGroup.set(u.group, []);
+        unitsByGroup.get(u.group).push(u);
+      }
+
+      const groupById = new Map();
+      for (const g of mapData.groups) {
+        groupById.set(g.id, g);
+      }
+      const groupEdges = mapData.edges.filter(e => e.level === "group");
+      const groupCols = computeDependencyColumns(mapData.groups.map(g => g.id), groupEdges);
+      const unitById = new Map();
+      for (const u of mapData.units) {
+        unitById.set(u.id, u);
+      }
+
+      function renderGroupHtml(g) {
+        const gUnits = unitsByGroup.get(g.id) || [];
+        const isOpen = openMapGroup === g.id;
+        const isFocused = focusedGroup !== null && focusedGroup === g.path && allGroups.includes(g.path);
+        const gRun = (overlay.groupRunning.get(g.id) || { size: 0 }).size;
+        const gWait = (overlay.groupWaiting.get(g.id) || { size: 0 }).size;
+
+        const classes = ["sys-group", isOpen ? "open" : "collapsed"];
+        if (isFocused) classes.push("focused");
+        if (gRun > 0) classes.push("has-running");
+        if (gWait > 0) classes.push("has-waiting");
+
+        const statsParts = [
+          '<span>' + gUnits.length + (gUnits.length === 1 ? " unit" : " units") + '</span>'
+        ];
+        if (gRun > 0) {
+          statsParts.push('<span class="map-stat-running">' + gRun + ' in progress</span>');
+        }
+        if (gWait > 0) {
+          statsParts.push('<span class="map-stat-waiting">' + gWait + ' waiting</span>');
+        }
+
+        let bodyHtml = "";
+        if (isOpen) {
+          if (gUnits.length === 0) {
+            bodyHtml = '<div class="sys-empty-units">No units in this group.</div>';
+          } else {
+            const groupUnitIds = gUnits.map(u => u.id);
+            const groupUnitSet = new Set(groupUnitIds);
+            const internalEdges = mapData.edges.filter(
+              e => e.level === "unit" && groupUnitSet.has(e.from) && groupUnitSet.has(e.to)
+            );
+            const unitCols = computeDependencyColumns(groupUnitIds, internalEdges);
+            bodyHtml = '<div class="sys-units-cols">' + unitCols.map(col =>
+              '<div class="sys-unit-col">' + col.map(uid => {
+                const u = unitById.get(uid);
+                const uRun = (overlay.unitRunning.get(uid) || { size: 0 }).size;
+                const uWait = (overlay.unitWaiting.get(uid) || { size: 0 }).size;
+                const uClasses = ["sys-unit"];
+                if (uRun > 0) uClasses.push("has-running");
+                if (uWait > 0) uClasses.push("has-waiting");
+                let uOverlayHtml = "";
+                if (uRun > 0 || uWait > 0) {
+                  uOverlayHtml = '<span class="sys-unit-overlay nums">' +
+                    (uRun > 0 ? '<span class="map-stat-running">' + uRun + ' in progress</span>' : "") +
+                    (uWait > 0 ? '<span class="map-stat-waiting">' + uWait + ' waiting</span>' : "") +
+                  '</span>';
+                }
+                return '<button type="button" class="' + uClasses.join(" ") + '" data-unit-id="' + escapeHtml(u.id) + '" data-node-id="unit:' + escapeHtml(u.id) + '" title="' + escapeHtml(u.id) + '">' +
+                  '<span class="sys-unit-label">' + escapeHtml(unitShortName(u.id)) + '</span>' +
+                  uOverlayHtml +
+                '</button>';
+              }).join("") + '</div>'
+            ).join("") + '</div>';
+          }
+        }
+
+        const nodeAttr = isOpen ? "" : ' data-node-id="group:' + escapeHtml(g.id) + '"';
+        return '<div class="' + classes.join(" ") + '"' + nodeAttr + '>' +
+          '<button type="button" class="sys-group-head" data-sys-group="' + escapeHtml(g.id) + '" aria-expanded="' + (isOpen ? "true" : "false") + '">' +
+            '<span class="sys-group-top">' +
+              '<span class="sys-group-id">' + escapeHtml(g.id).replace(/\./g, ".<wbr>") + '</span>' +
+              '<span class="sys-group-kind">' + escapeHtml(g.kind) + '</span>' +
+            '</span>' +
+            '<span class="sys-group-meta nums">' + statsParts.join("") + '</span>' +
+          '</button>' +
+          bodyHtml +
+        '</div>';
+      }
+
+      let groupsMarkup = "";
+      if (groupCols.length > 1) {
+        groupsMarkup = '<div class="sys-groups-cols">' + groupCols.map(col =>
+          '<div class="sys-group-col">' + col.map(gid => renderGroupHtml(groupById.get(gid))).join("") + '</div>'
+        ).join("") + '</div>';
+      } else {
+        groupsMarkup = '<div class="sys-groups-grid">' + mapData.groups.map(renderGroupHtml).join("") + '</div>';
+      }
+
+      sysEl.innerHTML =
+        '<div class="sys-canvas">' +
+          '<svg class="sys-svg" aria-hidden="true"></svg>' +
+          groupsMarkup +
+        '</div>';
+
+      drawSystemEdges(mapData);
+      requestAnimationFrame(() => drawSystemEdges(mapData));
+    }
+
+    function renderDataTab(state, force) {
+      if (mapTab !== "data") return;
+      const headEl = document.getElementById("map-data-head");
+      const bodyEl = document.getElementById("map-data-body");
+
+      const entry = mapState;
+      if (!entry) {
+        ensureMapLoaded();
+        return;
+      }
+      if (entry.status === "loading") {
+        headEl.hidden = true;
+        renderMapMeta(null, null, force);
+        renderMapDetail(null);
+        bodyEl.innerHTML = '<div class="map-loading">reading the code</div>';
+        lastDataSig = "loading";
+        return;
+      }
+      if (entry.status === "error") {
+        headEl.hidden = true;
+        renderMapMeta(null, null, force);
+        renderMapDetail(null);
+        bodyEl.innerHTML = '<div class="map-error">' + escapeHtml(entry.error) + '</div>';
+        lastDataSig = "error:" + entry.error;
+        return;
+      }
+
+      headEl.hidden = false;
+      const mapData = entry.data;
+      const overlay = computeOverlay(mapData, state);
+      renderMapMeta(mapData, overlay, force);
+      renderMapDetail(mapData);
+
+      const sig = [showAllStructures ? "1" : "0", selectedMapStructure || "", overlay.sig].join("||");
+      if (!force && sig === lastDataSig) return;
+      lastDataSig = sig;
+
+      const shown = showAllStructures
+        ? mapData.structures
+        : mapData.structures.filter(s => s.serialisable);
+
+      if (shown.length === 0) {
+        bodyEl.innerHTML = '<div class="map-loading">' +
+          (mapData.structures.length > 0 && !showAllStructures
+            ? "No serialisable structures in this repository."
+            : "No structures in this repository.") +
+        '</div>';
+        return;
+      }
+
+      const byUnit = new Map();
+      for (const s of shown) {
+        if (!byUnit.has(s.unit)) byUnit.set(s.unit, []);
+        byUnit.get(s.unit).push(s);
+      }
+
+      const groupsHtml = Array.from(byUnit.entries()).map(([unitId, structs]) => {
+        const uRun = (overlay.unitRunning.get(unitId) || { size: 0 }).size;
+        const uWait = (overlay.unitWaiting.get(unitId) || { size: 0 }).size;
+        const unitStats = [];
+        if (uRun > 0) unitStats.push('<span class="map-stat-running">' + uRun + ' in progress</span>');
+        if (uWait > 0) unitStats.push('<span class="map-stat-waiting">' + uWait + ' waiting</span>');
+        const unitStatsHtml = unitStats.length > 0
+          ? '<span class="sys-unit-overlay nums">' + unitStats.join("") + '</span>'
+          : "";
+
+        const rowsHtml = structs.map(s => {
+          const isSelected = selectedMapStructure === s.id;
+          const refCount = s.referenced_by.length;
+          return '<button type="button" class="data-struct-row' + (isSelected ? " selected" : "") + '" data-struct-id="' + escapeHtml(s.id) + '">' +
+            '<span class="data-struct-main">' +
+              '<span class="data-struct-name">' + escapeHtml(s.name) + '</span>' +
+              '<span class="data-struct-kind">' + escapeHtml(s.kind) + '</span>' +
+            '</span>' +
+            '<span class="data-struct-refs nums">' + refCount + (refCount === 1 ? " ref" : " refs") + '</span>' +
+          '</button>';
+        }).join("");
+
+        return '<section class="data-unit-group">' +
+          '<div class="data-unit-head"><span>' + escapeHtml(unitId) + '</span>' + unitStatsHtml + '</div>' +
+          '<div class="data-unit-list">' + rowsHtml + '</div>' +
+        '</section>';
+      }).join("");
+
+      bodyEl.innerHTML = groupsHtml;
+    }
+
+    function renderMapPane(state, force) {
+      renderMapChrome();
+      if (openReportKey !== null) {
+        renderReportReader();
+        return;
+      }
+      if (mapTab === "runs") {
+        renderMapMeta(null, null, force);
+        renderMapDetail(null);
+        renderMap(state, force);
+      } else if (mapTab === "system") {
+        renderSystemTab(state, force);
+      } else if (mapTab === "data") {
+        renderDataTab(state, force);
+      }
+    }
+
+    function renderModeChrome() {
+      const designTab = document.getElementById("mode-design");
+      const reviewTab = document.getElementById("mode-review");
+      const convEl = document.getElementById("conversation");
+      const reviewWrap = document.getElementById("review-wrap");
+
+      const isDesign = mode === "design";
+      designTab.classList.toggle("active", isDesign);
+      designTab.setAttribute("aria-selected", isDesign ? "true" : "false");
+      reviewTab.classList.toggle("active", !isDesign);
+      reviewTab.setAttribute("aria-selected", !isDesign ? "true" : "false");
+
+      convEl.hidden = !isDesign;
+      reviewWrap.hidden = isDesign;
+    }
+
+    function renderAll(force) {
+      const state = computeState();
+      updateHeaderCounters(state);
+      renderModeChrome();
+      updateFocusIndicator();
+      renderMapPane(state, force);
+      renderAttachedReports();
+      renderQueue(state, force);
+    }
+
+    function switchMode(targetMode, scrollToGroup) {
+      if (targetMode === mode) {
+        if (targetMode === "review" && scrollToGroup) {
+          scrollQueueToGroup(scrollToGroup);
+        }
+        return;
+      }
+      mode = targetMode;
+      renderAll(true);
+      if (targetMode === "review") {
+        const target = scrollToGroup || focusedGroup || null;
+        if (target) scrollQueueToGroup(target);
+      }
+    }
+
+    function setFocusGroup(groupName) {
+      focusedGroup = focusedGroup === groupName ? null : groupName;
+      renderAll(true);
+      if (focusedGroup !== null && mode === "review") {
+        scrollQueueToGroup(focusedGroup);
+      }
+    }
+
+    function setMapTab(nextTab) {
+      if (nextTab === mapTab) return;
+      mapTab = nextTab;
+      hoveredMapUnit = null;
+      if (mapTab === "system" || mapTab === "data") {
+        ensureMapLoaded();
+      }
+      renderAll(true);
+    }
+
+    function setHeaderError(msg) {
+      const el = document.getElementById("header-error");
+      if (!el) return;
+      if (!msg) {
+        el.hidden = true;
+        el.textContent = "";
+      } else {
+        el.hidden = false;
+        el.textContent = msg;
+      }
+    }
+
+    function setComposerError(msg) {
+      const el = document.getElementById("composer-error");
+      if (!el) return;
+      if (!msg) {
+        el.hidden = true;
+        el.textContent = "";
+      } else {
+        el.hidden = false;
+        el.textContent = msg;
+      }
+    }
+
+    function setQueueError(msg) {
+      const el = document.getElementById("queue-error");
+      if (!el) return;
+      if (!msg) {
+        el.hidden = true;
+        el.textContent = "";
+      } else {
+        el.hidden = false;
+        el.textContent = msg;
+      }
+    }
+
+    async function fetchRuns() {
+      if (runsFetchInFlight) {
+        runsRefetchNeeded = true;
+        return;
+      }
+      runsFetchInFlight = true;
+      try {
+        const res = await fetchWithRetry("/api/runs");
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, "/api/runs");
+          setQueueError(errMsg);
+          return;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          setQueueError("/api/runs returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+          return;
+        }
+        const err = validateRuns(data);
+        if (err) {
+          setQueueError(err);
+          return;
+        }
+        setQueueError("");
+        liveRuns = data;
+        allGroups = computeGroups();
+        if (focusedGroup !== null && !allGroups.includes(focusedGroup)) {
+          focusedGroup = null;
+        }
+        if (openReportKey !== null) {
+          const stillExists = liveRuns.runs.some(r => r.key === openReportKey && isUndecided(r));
+          if (!stillExists) {
+            closeReport();
+          }
+        }
+        renderAll(true);
+      } finally {
+        runsFetchInFlight = false;
+        if (runsRefetchNeeded) {
+          runsRefetchNeeded = false;
+          fetchRuns();
+        }
+      }
+    }
+
+    async function postDecision(runKey, action, note, shouldRefresh) {
+      const run = findRunByKey(runKey);
+      if (!run) {
+        cardErrors.set(runKey, "run not found in queue");
+        renderAll(true);
+        return false;
+      }
+      const trimmedNote = (note || "").trim();
+      if ((action === "send_back" || action === "hold") && trimmedNote.length === 0) {
+        noteErrors.set(runKey, "A one-line note is required.");
+        renderAll(true);
+        return false;
+      }
+      const url = "/api/runs/" + encodeURIComponent(run.id) + "/decision";
+      const res = await fetchWithRetry(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, note: trimmedNote })
+      });
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, url);
+        cardErrors.set(runKey, errMsg);
+        if (openReportKey === runKey) {
+          reportReaderError = errMsg;
+        }
+        renderAll(true);
+        return false;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        const msg = url + " returned invalid JSON: " + (err && err.message ? err.message : String(err));
+        cardErrors.set(runKey, msg);
+        if (openReportKey === runKey) reportReaderError = msg;
+        renderAll(true);
+        return false;
+      }
+      const validationErr = validateDecisionResponse(data);
+      if (validationErr) {
+        cardErrors.set(runKey, validationErr);
+        if (openReportKey === runKey) reportReaderError = validationErr;
+        renderAll(true);
+        return false;
+      }
+      pendingNoteAction.delete(runKey);
+      noteDrafts.delete(runKey);
+      noteErrors.delete(runKey);
+      cardErrors.delete(runKey);
+      if (openReportKey === runKey) {
+        reportReaderError = "";
+      }
+      if (shouldRefresh) {
+        await fetchRuns();
+      }
+      return true;
+    }
+
+    async function acceptAllCleanInGroup(groupName) {
+      const state = computeState();
+      const targets = state.undecidedArrived.filter(
+        r => r.card === "clean" && !isHeld(r) && runGroupName(r) === groupName
+      );
+      for (const r of targets) {
+        const ok = await postDecision(r.key, "accept", "", false);
+        if (!ok) break;
+      }
+      await fetchRuns();
+    }
+
+    function bindEvents() {
+      document.getElementById("mode-design").addEventListener("click", () => {
+        switchMode("design", null);
+      });
+
+      document.getElementById("mode-review").addEventListener("click", () => {
+        switchMode("review", null);
+      });
+
+      document.getElementById("focus-indicator").addEventListener("click", (e) => {
+        if (e.target.closest("[data-clear-focus]")) {
+          setFocusGroup(focusedGroup);
+        }
+      });
+
+      document.getElementById("model-select").addEventListener("change", (e) => {
+        changeModel(e.target.value);
+      });
+
+      document.getElementById("effort-select").addEventListener("change", (e) => {
+        changeEffort(e.target.value === "" ? null : e.target.value);
+      });
+
+      document.getElementById("conversation-form").addEventListener("submit", (e) => {
+        e.preventDefault();
+        submitMessage();
+      });
+
+      document.getElementById("attached-reports").addEventListener("click", (e) => {
+        const detachBtn = e.target.closest("[data-report-detach]");
+        if (!detachBtn) return;
+        const key = detachBtn.dataset.reportDetach;
+        const idx = attachedReports.findIndex(item => item.key === key);
+        if (idx === -1) return;
+        attachedReports.splice(idx, 1);
+        renderAttachedReports();
+      });
+
+      document.getElementById("report-reader").addEventListener("click", (e) => {
+        if (e.target.closest("#report-close")) {
+          closeReport();
+          return;
+        }
+        const useBtn = e.target.closest("[data-report-use]");
+        if (useBtn) {
+          useReportInConversation(useBtn.dataset.reportUse);
+          return;
+        }
+        const actionBtn = e.target.closest("[data-action][data-run-key]");
+        if (actionBtn) {
+          const key = actionBtn.dataset.runKey;
+          const action = actionBtn.dataset.action;
+          if (action === "mark_read") {
+            postDecision(key, "mark_read", "", true);
+          } else if (action === "hold") {
+            closeReport();
+            pendingNoteAction.set(key, "hold");
+            noteErrors.delete(key);
+            renderAll(true);
+            const inp = document.getElementById("queue").querySelector('[data-note-input="' + CSS.escape(key) + '"]');
+            if (inp) {
+              inp.scrollIntoView({ block: "nearest" });
+              inp.focus();
+            }
+          }
+        }
+      });
+
+      document.getElementById("map").addEventListener("click", (e) => {
+        const box = e.target.closest("[data-map-group]");
+        if (!box) return;
+        setFocusGroup(box.dataset.mapGroup);
+      });
+
+      document.getElementById("map-tabs").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-map-tab]");
+        if (!btn) return;
+        setMapTab(btn.dataset.mapTab);
+      });
+
+      document.getElementById("map-wide").addEventListener("click", () => {
+        mapWide = !mapWide;
+        renderMapChrome();
+        if (mapTab === "system" && mapState && mapState.status === "ok") {
+          requestAnimationFrame(() => drawSystemEdges(mapState.data));
+        }
+      });
+
+      document.getElementById("map-data-all").addEventListener("change", (e) => {
+        showAllStructures = Boolean(e.target.checked);
+        if (!showAllStructures && selectedMapStructure && mapState && mapState.status === "ok") {
+          const s = mapState.data.structures.find(x => x.id === selectedMapStructure);
+          if (s && !s.serialisable) {
+            selectedMapStructure = null;
+          }
+        }
+        renderAll(true);
+      });
+
+      document.getElementById("map-notes").addEventListener("click", (e) => {
+        if (!e.target.closest("[data-toggle-notes]")) return;
+        mapNotesOpen = !mapNotesOpen;
+        renderAll(true);
+      });
+
+      document.getElementById("map-detail").addEventListener("click", (e) => {
+        if (!e.target.closest("[data-close-detail]")) return;
+        if (mapTab === "system") {
+          selectedMapUnit = null;
+          hoveredMapUnit = null;
+          applySystemHighlight();
+        } else if (mapTab === "data") {
+          selectedMapStructure = null;
+          renderAll(true);
+        }
+      });
+
+      const sysEl = document.getElementById("map-system");
+      sysEl.addEventListener("click", (e) => {
+        const unitBtn = e.target.closest("[data-unit-id]");
+        if (unitBtn) {
+          const uid = unitBtn.dataset.unitId;
+          selectedMapUnit = selectedMapUnit === uid ? null : uid;
+          applySystemHighlight();
+          return;
+        }
+        const groupBtn = e.target.closest("[data-sys-group]");
+        if (groupBtn) {
+          const gid = groupBtn.dataset.sysGroup;
+          openMapGroup = openMapGroup === gid ? null : gid;
+          selectedMapUnit = null;
+          hoveredMapUnit = null;
+          const groupObj = mapState && mapState.status === "ok"
+            ? mapState.data.groups.find(g => g.id === gid)
+            : null;
+          if (groupObj && allGroups.includes(groupObj.path)) {
+            setFocusGroup(groupObj.path);
+          } else {
+            renderAll(true);
+          }
+        }
+      });
+
+      sysEl.addEventListener("mouseover", (e) => {
+        const unitBtn = e.target.closest("[data-unit-id]");
+        if (!unitBtn) return;
+        const uid = unitBtn.dataset.unitId;
+        if (hoveredMapUnit !== uid) {
+          hoveredMapUnit = uid;
+          applySystemHighlight();
+        }
+      });
+
+      sysEl.addEventListener("mouseout", (e) => {
+        const unitBtn = e.target.closest("[data-unit-id]");
+        if (!unitBtn) return;
+        const related = e.relatedTarget && e.relatedTarget.closest ? e.relatedTarget.closest("[data-unit-id]") : null;
+        if (related === unitBtn) return;
+        if (hoveredMapUnit !== null) {
+          hoveredMapUnit = null;
+          applySystemHighlight();
+        }
+      });
+
+      document.getElementById("map-data").addEventListener("click", (e) => {
+        const row = e.target.closest("[data-struct-id]");
+        if (!row) return;
+        const sid = row.dataset.structId;
+        selectedMapStructure = selectedMapStructure === sid ? null : sid;
+        renderAll(true);
+      });
+
+      window.addEventListener("resize", () => {
+        if (openReportKey !== null) return;
+        if (mapTab === "system" && mapState && mapState.status === "ok") {
+          drawSystemEdges(mapState.data);
+        }
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (openReportKey !== null && e.key === "Escape") {
+          e.preventDefault();
+          closeReport();
+        }
+      });
+
+      const queueEl = document.getElementById("queue");
+      queueEl.addEventListener("click", (e) => {
+        const acceptAllBtn = e.target.closest("[data-accept-all-clean]");
+        if (acceptAllBtn) {
+          acceptAllCleanInGroup(acceptAllBtn.dataset.acceptAllClean);
+          return;
+        }
+
+        const reportOpenBtn = e.target.closest("[data-report-open]");
+        if (reportOpenBtn) {
+          openReport(reportOpenBtn.dataset.reportOpen);
+          return;
+        }
+
+        const detailsBtn = e.target.closest("[data-toggle-details]");
+        if (detailsBtn) {
+          const key = detailsBtn.dataset.toggleDetails;
+          if (openDetails.has(key)) {
+            openDetails.delete(key);
+            renderAll(true);
+          } else {
+            openDetails.add(key);
+            const run = findRunByKey(key);
+            renderAll(true);
+            if (run && run.card !== "research") {
+              loadRunDiff(run);
+            }
+          }
+          return;
+        }
+
+        const cancelNoteBtn = e.target.closest("[data-cancel-note]");
+        if (cancelNoteBtn) {
+          const key = cancelNoteBtn.dataset.cancelNote;
+          pendingNoteAction.delete(key);
+          noteErrors.delete(key);
+          renderAll(true);
+          return;
+        }
+
+        const actionBtn = e.target.closest("[data-action][data-run-key]");
+        if (actionBtn) {
+          const key = actionBtn.dataset.runKey;
+          const action = actionBtn.dataset.action;
+          if (action === "accept" || action === "redo" || action === "mark_read") {
+            postDecision(key, action, "", true);
+          } else if (action === "send_back" || action === "hold") {
+            if (action === "hold" && openReportKey === key) {
+              closeReport();
+            }
+            pendingNoteAction.set(key, action);
+            noteErrors.delete(key);
+            renderAll(true);
+            const inp = queueEl.querySelector('[data-note-input="' + CSS.escape(key) + '"]');
+            if (inp) inp.focus();
+          }
+        }
+      });
+
+      queueEl.addEventListener("input", (e) => {
+        const noteInp = e.target.closest("[data-note-input]");
+        if (noteInp) {
+          const key = noteInp.dataset.noteInput;
+          noteDrafts.set(key, noteInp.value);
+          noteErrors.delete(key);
+        }
+      });
+
+      queueEl.addEventListener("submit", (e) => {
+        const noteForm = e.target.closest("[data-note-form]");
+        if (noteForm) {
+          e.preventDefault();
+          const key = noteForm.dataset.noteForm;
+          const action = noteForm.dataset.noteAction;
+          const val = noteDrafts.get(key) || "";
+          postDecision(key, action, val, true);
+        }
+      });
+    }
+
+    async function submitMessage() {
+      const input = document.getElementById("conversation-input");
+      const text = input.value.trim();
+      if (!text) return;
+      const sendBtn = document.getElementById("conversation-send");
+      const reports = attachedReports.map(r => r.id);
+      sendBtn.disabled = true;
+      try {
+        const res = await fetchWithRetry("/api/session/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, reports })
+        });
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, "/api/session/messages");
+          setComposerError(errMsg);
+          return;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          setComposerError("/api/session/messages returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+          return;
+        }
+        if (!isPlainObject(data) || typeof data.seq !== "number" || !Number.isFinite(data.seq)) {
+          setComposerError("/api/session/messages: missing or invalid field seq");
+          return;
+        }
+        setComposerError("");
+        input.value = "";
+        attachedReports.length = 0;
+        renderAttachedReports();
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    async function changeModel(nextModel) {
+      const select = document.getElementById("model-select");
+      const prevModel = sessionState ? sessionState.model : "";
+      const res = await fetchWithRetry("/api/session/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: nextModel })
+      });
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/session/model");
+        setHeaderError(errMsg);
+        if (prevModel) select.value = prevModel;
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        setHeaderError("/api/session/model returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+        if (prevModel) select.value = prevModel;
+        return;
+      }
+      const err = validateSession(data, "/api/session/model");
+      if (err) {
+        setHeaderError(err);
+        if (prevModel) select.value = prevModel;
+        return;
+      }
+      setHeaderError("");
+      applySessionState(data, false);
+    }
+
+    async function changeEffort(nextEffort) {
+      const select = document.getElementById("effort-select");
+      const prevEffort = sessionState ? sessionState.effort : null;
+      const res = await fetchWithRetry("/api/session/effort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ effort: nextEffort })
+      });
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/session/effort");
+        setHeaderError(errMsg);
+        select.value = prevEffort === null ? "" : prevEffort;
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        setHeaderError("/api/session/effort returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+        select.value = prevEffort === null ? "" : prevEffort;
+        return;
+      }
+      const err = validateSession(data, "/api/session/effort");
+      if (err) {
+        setHeaderError(err);
+        select.value = prevEffort === null ? "" : prevEffort;
+        return;
+      }
+      setHeaderError("");
+      applySessionState(data, false);
+    }
+
+    async function pollEvents() {
+      while (true) {
+        const url = "/api/session/events?after=" + encodeURIComponent(String(lastSeqSeen)) + "&wait_ms=25000";
+        const res = await fetchWithRetry(url);
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, "/api/session/events");
+          appendConversationError(errMsg);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          appendConversationError("/api/session/events returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        const validationErr = validateEvents(data);
+        if (validationErr) {
+          appendConversationError(validationErr);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        applyLogEntries(data.entries);
+        if (data.last_seq > lastSeqSeen) {
+          lastSeqSeen = data.last_seq;
+        }
+        initialEventsLoaded = true;
+      }
+    }
+
+    async function loadInitialSession() {
+      const res = await fetchWithRetry("/api/session");
+      if (!res.ok) {
+        appendConversationError(await parseErrorPayload(res, "/api/session"));
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        appendConversationError("/api/session returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+        return;
+      }
+      const err = validateSession(data, "/api/session");
+      if (err) {
+        appendConversationError(err);
+        return;
+      }
+      applySessionState(data, true);
+    }
+
+    async function loadModels() {
+      const res = await fetchWithRetry("/api/models");
+      if (!res.ok) {
+        setHeaderError(await parseErrorPayload(res, "/api/models"));
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        setHeaderError("/api/models returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+        return;
+      }
+      const err = validateModels(data);
+      if (err) {
+        setHeaderError(err);
+        return;
+      }
+      modelsList = data.models;
+      renderModelsSelect();
+    }
+
+    async function init() {
+      bindEvents();
+      renderAll(true);
+      await loadInitialSession();
+      loadModels();
+      fetchRuns();
+      runsPollTimer = setInterval(fetchRuns, RUNS_POLL_MS);
+      pollEvents();
+    }
+
+    if (typeof document !== "undefined") {
+      init();
+    }
+  </script>
+</body>
+</html>
