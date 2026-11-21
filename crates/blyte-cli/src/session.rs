@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -59,6 +59,88 @@ pub enum EntryBody {
         action: String,
         note: Option<String>,
     },
+    ApprovalRequested {
+        id: String,
+        command: String,
+        reason: String,
+    },
+    ApprovalAnswered {
+        id: String,
+        command: String,
+        answer: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalAnswer {
+    Yes,
+    No,
+}
+
+impl ApprovalAnswer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalAnswer::Yes => "yes",
+            ApprovalAnswer::No => "no",
+        }
+    }
+
+    fn to_approval(self) -> blyte_agent::approval::Approval {
+        match self {
+            ApprovalAnswer::Yes => blyte_agent::approval::Approval::Approved,
+            ApprovalAnswer::No => blyte_agent::approval::Approval::Denied,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnswerError {
+    NotFound,
+    AlreadyAnswered,
+}
+
+pub struct SurfaceApprover {
+    shared: Arc<Shared>,
+}
+
+impl blyte_agent::approval::Approver for SurfaceApprover {
+    fn ask(&self, command: &str, reason: &str) -> blyte_agent::approval::Approval {
+        let mut state = self.shared.lock_state();
+        if state.closed {
+            return blyte_agent::approval::Approval::Denied;
+        }
+        state.next_approval_id += 1;
+        let order = state.next_approval_id;
+        let id = format!("approval-{order}");
+        state.approvals.insert(
+            id.clone(),
+            ApprovalRecord {
+                order,
+                command: command.to_string(),
+                answer: None,
+            },
+        );
+        state.push_entry(EntryBody::ApprovalRequested {
+            id: id.clone(),
+            command: command.to_string(),
+            reason: reason.to_string(),
+        });
+        self.shared.log_cv.notify_all();
+
+        loop {
+            if let Some(answer) = state.approvals.get(&id).and_then(|r| r.answer) {
+                return answer.to_approval();
+            }
+            if state.closed {
+                return blyte_agent::approval::Approval::Denied;
+            }
+            state = self
+                .shared
+                .approval_cv
+                .wait(state)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,13 +173,16 @@ pub struct AgentRunner {
 }
 
 impl AgentRunner {
-    pub fn new(config: &crate::repl::ReplConfig) -> Self {
+    pub fn new(
+        config: &crate::repl::ReplConfig,
+        approver: Arc<dyn blyte_agent::approval::Approver>,
+    ) -> Self {
         let mut cfg = config.clone();
         cfg.orchestrate = true;
         let repl = crate::repl::ReplSession::new(&cfg);
         if let Some(approval) = blyte_agent::tools::approval() {
             blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
-                approver: std::sync::Arc::new(blyte_agent::approval::NoApprover),
+                approver,
                 rules: approval.rules,
             }));
         }
@@ -178,6 +263,12 @@ impl PromptRunner for AgentRunner {
     }
 }
 
+struct ApprovalRecord {
+    order: u64,
+    command: String,
+    answer: Option<ApprovalAnswer>,
+}
+
 struct SessionState {
     entries: Vec<Entry>,
     queue: VecDeque<String>,
@@ -185,6 +276,8 @@ struct SessionState {
     effort: Option<String>,
     busy: bool,
     closed: bool,
+    approvals: HashMap<String, ApprovalRecord>,
+    next_approval_id: u64,
 }
 
 impl SessionState {
@@ -203,12 +296,37 @@ impl SessionState {
             _ => self.model.clone(),
         }
     }
+
+    fn deny_all_pending(&mut self) -> bool {
+        let mut pending: Vec<(u64, String, String)> = self
+            .approvals
+            .iter()
+            .filter(|(_, record)| record.answer.is_none())
+            .map(|(id, record)| (record.order, id.clone(), record.command.clone()))
+            .collect();
+        if pending.is_empty() {
+            return false;
+        }
+        pending.sort_by_key(|(order, _, _)| *order);
+        for (_, id, command) in pending {
+            if let Some(record) = self.approvals.get_mut(&id) {
+                record.answer = Some(ApprovalAnswer::No);
+            }
+            self.push_entry(EntryBody::ApprovalAnswered {
+                id,
+                command,
+                answer: ApprovalAnswer::No.as_str().to_string(),
+            });
+        }
+        true
+    }
 }
 
 struct Shared {
     state: Mutex<SessionState>,
     log_cv: Condvar,
     work_cv: Condvar,
+    approval_cv: Condvar,
 }
 
 impl Shared {
@@ -225,8 +343,10 @@ impl Drop for SessionGuard {
     fn drop(&mut self) {
         let mut state = self.shared.lock_state();
         state.closed = true;
+        state.deny_all_pending();
         self.shared.work_cv.notify_all();
         self.shared.log_cv.notify_all();
+        self.shared.approval_cv.notify_all();
     }
 }
 
@@ -242,6 +362,13 @@ struct TurnTotals {
 
 impl Session {
     pub fn start(runner: Box<dyn PromptRunner>, model: String) -> Session {
+        Self::start_with(model, |_| runner)
+    }
+
+    pub fn start_with<F>(model: String, build_runner: F) -> Session
+    where
+        F: FnOnce(Arc<SurfaceApprover>) -> Box<dyn PromptRunner>,
+    {
         let (base_model, effort) = parse_model_and_effort(&model);
         let shared = Arc::new(Shared {
             state: Mutex::new(SessionState {
@@ -251,14 +378,55 @@ impl Session {
                 effort,
                 busy: false,
                 closed: false,
+                approvals: HashMap::new(),
+                next_approval_id: 0,
             }),
             log_cv: Condvar::new(),
             work_cv: Condvar::new(),
+            approval_cv: Condvar::new(),
         });
+        let approver = Arc::new(SurfaceApprover {
+            shared: Arc::clone(&shared),
+        });
+        let runner = build_runner(approver);
         let worker_shared = Arc::clone(&shared);
         std::thread::spawn(move || worker_loop(runner, worker_shared));
         Session {
             guard: Arc::new(SessionGuard { shared }),
+        }
+    }
+
+    pub fn approver(&self) -> Arc<SurfaceApprover> {
+        Arc::new(SurfaceApprover {
+            shared: Arc::clone(&self.guard.shared),
+        })
+    }
+
+    pub fn answer_approval(&self, id: &str, answer: ApprovalAnswer) -> Result<u64, AnswerError> {
+        let mut state = self.guard.shared.lock_state();
+        let command = match state.approvals.get_mut(id) {
+            None => return Err(AnswerError::NotFound),
+            Some(record) if record.answer.is_some() => return Err(AnswerError::AlreadyAnswered),
+            Some(record) => {
+                record.answer = Some(answer);
+                record.command.clone()
+            }
+        };
+        let seq = state.push_entry(EntryBody::ApprovalAnswered {
+            id: id.to_string(),
+            command,
+            answer: answer.as_str().to_string(),
+        });
+        self.guard.shared.approval_cv.notify_all();
+        self.guard.shared.log_cv.notify_all();
+        Ok(seq)
+    }
+
+    pub fn stop_run(&self) {
+        let mut state = self.guard.shared.lock_state();
+        if state.deny_all_pending() {
+            self.guard.shared.approval_cv.notify_all();
+            self.guard.shared.log_cv.notify_all();
         }
     }
 

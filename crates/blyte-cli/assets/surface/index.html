@@ -700,6 +700,131 @@
       color: var(--color-muted);
     }
 
+    .entry-approval {
+      border: 2px solid var(--amber);
+      background: var(--amber-soft);
+      border-radius: 6px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      color: var(--color-strong);
+    }
+
+    .entry-approval.approval-answered {
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+    }
+
+    .entry-approval-matched[hidden] {
+      display: none;
+    }
+
+    .approval-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .approval-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--amber);
+    }
+
+    .entry-approval.approval-answered .approval-title {
+      color: var(--color-muted);
+    }
+
+    .approval-badge {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 2px 7px;
+      border-radius: 3px;
+    }
+
+    .approval-badge-pending {
+      background: var(--amber);
+      color: var(--color-page);
+    }
+
+    .approval-badge-yes {
+      background: var(--pass-soft);
+      border: 1px solid var(--pass);
+      color: var(--pass);
+    }
+
+    .approval-badge-no {
+      background: var(--fail-soft);
+      border: 1px solid var(--fail);
+      color: var(--fail);
+    }
+
+    .approval-reason {
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--color-text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .approval-command {
+      margin: 0;
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-all;
+      overflow-x: auto;
+    }
+
+    .approval-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .approval-actions[hidden] {
+      display: none;
+    }
+
+    .approval-btn-yes {
+      background: var(--pass-soft);
+      border-color: var(--pass);
+      color: var(--color-strong);
+    }
+
+    .approval-btn-no {
+      background: var(--fail-soft);
+      border-color: var(--fail);
+      color: var(--color-strong);
+    }
+
+    .approval-error {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--fail);
+    }
+
+    .approval-error[hidden] {
+      display: none;
+    }
+
     .composer-error {
       padding: 6px 16px 0;
       background: var(--color-card);
@@ -2265,6 +2390,7 @@
     const logEntries = [];
     const queuedUserSeqs = [];
     const openToolsByName = new Map();
+    const approvalsById = new Map();
 
     let liveRuns = { generated_at: 0, repo: "", running: [], runs: [], skipped: [] };
     let allGroups = [];
@@ -2395,6 +2521,12 @@
       const effortEl = document.getElementById("effort-select");
       if (effortEl) {
         effortEl.disabled = missing || !(sessionState && sessionState.effort_supported);
+      }
+      const approvalBtns = document.querySelectorAll(".entry-approval:not(.approval-answered) .approval-btn");
+      for (const btn of approvalBtns) {
+        const id = btn.dataset.approvalId;
+        const rec = id ? approvalsById.get(id) : null;
+        btn.disabled = missing || Boolean(rec && rec.inFlight);
       }
     }
 
@@ -2910,8 +3042,103 @@
           const line = "decision on " + entry.run + ": " + entry.action + suffix;
           return '<div class="entry entry-quiet" data-seq="' + seqAttr + '">' + escapeHtml(line) + '</div>';
         }
+        case "approval_requested": {
+          if (typeof entry.id !== "string" || !entry.id) {
+            return renderEntryError(entry.seq, "approval_requested entry missing or invalid field id");
+          }
+          if (typeof entry.command !== "string") {
+            return renderEntryError(entry.seq, "approval_requested entry missing or invalid field command");
+          }
+          if (typeof entry.reason !== "string") {
+            return renderEntryError(entry.seq, "approval_requested entry missing or invalid field reason");
+          }
+          const idAttr = escapeHtml(entry.id);
+          const disabledAttr = surfaceToken ? "" : " disabled";
+          return (
+            '<div class="entry entry-approval" data-seq="' + seqAttr + '" data-approval-card="' + idAttr + '">' +
+              '<div class="approval-header">' +
+                '<span class="approval-title">Command outside the sandbox</span>' +
+                '<span class="approval-badge approval-badge-pending">Waiting for approval</span>' +
+              '</div>' +
+              '<div class="approval-reason">' + escapeHtml(entry.reason) + '</div>' +
+              '<pre class="approval-command">' + escapeHtml(entry.command) + '</pre>' +
+              '<div class="approval-actions">' +
+                '<button type="button" class="btn approval-btn approval-btn-yes" data-approval-id="' + idAttr + '" data-approval-answer="yes"' + disabledAttr + '>Approve once</button>' +
+                '<button type="button" class="btn approval-btn approval-btn-no" data-approval-id="' + idAttr + '" data-approval-answer="no"' + disabledAttr + '>Refuse</button>' +
+              '</div>' +
+              '<div class="approval-error" hidden></div>' +
+            '</div>'
+          );
+        }
+        case "approval_answered": {
+          if (typeof entry.id !== "string" || !entry.id) {
+            return renderEntryError(entry.seq, "approval_answered entry missing or invalid field id");
+          }
+          if (typeof entry.command !== "string") {
+            return renderEntryError(entry.seq, "approval_answered entry missing or invalid field command");
+          }
+          if (entry.answer !== "yes" && entry.answer !== "no") {
+            return renderEntryError(entry.seq, "approval_answered entry missing or invalid field answer");
+          }
+          if (opts && opts.matched) {
+            return '<div class="entry entry-approval-matched" data-seq="' + seqAttr + '" hidden></div>';
+          }
+          const approved = entry.answer === "yes";
+          const label = approved ? "Approved" : "Refused";
+          const badgeClass = approved ? "approval-badge-yes" : "approval-badge-no";
+          return (
+            '<div class="entry entry-approval approval-answered" data-seq="' + seqAttr + '" data-approval-card="' + escapeHtml(entry.id) + '">' +
+              '<div class="approval-header">' +
+                '<span class="approval-title">Command outside the sandbox</span>' +
+                '<span class="approval-badge ' + badgeClass + '">' + label + '</span>' +
+              '</div>' +
+              '<pre class="approval-command">' + escapeHtml(entry.command) + '</pre>' +
+            '</div>'
+          );
+        }
         default:
           return renderEntryError(entry.seq, "unknown entry kind " + entry.kind);
+      }
+    }
+
+    function findApprovalCard(threadEl, id) {
+      if (!threadEl) return null;
+      const cards = threadEl.querySelectorAll("[data-approval-card]");
+      for (const card of cards) {
+        if (card.getAttribute("data-approval-card") === id) {
+          return card;
+        }
+      }
+      return null;
+    }
+
+    function markApprovalCardAnswered(threadEl, id, answer) {
+      const rec = approvalsById.get(id);
+      if (rec) {
+        rec.answer = answer;
+        rec.inFlight = false;
+      }
+      const card = findApprovalCard(threadEl, id);
+      if (!card) return;
+      const approved = answer === "yes";
+      card.classList.add("approval-answered");
+      const badge = card.querySelector(".approval-badge");
+      if (badge) {
+        badge.className = "approval-badge " + (approved ? "approval-badge-yes" : "approval-badge-no");
+        badge.textContent = approved ? "Approved" : "Refused";
+      }
+      const actions = card.querySelector(".approval-actions");
+      if (actions) {
+        actions.hidden = true;
+      }
+      const btns = card.querySelectorAll(".approval-btn");
+      for (const btn of btns) {
+        btn.disabled = true;
+      }
+      const errEl = card.querySelector(".approval-error");
+      if (errEl) {
+        errEl.textContent = "";
+        errEl.hidden = true;
       }
     }
 
@@ -2966,6 +3193,7 @@
         return sa - sb;
       });
       let sawDecision = false;
+      let sawPendingApproval = false;
       for (const entry of sorted) {
         const hasValidSeq = isPlainObject(entry) && typeof entry.seq === "number" && Number.isFinite(entry.seq);
         if (hasValidSeq) {
@@ -2994,6 +3222,27 @@
                 statusEl.textContent = entry.summary;
               }
             }
+            insertEntryHtml(threadEl, entry.seq, renderEntry(entry, { matched: true }));
+            continue;
+          }
+        }
+
+        if (isPlainObject(entry) && entry.kind === "approval_requested" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && typeof entry.reason === "string" && hasValidSeq && isTimestamp(entry.ts)) {
+          approvalsById.set(entry.id, {
+            seq: entry.seq,
+            command: entry.command,
+            reason: entry.reason,
+            answer: null,
+            inFlight: false
+          });
+          insertEntryHtml(threadEl, entry.seq, renderEntry(entry));
+          sawPendingApproval = true;
+          continue;
+        }
+
+        if (isPlainObject(entry) && entry.kind === "approval_answered" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && (entry.answer === "yes" || entry.answer === "no") && hasValidSeq && isTimestamp(entry.ts)) {
+          if (approvalsById.has(entry.id)) {
+            markApprovalCardAnswered(threadEl, entry.id, entry.answer);
             insertEntryHtml(threadEl, entry.seq, renderEntry(entry, { matched: true }));
             continue;
           }
@@ -3040,7 +3289,7 @@
       if (threadEl.children.length === 0) {
         threadEl.innerHTML = '<div class="thread-empty">Conversation with the orchestrator will appear here.</div>';
       }
-      if (atBottom) {
+      if (atBottom || sawPendingApproval) {
         threadEl.scrollTop = threadEl.scrollHeight;
       }
       if (sawDecision && initialEventsLoaded) {
@@ -4773,6 +5022,12 @@
         submitMessage();
       });
 
+      document.getElementById("conversation-thread").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-approval-id][data-approval-answer]");
+        if (!btn || btn.disabled) return;
+        submitApprovalAnswer(btn.dataset.approvalId, btn.dataset.approvalAnswer);
+      });
+
       document.getElementById("attached-reports").addEventListener("click", (e) => {
         const detachBtn = e.target.closest("[data-report-detach]");
         if (!detachBtn) return;
@@ -5009,6 +5264,48 @@
           postDecision(key, action, val, true);
         }
       });
+    }
+
+    async function submitApprovalAnswer(id, answer) {
+      const threadEl = document.getElementById("conversation-thread");
+      const card = findApprovalCard(threadEl, id);
+      const errEl = card ? card.querySelector(".approval-error") : null;
+      const setErr = (msg) => {
+        if (!errEl) return;
+        errEl.textContent = msg;
+        errEl.hidden = !msg;
+      };
+      if (!surfaceToken) {
+        setErr(MISSING_TOKEN_MSG);
+        return;
+      }
+      const rec = approvalsById.get(id);
+      if (rec && (rec.answer !== null || rec.inFlight)) {
+        return;
+      }
+      if (rec) rec.inFlight = true;
+      const btns = card ? card.querySelectorAll(".approval-btn") : [];
+      for (const btn of btns) {
+        btn.disabled = true;
+      }
+      const route = "/api/session/approvals/" + encodeURIComponent(id);
+      const res = await fetchWithRetry(route, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer })
+      });
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, route);
+        setErr(errMsg);
+        if (rec) rec.inFlight = false;
+        if (res.status !== 409 && surfaceToken && (!rec || rec.answer === null)) {
+          for (const btn of btns) {
+            btn.disabled = false;
+          }
+        }
+        return;
+      }
+      markApprovalCardAnswered(threadEl, id, answer);
     }
 
     async function submitMessage() {

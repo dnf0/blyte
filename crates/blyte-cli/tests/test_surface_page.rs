@@ -33,6 +33,7 @@ fn page_calls_every_route() {
         "/api/session",
         "/api/session/events",
         "/api/session/messages",
+        "/api/session/approvals/",
         "/api/models",
         "/api/session/model",
         "/api/session/effort",
@@ -59,6 +60,8 @@ fn page_handles_every_entry_kind() {
         "model_changed",
         "effort_changed",
         "decision",
+        "approval_requested",
+        "approval_answered",
     ] {
         let double_quoted = format!("\"{kind}\"");
         let single_quoted = format!("'{kind}'");
@@ -157,5 +160,36 @@ fn page_carries_surface_token_handling() {
     assert!(
         html.contains("sessionStorage") && html.contains("replaceState"),
         "missing fragment token persistence and address-bar cleanup"
+    );
+}
+
+#[test]
+fn page_renders_approvals_as_escaped_text_without_approve_all() {
+    let html = load_surface_html();
+    let start = html
+        .find("case \"approval_requested\":")
+        .expect("surface page must render approval_requested entries");
+    let rest = &html[start..];
+    let end = rest
+        .find("default:")
+        .expect("approval cases must precede default case");
+    let body = &rest[..end];
+    assert!(
+        body.contains("escapeHtml(entry.command)"),
+        "approval rendering must escape entry.command"
+    );
+    assert!(
+        body.contains("escapeHtml(entry.reason)"),
+        "approval rendering must escape entry.reason"
+    );
+    assert!(
+        body.contains("data-approval-answer=\"yes\"")
+            && body.contains("data-approval-answer=\"no\""),
+        "approval rendering must provide approve and refuse buttons"
+    );
+    let lower = body.to_ascii_lowercase();
+    assert!(
+        !lower.contains("approve all") && !lower.contains("remember"),
+        "approval rendering must not offer approve-all or remembered answers"
     );
 }

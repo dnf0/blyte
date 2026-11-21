@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use blyte_agent::approval::Approver;
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
@@ -1500,4 +1501,193 @@ fn two_starts_give_different_secrets() {
     assert!(!constant_time_eq(b"short", b"longer"));
     assert!(!constant_time_eq(b"longer", b"short"));
     assert!(constant_time_eq(b"", b""));
+}
+
+#[test]
+fn approval_endpoint_answers_validates_and_requires_secret() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo-repo");
+    init_git_repo(&repo);
+    let (surface, _) = make_surface(repo, Vec::new());
+    let t = 1_700_000_200;
+
+    let wrong = flip_last_hex_char(&surface.token);
+    for headers in [vec![], vec![(TOKEN_HEADER, wrong.as_str())]] {
+        let resp = route(
+            &surface,
+            &post_json_headers(
+                "/api/session/approvals/approval-1",
+                &serde_json::json!({ "answer": "yes" }),
+                headers,
+            ),
+            t,
+        );
+        assert_eq!(resp.status, 403);
+        assert!(parse_json(&resp)["error"].is_string());
+    }
+
+    let wrong_method = route(
+        &surface,
+        &get("/api/session/approvals/approval-1", vec![]),
+        t,
+    );
+    assert_eq!(wrong_method.status, 405);
+
+    let unknown = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/session/approvals/unknown-id",
+            &serde_json::json!({ "answer": "yes" }),
+        ),
+        t,
+    );
+    assert_eq!(unknown.status, 404);
+    assert!(parse_json(&unknown)["error"].is_string());
+
+    for bad_body in [
+        serde_json::json!({}),
+        serde_json::json!({ "answer": "maybe" }),
+        serde_json::json!({ "answer": "YES" }),
+        serde_json::json!({ "answer": true }),
+        serde_json::json!({ "answer": "yes", "extra": 1 }),
+        serde_json::json!("yes"),
+    ] {
+        let resp = route(
+            &surface,
+            &post_json(&surface, "/api/session/approvals/approval-1", &bad_body),
+            t,
+        );
+        assert_eq!(resp.status, 400, "body={bad_body}");
+        assert!(parse_json(&resp)["error"].is_string());
+    }
+
+    let invalid_json_req = Request {
+        method: "POST".to_string(),
+        path: "/api/session/approvals/approval-1".to_string(),
+        query: Vec::new(),
+        headers: vec![(TOKEN_HEADER.to_string(), surface.token.clone())],
+        body: b"{not json".to_vec(),
+    };
+    let invalid_json_resp = route(&surface, &invalid_json_req, t);
+    assert_eq!(invalid_json_resp.status, 400);
+
+    let approver = surface.session.approver();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let cmd = "git push origin main && echo '<img src=x onerror=alert(1)>'";
+    let reason = "push verified branch";
+    let ask_thread = std::thread::spawn(move || {
+        let _ = done_tx.send(approver.ask(cmd, reason));
+    });
+
+    let ev_resp = route(
+        &surface,
+        &get(
+            "/api/session/events",
+            vec![("after", "0"), ("wait_ms", "2000")],
+        ),
+        t,
+    );
+    assert_eq!(ev_resp.status, 200);
+    let ev_json = parse_json(&ev_resp);
+    let entries = ev_json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["kind"], "approval_requested");
+    assert_eq!(entries[0]["command"], cmd);
+    assert_eq!(entries[0]["reason"], reason);
+    let id = entries[0]["id"].as_str().unwrap().to_string();
+
+    let unauth_answer = route(
+        &surface,
+        &post_json_headers(
+            &format!("/api/session/approvals/{id}"),
+            &serde_json::json!({ "answer": "yes" }),
+            vec![],
+        ),
+        t,
+    );
+    assert_eq!(unauth_answer.status, 403);
+    assert!(done_rx.recv_timeout(Duration::from_millis(80)).is_err());
+
+    let ok_yes = route(
+        &surface,
+        &post_json(
+            &surface,
+            &format!("/api/session/approvals/{id}"),
+            &serde_json::json!({ "answer": "yes" }),
+        ),
+        t,
+    );
+    assert_eq!(ok_yes.status, 200);
+    assert_eq!(
+        parse_json(&ok_yes),
+        serde_json::json!({ "id": id, "answer": "yes", "seq": 2 })
+    );
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        blyte_agent::approval::Approval::Approved
+    );
+    ask_thread.join().unwrap();
+
+    let conflict = route(
+        &surface,
+        &post_json(
+            &surface,
+            &format!("/api/session/approvals/{id}"),
+            &serde_json::json!({ "answer": "no" }),
+        ),
+        t,
+    );
+    assert_eq!(conflict.status, 409);
+    assert!(parse_json(&conflict)["error"].is_string());
+
+    let ev_after = route(
+        &surface,
+        &get(
+            "/api/session/events",
+            vec![("after", "1"), ("wait_ms", "0")],
+        ),
+        t,
+    );
+    assert_eq!(ev_after.status, 200);
+    let ev_after_json = parse_json(&ev_after);
+    let answered_entries = ev_after_json["entries"].as_array().unwrap();
+    assert_eq!(answered_entries.len(), 1);
+    assert_eq!(answered_entries[0]["kind"], "approval_answered");
+    assert_eq!(answered_entries[0]["id"], id);
+    assert_eq!(answered_entries[0]["command"], cmd);
+    assert_eq!(answered_entries[0]["answer"], "yes");
+
+    let approver2 = surface.session.approver();
+    let (done2_tx, done2_rx) = std::sync::mpsc::channel();
+    let ask_thread2 = std::thread::spawn(move || {
+        let _ = done2_tx.send(approver2.ask("curl https://example.com", "fetch"));
+    });
+
+    let ev2_resp = route(
+        &surface,
+        &get(
+            "/api/session/events",
+            vec![("after", "2"), ("wait_ms", "2000")],
+        ),
+        t,
+    );
+    let ev2_json = parse_json(&ev2_resp);
+    let id2 = ev2_json["entries"][0]["id"].as_str().unwrap().to_string();
+
+    let ok_no = route(
+        &surface,
+        &post_json(
+            &surface,
+            &format!("/api/session/approvals/{id2}"),
+            &serde_json::json!({ "answer": "no" }),
+        ),
+        t,
+    );
+    assert_eq!(ok_no.status, 200);
+    assert_eq!(
+        done2_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        blyte_agent::approval::Approval::Denied
+    );
+    ask_thread2.join().unwrap();
 }
