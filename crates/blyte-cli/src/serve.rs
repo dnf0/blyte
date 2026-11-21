@@ -598,7 +598,9 @@ fn open_browser(url: &str) {
     let cmd = "open";
     #[cfg(not(target_os = "macos"))]
     let cmd = "xdg-open";
-    let _ = Command::new(cmd).arg(url).spawn();
+    if let Err(e) = Command::new(cmd).arg(url).spawn() {
+        eprintln!("blyte: could not open a browser with {cmd}: {e}; open {url} yourself");
+    }
 }
 
 fn resolve_initial_model(config: &ReplConfig) -> String {
