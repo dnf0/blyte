@@ -73,6 +73,7 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
         .arg(&report)
         .current_dir(&repo)
         .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")

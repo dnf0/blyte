@@ -20,6 +20,7 @@ fn blyte(dir: &Path, home: &Path, state: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_blyte"));
     c.current_dir(dir)
         .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
         .env("BLYTE_STATE_DIR", state)
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("XDG_STATE_HOME")

@@ -41,6 +41,7 @@ fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("OLLAMA_API_KEY")
         .env_remove("BLYTE_ENV_FILE")
         .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
         .output()
         .unwrap()
 }

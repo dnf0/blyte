@@ -42,6 +42,7 @@ fn run_dispatch(cwd: &Path, id: &str, task: &str) -> std::process::Output {
         ])
         .current_dir(cwd)
         .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")

@@ -39,6 +39,7 @@ fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("BLYTE_ENV_FILE")
         .env_remove("BLYTE_MODEL")
         .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir)
         .output()
         .unwrap()
 }

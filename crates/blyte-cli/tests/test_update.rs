@@ -67,6 +67,7 @@ fn run(e: &Env, args: &[&str]) -> (i32, String) {
         .args(args)
         .env("BLYTE_GH", &e.gh)
         .env("HOME", &e.home)
+        .env("XDG_CONFIG_HOME", &e.home)
         .output()
         .unwrap();
     let text =

@@ -49,6 +49,7 @@ fn blyte_in(dir: &Path, home: &Path, state_dir: &Path, args: &[&str]) -> Output 
         .args(args)
         .current_dir(dir)
         .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
         .env("BLYTE_STATE_DIR", state_dir)
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
