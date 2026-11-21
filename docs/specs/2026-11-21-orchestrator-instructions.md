@@ -133,7 +133,7 @@ switch: a process file with the corrections appended is the second arm.
   every run, each from the same commit.
 - **Arms:** A, the reference and the default process; B, the same with the removed corrections
   appended to the process file. Three one-shot runs of each on `gemini-4-neon`, each capped with
-  `--max-cost-usd 10` (USD 60 at most).
+  `--max-cost 10` (USD 60 at most).
 - **Counted from each run's log:** tool calls before the first dispatch; calls of each kind a
   correction names (`--help`, reading blyte's source, looking for API keys, reading `.wt/` beyond
   the named files, output not trimmed); turns; cost in USD; whether the combined result passes the
