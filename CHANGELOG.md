@@ -1,3 +1,9 @@
+## v0.52.0 (2026-11-21)
+
+### Feat
+
+- **orchestrate**: facts built in, the process from a file the user can replace (#379)
+
 ## v0.51.1 (2026-11-21)
 
 ### Fix
