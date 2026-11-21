@@ -292,6 +292,9 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
     };
     let mut any_written = false;
     for run in &live.runs {
+        if run.checks_recorded || !surface.root.join(".wt").join(&run.id).is_dir() {
+            continue;
+        }
         match crate::queue_actions::ensure_checks(&surface.root, &run.id) {
             Ok(true) => any_written = true,
             Ok(false) => {}
