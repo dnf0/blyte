@@ -1,9 +1,10 @@
 use std::io::{BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use blyte_provider::gemini::Gemini;
-use blyte_provider::ProviderError;
+use blyte_provider::{ProviderError, StreamTiming};
 
 #[test]
 fn default_timeouts() {
@@ -42,10 +43,6 @@ fn streaming_timeout_helpers_defaults_and_parsing() {
         1800
     );
     assert_eq!(blyte_provider::model_stream_cap_secs_from(Some("600")), 600);
-
-    let a = blyte_provider::streaming_http_client() as *const ureq::Agent;
-    let b = blyte_provider::streaming_http_client() as *const ureq::Agent;
-    assert_eq!(a, b);
 }
 
 #[test]
@@ -59,40 +56,54 @@ fn env_override_gives_60_and_30() {
     assert_eq!(blyte_provider::model_stream_cap_secs(), 60);
     let client = blyte_provider::http_client();
     let _ = client;
+    let a = blyte_provider::streaming_http_client() as *const ureq::Agent;
+    let b = blyte_provider::streaming_http_client() as *const ureq::Agent;
+    assert_eq!(a, b);
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) {
     let mut buf = [0u8; 1024];
     let mut total = Vec::new();
-    while let Ok(n) = stream.read(&mut buf) {
-        if n == 0 {
-            break;
-        }
-        total.extend_from_slice(&buf[..n]);
-        if total.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                total.extend_from_slice(&buf[..n]);
+                if total.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
         }
     }
 }
 
 #[test]
 fn streaming_idle_timeout_fires_when_server_stalls_after_one_chunk() {
+    const IDLE: Duration = Duration::from_secs(2);
+    const CAP: Duration = Duration::from_secs(300);
+
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
 
     let server = std::thread::spawn(move || {
+        let _ = ready_tx.send(());
         if let Ok((mut stream, _)) = listener.accept() {
             read_http_request(&mut stream);
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"first\"}]}}]}\n\n",
             );
             let _ = stream.flush();
-            // Stall past the 1 s idle timeout.
-            std::thread::sleep(Duration::from_millis(2500));
+            let _ = release_rx.recv();
         }
     });
 
-    let client = blyte_provider::build_streaming_http_client(Duration::from_secs(1));
+    ready_rx.recv().unwrap();
+
+    let client = blyte_provider::build_streaming_http_client(IDLE);
     let started = Instant::now();
     let resp = client
         .get(&format!("http://{addr}/stream"))
@@ -100,53 +111,73 @@ fn streaming_idle_timeout_fires_when_server_stalls_after_one_chunk() {
         .call()
         .unwrap();
     let reader = BufReader::new(resp.into_reader());
-    let err = Gemini::parse_stream(reader, Duration::from_secs(60), started).unwrap_err();
+    let mut timing = StreamTiming::default();
+    let err = Gemini::parse_stream_timed(reader, CAP, started, &mut timing).unwrap_err();
 
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "expected failure within a few seconds, took {:?}",
-        started.elapsed()
+        release_tx.send(()).is_ok(),
+        "server closed before the idle timeout fired"
     );
+    assert_eq!(timing.data_events, 1);
     assert!(
         err.is_timeout(),
         "expected timeout Transport error, got {err:?}"
     );
     assert!(matches!(err, ProviderError::Transport(_)), "{err:?}");
+    assert!(
+        !err.to_string().contains("stream exceeded"),
+        "expected idle timeout rather than stream cap, got {err:?}"
+    );
 
     let _ = server.join();
 }
 
 #[test]
 fn streaming_succeeds_past_idle_timeout_when_chunks_keep_arriving() {
+    const IDLE: Duration = Duration::from_secs(3);
+    const TARGET: Duration = Duration::from_millis(3500);
+    const STEP: Duration = Duration::from_millis(50);
+    const CAP: Duration = Duration::from_secs(300);
+    const CHUNK_X: &[u8] =
+        b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"x\"}]}}]}\n\n";
+    const CHUNK_STOP: &[u8] =
+        b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"!\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
 
-    let server = std::thread::spawn(move || {
+    let server = std::thread::spawn(move || -> usize {
+        let _ = ready_tx.send(());
+        let mut sent = 0usize;
         if let Ok((mut stream, _)) = listener.accept() {
             read_http_request(&mut stream);
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
             );
             let _ = stream.flush();
-            for i in 0..6 {
-                std::thread::sleep(Duration::from_millis(500));
-                let chunk = if i == 5 {
-                    "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"!\"}]},\"finishReason\":\"STOP\"}]}\n\n"
-                } else {
-                    "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"x\"}]}}]}\n\n"
-                };
-                if stream.write_all(chunk.as_bytes()).is_err() {
+            let stream_start = Instant::now();
+            while stream_start.elapsed() < TARGET {
+                if stream.write_all(CHUNK_X).is_err() {
                     break;
                 }
+                let _ = stream.flush();
+                sent += 1;
+                std::thread::sleep(STEP);
+            }
+            if stream.write_all(CHUNK_STOP).is_ok() {
                 let _ = stream.flush();
             }
             let _ = stream.shutdown(std::net::Shutdown::Write);
             let mut drain = [0u8; 64];
             let _ = stream.read(&mut drain);
         }
+        sent
     });
 
-    let client = blyte_provider::build_streaming_http_client(Duration::from_secs(1));
+    ready_rx.recv().unwrap();
+
+    let client = blyte_provider::build_streaming_http_client(IDLE);
     let started = Instant::now();
     let resp = client
         .get(&format!("http://{addr}/stream"))
@@ -154,11 +185,15 @@ fn streaming_succeeds_past_idle_timeout_when_chunks_keep_arriving() {
         .call()
         .unwrap();
     let reader = BufReader::new(resp.into_reader());
-    let r = Gemini::parse_stream(reader, Duration::from_secs(60), started).unwrap();
+    let r = Gemini::parse_stream(reader, CAP, started).unwrap();
+    let sent = server.join().unwrap();
 
-    assert_eq!(r.text, "xxxxx!");
+    assert!(sent >= 1, "expected at least one intermediate chunk");
+    assert_eq!(r.text, format!("{}!", "x".repeat(sent)));
     assert_eq!(r.finish_reason.as_deref(), Some("STOP"));
-    assert!(started.elapsed() >= Duration::from_millis(2500));
-
-    let _ = server.join();
+    assert!(
+        started.elapsed() >= IDLE,
+        "expected stream to outlast idle timeout {IDLE:?}, took {:?}",
+        started.elapsed()
+    );
 }

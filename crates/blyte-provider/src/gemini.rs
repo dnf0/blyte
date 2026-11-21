@@ -82,6 +82,15 @@ pub fn output_with_timeout(
     cmd: &mut std::process::Command,
     limit: Duration,
 ) -> std::io::Result<std::process::Output> {
+    output_with_timeout_with_clock(cmd, limit, Instant::now)
+}
+
+#[doc(hidden)]
+pub fn output_with_timeout_with_clock(
+    cmd: &mut std::process::Command,
+    limit: Duration,
+    mut now: impl FnMut() -> Instant,
+) -> std::io::Result<std::process::Output> {
     use std::io::Read;
     use std::process::Stdio;
 
@@ -108,12 +117,12 @@ pub fn output_with_timeout(
         Ok(buf)
     });
 
-    let started = Instant::now();
+    let started = now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if started.elapsed() >= limit {
+        if now().saturating_duration_since(started) >= limit {
             let _ = child.kill();
             let _ = child.wait();
             return Err(std::io::Error::new(
