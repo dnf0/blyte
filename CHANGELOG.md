@@ -1,3 +1,9 @@
+## v0.54.0 (2026-11-21)
+
+### Feat
+
+- **cost**: write each turn to the usage ledger as it ends (#378)
+
 ## v0.53.0 (2026-11-21)
 
 ### Feat
