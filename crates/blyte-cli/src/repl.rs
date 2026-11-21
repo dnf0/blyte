@@ -117,6 +117,38 @@ impl ReplSession {
     pub fn new(config: &ReplConfig) -> Self {
         Self::try_new(config).expect("failed to initialize REPL session")
     }
+
+    pub fn task_config_for_prompt(&self, prompt: &str) -> crate::task_runner::TaskConfig {
+        crate::task_runner::TaskConfig {
+            prompt: prompt.to_string(),
+            gate: self.gate.clone(),
+            context_strategy: self.context_strategy.clone(),
+            model: Some(self.model.clone()),
+            container: self.container.clone(),
+            max_turns: self.max_turns,
+            max_gates: self.max_gates,
+            rollback: self.rollback,
+            root: self.repo_root.clone(),
+            container_workdir: "/workspace".into(),
+            max_seconds: None,
+            max_cost_usd: None,
+            report: None,
+            fold_budget: self.fold_budget,
+            sandbox: if self.orchestrate {
+                "off".into()
+            } else {
+                "on".into()
+            },
+            network: "on".into(),
+            allow_read: Vec::new(),
+            pass_env: Vec::new(),
+            research: false,
+            claim_check: false,
+            base_check: false,
+            orchestrate: self.orchestrate,
+            dispatch_cmd: self.dispatch_cmd.clone(),
+        }
+    }
 }
 
 /// Control flow signal emitted after handling REPL input.
@@ -197,6 +229,9 @@ pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
         }
         blyte_agent::run::Event::RolledBack { to } => {
             format!("↺ Rolled back working tree to {}", to)
+        }
+        blyte_agent::run::Event::ToolStart { .. } | blyte_agent::run::Event::Retry { .. } => {
+            String::new()
         }
     }
 }
@@ -621,35 +656,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                 }
 
                 // Build task configuration from current session parameters
-                let task_config = crate::task_runner::TaskConfig {
-                    prompt: prompt.clone(),
-                    gate: session.gate.clone(),
-                    context_strategy: session.context_strategy.clone(),
-                    model: Some(session.model.clone()),
-                    container: session.container.clone(),
-                    max_turns: session.max_turns,
-                    max_gates: session.max_gates,
-                    rollback: session.rollback,
-                    root: session.repo_root.clone(),
-                    container_workdir: "/workspace".into(),
-                    max_seconds: None,
-                    max_cost_usd: None,
-                    report: None,
-                    fold_budget: session.fold_budget,
-                    sandbox: if session.orchestrate {
-                        "off".into()
-                    } else {
-                        "on".into()
-                    },
-                    network: "on".into(),
-                    allow_read: Vec::new(),
-                    pass_env: Vec::new(),
-                    research: false,
-                    claim_check: false,
-                    base_check: false,
-                    orchestrate: session.orchestrate,
-                    dispatch_cmd: session.dispatch_cmd.clone(),
-                };
+                let task_config = session.task_config_for_prompt(&prompt);
 
                 // Invoke solver task runner preserving state and outputting directly to REPL writer
                 match crate::task_runner::run_task_with_state_and_writer(

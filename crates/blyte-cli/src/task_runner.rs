@@ -256,6 +256,16 @@ pub fn run_task_with_state_and_writer<W: Write>(
     run_task_with_state_writer_and_progress(config, state, writer, progress)
 }
 
+/// Executes an autonomous solver run against an existing mutable `State`, passing every raw event
+/// directly to `on_event` without formatting lines to a writer.
+pub fn run_task_with_state_and_events(
+    config: &TaskConfig,
+    state: &mut blyte_agent::state::State,
+    on_event: &(dyn Fn(&blyte_agent::run::Event<'_>) + Sync),
+) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
+    run_task_with_event_callback(config, state, &|event| on_event(event))
+}
+
 /// Executes an autonomous solver run against an existing mutable `State`, streaming events to `writer`
 /// and updating the shared `progress` record.
 pub fn run_task_with_state_writer_and_progress<W: Write>(
@@ -263,6 +273,50 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
     state: &mut blyte_agent::state::State,
     writer: &mut W,
     progress: Arc<Mutex<Progress>>,
+) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
+    let writer_mutex = Mutex::new(writer);
+    let on_event = |event: &blyte_agent::run::Event<'_>| {
+        {
+            let mut p = match progress.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            match event {
+                blyte_agent::run::Event::Turn { n, usage, .. } => {
+                    p.turns = *n;
+                    p.usage.input += usage.input;
+                    p.usage.cached += usage.cached;
+                    p.usage.output += usage.output;
+                    p.usage.thinking += usage.thinking;
+                    p.in_gate = false;
+                }
+                blyte_agent::run::Event::GateStart { attempt } => {
+                    p.gate_attempts = *attempt;
+                    p.in_gate = true;
+                }
+                blyte_agent::run::Event::GateSlotWait { ms } => {
+                    p.gate_wait_ms += ms;
+                }
+                blyte_agent::run::Event::Gate { .. } => {
+                    p.in_gate = false;
+                }
+                _ => {}
+            }
+        }
+        let line = crate::repl::format_event(event);
+        if !line.is_empty() {
+            if let Ok(mut w) = writer_mutex.lock() {
+                let _ = writeln!(w, "{line}");
+            }
+        }
+    };
+    run_task_with_event_callback(config, state, &on_event)
+}
+
+fn run_task_with_event_callback(
+    config: &TaskConfig,
+    state: &mut blyte_agent::state::State,
+    on_event: &dyn Fn(&blyte_agent::run::Event<'_>),
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
     let started = std::time::Instant::now();
@@ -407,42 +461,8 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
         None => &local_fs,
     };
 
-    // 4. Wrap writer in a Mutex so the event callback satisfies Fn trait bounds.
-    let writer_mutex = Mutex::new(writer);
-    let on_event = |event: blyte_agent::run::Event<'_>| {
-        {
-            let mut p = match progress.lock() {
-                Ok(g) => g,
-                Err(e) => e.into_inner(),
-            };
-            match &event {
-                blyte_agent::run::Event::Turn { n, usage, .. } => {
-                    p.turns = *n;
-                    p.usage.input += usage.input;
-                    p.usage.cached += usage.cached;
-                    p.usage.output += usage.output;
-                    p.usage.thinking += usage.thinking;
-                    p.in_gate = false;
-                }
-                blyte_agent::run::Event::GateStart { attempt } => {
-                    p.gate_attempts = *attempt;
-                    p.in_gate = true;
-                }
-                blyte_agent::run::Event::GateSlotWait { ms } => {
-                    p.gate_wait_ms += ms;
-                }
-                blyte_agent::run::Event::Gate { .. } => {
-                    p.in_gate = false;
-                }
-                _ => {}
-            }
-        }
-        if let Ok(mut w) = writer_mutex.lock() {
-            let _ = writeln!(w, "{}", crate::repl::format_event(&event));
-        }
-    };
+    let runner_on_event = |event: blyte_agent::run::Event<'_>| on_event(&event);
 
-    // 5. Assemble the autonomous runner and execute until terminal outcome or budget exhaustion.
     let runner = blyte_agent::run::Runner {
         provider: provider.as_ref(),
         shell,
@@ -455,7 +475,7 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
             max_duration: config.max_seconds.map(std::time::Duration::from_secs),
         },
         rollback: config.rollback,
-        on_event: Some(&on_event),
+        on_event: Some(&runner_on_event),
         research: config.research,
         claim_check: config.claim_check,
         base_check: config.base_check,

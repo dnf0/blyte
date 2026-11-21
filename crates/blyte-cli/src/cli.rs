@@ -109,6 +109,39 @@ pub struct DashboardArgs {
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct SurfaceArgs {
+    #[arg(
+        long,
+        default_value_t = 0,
+        value_name = "N",
+        help = "Port to listen on (0 picks a free port)"
+    )]
+    pub port: u16,
+
+    #[arg(long, help = "Do not open the live surface in the browser")]
+    pub no_open: bool,
+
+    #[arg(
+        long,
+        default_value_t = 14,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..=31),
+        help = "How many days back to include finished runs (1 to 31)"
+    )]
+    pub days: u64,
+}
+
+impl Default for SurfaceArgs {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            no_open: false,
+            days: 14,
+        }
+    }
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
 pub struct MockArgs {
     /// Port to listen on (0 for a free port)
     #[arg(long, default_value = "7272", value_name = "N")]
@@ -416,7 +449,7 @@ pub struct SkillArgs {
 #[command(
     name = "blyte",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BLYTE_BUILD"), ")"),
-    about = "A lean coding-agent harness with a sealed verification gate",
+    about = "A lean coding-agent harness with a sealed verification gate\nBare `blyte` starts the live surface for the current repository.",
     subcommand_precedence_over_arg = true
 )]
 pub struct Cli {
@@ -538,6 +571,30 @@ pub struct Cli {
     /// Run the verification gate once before the first model call and stop as blocked if it fails
     #[arg(long = "base-check")]
     pub base_check: bool,
+
+    #[arg(
+        long,
+        help = "Run the interactive terminal session instead of starting the live surface"
+    )]
+    pub terminal: bool,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Port for the live surface (0 picks a free port)"
+    )]
+    pub port: Option<u16>,
+
+    #[arg(long = "no-open", help = "Do not open the live surface in the browser")]
+    pub no_open: bool,
+
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..=31),
+        help = "How many days back to include finished runs in the live surface (1 to 31, default 14)"
+    )]
+    pub days: Option<u64>,
 }
 
 /// Turn and context defaults for `--orchestrate`. A flag the user gave explicitly wins.

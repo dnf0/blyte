@@ -80,6 +80,7 @@ fn main() {
                 if passed { "PASS" } else { "FAIL" }
             ),
             RolledBack { to } => println!("    reset to {to}"),
+            ToolStart { .. } | Retry { .. } => {}
         }
     };
 

@@ -186,6 +186,11 @@ pub enum Event<'e> {
         text: &'e str,
         usage: Usage,
     },
+    /// Emitted immediately before a tool call executes, with the same abbreviated `input` as `Tool`.
+    ToolStart {
+        name: &'e str,
+        input: String,
+    },
     /// `input` is the call's arguments, abbreviated. Logging only the RESULT made a run
     /// undiagnosable: twenty bash calls that changed nothing, with no record of what was run.
     Tool {
@@ -193,6 +198,13 @@ pub enum Event<'e> {
         input: String,
         summary: String,
         is_error: bool,
+    },
+    /// Emitted before sleeping to retry a transient model call error.
+    Retry {
+        attempt: u32,
+        max: u32,
+        wait_ms: u64,
+        reason: String,
     },
     /// A gate attempt is starting (the check runs next). Emitted so a watcher can tell a run
     /// that is waiting on its gate from one that is thinking (`blyte dashboard`, 2026-09-30).
@@ -1225,16 +1237,23 @@ impl<'a> Runner<'a> {
                                 first_data_ms: timing.first_data_ms,
                                 max_gap_ms: timing.max_gap_ms,
                             });
-                            if e.is_timeout() {
-                                eprintln!(
+                            let reason = if e.is_timeout() {
+                                format!(
                                     "model call timed out after {s} s; retrying ({attempt} of {max_retries}; raise BLYTE_MODEL_IDLE_TIMEOUT_SECS for silence or BLYTE_MODEL_TIMEOUT_SECS for whole call)"
-                                );
+                                )
                             } else {
-                                eprintln!(
+                                format!(
                                     "provider: {e}; retrying in {}s ({attempt}/{max_retries})",
                                     wait.as_secs()
-                                );
-                            }
+                                )
+                            };
+                            eprintln!("{reason}");
+                            self.emit(Event::Retry {
+                                attempt,
+                                max: max_retries,
+                                wait_ms: wait.as_millis() as u64,
+                                reason,
+                            });
                             std::thread::sleep(wait);
                         } else {
                             let err_msg = match quota_exhausted(&e) {
@@ -1342,6 +1361,33 @@ impl<'a> Runner<'a> {
                     let wrap_up_closed =
                         wrap_up_tools_closed && !matches!(call.name.as_str(), "write" | "edit");
                     let tool_closed = read_closed || wrap_up_closed;
+                    let input = if call.name == "read" {
+                        extract_action_target(&call.name, &call.arguments)
+                            .chars()
+                            .take(100)
+                            .collect()
+                    } else {
+                        let clean = |s: &str| s.trim_end().replace('\n', " ↵ ");
+                        let text = call
+                            .arguments
+                            .get("command")
+                            .or_else(|| call.arguments.get("pattern"))
+                            .or_else(|| call.arguments.get("path"))
+                            .and_then(|v| v.as_str())
+                            .map(clean)
+                            .unwrap_or_else(|| clean(&call.arguments.to_string()));
+                        if text.chars().count() > 2000 {
+                            let mut cut: String = text.chars().take(2000).collect();
+                            cut.push('…');
+                            cut
+                        } else {
+                            text
+                        }
+                    };
+                    self.emit(Event::ToolStart {
+                        name: &call.name,
+                        input: input.clone(),
+                    });
                     let mut outcome = if read_closed {
                         tools::ToolOutcome {
                             content: "[blyte] reading is closed; write report.md now from what you have found.".to_string(),
@@ -1371,31 +1417,6 @@ impl<'a> Runner<'a> {
                         .chars()
                         .take(90)
                         .collect::<String>();
-                    // A read's line range is part of what it did: paging through a file and
-                    // re-reading it look identical without it (blyte-eval 13.43).
-                    let input = if call.name == "read" {
-                        extract_action_target(&call.name, &call.arguments)
-                            .chars()
-                            .take(100)
-                            .collect()
-                    } else {
-                        let clean = |s: &str| s.trim_end().replace('\n', " ↵ ");
-                        let text = call
-                            .arguments
-                            .get("command")
-                            .or_else(|| call.arguments.get("pattern"))
-                            .or_else(|| call.arguments.get("path"))
-                            .and_then(|v| v.as_str())
-                            .map(clean)
-                            .unwrap_or_else(|| clean(&call.arguments.to_string()));
-                        if text.chars().count() > 2000 {
-                            let mut cut: String = text.chars().take(2000).collect();
-                            cut.push('…');
-                            cut
-                        } else {
-                            text
-                        }
-                    };
                     self.emit(Event::Tool {
                         name: &call.name,
                         input,
