@@ -275,7 +275,6 @@ fn mock_page_handles_research_card_kind_and_report_field() {
         "research-card",
         "Mark read",
         "Read report",
-        "Hide report",
         "data-action=\"read\"",
     ] {
         assert!(PAGE.contains(token), "missing research token {token}");
@@ -293,4 +292,85 @@ fn mock_page_exception_cards_do_not_have_hardcoded_fixed_height() {
 
     let research_block = extract_css_rule_block(PAGE, ".research-card");
     assert_no_fixed_px_height(".research-card", research_block);
+}
+
+#[test]
+fn report_reader_element_exists() {
+    for token in [
+        "id=\"report-reader\"",
+        "id=\"report-close\"",
+        "id=\"attached-reports\"",
+        "data-report-open=",
+        "data-report-use=",
+        "data-report-detach=",
+    ] {
+        assert!(PAGE.contains(token), "missing report reader token {token}");
+    }
+}
+
+#[test]
+fn report_markdown_renderer_escapes() {
+    let lines: Vec<&str> = PAGE.lines().collect();
+    let start_idx = lines
+        .iter()
+        .position(|line| line.contains("function renderReportMarkdown("))
+        .expect("missing function renderReportMarkdown(");
+    let indent_len = lines[start_idx]
+        .find("function ")
+        .expect("function keyword on start line");
+    let top_level_prefix = format!("{}function ", " ".repeat(indent_len));
+    let end_idx = lines[start_idx + 1..]
+        .iter()
+        .position(|line| line.starts_with(&top_level_prefix))
+        .map(|rel| start_idx + 1 + rel)
+        .unwrap_or(lines.len());
+    let body = lines[start_idx..end_idx].join("\n");
+    assert!(
+        body.contains("escapeHtml("),
+        "renderReportMarkdown must call escapeHtml("
+    );
+    assert!(
+        !body.contains("<a "),
+        "renderReportMarkdown must not emit anchor tags"
+    );
+    assert!(
+        !body.contains("innerHTML"),
+        "renderReportMarkdown must not touch innerHTML"
+    );
+}
+
+#[test]
+fn research_card_has_no_details_toggle() {
+    assert!(
+        !PAGE.contains("Hide report"),
+        "page must not contain Hide report"
+    );
+}
+
+#[test]
+fn report_events_recorded() {
+    for event in [
+        "\"report_open\"",
+        "\"report_close\"",
+        "\"report_use\"",
+        "\"report_detach\"",
+    ] {
+        assert!(PAGE.contains(event), "missing report event {event}");
+    }
+}
+
+#[test]
+fn reader_has_no_external_resources() {
+    for forbidden in [
+        "http://",
+        "https://",
+        "//fonts.",
+        "<link rel=\"stylesheet\"",
+        "<script src",
+    ] {
+        assert!(
+            !PAGE.contains(forbidden),
+            "unexpected external reference: {forbidden}"
+        );
+    }
 }

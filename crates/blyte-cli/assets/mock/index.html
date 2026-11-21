@@ -637,6 +637,39 @@
       flex-shrink: 0;
     }
 
+    .attached-reports {
+      border-top: 1px solid var(--color-line);
+      background: var(--color-card);
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .attached-report-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--research-soft);
+      border: 1px solid var(--research);
+      color: var(--color-strong);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .attached-report-chip button {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      padding: 0 2px;
+      color: var(--color-strong);
+      font-weight: 700;
+    }
+
     .composer {
       border-top: 1px solid var(--color-line);
       background: var(--color-card);
@@ -912,6 +945,19 @@
       border-left-color: var(--brand-rust);
     }
 
+    .research-card.is-reading {
+      border-color: var(--research);
+      box-shadow: 0 0 0 1px var(--research);
+      background: var(--research-soft);
+    }
+
+    .decided-row.is-reading {
+      border-style: solid;
+      border-color: var(--research);
+      background: var(--research-soft);
+      color: var(--color-strong);
+    }
+
     .research-pill {
       font-family: var(--font-mono);
       font-size: 11px;
@@ -1132,11 +1178,6 @@
       font-family: var(--font-sans);
       font-size: 12px;
       color: var(--color-text);
-    }
-
-    .report-pre {
-      max-height: 420px;
-      white-space: pre-wrap;
     }
 
     .details-list {
@@ -1811,6 +1852,247 @@
       color: var(--color-muted);
     }
 
+    #report-reader {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--color-page);
+    }
+
+    .report-reader-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--color-line);
+      background: var(--color-card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .report-reader-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .report-reader-ident {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .report-reader-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--color-strong);
+      line-height: 1.3;
+      word-break: break-word;
+    }
+
+    .report-reader-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .report-reader-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 18px 24px 32px;
+    }
+
+    .report-reader-col {
+      max-width: 76ch;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .report-question {
+      border: 1px solid var(--color-line);
+      border-radius: 6px;
+      background: var(--color-card);
+      padding: 8px 12px;
+    }
+
+    .report-question summary {
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+      font-weight: 500;
+    }
+
+    .report-question-body {
+      margin: 8px 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--color-text);
+    }
+
+    .report-body {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--color-text);
+    }
+
+    .report-body h1,
+    .report-body h2,
+    .report-body h3,
+    .report-body h4 {
+      color: var(--color-strong);
+      margin: 1.25em 0 0.5em;
+      line-height: 1.3;
+    }
+
+    .report-body h1:first-child,
+    .report-body h2:first-child,
+    .report-body h3:first-child,
+    .report-body h4:first-child {
+      margin-top: 0;
+    }
+
+    .report-body h1 {
+      font-size: 19px;
+      font-weight: 700;
+    }
+
+    .report-body h2 {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .report-body h3 {
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .report-body h4 {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .report-body p {
+      margin: 0 0 0.85em;
+    }
+
+    .report-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    .report-body ul,
+    .report-body ol {
+      margin: 0 0 0.85em;
+      padding-left: 22px;
+    }
+
+    .report-body li {
+      margin: 0.25em 0;
+    }
+
+    .report-body code {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: var(--color-card);
+      border: 1px solid var(--color-line);
+      color: var(--color-strong);
+    }
+
+    .report-body pre.report-code {
+      margin: 0 0 1em;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      overflow-x: auto;
+      line-height: 1.45;
+    }
+
+    .report-body pre.report-code code {
+      padding: 0;
+      border: none;
+      background: transparent;
+      font-size: 12px;
+      white-space: pre;
+    }
+
+    .report-table-wrap {
+      margin: 0 0 1em;
+      overflow-x: auto;
+    }
+
+    .report-body table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .report-body th,
+    .report-body td {
+      text-align: left;
+      padding: 6px 10px;
+      border: 1px solid var(--color-line);
+      vertical-align: top;
+    }
+
+    .report-body th {
+      background: var(--color-card);
+      color: var(--color-strong);
+      font-weight: 600;
+    }
+
+    .report-link-url {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-muted);
+      word-break: break-all;
+    }
+
+    .report-missing {
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      color: var(--color-muted);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .report-fallback-msg {
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--color-text);
+    }
+
+    .report-flags {
+      border-top: 1px solid var(--color-line);
+      padding-top: 12px;
+    }
+
     .guide-target {
       outline: 2px solid var(--brand-rust);
       outline-offset: -2px;
@@ -1971,6 +2253,7 @@
         <div id="conversation">
           <div id="conversation-thread" class="thread"></div>
           <div id="offer" hidden></div>
+          <div id="attached-reports" class="attached-reports" hidden></div>
           <form id="conversation-form" class="composer">
             <span id="composer-about" class="composer-about" hidden></span>
             <input type="text" id="conversation-input" placeholder="Message the orchestrator..." autocomplete="off">
@@ -2040,6 +2323,7 @@
           <div id="map-data-body" class="map-data-body"></div>
         </div>
         <div id="map-detail" class="map-detail" hidden></div>
+        <div id="report-reader" hidden></div>
       </aside>
     </div>
   </div>
@@ -2085,7 +2369,7 @@
         target: "#queue",
         tab: null,
         title: "The review queue",
-        text: "Finished work, grouped by the part of the system it touches. Clean results fold into one line. Only exceptions ask for your attention."
+        text: "Finished work, grouped by the part of the system it touches. Clean results fold into one line. Only exceptions ask for your attention. A research report opens in a reader in place of the map."
       },
       {
         id: "offer",
@@ -2198,6 +2482,11 @@
     let guideStepIndex = 0;
     let guideWasPlaying = false;
     let guideTargetEl = null;
+
+    let openReportKey = null;
+    let openReportOpenedAtMs = null;
+    let lastReportReaderKey = null;
+    const attachedReports = [];
 
     const sessionOpenedMs = Date.now();
     let logEntries = loadLog();
@@ -2561,26 +2850,333 @@
       }
     }
 
-    function renderDetailsHtml(run) {
-      if (!openDetails.has(run.key)) return "";
-      if (run.card === "research") {
-        const reportHtml = run.report !== null && run.report.length > 0
-          ? '<pre class="details-pre report-pre">' + escapeHtml(run.report) + '</pre>'
-          : '<div class="mono" style="color: var(--color-muted);">No report file recorded for this run.</div>';
-        const finalMsgHtml = run.final_message !== null && run.final_message.length > 0
-          ? '<div><div class="details-label">final_message</div><pre class="details-pre">' + escapeHtml(run.final_message) + '</pre></div>'
-          : "";
-        const flagsHtml = run.flags.length > 0
-          ? '<div><div class="details-label">flags (' + run.flags.length + ')</div><ul class="details-list">' +
-            run.flags.map(fl => '<li>' + escapeHtml(fl) + '</li>').join("") + '</ul></div>'
-          : "";
-        return '<div class="details-box">' +
-          '<div><div class="details-label">report</div>' + reportHtml + '</div>' +
-          finalMsgHtml +
-          flagsHtml +
-          '<div><div class="details-label">task</div><pre class="details-pre">' + escapeHtml(run.task) + '</pre></div>' +
-          '</div>';
+    function renderReportMarkdown(text) {
+      const renderInline = (raw) => {
+        let out = "";
+        let plain = "";
+        const flush = () => {
+          if (plain.length > 0) {
+            out += escapeHtml(plain);
+            plain = "";
+          }
+        };
+        let i = 0;
+        while (i < raw.length) {
+          if (raw[i] === "`") {
+            const end = raw.indexOf("`", i + 1);
+            if (end > i + 1) {
+              flush();
+              out += "<code>" + escapeHtml(raw.slice(i + 1, end)) + "</code>";
+              i = end + 1;
+              continue;
+            }
+          }
+          if (raw[i] === "*" && raw[i + 1] === "*") {
+            const end = raw.indexOf("**", i + 2);
+            if (end > i + 2) {
+              flush();
+              out += "<strong>" + renderInline(raw.slice(i + 2, end)) + "</strong>";
+              i = end + 2;
+              continue;
+            }
+          }
+          if (raw[i] === "[" && (i === 0 || raw[i - 1] !== "!")) {
+            const closeBracket = raw.indexOf("]", i + 1);
+            if (closeBracket > i + 1 && raw[closeBracket + 1] === "(") {
+              let depth = 1;
+              let p = closeBracket + 2;
+              while (p < raw.length && depth > 0) {
+                if (raw[p] === "(") depth += 1;
+                else if (raw[p] === ")") depth -= 1;
+                if (depth > 0) p += 1;
+              }
+              const closeParen = depth === 0 ? p : -1;
+              if (closeParen > closeBracket + 2) {
+                const linkText = raw.slice(i + 1, closeBracket);
+                const linkUrl = raw.slice(closeBracket + 2, closeParen).trim();
+                if (linkUrl.length > 0 && !linkText.includes("[")) {
+                  flush();
+                  out += renderInline(linkText) + ' <span class="report-link-url">(' + escapeHtml(linkUrl) + ")</span>";
+                  i = closeParen + 1;
+                  continue;
+                }
+              }
+            }
+          }
+          plain += raw[i];
+          i += 1;
+        }
+        flush();
+        return out;
+      };
+
+      const splitTableRow = (line) => {
+        let trimmed = line.trim();
+        if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+        if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+        return trimmed.split("|").map(cell => cell.trim());
+      };
+
+      const isTableSep = (line) => {
+        if (!line || !line.includes("|")) return false;
+        const cells = splitTableRow(line);
+        return cells.length > 0 && cells.every(c => /^:?-{1,}:?$/.test(c));
+      };
+
+      const isTableStart = (lines, idx) => {
+        if (idx + 1 >= lines.length) return false;
+        const head = lines[idx];
+        const sep = lines[idx + 1];
+        if (!head.includes("|") || !isTableSep(sep)) return false;
+        return splitTableRow(head).length > 0;
+      };
+
+      const isHeading = (line) => /^(#{1,4})\s+(.+)$/.test(line);
+      const isFence = (line) => /^```/.test(line);
+      const isUl = (line) => /^ {0,3}[-*+]\s+(.+)$/.test(line);
+      const isOl = (line) => /^ {0,3}\d+\.\s+(.+)$/.test(line);
+
+      const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+      const blocks = [];
+      let i = 0;
+
+      while (i < lines.length) {
+        const line = lines[i];
+
+        if (line.trim() === "") {
+          i += 1;
+          continue;
+        }
+
+        if (isFence(line)) {
+          i += 1;
+          const codeLines = [];
+          while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+            codeLines.push(lines[i]);
+            i += 1;
+          }
+          if (i < lines.length) i += 1;
+          blocks.push('<pre class="report-code"><code>' + escapeHtml(codeLines.join("\n")) + "</code></pre>");
+          continue;
+        }
+
+        const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          const content = headingMatch[2].replace(/\s+#+\s*$/, "").trim();
+          blocks.push("<h" + level + ">" + renderInline(content) + "</h" + level + ">");
+          i += 1;
+          continue;
+        }
+
+        if (isTableStart(lines, i)) {
+          const headers = splitTableRow(lines[i]);
+          i += 2;
+          const rows = [];
+          while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|") && !isFence(lines[i])) {
+            rows.push(splitTableRow(lines[i]));
+            i += 1;
+          }
+          const headHtml = "<thead><tr>" +
+            headers.map(h => "<th>" + renderInline(h) + "</th>").join("") +
+            "</tr></thead>";
+          const bodyHtml = rows.length > 0
+            ? "<tbody>" + rows.map(row => {
+                const cells = [];
+                for (let c = 0; c < headers.length; c++) {
+                  cells.push("<td>" + renderInline(c < row.length ? row[c] : "") + "</td>");
+                }
+                return "<tr>" + cells.join("") + "</tr>";
+              }).join("") + "</tbody>"
+            : "";
+          blocks.push('<div class="report-table-wrap"><table>' + headHtml + bodyHtml + "</table></div>");
+          continue;
+        }
+
+        if (isUl(line)) {
+          const items = [];
+          while (i < lines.length) {
+            const m = lines[i].match(/^ {0,3}[-*+]\s+(.+)$/);
+            if (!m) break;
+            items.push("<li>" + renderInline(m[1]) + "</li>");
+            i += 1;
+          }
+          blocks.push("<ul>" + items.join("") + "</ul>");
+          continue;
+        }
+
+        if (isOl(line)) {
+          const items = [];
+          while (i < lines.length) {
+            const m = lines[i].match(/^ {0,3}\d+\.\s+(.+)$/);
+            if (!m) break;
+            items.push("<li>" + renderInline(m[1]) + "</li>");
+            i += 1;
+          }
+          blocks.push("<ol>" + items.join("") + "</ol>");
+          continue;
+        }
+
+        const paraLines = [];
+        while (
+          i < lines.length &&
+          lines[i].trim() !== "" &&
+          !isFence(lines[i]) &&
+          !isHeading(lines[i]) &&
+          !isTableStart(lines, i) &&
+          !isUl(lines[i]) &&
+          !isOl(lines[i])
+        ) {
+          paraLines.push(lines[i].trim());
+          i += 1;
+        }
+        blocks.push("<p>" + renderInline(paraLines.join(" ")) + "</p>");
       }
+
+      return blocks.join("");
+    }
+
+    function findRunByKey(runKey) {
+      if (!replayData || !Array.isArray(replayData.runs)) {
+        throw new Error("Run not found: " + runKey);
+      }
+      const run = replayData.runs.find(r => r.key === runKey);
+      if (!run) {
+        throw new Error("Run not found: " + runKey);
+      }
+      return run;
+    }
+
+    function renderReportReader() {
+      const readerEl = document.getElementById("report-reader");
+      if (openReportKey === null) {
+        if (lastReportReaderKey !== null) {
+          readerEl.innerHTML = "";
+          lastReportReaderKey = null;
+        }
+        return;
+      }
+      if (openReportKey === lastReportReaderKey) return;
+      const run = findRunByKey(openReportKey);
+      lastReportReaderKey = run.key;
+
+      const hasReport = run.report !== null && run.report.trim().length > 0;
+      const bodyHtml = hasReport
+        ? '<div class="report-body">' + renderReportMarkdown(run.report) + '</div>'
+        : '<div class="report-body">' +
+            '<div class="report-missing">No report file was recorded for this run.</div>' +
+            (run.final_message !== null && run.final_message.length > 0
+              ? '<pre class="report-fallback-msg">' + escapeHtml(run.final_message) + '</pre>'
+              : "") +
+          '</div>';
+
+      const flagsHtml = run.flags.length > 0
+        ? '<div class="report-flags">' +
+            '<div class="details-label">flags (' + run.flags.length + ')</div>' +
+            '<ul class="details-list">' +
+              run.flags.map(fl => '<li>' + escapeHtml(fl) + '</li>').join("") +
+            '</ul>' +
+          '</div>'
+        : "";
+
+      const questionHtml = '<details class="report-question">' +
+        '<summary>Question</summary>' +
+        '<pre class="report-question-body">' + escapeHtml(run.task) + '</pre>' +
+      '</details>';
+
+      readerEl.innerHTML =
+        '<div class="report-reader-head">' +
+          '<div class="report-reader-title-row">' +
+            '<div class="report-reader-ident">' +
+              '<span class="run-id">' + escapeHtml(run.id) + '</span>' +
+              '<span class="report-reader-title">' + escapeHtml(run.title) + '</span>' +
+            '</div>' +
+            '<span class="research-pill">research</span>' +
+          '</div>' +
+          '<div class="report-reader-actions">' +
+            '<button type="button" class="btn btn-pass" data-action="read" data-run-key="' + escapeHtml(run.key) + '">Mark read</button>' +
+            '<button type="button" class="btn" data-action="hold" data-run-key="' + escapeHtml(run.key) + '">Hold</button>' +
+            '<button type="button" class="btn btn-primary" data-report-use="' + escapeHtml(run.key) + '"' + (hasReport ? "" : " disabled") + '>Use in conversation</button>' +
+            '<button type="button" id="report-close" class="btn btn-ghost">Close</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="report-reader-scroll">' +
+          '<div class="report-reader-col">' +
+            questionHtml +
+            bodyHtml +
+            flagsHtml +
+          '</div>' +
+        '</div>';
+    }
+
+    function openReport(runKey) {
+      const run = findRunByKey(runKey);
+      if (openReportKey === run.key) return;
+      if (openReportKey !== null) {
+        const prevSeconds = openReportOpenedAtMs !== null
+          ? Math.round(((Date.now() - openReportOpenedAtMs) / 1000) * 10) / 10
+          : 0;
+        appendLog({ type: "report_close", run_key: openReportKey, seconds: prevSeconds });
+      }
+      openReportKey = run.key;
+      openReportOpenedAtMs = Date.now();
+      lastReportReaderKey = null;
+      appendLog({ type: "report_open", run_key: run.key });
+      renderAll(true);
+    }
+
+    function closeReport() {
+      if (openReportKey === null) return;
+      const closedKey = openReportKey;
+      const seconds = openReportOpenedAtMs !== null
+        ? Math.round(((Date.now() - openReportOpenedAtMs) / 1000) * 10) / 10
+        : 0;
+      openReportKey = null;
+      openReportOpenedAtMs = null;
+      lastReportReaderKey = null;
+      const readerEl = document.getElementById("report-reader");
+      if (readerEl) readerEl.innerHTML = "";
+      appendLog({ type: "report_close", run_key: closedKey, seconds });
+      renderAll(true);
+    }
+
+    function useReportInConversation(runKey) {
+      const run = findRunByKey(runKey);
+      if (run.report === null || run.report.trim().length === 0) return;
+      appendLog({ type: "report_use", run_key: run.key });
+      if (!attachedReports.some(item => item.key === run.key)) {
+        attachedReports.push({ key: run.key, id: run.id });
+      }
+      const existingDec = decisions.get(run.key);
+      if (!existingDec || existingDec.action !== "read") {
+        applyDecision(run.key, "read", "");
+      }
+      closeReport();
+      switchMode("design", null);
+      renderAttachedReports();
+      const input = document.getElementById("conversation-input");
+      if (input) input.focus();
+    }
+
+    function renderAttachedReports() {
+      const el = document.getElementById("attached-reports");
+      if (!el) return;
+      if (attachedReports.length === 0) {
+        el.hidden = true;
+        el.innerHTML = "";
+        return;
+      }
+      el.hidden = false;
+      el.innerHTML = attachedReports.map(item =>
+        '<span class="attached-report-chip">report ' + escapeHtml(item.id) +
+          ' <button type="button" data-report-detach="' + escapeHtml(item.key) + '" aria-label="Remove report ' + escapeHtml(item.id) + '">×</button>' +
+        '</span>'
+      ).join("");
+    }
+
+    function renderDetailsHtml(run) {
+      if (run.card === "research") return "";
+      if (!openDetails.has(run.key)) return "";
       const finalMsg = run.final_message !== null ? run.final_message : "(not recorded)";
       const filesHtml = run.changed_files.length > 0
         ? '<ul class="details-list">' + run.changed_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") + '</ul>'
@@ -2647,7 +3243,7 @@
       const pendingSig = Array.from(pendingNoteAction.entries()).map(([k, v]) => k + ":" + v).join(",");
       const errSig = Array.from(noteErrors.entries()).map(([k, v]) => k + ":" + v).join(",");
       const threadSig = Array.from(groupThreads.entries()).map(([k, v]) => k + ":" + v.length).join(",");
-      const sig = [arrivedKeys, decisionSig, detailsSig, pendingSig, errSig, threadSig, focusedGroup || "", checkinOpen ? "1" : "0"].join("||");
+      const sig = [arrivedKeys, decisionSig, detailsSig, pendingSig, errSig, threadSig, focusedGroup || "", checkinOpen ? "1" : "0", openReportKey || ""].join("||");
 
       if (!force && sig === lastQueueSig) return;
       lastQueueSig = sig;
@@ -2710,12 +3306,12 @@
         const researchHtml = researchRuns.map(r => {
           const dec = decisions.get(r.key);
           const held = isHeld(r.key);
-          const isOpen = openDetails.has(r.key);
+          const isReading = openReportKey === r.key;
           const pending = pendingNoteAction.get(r.key) || null;
           const draft = noteDrafts.get(r.key) || "";
           const err = noteErrors.get(r.key) || "";
           const outcomeClass = r.outcome === "verified" ? "verified" : "failed";
-          const cardClass = "research-card" + (held ? " is-held" : "");
+          const cardClass = "research-card" + (held ? " is-held" : "") + (isReading ? " is-reading" : "");
           const verdictHtml = held && r.verdict !== null
             ? '<span class="recorded-verdict">recorded then: ' + escapeHtml(r.verdict) + '</span>'
             : "";
@@ -2751,12 +3347,11 @@
                 '</div>' +
                 '<div class="row-actions">' +
                   verdictHtml +
-                  '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide report" : "Read report") + '</button>' +
+                  '<button type="button" class="btn btn-ghost" data-report-open="' + escapeHtml(r.key) + '"' + (isReading ? " disabled" : "") + '>' + (isReading ? "Reading" : "Read report") + '</button>' +
                 '</div>' +
               '</div>' +
             '</div>' +
             promptHtml +
-            renderDetailsHtml(r) +
           '</div>';
         }).join("");
 
@@ -2833,6 +3428,7 @@
         const decidedHtml = decided.map(r => {
           const dec = decisions.get(r.key);
           const isOpen = openDetails.has(r.key);
+          const isReading = openReportKey === r.key;
           const actionLabel = dec.action === "accept" ? "Accepted"
             : dec.action === "read" ? "Read"
             : dec.action === "send_back" ? "Sent back"
@@ -2842,21 +3438,22 @@
           const recordedHtml = r.verdict !== null
             ? '<span class="recorded-verdict">recorded then: ' + escapeHtml(r.verdict) + '</span>'
             : "";
-          const toggleLabel = r.card === "research"
-            ? (isOpen ? "Hide report" : "Read report")
-            : (isOpen ? "Hide details" : "Details");
+          const actionBtnHtml = r.card === "research"
+            ? '<button type="button" class="btn btn-ghost" data-report-open="' + escapeHtml(r.key) + '"' + (isReading ? " disabled" : "") + '>' + (isReading ? "Reading" : "Read report") + '</button>'
+            : '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>';
+          const rowClass = "decided-row" + (r.card === "research" && isReading ? " is-reading" : "");
 
           return '<div>' +
-            '<div class="decided-row">' +
+            '<div class="' + rowClass + '">' +
               '<div class="decided-main">' +
                 '<span class="run-id">' + escapeHtml(r.id) + '</span>' +
                 '<span class="run-title" title="' + escapeHtml(r.title) + '">' + escapeHtml(r.title) + '</span>' +
                 '<span class="decision-badge">' + escapeHtml(actionLabel) + noteSnippet + '</span>' +
                 recordedHtml +
               '</div>' +
-              '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + toggleLabel + '</button>' +
+              actionBtnHtml +
             '</div>' +
-            renderDetailsHtml(r) +
+            (r.card === "research" ? "" : renderDetailsHtml(r)) +
           '</div>';
         }).join("");
 
@@ -3157,23 +3754,43 @@
     }
 
     function renderMapChrome() {
+      const readerOpen = openReportKey !== null;
+      const paneHead = document.querySelector(".map-pane-head");
       const tabsEl = document.getElementById("map-tabs");
+      const controlsEl = document.querySelector(".map-controls");
+      const metaBar = document.getElementById("map-meta-bar");
+      const detailEl = document.getElementById("map-detail");
+      const readerEl = document.getElementById("report-reader");
+
       tabsEl.querySelectorAll("[data-map-tab]").forEach(btn => {
         const isActive = btn.dataset.mapTab === mapTab;
         btn.classList.toggle("active", isActive);
         btn.setAttribute("aria-selected", isActive ? "true" : "false");
       });
 
-      document.getElementById("map").hidden = mapTab !== "runs";
-      document.getElementById("map-system").hidden = mapTab !== "system";
-      document.getElementById("map-data").hidden = mapTab !== "data";
+      if (paneHead) paneHead.hidden = readerOpen;
+      tabsEl.hidden = readerOpen;
+      if (controlsEl) controlsEl.hidden = readerOpen;
+      readerEl.hidden = !readerOpen;
+
+      if (readerOpen) {
+        document.getElementById("map").hidden = true;
+        document.getElementById("map-system").hidden = true;
+        document.getElementById("map-data").hidden = true;
+        metaBar.hidden = true;
+        detailEl.hidden = true;
+      } else {
+        document.getElementById("map").hidden = mapTab !== "runs";
+        document.getElementById("map-system").hidden = mapTab !== "system";
+        document.getElementById("map-data").hidden = mapTab !== "data";
+      }
 
       const wideBtn = document.getElementById("map-wide");
       wideBtn.classList.toggle("active", mapWide);
       wideBtn.setAttribute("aria-pressed", mapWide ? "true" : "false");
       wideBtn.textContent = mapWide ? "Narrow" : "Wide";
       const ws = document.querySelector(".workspace");
-      if (ws) ws.classList.toggle("map-wide", mapWide);
+      if (ws) ws.classList.toggle("map-wide", readerOpen || mapWide);
     }
 
     function renderMapMeta(mapData, overlay, force) {
@@ -3765,6 +4382,10 @@
 
     function renderMapPane(state, force) {
       renderMapChrome();
+      if (openReportKey !== null) {
+        renderReportReader();
+        return;
+      }
       if (mapTab === "runs") {
         renderMapMeta(null, null, force);
         renderMapDetail(null);
@@ -3823,6 +4444,7 @@
       updateFocusIndicator();
       renderMapPane(state, force);
       renderConversation(force);
+      renderAttachedReports();
       renderOffer();
       renderQueue(state, force);
     }
@@ -4237,12 +4859,19 @@
         if (!text) return;
         input.value = "";
         const prefix = focusedGroup !== null ? "about " + focusedGroup + " · " : "";
+        const usedReports = attachedReports.slice();
+        attachedReports.length = 0;
+        const suffix = usedReports.length === 1
+          ? " · with report " + usedReports[0].id
+          : usedReports.length > 1
+            ? " · with reports " + usedReports.map(r => r.id).join(", ")
+            : "";
         designMessages.push({
           seq: ++msgSeq,
           replayTime,
           role: "user",
           meta: prefix + formatReplayDateTime(replayTime),
-          text
+          text: text + suffix
         });
         designMessages.push({
           seq: ++msgSeq,
@@ -4251,12 +4880,59 @@
           meta: "orchestrator",
           text: FIXED_REPLY
         });
-        appendLog({
+        const logEntry = {
           type: "conversation_message",
           group: focusedGroup,
           text
-        });
+        };
+        if (usedReports.length > 0) {
+          logEntry.reports = usedReports.map(r => r.key);
+        }
+        appendLog(logEntry);
+        renderAttachedReports();
         renderConversation(true);
+      });
+
+      document.getElementById("attached-reports").addEventListener("click", (e) => {
+        const detachBtn = e.target.closest("[data-report-detach]");
+        if (!detachBtn) return;
+        const key = detachBtn.dataset.reportDetach;
+        const idx = attachedReports.findIndex(item => item.key === key);
+        if (idx === -1) return;
+        attachedReports.splice(idx, 1);
+        appendLog({ type: "report_detach", run_key: key });
+        renderAttachedReports();
+      });
+
+      document.getElementById("report-reader").addEventListener("click", (e) => {
+        if (e.target.closest("#report-close")) {
+          closeReport();
+          return;
+        }
+        const useBtn = e.target.closest("[data-report-use]");
+        if (useBtn) {
+          useReportInConversation(useBtn.dataset.reportUse);
+          return;
+        }
+        const actionBtn = e.target.closest("[data-action][data-run-key]");
+        if (actionBtn) {
+          const key = actionBtn.dataset.runKey;
+          const action = actionBtn.dataset.action;
+          if (action === "read") {
+            closeReport();
+            applyDecision(key, "read", "");
+          } else if (action === "hold") {
+            closeReport();
+            pendingNoteAction.set(key, "hold");
+            noteErrors.delete(key);
+            renderAll(true);
+            const inp = document.getElementById("queue").querySelector('[data-note-input="' + CSS.escape(key) + '"]');
+            if (inp) {
+              inp.scrollIntoView({ block: "nearest" });
+              inp.focus();
+            }
+          }
+        }
       });
 
       document.getElementById("offer").addEventListener("click", (e) => {
@@ -4485,6 +5161,7 @@
         if (guideOpen) {
           positionGuidePanel();
         }
+        if (openReportKey !== null) return;
         if (mapTab !== "system" || !selectedRepo) return;
         const entry = mapCache.get(selectedRepo);
         if (entry && entry.status === "ok") {
@@ -4516,24 +5193,30 @@
       });
 
       document.addEventListener("keydown", (e) => {
-        if (!guideOpen) return;
-        if (e.key === "Escape") {
-          e.preventDefault();
-          closeGuide();
+        if (guideOpen) {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            closeGuide();
+            return;
+          }
+          const tag = e.target && e.target.tagName ? e.target.tagName.toLowerCase() : "";
+          if (tag === "input" || tag === "textarea" || tag === "select") return;
+          if (e.key === "ArrowRight") {
+            e.preventDefault();
+            if (guideStepIndex < GUIDE_STEPS.length - 1) {
+              showGuideStep(guideStepIndex + 1);
+            }
+          } else if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            if (guideStepIndex > 0) {
+              showGuideStep(guideStepIndex - 1);
+            }
+          }
           return;
         }
-        const tag = e.target && e.target.tagName ? e.target.tagName.toLowerCase() : "";
-        if (tag === "input" || tag === "textarea" || tag === "select") return;
-        if (e.key === "ArrowRight") {
+        if (openReportKey !== null && e.key === "Escape") {
           e.preventDefault();
-          if (guideStepIndex < GUIDE_STEPS.length - 1) {
-            showGuideStep(guideStepIndex + 1);
-          }
-        } else if (e.key === "ArrowLeft") {
-          e.preventDefault();
-          if (guideStepIndex > 0) {
-            showGuideStep(guideStepIndex - 1);
-          }
+          closeReport();
         }
       });
 
@@ -4542,6 +5225,12 @@
         const acceptAllBtn = e.target.closest("[data-accept-all-clean]");
         if (acceptAllBtn) {
           acceptAllCleanInGroup(acceptAllBtn.dataset.acceptAllClean);
+          return;
+        }
+
+        const reportOpenBtn = e.target.closest("[data-report-open]");
+        if (reportOpenBtn) {
+          openReport(reportOpenBtn.dataset.reportOpen);
           return;
         }
 
@@ -4572,8 +5261,14 @@
           const key = actionBtn.dataset.runKey;
           const action = actionBtn.dataset.action;
           if (action === "accept" || action === "redo" || action === "read") {
+            if (action === "read" && openReportKey === key) {
+              closeReport();
+            }
             applyDecision(key, action, "");
           } else if (action === "send_back" || action === "hold") {
+            if (action === "hold" && openReportKey === key) {
+              closeReport();
+            }
             pendingNoteAction.set(key, action);
             noteErrors.delete(key);
             renderAll(true);
