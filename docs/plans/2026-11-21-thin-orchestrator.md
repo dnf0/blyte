@@ -155,6 +155,28 @@ the run in the queue; a failed review is recorded and the run waits.
 
 **Commit message:** `feat(review): review a flagged run with a fresh model run, and only then`
 
+### Task T5b: an unreadable stored review is an error
+
+**Goal.** Found in review of T5: `read_stored_model_review` in
+`crates/blyte-cli/src/queue_actions.rs` returns `None` both when a run has no stored review and
+when `.wt/<id>.checks.json` cannot be read, is not valid JSON, or holds a `model_review` that does
+not deserialize. The second group makes a run with findings look like a run with no review. No
+fallbacks: only a missing file, or a missing or `null` `model_review`, means "no review".
+
+**What must be true when it is done.**
+- The function returns a result: `Ok(None)` for a missing file or a missing or `null`
+  `model_review`; `Ok(Some(..))` for a stored review; an error naming the file and the cause for
+  anything else.
+- Every caller handles the error: `blyte review <id>` prints it and exits non-zero; anything that
+  decides whether a run waits in the review queue treats the run as waiting and shows the error.
+
+**Tests** for: a missing file; a `null` review; a stored review; invalid JSON; a `model_review` of
+the wrong shape; `blyte review` exiting non-zero with the file named.
+
+**Depends on:** T5.
+
+**Commit message:** `fix(review): an unreadable stored review is an error, not "no review"`
+
 ### Task T6: tests that fail when the machine is busy (split)
 
 The first attempt (one task for five tests in three crates, each to be repeated 20 times under a
