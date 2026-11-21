@@ -338,6 +338,10 @@ fn main() {
             orchestrate: cli.orchestrate,
             dispatch_cmd: cli.dispatch_cmd,
             fold_budget: cli.fold_budget,
+            sandbox: cli.sandbox,
+            network: cli.network,
+            allow_read: cli.allow_read,
+            pass_env: cli.pass_env,
         };
         std::process::exit(blyte_cli::serve::run(&surface_args, repl_config));
     }
