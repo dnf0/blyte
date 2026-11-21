@@ -1,3 +1,9 @@
+## v0.51.0 (2026-11-21)
+
+### Feat
+
+- **mock**: research items, faster replay and cards that fit their content (#375)
+
 ## v0.50.0 (2026-11-20)
 
 ### Feat
