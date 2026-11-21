@@ -124,13 +124,13 @@
       display: none !important;
     }
 
-    button, input, select {
+    button, input, select, textarea {
       font-family: inherit;
       font-size: inherit;
       color: inherit;
     }
 
-    button:focus-visible, input:focus-visible, select:focus-visible {
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
       outline: 2px solid var(--focus-ring);
       outline-offset: 2px;
     }
@@ -2261,6 +2261,240 @@
       padding-top: 12px;
     }
 
+    .requests-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .request-card {
+      padding: 12px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--color-line-dark);
+      border-left: 3px solid var(--color-line-dark);
+      background: var(--color-card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .request-card.request-state-waiting {
+      border-left-color: var(--amber);
+    }
+
+    .request-card.request-state-combining {
+      border-left-color: var(--brand-rust);
+    }
+
+    .request-card.request-state-combined {
+      border-left-color: var(--pass);
+    }
+
+    .request-card.request-state-conflict,
+    .request-card.request-state-check_failed,
+    .request-card.request-state-error {
+      border-left-color: var(--fail);
+    }
+
+    .request-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .outcome-pill.request-waiting {
+      background: var(--amber-soft);
+      border-color: var(--amber);
+    }
+
+    .outcome-pill.request-combining {
+      background: var(--brand-rust-soft);
+      border-color: var(--brand-rust);
+    }
+
+    .request-runs {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .request-run-id {
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+      color: var(--color-text);
+    }
+
+    .request-reasons {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-size: 12px;
+      color: var(--color-text);
+    }
+
+    .request-reason {
+      word-break: break-word;
+    }
+
+    .request-combining-msg {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--brand-rust);
+    }
+
+    .request-meta-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .request-branch {
+      font-size: 12px;
+      color: var(--color-strong);
+      word-break: break-all;
+    }
+
+    .request-check-passed {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--pass-soft);
+      border: 1px solid var(--pass);
+      color: var(--color-strong);
+    }
+
+    .request-commits {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .request-commit {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 12px;
+      min-width: 0;
+    }
+
+    .request-sha {
+      font-size: 11px;
+      color: var(--color-muted);
+      flex-shrink: 0;
+    }
+
+    .request-subject {
+      color: var(--color-text);
+      word-break: break-word;
+    }
+
+    .request-actions {
+      flex-wrap: wrap;
+    }
+
+    .request-pr-link {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--brand-rust);
+      text-decoration: underline;
+      word-break: break-all;
+    }
+
+    .request-pr-url-text {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-text);
+      word-break: break-all;
+    }
+
+    .request-pr-form {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--brand-rust);
+      background: var(--color-page);
+    }
+
+    .request-pr-label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .request-pr-title,
+    .request-pr-body {
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-strong);
+      font-family: var(--font-sans);
+      font-size: 12.5px;
+    }
+
+    .request-pr-body {
+      resize: vertical;
+      min-height: 72px;
+    }
+
+    .request-detail-line {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+    }
+
+    .request-detail-block {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .request-output-tail {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      max-height: 220px;
+    }
+
+    .request-error-box {
+      padding: 6px 10px;
+      border-radius: 4px;
+      background: var(--fail-soft);
+      border: 1px solid var(--fail);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .request-muted {
+      font-size: 11.5px;
+      color: var(--color-muted);
+    }
+
     @media (max-width: 900px) {
       .shell {
         height: auto;
@@ -2350,6 +2584,7 @@
         <div class="pane-head map-pane-head">
           <div id="map-tabs" role="tablist" aria-label="Map view">
             <button type="button" class="mode-btn active" data-map-tab="runs" role="tab" aria-selected="true">Runs</button>
+            <button type="button" class="mode-btn" id="map-tab-requests" data-map-tab="requests" role="tab" aria-selected="false">Requests</button>
             <button type="button" class="mode-btn" data-map-tab="system" role="tab" aria-selected="false">System</button>
             <button type="button" class="mode-btn" data-map-tab="data" role="tab" aria-selected="false">Data</button>
           </div>
@@ -2362,6 +2597,9 @@
           <div id="map-notes" class="map-notes" hidden></div>
         </div>
         <div id="map"></div>
+        <div id="requests-panel" class="map-panel" role="region" aria-label="Requests" hidden>
+          <div id="requests" class="requests-list"></div>
+        </div>
         <div id="map-system" class="map-panel" hidden></div>
         <div id="map-data" class="map-panel" hidden>
           <div id="map-data-head" class="map-data-head" hidden>
@@ -2402,6 +2640,18 @@
     let runsFetchInFlight = false;
     let runsRefetchNeeded = false;
     let runsPollTimer = null;
+
+    let liveRequests = [];
+    let requestsError = "";
+    let requestsFetchInFlight = false;
+    let requestsRefetchNeeded = false;
+    let requestsPollTimer = null;
+    const requestPushInFlight = new Set();
+    const requestPrInFlight = new Set();
+    const requestPrFormOpen = new Set();
+    const requestPrDrafts = new Map();
+    const requestCardErrors = new Map();
+    let lastRequestsSig = "";
 
     let serverLost = false;
     let mode = "design";
@@ -4245,12 +4495,14 @@
 
       if (readerOpen) {
         document.getElementById("map").hidden = true;
+        document.getElementById("requests-panel").hidden = true;
         document.getElementById("map-system").hidden = true;
         document.getElementById("map-data").hidden = true;
         metaBar.hidden = true;
         detailEl.hidden = true;
       } else {
         document.getElementById("map").hidden = mapTab !== "runs";
+        document.getElementById("requests-panel").hidden = mapTab !== "requests";
         document.getElementById("map-system").hidden = mapTab !== "system";
         document.getElementById("map-data").hidden = mapTab !== "data";
       }
@@ -4833,6 +5085,347 @@
       bodyEl.innerHTML = groupsHtml;
     }
 
+    function escapeAttrSelector(val) {
+      if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+        return CSS.escape(val);
+      }
+      return String(val).replace(/["\\]/g, "\\$&");
+    }
+
+    function validateRequestCard(req) {
+      const errors = [];
+      if (!isPlainObject(req)) {
+        return ["invalid request entry: expected object"];
+      }
+      if (!hasOwn(req, "request") || typeof req.request !== "string" || req.request.length === 0) {
+        errors.push("missing or invalid field: request");
+      }
+      if (!hasOwn(req, "runs") || !Array.isArray(req.runs) || req.runs.some(r => typeof r !== "string")) {
+        errors.push("missing or invalid field: runs");
+      }
+      if (!hasOwn(req, "state") || typeof req.state !== "string" || req.state.length === 0) {
+        errors.push("missing or invalid field: state");
+        return errors;
+      }
+      switch (req.state) {
+        case "waiting":
+          if (
+            !hasOwn(req, "waiting_reasons") ||
+            !Array.isArray(req.waiting_reasons) ||
+            req.waiting_reasons.length === 0 ||
+            req.waiting_reasons.some(r => typeof r !== "string")
+          ) {
+            errors.push("missing or invalid field: waiting_reasons");
+          }
+          break;
+        case "combining":
+          break;
+        case "combined":
+          if (!hasOwn(req, "branch") || typeof req.branch !== "string" || req.branch.length === 0) {
+            errors.push("missing or invalid field: branch");
+          }
+          if (!hasOwn(req, "commits") || !Array.isArray(req.commits)) {
+            errors.push("missing or invalid field: commits");
+          } else {
+            for (const c of req.commits) {
+              if (!isPlainObject(c) || typeof c.sha !== "string" || c.sha.length === 0) {
+                errors.push("missing or invalid field: commits.sha");
+                break;
+              }
+              if (typeof c.subject !== "string") {
+                errors.push("missing or invalid field: commits.subject");
+                break;
+              }
+            }
+          }
+          if (!hasOwn(req, "pushed") || typeof req.pushed !== "boolean") {
+            errors.push("missing or invalid field: pushed");
+          }
+          if (!hasOwn(req, "pull_request_url") || (req.pull_request_url !== null && typeof req.pull_request_url !== "string")) {
+            errors.push("missing or invalid field: pull_request_url");
+          }
+          if (hasOwn(req, "suggested_title") && req.suggested_title !== null && typeof req.suggested_title !== "string") {
+            errors.push("missing or invalid field: suggested_title");
+          }
+          if (hasOwn(req, "suggested_body") && req.suggested_body !== null && typeof req.suggested_body !== "string") {
+            errors.push("missing or invalid field: suggested_body");
+          }
+          break;
+        case "conflict":
+          if (!hasOwn(req, "conflicting_run") || typeof req.conflicting_run !== "string" || req.conflicting_run.length === 0) {
+            errors.push("missing or invalid field: conflicting_run");
+          }
+          if (
+            !hasOwn(req, "conflicting_files") ||
+            !Array.isArray(req.conflicting_files) ||
+            req.conflicting_files.some(f => typeof f !== "string")
+          ) {
+            errors.push("missing or invalid field: conflicting_files");
+          }
+          break;
+        case "check_failed":
+          if (!hasOwn(req, "failing_step") || typeof req.failing_step !== "string" || req.failing_step.length === 0) {
+            errors.push("missing or invalid field: failing_step");
+          }
+          if (!hasOwn(req, "output_tail") || typeof req.output_tail !== "string") {
+            errors.push("missing or invalid field: output_tail");
+          }
+          break;
+        case "error":
+          if (!hasOwn(req, "error") || typeof req.error !== "string" || req.error.length === 0) {
+            errors.push("missing or invalid field: error");
+          }
+          break;
+        default:
+          errors.push("unknown state: " + req.state);
+          break;
+      }
+      return errors;
+    }
+
+    function renderPullRequestLink(url) {
+      if (typeof url === "string" && url.startsWith("https://")) {
+        const escaped = escapeHtml(url);
+        return '<a class="request-pr-link" href="' + escaped + '" target="_blank" rel="noopener noreferrer">' + escaped + '</a>';
+      }
+      return '<span class="request-pr-url-text">' + escapeHtml(url) + '</span>';
+    }
+
+    function renderRequestCard(req, uiState) {
+      const ui = isPlainObject(uiState) ? uiState : {};
+      const pushInFlight = Boolean(ui.pushInFlight);
+      const prInFlight = Boolean(ui.prInFlight);
+      const prFormOpen = Boolean(ui.prFormOpen);
+      const prDraft = isPlainObject(ui.prDraft) ? ui.prDraft : null;
+      const cardError = typeof ui.cardError === "string" ? ui.cardError : "";
+
+      const validationErrors = validateRequestCard(req);
+      const reqId = isPlainObject(req) && typeof req.request === "string" ? req.request : "";
+      const stateName = isPlainObject(req) && typeof req.state === "string" ? req.state : "error";
+      const validRuns = isPlainObject(req) && Array.isArray(req.runs) && req.runs.every(r => typeof r === "string")
+        ? req.runs
+        : null;
+
+      let pillClass = "outcome-pill";
+      let cardStateClass = "request-state-error";
+      if (stateName === "waiting") {
+        pillClass += " request-waiting";
+        cardStateClass = "request-state-waiting";
+      } else if (stateName === "combining") {
+        pillClass += " request-combining";
+        cardStateClass = "request-state-combining";
+      } else if (stateName === "combined") {
+        pillClass += " verified";
+        cardStateClass = "request-state-combined";
+      } else if (stateName === "conflict" || stateName === "check_failed" || stateName === "error") {
+        pillClass += " failed";
+        cardStateClass = "request-state-" + stateName;
+      }
+
+      const headerHtml = '<div class="request-top">' +
+        (reqId ? '<span class="run-id request-id">' + escapeHtml(reqId) + '</span>' : '<span class="run-id request-id">invalid request</span>') +
+        '<span class="' + pillClass + '">' + escapeHtml(stateName) + '</span>' +
+      '</div>';
+
+      const runsHtml = validRuns !== null
+        ? '<div class="request-runs"><span>runs</span>' +
+            validRuns.map(id => '<span class="request-run-id">' + escapeHtml(id) + '</span>').join("") +
+          '</div>'
+        : "";
+
+      let bodyHtml = "";
+      if (validationErrors.length > 0) {
+        bodyHtml = '<div class="request-error-box request-validation-error">' + escapeHtml(validationErrors.join("; ")) + '</div>';
+      } else if (stateName === "waiting") {
+        bodyHtml = '<div class="request-reasons">' +
+          req.waiting_reasons.map(r => '<div class="request-reason">' + escapeHtml(r) + '</div>').join("") +
+        '</div>';
+      } else if (stateName === "combining") {
+        bodyHtml = '<div class="request-combining-msg">Combining runs and running checks…</div>';
+      } else if (stateName === "combined") {
+        const commitsHtml = req.commits.length > 0
+          ? '<div class="request-commits">' +
+              req.commits.map(c =>
+                '<div class="request-commit">' +
+                  '<span class="request-sha mono">' + escapeHtml(c.sha.slice(0, 7)) + '</span>' +
+                  '<span class="request-subject">' + escapeHtml(c.subject) + '</span>' +
+                '</div>'
+              ).join("") +
+            '</div>'
+          : '<div class="request-muted mono">No commits.</div>';
+
+        const pushDisabled = req.pushed || pushInFlight;
+        const pushLabel = req.pushed ? "Pushed" : "Push branch";
+        const pushBtnHtml = '<button type="button" class="btn btn-primary" data-request-push="' + escapeHtml(reqId) + '"' + (pushDisabled ? ' disabled' : '') + '>' + pushLabel + '</button>';
+
+        const hasPrUrl = typeof req.pull_request_url === "string" && req.pull_request_url.length > 0;
+        const prControlHtml = hasPrUrl
+          ? renderPullRequestLink(req.pull_request_url)
+          : '<button type="button" class="btn" data-request-open-pr="' + escapeHtml(reqId) + '"' + (!req.pushed || prInFlight ? ' disabled' : '') + '>Open pull request</button>';
+
+        let prFormHtml = "";
+        if (!hasPrUrl && req.pushed && prFormOpen) {
+          const draftTitle = prDraft && typeof prDraft.title === "string"
+            ? prDraft.title
+            : (typeof req.suggested_title === "string" ? req.suggested_title : "");
+          const draftBody = prDraft && typeof prDraft.body === "string"
+            ? prDraft.body
+            : (typeof req.suggested_body === "string" ? req.suggested_body : "");
+          const submitDisabled = draftTitle.trim().length === 0 || prInFlight;
+          prFormHtml = '<form class="request-pr-form" data-request-pr-form="' + escapeHtml(reqId) + '">' +
+            '<label class="request-pr-label">Title' +
+              '<input type="text" class="request-pr-title" data-request-pr-title="' + escapeHtml(reqId) + '" data-preserve-id="pr-title:' + escapeHtml(reqId) + '" value="' + escapeHtml(draftTitle) + '" placeholder="Pull request title">' +
+            '</label>' +
+            '<label class="request-pr-label">Body' +
+              '<textarea class="request-pr-body" rows="4" data-request-pr-body="' + escapeHtml(reqId) + '" data-preserve-id="pr-body:' + escapeHtml(reqId) + '" placeholder="Pull request description">' + escapeHtml(draftBody) + '</textarea>' +
+            '</label>' +
+            '<div class="row-actions">' +
+              '<button type="submit" class="btn btn-primary" data-request-pr-submit="' + escapeHtml(reqId) + '"' + (submitDisabled ? ' disabled' : '') + '>Submit pull request</button>' +
+              '<button type="button" class="btn btn-ghost" data-request-pr-cancel="' + escapeHtml(reqId) + '"' + (prInFlight ? ' disabled' : '') + '>Cancel</button>' +
+            '</div>' +
+          '</form>';
+        }
+
+        bodyHtml = '<div class="request-meta-row">' +
+            '<span class="request-branch mono">' + escapeHtml(req.branch) + '</span>' +
+            '<span class="request-check-passed">check passed</span>' +
+          '</div>' +
+          commitsHtml +
+          '<div class="row-actions request-actions">' +
+            pushBtnHtml +
+            prControlHtml +
+          '</div>' +
+          prFormHtml;
+      } else if (stateName === "conflict") {
+        const filesHtml = req.conflicting_files.length > 0
+          ? '<ul class="details-list">' +
+              req.conflicting_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") +
+            '</ul>'
+          : '<div class="request-muted mono">No conflicting files listed.</div>';
+        bodyHtml = '<div class="request-detail-line">' +
+            '<span class="details-label">Conflicting run</span>' +
+            '<span class="run-id">' + escapeHtml(req.conflicting_run) + '</span>' +
+          '</div>' +
+          '<div class="request-detail-block">' +
+            '<div class="details-label">Conflicting files</div>' +
+            filesHtml +
+          '</div>';
+      } else if (stateName === "check_failed") {
+        bodyHtml = '<div class="request-detail-line">' +
+            '<span class="details-label">Failing step</span>' +
+            '<span class="mono">' + escapeHtml(req.failing_step) + '</span>' +
+          '</div>' +
+          '<pre class="details-pre request-output-tail">' + escapeHtml(req.output_tail) + '</pre>';
+      } else if (stateName === "error") {
+        bodyHtml = '<div class="request-error-box request-state-error">' + escapeHtml(req.error) + '</div>';
+      }
+
+      const actionErrorHtml = cardError
+        ? '<div class="request-error-box request-action-error">' + escapeHtml(cardError) + '</div>'
+        : "";
+
+      return '<article class="request-card ' + cardStateClass + '" data-request-id="' + escapeHtml(reqId) + '">' +
+        headerHtml +
+        runsHtml +
+        bodyHtml +
+        actionErrorHtml +
+      '</article>';
+    }
+
+    function lookupStateEntry(collection, key) {
+      if (!collection) return undefined;
+      if (collection instanceof Map) return collection.get(key);
+      if (isPlainObject(collection) && hasOwn(collection, key)) return collection[key];
+      return undefined;
+    }
+
+    function hasStateEntry(collection, key) {
+      if (!collection) return false;
+      if (collection instanceof Set) return collection.has(key);
+      if (Array.isArray(collection)) return collection.includes(key);
+      if (isPlainObject(collection)) return Boolean(collection[key]);
+      return false;
+    }
+
+    function renderRequestsList(requests, panelState) {
+      const state = isPlainObject(panelState) ? panelState : {};
+      const errText = typeof state.error === "string" ? state.error : "";
+      let html = "";
+      if (errText) {
+        html += '<div class="map-error">' + escapeHtml(errText) + '</div>';
+      }
+      if (!Array.isArray(requests) || requests.length === 0) {
+        if (!errText) {
+          html += '<div class="thread-empty">No requests.</div>';
+        }
+        return html;
+      }
+      const cardsHtml = requests.map(req => {
+        const reqId = isPlainObject(req) && typeof req.request === "string" ? req.request : "";
+        return renderRequestCard(req, {
+          pushInFlight: hasStateEntry(state.pushInFlight, reqId),
+          prInFlight: hasStateEntry(state.prInFlight, reqId),
+          prFormOpen: hasStateEntry(state.prFormOpen, reqId),
+          prDraft: lookupStateEntry(state.prDrafts, reqId) || null,
+          cardError: lookupStateEntry(state.cardErrors, reqId) || ""
+        });
+      }).join("");
+      return html + cardsHtml;
+    }
+
+    function updateRequestsTabLabel() {
+      if (typeof document === "undefined") return;
+      const tab = document.getElementById("map-tab-requests");
+      if (!tab) return;
+      tab.textContent = liveRequests.length > 0
+        ? "Requests (" + liveRequests.length + ")"
+        : "Requests";
+    }
+
+    function renderRequestsPanel(force) {
+      if (typeof document === "undefined") return;
+      updateRequestsTabLabel();
+      const el = document.getElementById("requests");
+      if (!el) return;
+
+      const sig = JSON.stringify({
+        requests: liveRequests,
+        error: requestsError,
+        pushInFlight: Array.from(requestPushInFlight),
+        prInFlight: Array.from(requestPrInFlight),
+        prFormOpen: Array.from(requestPrFormOpen),
+        cardErrors: Array.from(requestCardErrors.entries())
+      });
+      if (!force && sig === lastRequestsSig) return;
+      lastRequestsSig = sig;
+
+      const activeInput = document.activeElement;
+      const activeInputId = activeInput && activeInput.dataset ? activeInput.dataset.preserveId : null;
+      const activeSelStart = activeInput && typeof activeInput.selectionStart === "number" ? activeInput.selectionStart : null;
+      const activeSelEnd = activeInput && typeof activeInput.selectionEnd === "number" ? activeInput.selectionEnd : null;
+
+      el.innerHTML = renderRequestsList(liveRequests, {
+        error: requestsError,
+        pushInFlight: requestPushInFlight,
+        prInFlight: requestPrInFlight,
+        prFormOpen: requestPrFormOpen,
+        prDrafts: requestPrDrafts,
+        cardErrors: requestCardErrors
+      });
+
+      if (activeInputId) {
+        const restored = el.querySelector('[data-preserve-id="' + escapeAttrSelector(activeInputId) + '"]');
+        if (restored) {
+          restored.focus();
+          if (activeSelStart !== null) {
+            try {
+              restored.setSelectionRange(activeSelStart, activeSelEnd !== null ? activeSelEnd : activeSelStart);
+            } catch (_) {}
+          }
+        }
+      }
+    }
+
     function renderMapPane(state, force) {
       renderMapChrome();
       if (openReportKey !== null) {
@@ -4843,6 +5436,10 @@
         renderMapMeta(null, null, force);
         renderMapDetail(null);
         renderMap(state, force);
+      } else if (mapTab === "requests") {
+        renderMapMeta(null, null, force);
+        renderMapDetail(null);
+        renderRequestsPanel(force);
       } else if (mapTab === "system") {
         renderSystemTab(state, force);
       } else if (mapTab === "data") {
@@ -4989,6 +5586,137 @@
           runsRefetchNeeded = false;
           fetchRuns();
         }
+      }
+    }
+
+    async function fetchRequests() {
+      if (requestsFetchInFlight) {
+        requestsRefetchNeeded = true;
+        return;
+      }
+      requestsFetchInFlight = true;
+      try {
+        const res = await fetchWithRetry("/api/requests");
+        if (!res.ok) {
+          requestsError = await parseErrorPayload(res, "/api/requests");
+          renderRequestsPanel(false);
+          return;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          requestsError = "/api/requests returned invalid JSON: " + (err && err.message ? err.message : String(err));
+          renderRequestsPanel(false);
+          return;
+        }
+        if (!Array.isArray(data)) {
+          requestsError = "/api/requests: response must be a JSON array";
+          renderRequestsPanel(false);
+          return;
+        }
+        requestsError = "";
+        liveRequests = data;
+        renderRequestsPanel(false);
+      } finally {
+        requestsFetchInFlight = false;
+        if (requestsRefetchNeeded) {
+          requestsRefetchNeeded = false;
+          fetchRequests();
+        }
+      }
+    }
+
+    async function postRequestPush(requestId) {
+      if (requestPushInFlight.has(requestId)) {
+        return false;
+      }
+      if (!surfaceToken) {
+        requestCardErrors.set(requestId, MISSING_TOKEN_MSG);
+        renderRequestsPanel(true);
+        return false;
+      }
+      requestPushInFlight.add(requestId);
+      requestCardErrors.delete(requestId);
+      renderRequestsPanel(true);
+      const route = "/api/requests/" + encodeURIComponent(requestId) + "/push";
+      try {
+        const res = await fetchWithRetry(route, { method: "POST" });
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, route);
+          requestCardErrors.set(requestId, errMsg);
+          return false;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          requestCardErrors.set(requestId, route + " returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+          return false;
+        }
+        if (!isPlainObject(data) || data.pushed !== true) {
+          requestCardErrors.set(requestId, route + ": missing or invalid field pushed");
+          return false;
+        }
+        requestCardErrors.delete(requestId);
+        await fetchRequests();
+        return true;
+      } finally {
+        requestPushInFlight.delete(requestId);
+        renderRequestsPanel(true);
+      }
+    }
+
+    async function postRequestPullRequest(requestId, title, body) {
+      if (requestPrInFlight.has(requestId)) {
+        return false;
+      }
+      const trimmedTitle = typeof title === "string" ? title.trim() : "";
+      if (trimmedTitle.length === 0) {
+        requestCardErrors.set(requestId, "Pull request title is required.");
+        renderRequestsPanel(true);
+        return false;
+      }
+      if (!surfaceToken) {
+        requestCardErrors.set(requestId, MISSING_TOKEN_MSG);
+        renderRequestsPanel(true);
+        return false;
+      }
+      const bodyText = typeof body === "string" ? body : "";
+      requestPrInFlight.add(requestId);
+      requestCardErrors.delete(requestId);
+      renderRequestsPanel(true);
+      const route = "/api/requests/" + encodeURIComponent(requestId) + "/pull-request";
+      try {
+        const res = await fetchWithRetry(route, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: trimmedTitle, body: bodyText })
+        });
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, route);
+          requestCardErrors.set(requestId, errMsg);
+          return false;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          requestCardErrors.set(requestId, route + " returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+          return false;
+        }
+        if (!isPlainObject(data) || typeof data.url !== "string" || data.url.length === 0) {
+          requestCardErrors.set(requestId, route + ": missing or invalid field url");
+          return false;
+        }
+        requestCardErrors.delete(requestId);
+        requestPrFormOpen.delete(requestId);
+        requestPrDrafts.delete(requestId);
+        await fetchRequests();
+        return true;
+      } finally {
+        requestPrInFlight.delete(requestId);
+        renderRequestsPanel(true);
       }
     }
 
@@ -5340,6 +6068,81 @@
           postDecision(key, action, val, true);
         }
       });
+
+      const requestsEl = document.getElementById("requests");
+      if (requestsEl) {
+        requestsEl.addEventListener("click", (e) => {
+          const pushBtn = e.target.closest("[data-request-push]");
+          if (pushBtn && !pushBtn.disabled) {
+            postRequestPush(pushBtn.dataset.requestPush);
+            return;
+          }
+
+          const openPrBtn = e.target.closest("[data-request-open-pr]");
+          if (openPrBtn && !openPrBtn.disabled) {
+            const reqId = openPrBtn.dataset.requestOpenPr;
+            const req = liveRequests.find(r => isPlainObject(r) && r.request === reqId);
+            requestPrFormOpen.add(reqId);
+            if (!requestPrDrafts.has(reqId)) {
+              const title = req && typeof req.suggested_title === "string" ? req.suggested_title : "";
+              const body = req && typeof req.suggested_body === "string" ? req.suggested_body : "";
+              requestPrDrafts.set(reqId, { title, body });
+            }
+            renderRequestsPanel(true);
+            const inp = requestsEl.querySelector('[data-request-pr-title="' + escapeAttrSelector(reqId) + '"]');
+            if (inp) inp.focus();
+            return;
+          }
+
+          const cancelPrBtn = e.target.closest("[data-request-pr-cancel]");
+          if (cancelPrBtn && !cancelPrBtn.disabled) {
+            const reqId = cancelPrBtn.dataset.requestPrCancel;
+            requestPrFormOpen.delete(reqId);
+            requestPrDrafts.delete(reqId);
+            requestCardErrors.delete(reqId);
+            renderRequestsPanel(true);
+          }
+        });
+
+        requestsEl.addEventListener("input", (e) => {
+          const titleInp = e.target.closest("[data-request-pr-title]");
+          if (titleInp) {
+            const reqId = titleInp.dataset.requestPrTitle;
+            const existing = requestPrDrafts.get(reqId) || { title: "", body: "" };
+            existing.title = titleInp.value;
+            requestPrDrafts.set(reqId, existing);
+            const form = titleInp.closest("[data-request-pr-form]");
+            const submitBtn = form ? form.querySelector("[data-request-pr-submit]") : null;
+            if (submitBtn) {
+              submitBtn.disabled = titleInp.value.trim().length === 0 || requestPrInFlight.has(reqId);
+            }
+            return;
+          }
+
+          const bodyInp = e.target.closest("[data-request-pr-body]");
+          if (bodyInp) {
+            const reqId = bodyInp.dataset.requestPrBody;
+            const existing = requestPrDrafts.get(reqId) || { title: "", body: "" };
+            existing.body = bodyInp.value;
+            requestPrDrafts.set(reqId, existing);
+          }
+        });
+
+        requestsEl.addEventListener("submit", (e) => {
+          const prForm = e.target.closest("[data-request-pr-form]");
+          if (prForm) {
+            e.preventDefault();
+            const reqId = prForm.dataset.requestPrForm;
+            const titleInp = prForm.querySelector("[data-request-pr-title]");
+            const bodyInp = prForm.querySelector("[data-request-pr-body]");
+            const draft = requestPrDrafts.get(reqId) || { title: "", body: "" };
+            const title = titleInp ? titleInp.value : draft.title;
+            const body = bodyInp ? bodyInp.value : draft.body;
+            requestPrDrafts.set(reqId, { title, body });
+            postRequestPullRequest(reqId, title, body);
+          }
+        });
+      }
     }
 
     async function submitApprovalAnswer(id, answer) {
@@ -5593,6 +6396,8 @@
       loadModels();
       fetchRuns();
       runsPollTimer = setInterval(fetchRuns, RUNS_POLL_MS);
+      fetchRequests();
+      requestsPollTimer = setInterval(fetchRequests, RUNS_POLL_MS);
       pollEvents();
     }
 

@@ -17,6 +17,8 @@ fn page_has_its_parts() {
         "attached-reports",
         "lost-server",
         "missing-token",
+        "requests-panel",
+        "requests",
     ] {
         let needle = format!("id=\"{id}\"");
         assert!(
@@ -41,6 +43,9 @@ fn page_calls_every_route() {
         "/decision",
         "/diff",
         "/api/map",
+        "/api/requests",
+        "/push",
+        "/pull-request",
     ] {
         assert!(html.contains(route), "surface page must call route {route}");
     }
@@ -395,4 +400,386 @@ fn page_renders_approvals_as_escaped_text_without_approve_all() {
         !lower.contains("approve all") && !lower.contains("remember"),
         "approval rendering must not offer approve-all or remembered answers"
     );
+}
+
+#[test]
+fn requests_panel_renders_all_six_states_and_missing_field_errors() {
+    let harness = r#"
+const assert = require("assert");
+
+const waitingHtml = renderRequestCard({
+  request: "req-wait",
+  runs: ["T1", "T2"],
+  state: "waiting",
+  waiting_reasons: ["T1 is still running", "T2 failed check"],
+});
+assert.ok(waitingHtml.includes("req-wait"), waitingHtml);
+assert.ok(waitingHtml.includes("T1") && waitingHtml.includes("T2"), waitingHtml);
+assert.ok(waitingHtml.includes("T1 is still running"), waitingHtml);
+assert.ok(waitingHtml.includes("T2 failed check"), waitingHtml);
+assert.ok(waitingHtml.includes('<div class="request-reason">T1 is still running</div>'), waitingHtml);
+assert.ok(waitingHtml.includes('<div class="request-reason">T2 failed check</div>'), waitingHtml);
+
+const combiningHtml = renderRequestCard({
+  request: "req-comb",
+  runs: ["T3"],
+  state: "combining",
+});
+assert.ok(combiningHtml.includes("req-comb"), combiningHtml);
+assert.ok(combiningHtml.includes("T3"), combiningHtml);
+assert.ok(combiningHtml.toLowerCase().includes("combining"), combiningHtml);
+
+const combinedHtml = renderRequestCard({
+  request: "req-done",
+  runs: ["T4", "T5"],
+  state: "combined",
+  branch: "blyte/req-done",
+  base: "main",
+  commits: [
+    { sha: "abcdef1234567890", subject: "feat: first commit" },
+    { sha: "9876543210fedcba", subject: "fix: second commit" },
+  ],
+  suggested_title: "feat: first commit",
+  suggested_body: "feat: first commit\nfix: second commit",
+  pushed: false,
+  pull_request_url: null,
+});
+assert.ok(combinedHtml.includes("req-done"), combinedHtml);
+assert.ok(combinedHtml.includes("T4") && combinedHtml.includes("T5"), combinedHtml);
+assert.ok(combinedHtml.includes("blyte/req-done"), combinedHtml);
+assert.ok(combinedHtml.includes("abcdef1"), combinedHtml);
+assert.ok(!combinedHtml.includes("abcdef1234567890"), combinedHtml);
+assert.ok(combinedHtml.includes("feat: first commit"), combinedHtml);
+assert.ok(combinedHtml.includes("9876543"), combinedHtml);
+assert.ok(combinedHtml.includes("fix: second commit"), combinedHtml);
+assert.ok(combinedHtml.includes("check passed"), combinedHtml);
+
+const conflictHtml = renderRequestCard({
+  request: "req-conf",
+  runs: ["T6", "T7"],
+  state: "conflict",
+  conflicting_run: "T7",
+  conflicting_files: ["src/main.rs", "src/lib.rs"],
+});
+assert.ok(conflictHtml.includes("req-conf"), conflictHtml);
+assert.ok(conflictHtml.includes("T6") && conflictHtml.includes("T7"), conflictHtml);
+assert.ok(conflictHtml.includes("src/main.rs"), conflictHtml);
+assert.ok(conflictHtml.includes("src/lib.rs"), conflictHtml);
+
+const checkFailedHtml = renderRequestCard({
+  request: "req-fail",
+  runs: ["T8"],
+  state: "check_failed",
+  failing_step: "cargo test",
+  output_tail: "test foo ... FAILED\nassertion failed",
+});
+assert.ok(checkFailedHtml.includes("req-fail"), checkFailedHtml);
+assert.ok(checkFailedHtml.includes("T8"), checkFailedHtml);
+assert.ok(checkFailedHtml.includes("cargo test"), checkFailedHtml);
+assert.ok(
+  checkFailedHtml.includes('<pre class="details-pre request-output-tail">test foo ... FAILED\nassertion failed</pre>'),
+  checkFailedHtml
+);
+
+const errorHtml = renderRequestCard({
+  request: "req-err",
+  runs: ["T9"],
+  state: "error",
+  error: "git cherry-pick exited 128",
+});
+assert.ok(errorHtml.includes("req-err"), errorHtml);
+assert.ok(errorHtml.includes("T9"), errorHtml);
+assert.ok(errorHtml.includes("git cherry-pick exited 128"), errorHtml);
+
+const missingBranchHtml = renderRequestCard({
+  request: "req-bad-branch",
+  runs: ["T10"],
+  state: "combined",
+  commits: [],
+  pushed: false,
+  pull_request_url: null,
+});
+assert.ok(missingBranchHtml.includes("branch"), missingBranchHtml);
+assert.ok(missingBranchHtml.includes("request-validation-error"), missingBranchHtml);
+
+const missingStepHtml = renderRequestCard({
+  request: "req-bad-step",
+  runs: ["T11"],
+  state: "check_failed",
+  output_tail: "boom",
+});
+assert.ok(missingStepHtml.includes("failing_step"), missingStepHtml);
+assert.ok(missingStepHtml.includes("request-validation-error"), missingStepHtml);
+
+const missingErrorHtml = renderRequestCard({
+  request: "req-bad-err",
+  runs: ["T12"],
+  state: "error",
+});
+assert.ok(missingErrorHtml.includes("error"), missingErrorHtml);
+assert.ok(missingErrorHtml.includes("request-validation-error"), missingErrorHtml);
+
+const failedFetchHtml = renderRequestsList([], { error: "/api/requests failed with HTTP 500" });
+assert.ok(failedFetchHtml.includes("/api/requests failed with HTTP 500"), failedFetchHtml);
+assert.ok(!failedFetchHtml.includes("No requests"), failedFetchHtml);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn requests_panel_combined_buttons_pr_form_and_escaping() {
+    let harness = r#"
+const assert = require("assert");
+
+const baseCombined = {
+  request: "req-1",
+  runs: ["T1"],
+  state: "combined",
+  branch: "blyte/req-1",
+  base: "main",
+  commits: [{ sha: "1234567890abcdef", subject: "add <script>alert(1)</script> safely" }],
+  suggested_title: "Suggested PR Title",
+  suggested_body: "Suggested PR Body",
+  pushed: false,
+  pull_request_url: null,
+};
+
+const notPushedHtml = renderRequestCard(baseCombined);
+assert.ok(
+  notPushedHtml.includes('data-request-push="req-1">Push branch</button>'),
+  notPushedHtml
+);
+assert.ok(
+  notPushedHtml.includes('data-request-open-pr="req-1" disabled>Open pull request</button>'),
+  notPushedHtml
+);
+assert.ok(!notPushedHtml.includes("<script>"), notPushedHtml);
+assert.ok(notPushedHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), notPushedHtml);
+
+const pushInFlightHtml = renderRequestCard(baseCombined, { pushInFlight: true });
+assert.ok(
+  pushInFlightHtml.includes('data-request-push="req-1" disabled>Push branch</button>'),
+  pushInFlightHtml
+);
+
+const pushedNoUrlHtml = renderRequestCard(Object.assign({}, baseCombined, { pushed: true }));
+assert.ok(
+  pushedNoUrlHtml.includes('data-request-push="req-1" disabled>Pushed</button>'),
+  pushedNoUrlHtml
+);
+assert.ok(
+  pushedNoUrlHtml.includes('data-request-open-pr="req-1">Open pull request</button>'),
+  pushedNoUrlHtml
+);
+
+const prFormOpenHtml = renderRequestCard(
+  Object.assign({}, baseCombined, { pushed: true }),
+  { prFormOpen: true }
+);
+assert.ok(prFormOpenHtml.includes('value="Suggested PR Title"'), prFormOpenHtml);
+assert.ok(prFormOpenHtml.includes('>Suggested PR Body</textarea>'), prFormOpenHtml);
+assert.ok(
+  prFormOpenHtml.includes('data-request-pr-submit="req-1">Submit pull request</button>'),
+  prFormOpenHtml
+);
+
+const emptyTitleFormHtml = renderRequestCard(
+  Object.assign({}, baseCombined, { pushed: true }),
+  { prFormOpen: true, prDraft: { title: "   ", body: "User body" } }
+);
+assert.ok(
+  emptyTitleFormHtml.includes('data-request-pr-submit="req-1" disabled>Submit pull request</button>'),
+  emptyTitleFormHtml
+);
+assert.ok(emptyTitleFormHtml.includes('>User body</textarea>'), emptyTitleFormHtml);
+
+const preservedDraftHtml = renderRequestCard(
+  Object.assign({}, baseCombined, { pushed: true }),
+  { prFormOpen: true, prDraft: { title: "Edited title", body: "Edited body" } }
+);
+assert.ok(preservedDraftHtml.includes('value="Edited title"'), preservedDraftHtml);
+assert.ok(preservedDraftHtml.includes('>Edited body</textarea>'), preservedDraftHtml);
+assert.ok(!preservedDraftHtml.includes("Suggested PR Title"), preservedDraftHtml);
+
+const withHttpsUrlHtml = renderRequestCard(
+  Object.assign({}, baseCombined, {
+    pushed: true,
+    pull_request_url: "https://github.com/example/repo/pull/42",
+  })
+);
+assert.ok(
+  withHttpsUrlHtml.includes('<a class="request-pr-link" href="https://github.com/example/repo/pull/42"'),
+  withHttpsUrlHtml
+);
+assert.ok(!withHttpsUrlHtml.includes("data-request-open-pr"), withHttpsUrlHtml);
+assert.ok(!withHttpsUrlHtml.includes("Open pull request"), withHttpsUrlHtml);
+
+const withNonHttpsUrlHtml = renderRequestCard(
+  Object.assign({}, baseCombined, {
+    pushed: true,
+    pull_request_url: "javascript:alert(1)",
+  })
+);
+assert.ok(!withNonHttpsUrlHtml.includes("<a "), withNonHttpsUrlHtml);
+assert.ok(
+  withNonHttpsUrlHtml.includes('<span class="request-pr-url-text">javascript:alert(1)</span>'),
+  withNonHttpsUrlHtml
+);
+
+const withHttpUrlHtml = renderRequestCard(
+  Object.assign({}, baseCombined, {
+    pushed: true,
+    pull_request_url: "http://example.com/pr/1",
+  })
+);
+assert.ok(!withHttpUrlHtml.includes("<a "), withHttpUrlHtml);
+assert.ok(
+  withHttpUrlHtml.includes('<span class="request-pr-url-text">http://example.com/pr/1</span>'),
+  withHttpUrlHtml
+);
+
+const boldErrHtml = renderRequestCard({
+  request: "req-err-html",
+  runs: ["T2"],
+  state: "error",
+  error: "failed <b>badly</b>",
+});
+assert.ok(!boldErrHtml.includes("<b>"), boldErrHtml);
+assert.ok(boldErrHtml.includes("failed &lt;b&gt;badly&lt;/b&gt;"), boldErrHtml);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn requests_post_helpers_send_secret_header_handle_errors_and_refetch() {
+    let harness = r#"
+const assert = require("assert");
+
+(async () => {
+  surfaceToken = "secret-token-123";
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (url === "/api/requests/req-1/push") {
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { pushed: true }; },
+      };
+    }
+    if (url === "/api/requests/req-1/pull-request") {
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { url: "https://github.com/org/repo/pull/7" }; },
+      };
+    }
+    if (url === "/api/requests/req-fail/push") {
+      return {
+        ok: false,
+        status: 409,
+        async json() { return { error: "branch already diverged" }; },
+      };
+    }
+    if (url === "/api/requests/req-fail-pr/pull-request") {
+      return {
+        ok: false,
+        status: 500,
+        async json() { return { error: "gh pr create failed" }; },
+      };
+    }
+    if (url === "/api/requests") {
+      return {
+        ok: true,
+        status: 200,
+        async json() { return []; },
+      };
+    }
+    throw new Error("unexpected fetch url: " + url);
+  };
+
+  let inFlightObservedPush = false;
+  const origFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    if (url === "/api/requests/req-1/push") {
+      inFlightObservedPush = requestPushInFlight.has("req-1");
+    }
+    return origFetch(url, options);
+  };
+
+  const pushOk = await postRequestPush("req-1");
+  assert.strictEqual(pushOk, true);
+  assert.strictEqual(inFlightObservedPush, true);
+  assert.strictEqual(calls.length, 2);
+  assert.strictEqual(calls[0].url, "/api/requests/req-1/push");
+  assert.strictEqual(calls[0].options.method, "POST");
+  assert.strictEqual(calls[0].options.headers["X-Blyte-Token"], "secret-token-123");
+  assert.strictEqual(calls[1].url, "/api/requests");
+  assert.strictEqual(requestPushInFlight.has("req-1"), false);
+
+  calls.length = 0;
+  let inFlightObservedPr = false;
+  global.fetch = async (url, options) => {
+    if (url === "/api/requests/req-1/pull-request") {
+      inFlightObservedPr = requestPrInFlight.has("req-1");
+    }
+    return origFetch(url, options);
+  };
+  requestPrFormOpen.add("req-1");
+  requestPrDrafts.set("req-1", { title: "Add feature", body: "Details here" });
+  const prOk = await postRequestPullRequest("req-1", "Add feature", "Details here");
+  assert.strictEqual(prOk, true);
+  assert.strictEqual(inFlightObservedPr, true);
+  assert.strictEqual(calls.length, 2);
+  assert.strictEqual(calls[0].url, "/api/requests/req-1/pull-request");
+  assert.strictEqual(calls[0].options.method, "POST");
+  assert.strictEqual(calls[0].options.headers["X-Blyte-Token"], "secret-token-123");
+  assert.strictEqual(calls[0].options.headers["Content-Type"], "application/json");
+  assert.deepStrictEqual(JSON.parse(calls[0].options.body), {
+    title: "Add feature",
+    body: "Details here",
+  });
+  assert.strictEqual(calls[1].url, "/api/requests");
+  assert.strictEqual(requestPrInFlight.has("req-1"), false);
+  assert.strictEqual(requestPrFormOpen.has("req-1"), false);
+
+  calls.length = 0;
+  const pushErr = await postRequestPush("req-fail");
+  assert.strictEqual(pushErr, false);
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(requestPushInFlight.has("req-fail"), false);
+  assert.strictEqual(requestCardErrors.get("req-fail"), "branch already diverged");
+
+  calls.length = 0;
+  requestPrFormOpen.add("req-fail-pr");
+  requestPrDrafts.set("req-fail-pr", { title: "Keep me", body: "Keep body" });
+  const prErr = await postRequestPullRequest("req-fail-pr", "Keep me", "Keep body");
+  assert.strictEqual(prErr, false);
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(requestPrInFlight.has("req-fail-pr"), false);
+  assert.strictEqual(requestCardErrors.get("req-fail-pr"), "gh pr create failed");
+  assert.strictEqual(requestPrFormOpen.has("req-fail-pr"), true);
+  assert.deepStrictEqual(requestPrDrafts.get("req-fail-pr"), { title: "Keep me", body: "Keep body" });
+
+  global.fetch = async (url) => {
+    if (url === "/api/requests") {
+      return {
+        ok: false,
+        status: 503,
+        async json() { return { error: "requests unavailable" }; },
+      };
+    }
+    throw new Error("unexpected fetch url: " + url);
+  };
+  await fetchRequests();
+  assert.strictEqual(requestsError, "requests unavailable");
+  const errPanelHtml = renderRequestsList(liveRequests, { error: requestsError });
+  assert.ok(errPanelHtml.includes("requests unavailable"), errPanelHtml);
+  assert.ok(!errPanelHtml.includes("No requests"), errPanelHtml);
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
 }
