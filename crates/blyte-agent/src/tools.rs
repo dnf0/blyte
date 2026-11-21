@@ -1145,6 +1145,22 @@ fn execute_unbounded(
 
             match run_command_bounded(cmd_builder, command_timeout) {
                 Ok((0, stdout, _stderr)) => ToolOutcome::ok(stdout),
+                Ok((2, stdout, stderr)) if first == "wait" => {
+                    let lines: Vec<&str> = stderr.lines().collect();
+                    let tail = if lines.len() > OUTPUT_LINE_BUDGET {
+                        lines[lines.len() - OUTPUT_LINE_BUDGET..].join("\n")
+                    } else {
+                        stderr.trim_end().to_string()
+                    };
+                    let mut parts = vec!["still waiting".to_string()];
+                    if !stdout.trim().is_empty() {
+                        parts.push(stdout.trim_end().to_string());
+                    }
+                    if !tail.trim().is_empty() {
+                        parts.push(tail);
+                    }
+                    ToolOutcome::ok(parts.join("\n"))
+                }
                 Ok((code, stdout, stderr)) => {
                     let lines: Vec<&str> = stderr.lines().collect();
                     let tail = if lines.len() > OUTPUT_LINE_BUDGET {

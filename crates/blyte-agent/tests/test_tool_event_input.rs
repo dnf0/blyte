@@ -90,3 +90,90 @@ fn bash_call_2500_char_cut_at_2000_with_ellipsis() {
     let first_2000_cmd: String = cmd.chars().take(2000).collect();
     assert_eq!(first_2000_input, first_2000_cmd);
 }
+
+#[test]
+fn blyte_tool_event_formats_command_and_background() {
+    use blyte_agent::run::format_blyte_tool_input;
+
+    assert_eq!(
+        format_blyte_tool_input(&json!({"args": ["wait", "--any", "IS1"]})),
+        Some("blyte wait --any IS1".to_string())
+    );
+    assert_eq!(
+        format_blyte_tool_input(
+            &json!({"args": ["dispatch", "T1", "task.md"], "background": true})
+        ),
+        Some("blyte dispatch T1 task.md (background)".to_string())
+    );
+    assert_eq!(
+        format_blyte_tool_input(
+            &json!({"args": ["dispatch", "T1", "task.md"], "background": false})
+        ),
+        Some("blyte dispatch T1 task.md".to_string())
+    );
+    assert_eq!(
+        format_blyte_tool_input(&json!({"args": ["dispatch", "T1", "my task.md", ""]})),
+        Some("blyte dispatch T1 \"my task.md\" \"\"".to_string())
+    );
+
+    let d = tempfile::tempdir().unwrap();
+    let p = Scripted(Mutex::new(vec![Response {
+        tool_calls: vec![
+            ToolCall {
+                id: "b1".into(),
+                name: "blyte".into(),
+                arguments: json!({"args": ["wait", "--any", "IS1"]}),
+                signature: None,
+            },
+            ToolCall {
+                id: "b2".into(),
+                name: "blyte".into(),
+                arguments: json!({"args": ["dispatch", "T1", "task.md"], "background": true}),
+                signature: None,
+            },
+        ],
+        ..Default::default()
+    }]));
+    let started: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let finished: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let on_event = |e: Event<'_>| match e {
+        Event::ToolStart {
+            name: "blyte",
+            input,
+        } => {
+            started.lock().unwrap().push(input);
+        }
+        Event::Tool {
+            name: "blyte",
+            input,
+            ..
+        } => {
+            finished.lock().unwrap().push(input);
+        }
+        _ => {}
+    };
+    let runner = Runner {
+        provider: &p,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 3,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        on_event: Some(&on_event),
+        research: false,
+        claim_check: false,
+        base_check: false,
+    };
+    runner.run(&mut State::new("blyte", "true"));
+    let expected = vec![
+        "blyte wait --any IS1".to_string(),
+        "blyte dispatch T1 task.md (background)".to_string(),
+    ];
+    assert_eq!(started.into_inner().unwrap(), expected);
+    assert_eq!(finished.into_inner().unwrap(), expected);
+}
