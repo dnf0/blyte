@@ -241,3 +241,136 @@ fn mock_page_guide_records_and_remembers() {
         assert!(PAGE.contains(token), "missing guide token {token}");
     }
 }
+
+fn extract_css_rule_block<'a>(page: &'a str, selector: &str) -> &'a str {
+    let header = format!("{selector} {{");
+    let start = page
+        .find(&header)
+        .unwrap_or_else(|| panic!("missing CSS rule {selector}"));
+    let body_start = start + header.len();
+    let end = page[body_start..]
+        .find('}')
+        .unwrap_or_else(|| panic!("unterminated CSS rule {selector}"));
+    &page[body_start..body_start + end]
+}
+
+fn assert_no_fixed_px_height(selector: &str, block: &str) {
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix("height:") {
+            assert!(
+                !val.contains("px"),
+                "unexpected fixed pixel height declaration in {selector}: {trimmed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mock_page_handles_research_card_kind_and_report_field() {
+    for token in [
+        "report",
+        "research",
+        "research reports",
+        "research-card",
+        "Mark read",
+        "Read report",
+        "data-action=\"read\"",
+    ] {
+        assert!(PAGE.contains(token), "missing research token {token}");
+    }
+}
+
+#[test]
+fn mock_page_exception_cards_do_not_have_hardcoded_fixed_height() {
+    let exc_block = extract_css_rule_block(PAGE, ".exception-card");
+    assert!(
+        !exc_block.contains("height: 184px"),
+        ".exception-card must not hardcode height: 184px"
+    );
+    assert_no_fixed_px_height(".exception-card", exc_block);
+
+    let research_block = extract_css_rule_block(PAGE, ".research-card");
+    assert_no_fixed_px_height(".research-card", research_block);
+}
+
+#[test]
+fn report_reader_element_exists() {
+    for token in [
+        "id=\"report-reader\"",
+        "id=\"report-close\"",
+        "id=\"attached-reports\"",
+        "data-report-open=",
+        "data-report-use=",
+        "data-report-detach=",
+    ] {
+        assert!(PAGE.contains(token), "missing report reader token {token}");
+    }
+}
+
+#[test]
+fn report_markdown_renderer_escapes() {
+    let lines: Vec<&str> = PAGE.lines().collect();
+    let start_idx = lines
+        .iter()
+        .position(|line| line.contains("function renderReportMarkdown("))
+        .expect("missing function renderReportMarkdown(");
+    let indent_len = lines[start_idx]
+        .find("function ")
+        .expect("function keyword on start line");
+    let top_level_prefix = format!("{}function ", " ".repeat(indent_len));
+    let end_idx = lines[start_idx + 1..]
+        .iter()
+        .position(|line| line.starts_with(&top_level_prefix))
+        .map(|rel| start_idx + 1 + rel)
+        .unwrap_or(lines.len());
+    let body = lines[start_idx..end_idx].join("\n");
+    assert!(
+        body.contains("escapeHtml("),
+        "renderReportMarkdown must call escapeHtml("
+    );
+    assert!(
+        !body.contains("<a "),
+        "renderReportMarkdown must not emit anchor tags"
+    );
+    assert!(
+        !body.contains("innerHTML"),
+        "renderReportMarkdown must not touch innerHTML"
+    );
+}
+
+#[test]
+fn research_card_has_no_details_toggle() {
+    assert!(
+        !PAGE.contains("Hide report"),
+        "page must not contain Hide report"
+    );
+}
+
+#[test]
+fn report_events_recorded() {
+    for event in [
+        "\"report_open\"",
+        "\"report_close\"",
+        "\"report_use\"",
+        "\"report_detach\"",
+    ] {
+        assert!(PAGE.contains(event), "missing report event {event}");
+    }
+}
+
+#[test]
+fn reader_has_no_external_resources() {
+    for forbidden in [
+        "http://",
+        "https://",
+        "//fonts.",
+        "<link rel=\"stylesheet\"",
+        "<script src",
+    ] {
+        assert!(
+            !PAGE.contains(forbidden),
+            "unexpected external reference: {forbidden}"
+        );
+    }
+}

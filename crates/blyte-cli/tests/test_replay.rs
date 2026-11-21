@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use blyte_cli::dashboard::Sources;
-use blyte_cli::replay::{card_of, collect, group_of};
+use blyte_cli::replay::{card_for_run, card_of, collect, group_of};
 
 fn now() -> u64 {
     SystemTime::now()
@@ -347,6 +347,7 @@ fn serialized_run_has_exact_contract_keys() {
         "verdict",
         "verdict_notes",
         "verdict_ts",
+        "report",
     ]
     .into_iter()
     .collect();
@@ -420,4 +421,156 @@ fn flagged_checks_produce_exception_card_and_no_root_is_skipped() {
     assert_eq!(replay.skipped.len(), 1);
     assert_eq!(replay.skipped[0].key, "repo-b/R0");
     assert_eq!(replay.skipped[0].reason, "no root");
+}
+
+#[test]
+fn card_for_run_classifies_research_independently_of_outcome_and_checks() {
+    assert_eq!(card_for_run(true, "verified", true, &[]), "research");
+    assert_eq!(card_for_run(true, "verified", false, &[]), "research");
+    assert_eq!(
+        card_for_run(
+            true,
+            "budget_exhausted",
+            false,
+            &["broad research run".to_string()],
+        ),
+        "research"
+    );
+
+    let flags = vec!["flag one".to_string()];
+    assert_eq!(
+        card_for_run(false, "verified", true, &[]),
+        card_of("verified", true, &[])
+    );
+    assert_eq!(
+        card_for_run(false, "verified", false, &[]),
+        card_of("verified", false, &[])
+    );
+    assert_eq!(
+        card_for_run(false, "verified", true, &flags),
+        card_of("verified", true, &flags)
+    );
+    assert_eq!(
+        card_for_run(false, "gate_failed", true, &[]),
+        card_of("gate_failed", true, &[])
+    );
+}
+
+#[test]
+fn research_run_gets_research_card_and_report_markdown() {
+    let d = tempfile::tempdir().unwrap();
+    let t = now();
+    let wt = d.path().join("repos/repo-a/.wt");
+    let markdown = "# Findings\n\n- Key insight one\n- Key insight two\n";
+
+    write(
+        &wt.join("R1.start.json"),
+        &format!(
+            r#"{{"id":"R1","pid":999999,"started_at":{},"research":true}}"#,
+            t - 300
+        ),
+    );
+    write(&wt.join("R1.log"), "[Turn 5] \n");
+    write(
+        &wt.join("R1.json"),
+        r#"{"outcome":"verified","seconds":90,"commits":[],"changed_files":[]}"#,
+    );
+    write(&wt.join("R1.report.md"), markdown);
+
+    let replay = collect(&sources_for(&d.path().join("repos")), t, 7);
+    assert!(replay.skipped.is_empty());
+    assert_eq!(replay.runs.len(), 1);
+
+    let run = &replay.runs[0];
+    assert!(run.research);
+    assert_eq!(run.card, "research");
+    assert_eq!(run.report.as_deref(), Some(markdown));
+}
+
+#[test]
+fn research_run_without_report_file_has_none_report_and_research_card() {
+    let d = tempfile::tempdir().unwrap();
+    let t = now();
+    let wt = d.path().join("repos/repo-a/.wt");
+
+    write(
+        &wt.join("R2.start.json"),
+        &format!(
+            r#"{{"id":"R2","pid":999999,"started_at":{},"research":true}}"#,
+            t - 300
+        ),
+    );
+    write(&wt.join("R2.log"), "[Turn 3] \n");
+    write(
+        &wt.join("R2.json"),
+        r#"{"outcome":"verified","seconds":45,"commits":[],"changed_files":[]}"#,
+    );
+
+    let replay = collect(&sources_for(&d.path().join("repos")), t, 7);
+    assert!(replay.skipped.is_empty());
+    assert_eq!(replay.runs.len(), 1);
+
+    let run = &replay.runs[0];
+    assert_eq!(run.card, "research");
+    assert!(run.report.is_none());
+}
+
+#[test]
+fn research_run_with_unreadable_report_file_is_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    let t = now();
+    let wt = d.path().join("repos/repo-a/.wt");
+
+    write(
+        &wt.join("RBAD.start.json"),
+        &format!(
+            r#"{{"id":"RBAD","pid":999999,"started_at":{},"research":true}}"#,
+            t - 300
+        ),
+    );
+    write(&wt.join("RBAD.log"), "[Turn 2] \n");
+    write(
+        &wt.join("RBAD.json"),
+        r#"{"outcome":"verified","seconds":30,"commits":[],"changed_files":[]}"#,
+    );
+    std::fs::write(wt.join("RBAD.report.md"), [0xff_u8, 0xfe]).unwrap();
+
+    let replay = collect(&sources_for(&d.path().join("repos")), t, 7);
+    assert!(replay.runs.is_empty());
+    assert_eq!(replay.skipped.len(), 1);
+    assert_eq!(replay.skipped[0].key, "repo-a/RBAD");
+    assert!(
+        replay.skipped[0].reason.starts_with("report unreadable: "),
+        "got: {}",
+        replay.skipped[0].reason
+    );
+}
+
+#[test]
+fn non_research_run_ignores_report_file() {
+    let d = tempfile::tempdir().unwrap();
+    let t = now();
+    let wt = d.path().join("repos/repo-a/.wt");
+
+    write(
+        &wt.join("T1.start.json"),
+        &format!(
+            r#"{{"id":"T1","pid":999999,"started_at":{},"research":false}}"#,
+            t - 300
+        ),
+    );
+    write(&wt.join("T1.log"), "[Turn 4] \n");
+    write(
+        &wt.join("T1.json"),
+        r#"{"outcome":"verified","seconds":60,"commits":[],"changed_files":[]}"#,
+    );
+    write(&wt.join("T1.report.md"), "# Should be ignored\n");
+
+    let replay = collect(&sources_for(&d.path().join("repos")), t, 7);
+    assert!(replay.skipped.is_empty());
+    assert_eq!(replay.runs.len(), 1);
+
+    let run = &replay.runs[0];
+    assert!(run.report.is_none());
+    assert_ne!(run.card, "research");
 }

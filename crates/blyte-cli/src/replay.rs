@@ -45,6 +45,7 @@ pub struct Run {
     pub verdict: Option<String>,
     pub verdict_notes: Option<String>,
     pub verdict_ts: Option<u64>,
+    pub report: Option<String>,
 }
 
 fn file_group(file: &str) -> String {
@@ -84,6 +85,19 @@ pub fn card_of(outcome: &str, checks_recorded: bool, flags: &[String]) -> &'stat
         "clean"
     } else {
         "exception"
+    }
+}
+
+pub fn card_for_run(
+    research: bool,
+    outcome: &str,
+    checks_recorded: bool,
+    flags: &[String],
+) -> &'static str {
+    if research {
+        "research"
+    } else {
+        card_of(outcome, checks_recorded, flags)
     }
 }
 
@@ -164,6 +178,14 @@ fn read_checks(path: &Path) -> Result<(bool, Vec<String>), String> {
     Ok((true, flags))
 }
 
+fn read_report(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 pub fn collect(src: &Sources, now: u64, days: u64) -> Replay {
     let mut windowed = src.clone();
     windowed.hours = days.saturating_mul(24);
@@ -241,8 +263,25 @@ pub fn collect(src: &Sources, now: u64, days: u64) -> Replay {
             }
         };
 
+        let report = if job.research {
+            let report_path = root.join(".wt").join(format!("{}.report.md", job.id));
+            match read_report(&report_path) {
+                Ok(r) => r,
+                Err(err) => {
+                    skipped.push(Skipped {
+                        key: job.key,
+                        reason: format!("report unreadable: {err}"),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
         let group = group_of(&job.changed_files);
-        let card = card_of(&summary.outcome, checks_recorded, &flags).to_string();
+        let card =
+            card_for_run(job.research, &summary.outcome, checks_recorded, &flags).to_string();
 
         runs.push(Run {
             key: job.key,
@@ -268,6 +307,7 @@ pub fn collect(src: &Sources, now: u64, days: u64) -> Replay {
             verdict: job.verdict,
             verdict_notes: job.verdict_notes,
             verdict_ts: job.verdict_ts,
+            report,
         });
     }
 

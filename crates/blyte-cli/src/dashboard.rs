@@ -174,27 +174,46 @@ pub struct DashboardResponse {
     pub jobs: Vec<Job>,
 }
 
-fn strip_ansi(s: &str) -> String {
+fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = s.as_bytes();
+    let Some(first_esc) = bytes.iter().position(|&b| b == 0x1b) else {
+        return std::borrow::Cow::Borrowed(s);
+    };
+
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            while let Some(&next_c) = chars.peek() {
-                chars.next();
-                if ('\x40'..='\x7e').contains(&next_c) {
+    let mut seg_start = 0;
+    let mut i = first_esc;
+
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            out.push_str(&s[seg_start..i]);
+            i += 2;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if (0x40..=0x7e).contains(&b) {
+                    i += 1;
                     break;
                 }
-                if next_c == '\n' || next_c == '\x1b' {
-                    out.push(next_c);
+                if b == b'\n' || b == 0x1b {
+                    out.push(b as char);
+                    i += 1;
                     break;
                 }
+                i += 1;
             }
-            continue;
+            seg_start = i;
+        } else {
+            i += 1;
         }
-        out.push(c);
+        if let Some(rel) = bytes[i..].iter().position(|&b| b == 0x1b) {
+            i += rel;
+        } else {
+            break;
+        }
     }
-    out
+
+    out.push_str(&s[seg_start..]);
+    std::borrow::Cow::Owned(out)
 }
 
 fn extract_title(task: &str) -> String {
@@ -454,6 +473,100 @@ fn file_mtime(path: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+fn regular_file_mtime(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    meta.modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+fn started_with_job(pid: i64, started_at: Option<u64>, now: u64) -> bool {
+    match (get_process_etime(pid), started_at) {
+        (Some(elapsed), Some(started_at)) => now.saturating_sub(elapsed) <= started_at + 60,
+        _ => true,
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => match out.components().next_back() {
+                Some(std::path::Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {}
+                _ => out.push(comp.as_os_str()),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn git_common_dir(start: &Path) -> Option<PathBuf> {
+    if !start.exists() {
+        return None;
+    }
+    let resolved_start = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::fs::canonicalize(start).ok()?
+    };
+    for dir in resolved_start.ancestors() {
+        let dot_git = dir.join(".git");
+        let Ok(meta) = std::fs::metadata(&dot_git) else {
+            continue;
+        };
+        if meta.is_dir() {
+            return Some(
+                std::fs::canonicalize(&dot_git).unwrap_or_else(|_| normalize_path(&dot_git)),
+            );
+        }
+        if meta.is_file() {
+            let content = std::fs::read_to_string(&dot_git).ok()?;
+            let first_line = content.lines().next()?.trim();
+            let raw_gitdir = first_line.strip_prefix("gitdir:")?.trim();
+            if raw_gitdir.is_empty() {
+                return None;
+            }
+            let gitdir_path = Path::new(raw_gitdir);
+            let gitdir = if gitdir_path.is_absolute() {
+                gitdir_path.to_path_buf()
+            } else {
+                dir.join(gitdir_path)
+            };
+            let commondir_file = gitdir.join("commondir");
+            let common = if commondir_file.is_file() {
+                let raw_common = std::fs::read_to_string(&commondir_file).ok()?;
+                let trimmed = raw_common.trim();
+                if trimmed.is_empty() {
+                    gitdir
+                } else {
+                    let common_path = Path::new(trimmed);
+                    if common_path.is_absolute() {
+                        common_path.to_path_buf()
+                    } else {
+                        gitdir.join(common_path)
+                    }
+                }
+            } else {
+                gitdir
+            };
+            return Some(
+                std::fs::canonicalize(&common).unwrap_or_else(|_| normalize_path(&common)),
+            );
+        }
+    }
+    None
+}
+
 pub fn parse_etime(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -559,25 +672,17 @@ struct RawJob {
 }
 
 pub fn repo_name(checkout: &Path) -> String {
-    let from_git = std::process::Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(checkout)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| {
-            let s = String::from_utf8_lossy(&out.stdout);
-            let common = PathBuf::from(s.trim());
-            if common.file_name().and_then(|n| n.to_str()) == Some(".git") {
-                common
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.to_string())
-            } else {
-                None
-            }
-        });
+    let from_git = git_common_dir(checkout).and_then(|common| {
+        if common.file_name().and_then(|n| n.to_str()) == Some(".git") {
+            common
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_string())
+        } else {
+            None
+        }
+    });
 
     let raw = from_git.unwrap_or_else(|| {
         checkout
@@ -605,6 +710,7 @@ pub fn repo_name(checkout: &Path) -> String {
 }
 
 pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
+    let cutoff = now.saturating_sub(src.hours.saturating_mul(3600));
     let mut raw_jobs = Vec::new();
     let mut seen_keys = HashSet::new();
 
@@ -644,11 +750,31 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         continue;
                     }
 
+                    let report_path = wt_dir.join(format!("{id}.report.json"));
+                    let log_path = wt_dir.join(format!("{id}.log"));
+                    let report_mtime = regular_file_mtime(&report_path);
+                    let log_mtime = file_mtime(&log_path);
+                    if report_mtime.is_some_and(|m| m < cutoff)
+                        && log_mtime.is_none_or(|m| m < cutoff)
+                    {
+                        continue;
+                    }
+
                     let start_path = wt_dir.join(format!("{id}.start.json"));
                     let start_val = std::fs::read_to_string(&start_path)
                         .ok()
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
                     let pid = start_val.as_ref().and_then(|v| v["pid"].as_i64());
+
+                    if report_mtime.is_none() && log_mtime.is_none_or(|m| m < cutoff) {
+                        let is_alive = pid.is_some_and(|p| {
+                            p > 0 && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
+                        });
+                        if !is_alive {
+                            continue;
+                        }
+                    }
+
                     let started_at = start_val.as_ref().and_then(|v| v["started_at"].as_u64());
                     let research = start_val
                         .as_ref()
@@ -739,8 +865,8 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         start_plan,
                         start_plan_task,
                         file_tags,
-                        log_path: wt_dir.join(format!("{id}.log")),
-                        report_path: wt_dir.join(format!("{id}.report.json")),
+                        log_path,
+                        report_path,
                         tags_path: wt_dir.join(format!("{id}.tags.json")),
                         verdict_path: wt_dir.join(format!("{id}.verdict.json")),
                         worktree,
@@ -777,6 +903,26 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     continue;
                                 }
 
+                                let report_path = repo_path.join(format!("{id}.report.json"));
+                                let agy_path = repo_path.join(format!("{id}.json"));
+                                let log_path = repo_path.join(format!("{id}.log"));
+                                let report_mtime = regular_file_mtime(&report_path);
+                                let agy_mtime = regular_file_mtime(&agy_path);
+                                let log_mtime = file_mtime(&log_path);
+
+                                if report_mtime.is_some_and(|m| m < cutoff)
+                                    && agy_mtime.is_none_or(|m| m < cutoff)
+                                    && log_mtime.is_none_or(|m| m < cutoff)
+                                {
+                                    continue;
+                                }
+                                if report_mtime.is_none()
+                                    && agy_mtime.is_some_and(|m| m < cutoff)
+                                    && log_mtime.is_none_or(|m| m < cutoff)
+                                {
+                                    continue;
+                                }
+
                                 let pid_path = repo_path.join(format!("{id}.pid"));
                                 let (pid, started_at) = if pid_path.is_file() {
                                     let pid_text =
@@ -787,6 +933,20 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                 } else {
                                     (None, None)
                                 };
+
+                                if report_mtime.is_none()
+                                    && agy_mtime.is_none()
+                                    && log_mtime.is_none_or(|m| m < cutoff)
+                                {
+                                    let is_alive = pid.is_some_and(|p| {
+                                        p > 0
+                                            && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
+                                            && started_with_job(p, started_at, now)
+                                    });
+                                    if !is_alive {
+                                        continue;
+                                    }
+                                }
 
                                 let prompt_path = repo_path.join(format!("{id}.prompt"));
                                 let task = if prompt_path.is_file() {
@@ -807,29 +967,12 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
 
                                 let root = worktree.as_ref().and_then(|wt_str| {
                                     let p = Path::new(wt_str.trim_end_matches('/'));
-                                    if p.exists() {
-                                        if let Ok(out) = std::process::Command::new("git")
-                                            .args(["rev-parse", "--git-common-dir"])
-                                            .current_dir(p)
-                                            .output()
+                                    if let Some(common) = git_common_dir(p) {
+                                        if common.file_name().and_then(|n| n.to_str())
+                                            == Some(".git")
                                         {
-                                            if out.status.success() {
-                                                let s = String::from_utf8_lossy(&out.stdout)
-                                                    .trim()
-                                                    .to_string();
-                                                let common = PathBuf::from(s);
-                                                let abs = if common.is_relative() {
-                                                    p.join(common)
-                                                } else {
-                                                    common
-                                                };
-                                                if abs.file_name().and_then(|n| n.to_str())
-                                                    == Some(".git")
-                                                {
-                                                    if let Some(parent) = abs.parent() {
-                                                        return Some(parent.to_path_buf());
-                                                    }
-                                                }
+                                            if let Some(parent) = common.parent() {
+                                                return Some(parent.to_path_buf());
                                             }
                                         }
                                     }
@@ -865,13 +1008,11 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     Some(p.to_path_buf())
                                 });
 
-                                let agy_summary_path = {
-                                    let p = repo_path.join(format!("{id}.json"));
-                                    if p.is_file() {
-                                        Some(p)
-                                    } else {
-                                        None
-                                    }
+                                let agy_summary_path = if agy_mtime.is_some() || agy_path.is_file()
+                                {
+                                    Some(agy_path)
+                                } else {
+                                    None
                                 };
 
                                 raw_jobs.push(RawJob {
@@ -886,8 +1027,8 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     start_plan: None,
                                     start_plan_task: None,
                                     file_tags: Vec::new(),
-                                    log_path: repo_path.join(format!("{id}.log")),
-                                    report_path: repo_path.join(format!("{id}.report.json")),
+                                    log_path,
+                                    report_path,
                                     tags_path: repo_path.join(format!("{id}.tags.json")),
                                     verdict_path: repo_path.join(format!("{id}.verdict.json")),
                                     worktree,
@@ -1141,14 +1282,10 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             // A live PID is this job's only if that process started with the job, not after it.
             // Only runs-dir jobs are checked: their PID files outlive the job for days, and the
             // dispatch layout's test fixture fakes a start time before its own process.
-            let started_with_job = |p: i64| match (get_process_etime(p), raw.started_at) {
-                (Some(elapsed), Some(started_at)) => now.saturating_sub(elapsed) <= started_at + 60,
-                _ => true,
-            };
             let is_alive = raw.pid.is_some_and(|p| {
                 p > 0
                     && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
-                    && (!raw.is_runs_dir || started_with_job(p))
+                    && (!raw.is_runs_dir || started_with_job(p, raw.started_at, now))
             });
             let status = if is_alive {
                 "running".to_string()
@@ -1194,7 +1331,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
         } else {
             let effective_finished = finished_at.or(log_info.mtime);
             if let Some(fin) = effective_finished {
-                fin >= now.saturating_sub(src.hours * 3600)
+                fin >= cutoff
             } else {
                 false
             }
@@ -1591,5 +1728,49 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn strip_ansi_borrows_plain_and_strips_csi_sequences() {
+        let plain = "[Turn 4]\n● bash\n✓ Gate passed\n";
+        let res = strip_ansi(plain);
+        assert!(matches!(res, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(res.as_ref(), plain);
+
+        let colored =
+            "\x1b[32m[Turn 4]\x1b[0m\n\x1b[1m● bash\x1b[0m\n\x1b[32m✓ Gate passed\x1b[0m\n";
+        let stripped = strip_ansi(colored);
+        assert!(matches!(stripped, std::borrow::Cow::Owned(_)));
+        assert_eq!(stripped.as_ref(), plain);
+
+        assert_eq!(strip_ansi("\x1b[32\nhello").as_ref(), "\nhello");
+        assert_eq!(strip_ansi("\x1b[32\x1b[0mhello").as_ref(), "\x1b[0mhello");
+        assert_eq!(strip_ansi("\x1bXhello").as_ref(), "\x1bXhello");
+        assert_eq!(strip_ansi("tail\x1b").as_ref(), "tail\x1b");
+        assert_eq!(strip_ansi("\x1b[32").as_ref(), "");
+        assert_eq!(strip_ansi("\x1b[✓mhello").as_ref(), "hello");
+    }
+
+    #[test]
+    fn git_common_dir_resolves_relative_gitdir_and_commondir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("myrepo");
+        let worktree_git = main.join(".git/worktrees/wt1");
+        let wt = tmp.path().join("wt1");
+        std::fs::create_dir_all(&worktree_git).unwrap();
+        std::fs::create_dir_all(wt.join("nested")).unwrap();
+        std::fs::write(worktree_git.join("commondir"), "../..\n").unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: ../myrepo/.git/worktrees/wt1\n").unwrap();
+
+        let common = git_common_dir(&wt.join("nested")).unwrap();
+        assert_eq!(common.file_name().and_then(|n| n.to_str()), Some(".git"));
+        assert_eq!(
+            common
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some("myrepo")
+        );
+        assert_eq!(repo_name(&wt.join("nested")), "myrepo");
     }
 }
