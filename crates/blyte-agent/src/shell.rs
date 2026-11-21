@@ -136,8 +136,7 @@ pub fn withheld_env() -> Vec<String> {
     withheld
 }
 
-/// Remove the harness's own variables and credential-looking variables from a command about to run on this machine.
-fn scrub(cmd: &mut Command) {
+fn scrub_harness(cmd: &mut Command) {
     for name in HARNESS_ENV {
         cmd.env_remove(name);
     }
@@ -147,6 +146,11 @@ fn scrub(cmd: &mut Command) {
             cmd.env_remove(&name);
         }
     }
+}
+
+/// Remove the harness's own variables and credential-looking variables from a command about to run on this machine.
+fn scrub(cmd: &mut Command) {
+    scrub_harness(cmd);
     for name in withheld_env() {
         cmd.env_remove(name);
     }
@@ -176,6 +180,11 @@ pub trait Shell: Send + Sync {
     /// is `exec`: a fresh process in `cwd`.
     fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
         self.exec(command, cwd, timeout)
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let _ = (command, cwd, timeout);
+        Err("this shell cannot run a command outside the sandbox".into())
     }
 
     /// Human-readable description of where commands land, for the system prompt.
@@ -405,6 +414,15 @@ impl Shell for LocalShell {
         };
         cmd.current_dir(cwd);
         scrub(&mut cmd);
+        exec_command(cmd, timeout)
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let full_command = inherited_path_prefix() + command;
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc").arg(&full_command);
+        cmd.current_dir(cwd);
+        scrub_harness(&mut cmd);
         exec_command(cmd, timeout)
     }
 
@@ -952,6 +970,10 @@ impl Shell for PersistentShell {
     fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
         self.run(&self.user, command, None, timeout)
             .unwrap_or_else(|| self.fallback.exec(command, cwd, timeout))
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.fallback.exec_host(command, cwd, timeout)
     }
 
     fn describe(&self) -> String {

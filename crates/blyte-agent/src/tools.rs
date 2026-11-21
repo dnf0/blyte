@@ -15,11 +15,27 @@ use std::time::Duration;
 use blyte_provider::ToolSpec;
 use serde_json::{json, Value};
 
+use crate::approval::{matching_rule, Approval, ApprovalConfig};
 use crate::fs::Fs;
 use crate::shell::Shell;
 
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
+
+pub fn set_approval(config: Option<ApprovalConfig>) {
+    match APPROVAL.write() {
+        Ok(mut lock) => *lock = config,
+        Err(poisoned) => *poisoned.into_inner() = config,
+    }
+}
+
+pub fn approval() -> Option<ApprovalConfig> {
+    APPROVAL
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
 
 /// Set the host dispatch command for the orchestrator's `dispatch` tool.
 pub fn set_dispatch_cmd(cmd: Option<String>) {
@@ -516,8 +532,26 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "bash".into(),
             description: bash_description(),
-            parameters: json!({"type":"object","properties":{
-                "command":{"type":"string"}},"required":["command"]}),
+            parameters: if approval().is_some() {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "unsandboxed": {
+                            "type": "boolean",
+                            "description": "Run this one command outside the sandbox, with the user's network and credentials. It runs only if the user approves it."
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "One line telling the user why the command must leave the sandbox."
+                        }
+                    },
+                    "required": ["command"]
+                })
+            } else {
+                json!({"type":"object","properties":{
+                    "command":{"type":"string"}},"required":["command"]})
+            },
         },
         ToolSpec {
             name: "glob".into(),
@@ -750,17 +784,63 @@ fn execute_unbounded(
                 },
             }
         }
-        "bash" => match shell.exec_user(&s("command"), root, command_timeout) {
-            Ok(o) => {
-                let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
-                // Exit code always stated: a non-zero exit with quiet output reads as success.
-                ToolOutcome {
-                    content: format!("exit {}\n{body}", o.exit_code),
-                    is_error: o.exit_code != 0,
+        "bash" => {
+            let command = s("command");
+            let unsandboxed = args
+                .get("unsandboxed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if unsandboxed {
+                let Some(cfg) = approval() else {
+                    return ToolOutcome::err("this run cannot run commands outside the sandbox");
+                };
+                let reason_raw = s("reason");
+                let reason = reason_raw.trim();
+                if reason.is_empty() {
+                    return ToolOutcome::err("give a one-line reason with an unsandboxed command");
+                }
+                let banner = if let Some(rule) = matching_rule(&command, &cfg.rules) {
+                    format!("ran outside the sandbox (allowed by rule \"{rule}\")")
+                } else {
+                    match cfg.approver.ask(&command, reason) {
+                        Approval::Approved => {
+                            "ran outside the sandbox (approved by the user)".to_string()
+                        }
+                        Approval::Denied => {
+                            return ToolOutcome::err(
+                                "the user refused this command; it was not run. Do not try to run it another way.",
+                            );
+                        }
+                        Approval::Unavailable => {
+                            return ToolOutcome::err(
+                                "nobody can approve a command in this run, so it was not run",
+                            );
+                        }
+                    }
+                };
+                match shell.exec_host(&command, root, command_timeout) {
+                    Ok(o) => {
+                        let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
+                        ToolOutcome {
+                            content: format!("{banner}\nexit {}\n{body}", o.exit_code),
+                            is_error: o.exit_code != 0,
+                        }
+                    }
+                    Err(e) => ToolOutcome::err(e),
+                }
+            } else {
+                match shell.exec_user(&command, root, command_timeout) {
+                    Ok(o) => {
+                        let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
+                        ToolOutcome {
+                            content: format!("exit {}\n{body}", o.exit_code),
+                            is_error: o.exit_code != 0,
+                        }
+                    }
+                    Err(e) => ToolOutcome::err(e),
                 }
             }
-            Err(e) => ToolOutcome::err(e),
-        },
+        }
         "glob" => {
             let pattern = s("pattern");
             let raw_path = s("path");
