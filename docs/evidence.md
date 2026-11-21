@@ -305,5 +305,20 @@ file, not the default process itself.
 
 **What changed.** The default process no longer asks the orchestrator to write out names,
 signatures and tests, which is what made it read the code before dispatching. It now passes on the
-request and its decisions, and leaves reading the code to the implementer. This change has not yet
-been measured.
+request and its decisions, and leaves reading the code to the implementer (#390).
+
+**The changed process, measured** (2026-11-21, the same request, model and method; arm **N**):
+
+| | A (before) | N (after) |
+|---|---|---|
+| Verified work | 3 of 3 | 3 of 3 |
+| Full check on the result, re-run afterwards | 3 pass | 3 pass |
+| Total cost per run (USD) | 3.85, 4.51, 4.31 | 2.24, 2.21, 2.90 |
+| Of which the orchestrator (USD) | 2.99, 3.68, 3.18 | 0.64, 0.71, 0.77 |
+| Of which the implementer (USD) | 0.86, 0.83, 1.13 | 1.61, 1.51, 2.13 |
+| Wall time (minutes) | 25, 50, 34 | 33, 32, 28 |
+
+The orchestrator's own cost fell to about a fifth. The implementer's rose, because it now does the
+reading, and the total fell by about USD 1 to 2.3 a run. It is still USD 0.5 to 1.4 more than no
+orchestrator at all (C) on this one-task request. Two of the three N results first stopped at a
+timing test while the machine was busy; re-run alone, all three pass the full check.
