@@ -15,11 +15,46 @@ use std::time::Duration;
 use blyte_provider::ToolSpec;
 use serde_json::{json, Value};
 
+use crate::approval::{matching_rule, Approval, ApprovalConfig};
 use crate::fs::Fs;
 use crate::shell::Shell;
 
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
+
+pub const BLYTE_TOOL_COMMANDS: [&str; 7] = [
+    "dispatch", "wait", "status", "review", "plan", "init", "clean",
+];
+
+pub fn set_blyte_tool(exe: Option<std::path::PathBuf>) {
+    match BLYTE_TOOL.write() {
+        Ok(mut lock) => *lock = exe,
+        Err(poisoned) => *poisoned.into_inner() = exe,
+    }
+}
+
+pub fn blyte_tool() -> Option<PathBuf> {
+    BLYTE_TOOL
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_approval(config: Option<ApprovalConfig>) {
+    match APPROVAL.write() {
+        Ok(mut lock) => *lock = config,
+        Err(poisoned) => *poisoned.into_inner() = config,
+    }
+}
+
+pub fn approval() -> Option<ApprovalConfig> {
+    APPROVAL
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
 
 /// Set the host dispatch command for the orchestrator's `dispatch` tool.
 pub fn set_dispatch_cmd(cmd: Option<String>) {
@@ -516,8 +551,26 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "bash".into(),
             description: bash_description(),
-            parameters: json!({"type":"object","properties":{
-                "command":{"type":"string"}},"required":["command"]}),
+            parameters: if approval().is_some() {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "unsandboxed": {
+                            "type": "boolean",
+                            "description": "Run this one command outside the sandbox, with the user's network and credentials. It runs only if the user approves it."
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "One line telling the user why the command must leave the sandbox."
+                        }
+                    },
+                    "required": ["command"]
+                })
+            } else {
+                json!({"type":"object","properties":{
+                    "command":{"type":"string"}},"required":["command"]})
+            },
         },
         ToolSpec {
             name: "glob".into(),
@@ -565,6 +618,27 @@ pub fn specs() -> Vec<ToolSpec> {
                     }
                 },
                 "required": ["task", "gate"]
+            }),
+        });
+    }
+    if blyte_tool().is_some() {
+        tools.push(ToolSpec {
+            name: "blyte".into(),
+            description: "Run one of blyte's own commands on the host: dispatch, wait, status, review, plan, init, clean.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The words after `blyte`"
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Start a `dispatch` in the background and return at once"
+                    }
+                },
+                "required": ["args"]
             }),
         });
     }
@@ -750,17 +824,63 @@ fn execute_unbounded(
                 },
             }
         }
-        "bash" => match shell.exec_user(&s("command"), root, command_timeout) {
-            Ok(o) => {
-                let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
-                // Exit code always stated: a non-zero exit with quiet output reads as success.
-                ToolOutcome {
-                    content: format!("exit {}\n{body}", o.exit_code),
-                    is_error: o.exit_code != 0,
+        "bash" => {
+            let command = s("command");
+            let unsandboxed = args
+                .get("unsandboxed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if unsandboxed {
+                let Some(cfg) = approval() else {
+                    return ToolOutcome::err("this run cannot run commands outside the sandbox");
+                };
+                let reason_raw = s("reason");
+                let reason = reason_raw.trim();
+                if reason.is_empty() {
+                    return ToolOutcome::err("give a one-line reason with an unsandboxed command");
+                }
+                let banner = if let Some(rule) = matching_rule(&command, &cfg.rules) {
+                    format!("ran outside the sandbox (allowed by rule \"{rule}\")")
+                } else {
+                    match cfg.approver.ask(&command, reason) {
+                        Approval::Approved => {
+                            "ran outside the sandbox (approved by the user)".to_string()
+                        }
+                        Approval::Denied => {
+                            return ToolOutcome::err(
+                                "the user refused this command; it was not run. Do not try to run it another way.",
+                            );
+                        }
+                        Approval::Unavailable => {
+                            return ToolOutcome::err(
+                                "nobody can approve a command in this run, so it was not run",
+                            );
+                        }
+                    }
+                };
+                match shell.exec_host(&command, root, command_timeout) {
+                    Ok(o) => {
+                        let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
+                        ToolOutcome {
+                            content: format!("{banner}\nexit {}\n{body}", o.exit_code),
+                            is_error: o.exit_code != 0,
+                        }
+                    }
+                    Err(e) => ToolOutcome::err(e),
+                }
+            } else {
+                match shell.exec_user(&command, root, command_timeout) {
+                    Ok(o) => {
+                        let body = distil(o.merged().trim_end(), OUTPUT_LINE_BUDGET);
+                        ToolOutcome {
+                            content: format!("exit {}\n{body}", o.exit_code),
+                            is_error: o.exit_code != 0,
+                        }
+                    }
+                    Err(e) => ToolOutcome::err(e),
                 }
             }
-            Err(e) => ToolOutcome::err(e),
-        },
+        }
         "glob" => {
             let pattern = s("pattern");
             let raw_path = s("path");
@@ -907,13 +1027,7 @@ fn execute_unbounded(
             let Some(cmd) = dispatch_cmd() else {
                 return ToolOutcome::err("unknown tool: dispatch");
             };
-            let parent_session = std::env::var("BLYTE_SESSION").unwrap_or_else(|_| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                format!("{now}-{}", std::process::id())
-            });
+            let parent_session = dispatch_parent_session();
             let mut cmd_builder = std::process::Command::new("sh");
             cmd_builder
                 .arg("-c")
@@ -962,7 +1076,192 @@ fn execute_unbounded(
                 Err(e) => ToolOutcome::err(format!("dispatch command failed: {e}")),
             }
         }
+        "blyte" => {
+            let Some(exe) = blyte_tool() else {
+                return ToolOutcome::err("unknown tool: blyte");
+            };
+            let cmd_args: Vec<String> = match args.get("args").and_then(|v| v.as_array()) {
+                Some(arr) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for item in arr {
+                        match item.as_str() {
+                            Some(s) => out.push(s.to_string()),
+                            None => return ToolOutcome::err("args must be an array of strings"),
+                        }
+                    }
+                    out
+                }
+                None => Vec::new(),
+            };
+            let Some(first) = cmd_args.first().map(|s| s.as_str()) else {
+                return ToolOutcome::err(format!(
+                    "the blyte tool runs only: {}",
+                    BLYTE_TOOL_COMMANDS.join(", ")
+                ));
+            };
+            if !BLYTE_TOOL_COMMANDS.contains(&first) {
+                return ToolOutcome::err(format!(
+                    "the blyte tool runs only: {}",
+                    BLYTE_TOOL_COMMANDS.join(", ")
+                ));
+            }
+            let background = args
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if background && first != "dispatch" {
+                return ToolOutcome::err("only dispatch can run in the background");
+            }
+
+            let parent_session = dispatch_parent_session();
+            let mut cmd_builder = std::process::Command::new(&exe);
+            cmd_builder
+                .args(&cmd_args)
+                .env("BLYTE_DISPATCH_PARENT", &parent_session)
+                .stdin(std::process::Stdio::null());
+            if root.is_dir() {
+                cmd_builder.current_dir(root);
+            }
+
+            if background {
+                let Some(id) = cmd_args.get(1).filter(|s| !s.is_empty()) else {
+                    return ToolOutcome::err("dispatch needs an id");
+                };
+                cmd_builder
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                return match cmd_builder.spawn() {
+                    Ok(mut child) => {
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
+                        ToolOutcome::ok(format!(
+                            "started {id} in the background; use wait to learn when it ends"
+                        ))
+                    }
+                    Err(e) => ToolOutcome::err(format!("blyte failed to spawn: {e}")),
+                };
+            }
+
+            match run_command_bounded(cmd_builder, command_timeout) {
+                Ok((0, stdout, _stderr)) => ToolOutcome::ok(stdout),
+                Ok((code, stdout, stderr)) => {
+                    let lines: Vec<&str> = stderr.lines().collect();
+                    let tail = if lines.len() > OUTPUT_LINE_BUDGET {
+                        lines[lines.len() - OUTPUT_LINE_BUDGET..].join("\n")
+                    } else {
+                        stderr.trim_end().to_string()
+                    };
+                    let mut parts = vec![format!("exit {code}")];
+                    if !stdout.trim().is_empty() {
+                        parts.push(stdout.trim_end().to_string());
+                    }
+                    if !tail.trim().is_empty() {
+                        parts.push(tail);
+                    }
+                    ToolOutcome::err(parts.join("\n"))
+                }
+                Err(e) => ToolOutcome::err(e),
+            }
+        }
         other => ToolOutcome::err(format!("unknown tool: {other}")),
+    }
+}
+
+fn dispatch_parent_session() -> String {
+    std::env::var("BLYTE_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{now}-{}", std::process::id())
+        })
+}
+
+fn run_command_bounded(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<(i32, String, String), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("blyte failed to spawn: {e}"))?;
+
+    let mut so = child.stdout.take().ok_or("no stdout")?;
+    let mut se = child.stderr.take().ok_or("no stderr")?;
+    let t_out = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = so.read_to_end(&mut b);
+        String::from_utf8_lossy(&b).into_owned()
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = se.read_to_end(&mut b);
+        String::from_utf8_lossy(&b).into_owned()
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child
+            .try_wait()
+            .map_err(|e| format!("blyte wait failed: {e}"))?
+        {
+            Some(s) => break Some(s),
+            None if std::time::Instant::now() >= deadline => {
+                #[cfg(unix)]
+                {
+                    let pgid = child.id() as i32;
+                    if pgid > 0 {
+                        unsafe {
+                            libc::kill(-pgid, libc::SIGKILL);
+                        }
+                    } else {
+                        let _ = child.kill();
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+
+    let stdout = t_out
+        .join()
+        .map_err(|_| "blyte: reading the command's output failed".to_string())?;
+    let stderr = t_err
+        .join()
+        .map_err(|_| "blyte: reading the command's errors failed".to_string())?;
+
+    match status {
+        Some(s) => match s.code() {
+            Some(code) => Ok((code, stdout, stderr)),
+            None => Err(format!(
+                "blyte ended without an exit code ({s}); its output so far:\n{stdout}{stderr}"
+            )),
+        },
+        None => Ok((
+            124,
+            stdout,
+            format!("{stderr}\n[killed by blyte after {}s]", timeout.as_secs()),
+        )),
     }
 }
 

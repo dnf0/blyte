@@ -4,7 +4,7 @@
 //! filesystem abstraction, context strategy, and verification gate runner into an autonomous loop.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Fold budget for research runs, which quote code read many turns before they write it up.
@@ -79,6 +79,14 @@ impl From<&crate::cli::Cli> for TaskConfig {
         // Fall back to current working directory if not running in container mode
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+        let network = match &cli.network {
+            Some(v) => v.clone(),
+            None if cli.orchestrate && cli.sandbox == "on" && cli.container.is_none() => {
+                "off".into()
+            }
+            None => "on".into(),
+        };
+
         Self {
             prompt: cli.prompt.clone().unwrap_or_default(),
             gate: cli.gate.clone(),
@@ -94,12 +102,8 @@ impl From<&crate::cli::Cli> for TaskConfig {
             max_cost_usd: cli.max_cost_usd,
             report: cli.report.clone(),
             fold_budget: cli.fold_budget,
-            sandbox: if cli.orchestrate {
-                "off".into()
-            } else {
-                cli.sandbox.clone()
-            },
-            network: cli.network.clone(),
+            sandbox: cli.sandbox.clone(),
+            network,
             allow_read: cli.allow_read.clone(),
             pass_env: cli.pass_env.clone(),
             research: cli.research,
@@ -108,6 +112,145 @@ impl From<&crate::cli::Cli> for TaskConfig {
             orchestrate: cli.orchestrate,
             dispatch_cmd: cli.dispatch_cmd.clone(),
         }
+    }
+}
+
+fn orchestrator_extra_writes(root: &Path) -> Vec<PathBuf> {
+    let output = match std::process::Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines().map(str::trim).filter(|s| !s.is_empty());
+    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
+        return Vec::new();
+    };
+    let git_dir_path = PathBuf::from(git_dir);
+    let common_dir_path = PathBuf::from(common_dir);
+    let git_canon = git_dir_path.canonicalize().unwrap_or(git_dir_path);
+    let common_canon = common_dir_path
+        .canonicalize()
+        .unwrap_or_else(|_| common_dir_path.clone());
+    if git_canon == common_canon {
+        return Vec::new();
+    }
+    let mut extra = vec![common_canon.clone()];
+    if common_dir_path != common_canon {
+        extra.push(common_dir_path.clone());
+    }
+    if common_dir_path.file_name() == Some(std::ffi::OsStr::new(".git")) {
+        if let Some(main_root) = common_dir_path.parent() {
+            let main_canon = main_root
+                .canonicalize()
+                .unwrap_or_else(|_| main_root.to_path_buf());
+            extra.push(main_canon.join(".wt"));
+            if main_canon != main_root {
+                extra.push(main_root.join(".wt"));
+            }
+        }
+    }
+    extra
+}
+
+pub fn build_sandbox_profile(config: &TaskConfig) -> blyte_agent::sandbox::Profile {
+    let extra = if config.orchestrate {
+        orchestrator_extra_writes(&config.root)
+    } else {
+        Vec::new()
+    };
+    if extra.is_empty() {
+        return blyte_agent::sandbox::default_profile_net(
+            &config.root,
+            &config.allow_read,
+            config.network == "on",
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut allowed = blyte_agent::sandbox::default_allowed(&config.root);
+        allowed.extend(extra);
+        let deny_read = match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => blyte_agent::sandbox::read_denied(Path::new(&home)),
+            _ => Vec::new(),
+        };
+        let base = blyte_agent::sandbox::profile_with(
+            &config.root,
+            &allowed,
+            &deny_read,
+            &config.allow_read,
+        );
+        if config.network == "on" {
+            blyte_agent::sandbox::Profile::Seatbelt(base)
+        } else {
+            let socks = match std::env::var_os("HOME") {
+                Some(home) if !home.is_empty() => {
+                    blyte_agent::sandbox::docker_sockets(Path::new(&home))
+                }
+                _ => Vec::new(),
+            };
+            blyte_agent::sandbox::Profile::Seatbelt(blyte_agent::sandbox::offline(base, &socks))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut profile = blyte_agent::sandbox::default_profile_net(
+            &config.root,
+            &config.allow_read,
+            config.network == "on",
+        );
+        match &mut profile {
+            blyte_agent::sandbox::Profile::Landlock(write)
+            | blyte_agent::sandbox::Profile::LandlockOffline(write)
+            | blyte_agent::sandbox::Profile::LandlockConfined { write, .. } => {
+                write.extend(extra);
+            }
+            blyte_agent::sandbox::Profile::Seatbelt(_) => {}
+        }
+        profile
+    }
+}
+
+pub fn build_local_shell(config: &TaskConfig) -> blyte_agent::shell::PersistentShell {
+    if config.sandbox == "on" {
+        if blyte_agent::sandbox::available() {
+            let profile = build_sandbox_profile(config);
+            if matches!(profile, blyte_agent::sandbox::Profile::Landlock(_)) {
+                eprintln!(
+                    "blyte: on Linux the sandbox restricts writes only; credential reads are not blocked"
+                );
+            }
+            if matches!(profile, blyte_agent::sandbox::Profile::LandlockOffline(_)) {
+                eprintln!(
+                    "blyte: on Linux --network=off blocks TCP connections only (localhost included); UDP and the Docker socket are not blocked"
+                );
+            }
+            if let blyte_agent::sandbox::Profile::LandlockConfined { block_tcp, .. } = &profile {
+                eprintln!(
+                    "blyte: on Linux, commands can read only system directories, the workspace, tool caches and --allow-read paths"
+                );
+                if *block_tcp {
+                    eprintln!(
+                        "blyte: on Linux --network=off blocks TCP connections only (localhost included); UDP and the Docker socket are not blocked"
+                    );
+                }
+            }
+            blyte_agent::shell::PersistentShell::local_sandboxed(config.root.clone(), profile)
+        } else {
+            eprintln!("warning: sandbox unavailable; running unsandboxed");
+            blyte_agent::shell::PersistentShell::local(config.root.clone())
+        }
+    } else {
+        blyte_agent::shell::PersistentShell::local(config.root.clone())
     }
 }
 
@@ -427,11 +570,32 @@ fn run_task_with_event_callback(
             let id = crate::repl::new_session_id(now_secs, std::process::id());
             std::env::set_var("BLYTE_SESSION", &id);
         }
+        let sandbox_on = config.sandbox == "on";
+        let allowed_count = if sandbox_on {
+            let rules = crate::approval_file::load()?;
+            let count = rules.len();
+            let approver: Arc<dyn blyte_agent::approval::Approver> =
+                if state.runtime.conversation.is_some() {
+                    Arc::new(crate::tty_approver::TtyApprover)
+                } else {
+                    Arc::new(blyte_agent::approval::NoApprover)
+                };
+            blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
+                rules,
+                approver,
+            }));
+            count
+        } else {
+            blyte_agent::tools::set_approval(None);
+            0
+        };
         if state.orchestrator.instructions.is_none() {
             let lines = crate::orchestrator_text::set_state_instructions(
                 state,
                 config.dispatch_cmd.is_some(),
                 &config.root,
+                sandbox_on,
+                allowed_count,
             )?;
             if state.runtime.conversation.is_none() {
                 for line in &lines {
@@ -439,6 +603,12 @@ fn run_task_with_event_callback(
                 }
             }
         }
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("cannot locate blyte executable for the blyte tool: {e}"))?;
+        blyte_agent::tools::set_blyte_tool(Some(exe));
+    } else {
+        blyte_agent::tools::set_approval(None);
+        blyte_agent::tools::set_blyte_tool(None);
     }
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());
     // 1. Initialize LLM provider from environment credentials or model specification.
@@ -507,46 +677,7 @@ fn run_task_with_event_callback(
                     withheld.join(", ")
                 );
             }
-            let shell = if config.sandbox == "on" {
-                if blyte_agent::sandbox::available() {
-                    let profile = blyte_agent::sandbox::default_profile_net(
-                        &config.root,
-                        &config.allow_read,
-                        config.network == "on",
-                    );
-                    if matches!(profile, blyte_agent::sandbox::Profile::Landlock(_)) {
-                        eprintln!(
-                            "blyte: on Linux the sandbox restricts writes only; credential reads are not blocked"
-                        );
-                    }
-                    if matches!(profile, blyte_agent::sandbox::Profile::LandlockOffline(_)) {
-                        eprintln!(
-                            "blyte: on Linux --network=off blocks TCP connections only (localhost included); UDP and the Docker socket are not blocked"
-                        );
-                    }
-                    if let blyte_agent::sandbox::Profile::LandlockConfined { block_tcp, .. } =
-                        &profile
-                    {
-                        eprintln!(
-                            "blyte: on Linux, commands can read only system directories, the workspace, tool caches and --allow-read paths"
-                        );
-                        if *block_tcp {
-                            eprintln!(
-                                "blyte: on Linux --network=off blocks TCP connections only (localhost included); UDP and the Docker socket are not blocked"
-                            );
-                        }
-                    }
-                    blyte_agent::shell::PersistentShell::local_sandboxed(
-                        config.root.clone(),
-                        profile,
-                    )
-                } else {
-                    eprintln!("warning: sandbox unavailable; running unsandboxed");
-                    blyte_agent::shell::PersistentShell::local(config.root.clone())
-                }
-            } else {
-                blyte_agent::shell::PersistentShell::local(config.root.clone())
-            };
+            let shell = build_local_shell(config);
             (shell, None, config.root.clone())
         }
     };

@@ -77,7 +77,9 @@ fn prints_start_lines_then_the_reference_and_the_default_process() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(
-        stdout.starts_with("process: default (built in)\nrepository rules: none\n\n"),
+        stdout.starts_with(
+            "process: default (built in)\nrepository rules: none\nsandbox: on (a command leaves it only with your approval; 0 allowed in advance)\n\n"
+        ),
         "unexpected prefix:\n{stdout}"
     );
     let ref_pos = stdout
@@ -128,7 +130,7 @@ fn a_user_file_is_named_and_replaces_the_default() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     let expected_prefix = format!(
-        "process: {}\nrepository rules: none\n\n",
+        "process: {}\nrepository rules: none\nsandbox: on (a command leaves it only with your approval; 0 allowed in advance)\n\n",
         user_file.display()
     );
     assert!(
@@ -197,7 +199,9 @@ fn dispatch_tool_prints_the_tool_reference_and_process_none() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(
-        stdout.starts_with("process: none\nrepository rules: none\n\n"),
+        stdout.starts_with(
+            "process: none\nrepository rules: none\nsandbox: on (a command leaves it only with your approval; 0 allowed in advance)\n\n"
+        ),
         "unexpected prefix:\n{stdout}"
     );
     assert!(stdout.contains(REFERENCE_DISPATCH_TOOL.trim()));

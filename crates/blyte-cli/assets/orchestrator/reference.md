@@ -2,9 +2,13 @@ These are facts about blyte's commands. They say what each command does, not how
 
 ### Dispatching a task
 
+The `blyte` tool runs blyte's own commands (`dispatch`, `wait`, `status`, `review`, `plan`, `init`,
+`clean`) on the host in the repository's main checkout. Commands below are written as command lines;
+the words after `blyte` are passed as `args`.
+
 `blyte dispatch <id> <task.md>` starts one implementer on one task, in its own git worktree at
-`.wt/<id>` on a branch `wip/<id>`. Run it from the repository's main checkout. The implementer sees
-only the task text and the repository. A dispatch takes minutes.
+`.wt/<id>` on a branch `wip/<id>`. The implementer sees only the task text and the repository. A
+dispatch takes minutes.
 
 - `--plan <plan.md> --plan-task "Task <ID>"` takes the task from the plan section headed
   `### Task <ID>: …`, with no task file. Dispatch refuses a heading it cannot find. The implementer
@@ -29,14 +33,13 @@ waiting) and prints, for each ready task, the exact `blyte dispatch` command.
 
 ### While runs are going
 
-Your shell keeps background jobs alive after a command returns, you are not told when they exit, and
-each command times out after 300 s. A dispatch started in the foreground holds the command until it
-ends. Started in the background with both outputs redirected, it does not:
+Each foreground `blyte` call and shell command times out after 300 s. Calling `blyte` with
+`background: true` starts a `dispatch` and returns at once; nothing reports when it exits:
 
-```bash
-blyte dispatch T1 --plan plan.md --plan-task "Task T1" > /dev/null 2>&1 &
-blyte dispatch T2 --plan plan.md --plan-task "Task T2" > /dev/null 2>&1 &
-blyte wait --any T1 T2
+```json
+{"args": ["dispatch", "T1", "--plan", "plan.md", "--plan-task", "Task T1"], "background": true}
+{"args": ["dispatch", "T2", "--plan", "plan.md", "--plan-task", "Task T2"], "background": true}
+{"args": ["wait", "--any", "T1", "T2"]}
 ```
 
 - `blyte wait --any <ids>` prints `<id> <outcome> <turns> <cost>` for each run that has finished.

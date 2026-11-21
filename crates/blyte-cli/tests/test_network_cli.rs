@@ -6,7 +6,7 @@ use blyte_cli::task_runner::{check_network_mode, run_task, TaskConfig};
 #[test]
 fn cli_network_flag_defaults_to_on() {
     let cli = Cli::try_parse_from(["blyte"]).unwrap();
-    assert_eq!(cli.network, "on");
+    assert_eq!(cli.network, None);
     let config = TaskConfig::from(&cli);
     assert_eq!(config.network, "on");
 }
@@ -14,7 +14,7 @@ fn cli_network_flag_defaults_to_on() {
 #[test]
 fn cli_network_flag_parses_off() {
     let cli = Cli::try_parse_from(["blyte", "--network", "off"]).unwrap();
-    assert_eq!(cli.network, "off");
+    assert_eq!(cli.network.as_deref(), Some("off"));
     let config = TaskConfig::from(&cli);
     assert_eq!(config.network, "off");
 }

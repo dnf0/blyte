@@ -18,6 +18,7 @@ fn test_slash_help() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -47,6 +48,7 @@ fn test_slash_gate_get_and_set() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
 
@@ -86,6 +88,7 @@ fn test_slash_state_inspection() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -111,6 +114,7 @@ fn test_slash_exit() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
 
@@ -137,6 +141,7 @@ fn test_repl_stream_driving() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let session = ReplSession::new(&config);
 
@@ -256,6 +261,7 @@ fn test_prompt_submission() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
     let mut out = Vec::new();
@@ -286,6 +292,7 @@ fn test_clear_starts_new_conversation() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
     session.state.runtime.conversation = Some(vec![Message::User("hi".into())]);
@@ -311,6 +318,7 @@ fn test_state_counts_conversation_messages() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
     session.state.runtime.conversation = Some(vec![
@@ -343,6 +351,7 @@ fn test_slash_cost() {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     let mut session = ReplSession::new(&config);
 

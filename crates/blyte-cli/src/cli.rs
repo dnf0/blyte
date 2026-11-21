@@ -377,6 +377,10 @@ pub struct InstructionsArgs {
     /// Show the instructions for `--dispatch-cmd` mode
     #[arg(long)]
     pub dispatch_tool: bool,
+
+    /// Show the instructions for sandbox 'on' or 'off'
+    #[arg(long, value_parser = ["on", "off"])]
+    pub sandbox: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
@@ -536,13 +540,12 @@ pub struct Cli {
     )]
     pub sandbox: String,
 
-    /// Let commands blyte runs connect out: 'on' or 'off' (default 'on'). 'off' needs the sandbox
+    /// Let commands blyte runs connect out: 'on' or 'off' (default 'on', or 'off' under --orchestrate). 'off' needs the sandbox
     #[arg(
         long,
-        default_value = "on",
         value_parser = ["on", "off"]
     )]
-    pub network: String,
+    pub network: Option<String>,
 
     /// Let sandboxed commands read this path despite the credential deny-list (repeatable)
     #[arg(long = "allow-read")]

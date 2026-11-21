@@ -252,6 +252,10 @@ fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        sandbox: "on".to_string(),
+        network: None,
+        allow_read: Vec::new(),
+        pass_env: Vec::new(),
     }
 }
 

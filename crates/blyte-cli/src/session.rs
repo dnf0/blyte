@@ -95,6 +95,12 @@ impl AgentRunner {
         let mut cfg = config.clone();
         cfg.orchestrate = true;
         let repl = crate::repl::ReplSession::new(&cfg);
+        if let Some(approval) = blyte_agent::tools::approval() {
+            blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
+                approver: std::sync::Arc::new(blyte_agent::approval::NoApprover),
+                rules: approval.rules,
+            }));
+        }
         Self { repl }
     }
 }

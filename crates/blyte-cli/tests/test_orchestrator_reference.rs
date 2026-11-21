@@ -212,3 +212,9 @@ fn the_check_catches_an_unknown_flag() {
         "expected `--no-such-flag` to be reported, got: {errors:?}"
     );
 }
+
+#[test]
+fn reference_describes_unsandboxed_and_no_dev_null_redirect() {
+    assert!(blyte_cli::orchestrator_text::SANDBOX_ON_PARAGRAPH.contains("unsandboxed"));
+    assert!(!REFERENCE.contains("> /dev/null"));
+}

@@ -1,3 +1,4 @@
+pub mod approval_file;
 pub mod clean;
 pub mod cli;
 pub mod comment_lint;
@@ -39,6 +40,7 @@ pub mod setup;
 pub mod skill;
 pub mod statusline;
 pub mod task_runner;
+pub mod tty_approver;
 pub mod update;
 pub mod update_notice;
 pub mod usage_log;

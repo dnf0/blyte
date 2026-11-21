@@ -14,6 +14,7 @@ fn create_test_session() -> ReplSession {
         orchestrate: false,
         fold_budget: None,
         dispatch_cmd: None,
+        ..Default::default()
     };
     ReplSession::new(&config)
 }
