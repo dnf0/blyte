@@ -4,9 +4,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::dashboard::{collect_jobs, CommitRecord, Sources};
+use crate::dashboard::{collect_jobs, CommitRecord, Job, Sources};
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Replay {
     pub exported_at: u64,
     pub window_days: u64,
@@ -14,13 +14,13 @@ pub struct Replay {
     pub runs: Vec<Run>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Skipped {
     pub key: String,
     pub reason: String,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Run {
     pub key: String,
     pub id: String,
@@ -186,12 +186,14 @@ fn read_report(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-pub fn collect(src: &Sources, now: u64, days: u64) -> Replay {
-    let mut windowed = src.clone();
-    windowed.hours = days.saturating_mul(24);
-    let jobs = collect_jobs(&windowed, now);
+pub(crate) fn classify_jobs(
+    jobs: Vec<Job>,
+    now: u64,
+    days: u64,
+) -> (Vec<Job>, Vec<Run>, Vec<Skipped>) {
     let cutoff = now.saturating_sub(days.saturating_mul(86_400));
 
+    let mut running = Vec::new();
     let mut runs = Vec::new();
     let mut skipped = Vec::new();
 
@@ -201,10 +203,7 @@ pub fn collect(src: &Sources, now: u64, days: u64) -> Replay {
         }
 
         if job.status == "running" {
-            skipped.push(Skipped {
-                key: job.key,
-                reason: "still running".to_string(),
-            });
+            running.push(job);
             continue;
         }
 
@@ -308,6 +307,22 @@ pub fn collect(src: &Sources, now: u64, days: u64) -> Replay {
             verdict_notes: job.verdict_notes,
             verdict_ts: job.verdict_ts,
             report,
+        });
+    }
+
+    (running, runs, skipped)
+}
+
+pub fn collect(src: &Sources, now: u64, days: u64) -> Replay {
+    let mut windowed = src.clone();
+    windowed.hours = days.saturating_mul(24);
+    let jobs = collect_jobs(&windowed, now);
+
+    let (running, mut runs, mut skipped) = classify_jobs(jobs, now, days);
+    for job in running {
+        skipped.push(Skipped {
+            key: job.key,
+            reason: "still running".to_string(),
         });
     }
 
