@@ -225,3 +225,122 @@ writes (copy the field names from an existing test that builds such files):
 9. The existing tests of `blyte review --verdict` and `blyte review` pass unmodified.
 
 **Commit message:** `feat(queue): record decisions, holds and review checks from library functions`
+
+### Task S5: the session worker and its numbered log
+
+**Depends on:** S1 (already on this branch). **Siblings:** S4 and S7 may run at the same time in
+other worktrees (`live_runs.rs`, `assets/surface/`); none of their code is needed. The HTTP
+routes are a later task (S6): build no server here.
+
+**Goal.** One live conversation with the orchestrator, driven from other threads: messages go in,
+and everything that happens comes out as numbered entries that a page can follow by asking for
+"everything after entry N".
+
+**Files.** `crates/blyte-cli/src/session.rs` (exists, empty), `crates/blyte-cli/src/repl.rs` (only
+to move the building of `TaskConfig` for a prompt into a function both use), and a new
+`crates/blyte-cli/tests/test_session.rs`. No other file.
+
+**What to build.**
+
+1. The log.
+   ```rust
+   #[derive(Clone, Debug, PartialEq, serde::Serialize)]
+   pub struct Entry { pub seq: u64, pub ts: u64, #[serde(flatten)] pub body: EntryBody }
+   #[derive(Clone, Debug, PartialEq, serde::Serialize)]
+   #[serde(tag = "kind", rename_all = "snake_case")]
+   pub enum EntryBody {
+       UserMessage { text: String, reports: Vec<String>, queued: bool },
+       Turn { n: u32, text: String, input_tokens: u64, output_tokens: u64, cost_usd: Option<f64> },
+       ToolStarted { name: String, input: String },
+       ToolFinished { name: String, summary: String, is_error: bool },
+       Retry { attempt: u32, max: u32, wait_ms: u64, reason: String },
+       Error { message: String },
+       Idle { turns: u32, cost_usd: Option<f64> },
+       ModelChanged { model: String },
+       EffortChanged { effort: Option<String> },
+       Decision { run: String, action: String, note: Option<String> },
+   }
+   ```
+   `seq` starts at 1 and rises by one with no gaps; `ts` is seconds since the epoch. `cost_usd`
+   is `None` only when the model has no known price (the existing price lookup says so); it is
+   never a made-up number.
+2. The runner, so that tests need no model:
+   ```rust
+   pub trait PromptRunner: Send + 'static {
+       fn run(&mut self, prompt: &str, model: &str, emit: &(dyn Fn(EntryBody) + Sync)) -> Result<(), String>;
+   }
+   ```
+   `pub struct AgentRunner` implements it over a `crate::repl::ReplSession` created with
+   `orchestrate` on: it sets the goal and the model, builds the `TaskConfig` with the function
+   moved out of `run_repl_stream` (same values as today), and calls
+   `crate::task_runner::run_task_with_state_and_events`, turning `Event::Turn` into `Turn`,
+   `Event::ToolStart` into `ToolStarted`, `Event::Tool` into `ToolFinished` and `Event::Retry`
+   into `Retry`. Other events are not logged. It must never call `run_task` (that one can exit
+   the process). `AgentRunner::new(config: &crate::repl::ReplConfig) -> Self`.
+3. The session, a handle that is `Clone + Send + Sync`:
+   - `Session::start(runner: Box<dyn PromptRunner>, model: String) -> Session` starts one worker
+     thread that takes prompts in order.
+   - `submit(&self, text: &str, attachments: Vec<Attachment>) -> Result<u64, String>` with
+     `pub struct Attachment { pub run: String, pub text: String }`: a blank `text` is
+     `Err("a message needs text")`. Appends `UserMessage` (`reports` = the attachments' run ids,
+     `queued` = whether a prompt is running or waiting) and returns its `seq`. The prompt given
+     to the runner is the text followed, for each attachment, by a blank line,
+     `Research report <run>:` and the attachment's text.
+   - While a prompt runs, the runner's entries are appended as they are emitted. When it returns
+     `Ok`, `Idle` is appended with the number of `Turn` entries and the sum of their costs (`None`
+     if any was `None`). When it returns `Err(e)`, `Error { message: e }` is appended and then
+     `Idle`. A panic in the runner is caught: `Error` with the panic text, then `Idle`; the
+     worker carries on with the next prompt.
+   - `entries_after(&self, after: u64, wait: std::time::Duration) -> Vec<Entry>`: entries with
+     `seq > after`; when there are none it waits up to `wait` for one (a `Condvar`, no polling
+     loop) and returns an empty list if none came.
+   - `info(&self) -> SessionInfo` with `pub struct SessionInfo { pub model: String, pub effort:
+     Option<String>, pub effort_supported: bool, pub busy: bool, pub queued: usize, pub last_seq:
+     u64 }` (serde `Serialize`).
+   - `set_model(&self, model: &str) -> Result<(), String>`: a blank model is an `Err`; otherwise
+     it is used from the next prompt and `ModelChanged` is appended. The current effort is kept
+     when the new model accepts effort and dropped (with `EffortChanged { effort: None }`) when
+     it does not.
+   - `set_effort(&self, effort: Option<&str>) -> Result<(), String>`: accepted values are
+     `low`, `medium`, `high` and `None`; anything else is
+     `Err("effort must be low, medium or high")`. When the current model's provider does not
+     take effort: `Err("<model> does not take an effort setting")`. Effort is carried the way
+     the terminal session's model names carry it today (the `-low|-medium|-high` suffix handled
+     by `blyte_provider::gemini::split_effort`); `info().model` is the name without the suffix.
+     Appends `EffortChanged`.
+   - `record_decision(&self, run: &str, action: &str, note: Option<&str>, orchestrator_message:
+     Option<&str>) -> Result<u64, String>`: appends `Decision`, then, when there is a message,
+     submits it as a prompt with no attachments. Returns the `Decision` entry's `seq`.
+   - Dropping the last handle stops the worker after the prompt in progress.
+
+No fallbacks: nothing is substituted for a failure; every failure is an `Err` or an `Error`
+entry that says what failed. Add no comments to code. Nothing here needs to be resumable (the
+log is in memory in this version).
+
+**Tests** (`cargo test -p blyte --test test_session`), with a scripted `PromptRunner` that emits
+given entries, can block on a channel until released, and can fail or panic on request:
+
+1. `entries_are_numbered_without_gaps`: one prompt whose runner emits a turn, a tool start and a
+   tool finish: `seq` 1 to 5 (`user_message`, `turn`, `tool_started`, `tool_finished`, `idle`).
+2. `entry_json_shape`: `serde_json::to_value` of a `Turn` entry has exactly the keys `seq`, `ts`,
+   `kind`, `n`, `text`, `input_tokens`, `output_tokens`, `cost_usd`, with `kind == "turn"`.
+3. `messages_sent_while_busy_run_in_order`: with the runner blocked on the first prompt, submit
+   two more: their entries have `queued: true`, `info().queued == 2`; after release the runner
+   saw the three prompts in order and `info().busy` ends false.
+4. `blank_message_is_refused`.
+5. `attachments_are_appended_to_the_prompt`: the runner received the exact text described above;
+   the entry lists the run id.
+6. `runner_error_becomes_error_then_idle`; `runner_panic_becomes_error_then_idle_and_the_next_prompt_runs`.
+7. `entries_after_waits_for_a_new_entry`: a call with `after = last_seq` and a 5 s wait returns
+   within 1 s of a submit made 200 ms later from another thread; with nothing submitted and a
+   300 ms wait it returns empty after at least 300 ms.
+8. `idle_sums_turn_costs`, and `idle_cost_is_none_when_a_turn_has_no_price`.
+9. `set_effort_rules`: on a `gemini-4-neon` model, `high` then `None`, with the entries and
+   `info()` after each; an unknown value; a model whose provider takes no effort (use a model
+   name the provider crate detects as Anthropic).
+10. `set_model_keeps_or_drops_effort`.
+11. `decision_with_a_message_submits_it`: `Decision` then `UserMessage`, and the runner got the
+    message; without a message, only `Decision`.
+12. The existing tests of the terminal session pass unmodified.
+
+**Commit message:** `feat(session): a session worker with a numbered log that other threads can follow`
