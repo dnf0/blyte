@@ -54,6 +54,8 @@ pub enum Command {
     Plan(PlanArgs),
     /// Fail when the working tree adds comments since a base commit
     Comments(CommentsArgs),
+    /// Print the instructions the orchestrator is given
+    Instructions(InstructionsArgs),
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
@@ -327,6 +329,21 @@ pub struct CommentsArgs {
     /// Base commit or revision to compare the working tree against
     #[arg(long, value_name = "REV")]
     pub base: String,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct InstructionsArgs {
+    /// Print the built-in default process and exit
+    #[arg(long, conflicts_with_all = ["one_shot", "dispatch_tool"])]
+    pub default_process: bool,
+
+    /// Show the instructions for a one-shot run
+    #[arg(long)]
+    pub one_shot: bool,
+
+    /// Show the instructions for `--dispatch-cmd` mode
+    #[arg(long)]
+    pub dispatch_tool: bool,
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Clone)]
