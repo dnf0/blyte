@@ -439,6 +439,11 @@ fn run_task_with_event_callback(
                 }
             }
         }
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("cannot locate blyte executable for the blyte tool: {e}"))?;
+        blyte_agent::tools::set_blyte_tool(Some(exe));
+    } else {
+        blyte_agent::tools::set_blyte_tool(None);
     }
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());
     // 1. Initialize LLM provider from environment credentials or model specification.
