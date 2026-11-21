@@ -1,5 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blyte_agent::context::Folded;
 use blyte_agent::fs::LocalFs as RealFs;
@@ -15,15 +16,38 @@ const NUDGE_MARKER: &str =
     "turns without changing any file or running the gate. Stop exploring and decide now: make the change the task asks for, or, if the task needs no code change or the problem cannot be reproduced, stop calling tools and explain why in your reply.";
 const LAST_CALL_TEXT: &str = "[blyte] Still no change after the last reminder. Reply now with your conclusion and why, and do not call any tools: the run stops if this reply calls a tool without changing anything.";
 
+struct FakeClock {
+    base: Instant,
+    offset_ms: AtomicU64,
+}
+
+impl FakeClock {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            base: Instant::now(),
+            offset_ms: AtomicU64::new(0),
+        })
+    }
+
+    fn now(&self) -> Instant {
+        self.base + Duration::from_millis(self.offset_ms.load(Ordering::SeqCst))
+    }
+
+    fn advance(&self, d: Duration) {
+        self.offset_ms
+            .fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+    }
+}
+
 struct AlwaysBash {
     requests: Arc<Mutex<Vec<Vec<Message>>>>,
-    sleep: Option<Duration>,
+    clock_step: Option<(Arc<FakeClock>, Duration)>,
 }
 
 impl Provider for AlwaysBash {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        if let Some(d) = self.sleep {
-            std::thread::sleep(d);
+        if let Some((clock, step)) = &self.clock_step {
+            clock.advance(*step);
         }
         self.requests.lock().unwrap().push(req.messages.clone());
         Ok(Response {
@@ -57,7 +81,7 @@ fn fix_run_without_progress_nudges_at_21_last_calls_at_31_and_stops_at_32() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider = AlwaysBash {
         requests: requests.clone(),
-        sleep: None,
+        clock_step: None,
     };
     let runner = Runner {
         provider: &provider,
@@ -280,7 +304,7 @@ fn research_run_never_receives_no_progress_nudge_or_stops() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider = AlwaysBash {
         requests: requests.clone(),
-        sleep: None,
+        clock_step: None,
     };
     let runner = Runner {
         provider: &provider,
@@ -317,12 +341,11 @@ fn research_run_never_receives_no_progress_nudge_or_stops() {
 #[test]
 fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
     let dir = tempfile::tempdir().unwrap();
+    let clock = FakeClock::new();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider = AlwaysBash {
         requests: requests.clone(),
-        // The model sleep dominates each turn, so CI runners whose git and shell calls are several
-        // times slower still reach the stop well before the deadline.
-        sleep: Some(Duration::from_millis(400)),
+        clock_step: Some((Arc::clone(&clock), Duration::from_secs(20))),
     };
     let runner = Runner {
         provider: &provider,
@@ -333,7 +356,7 @@ fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
         budget: Budget {
             max_turns: 200,
             max_gate_attempts: 1,
-            max_duration: Some(Duration::from_secs(12)),
+            max_duration: Some(Duration::from_secs(600)),
         },
         rollback: false,
         on_event: None,
@@ -343,7 +366,7 @@ fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
     };
 
     let mut state = State::new("fix the bug", "true");
-    let (outcome, report) = runner.run(&mut state);
+    let (outcome, report) = runner.run_with_clock(&mut state, &|| clock.now());
 
     assert_eq!(outcome, Outcome::BudgetExhausted);
     assert!(report.stalled);
@@ -372,6 +395,11 @@ fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
     assert!(
         first_last_call_turn > first_nudge_turn,
         "last call (turn {first_last_call_turn}) must appear after nudge (turn {first_nudge_turn})"
+    );
+    assert!(
+        first_last_call_turn < first_nudge_turn + 10,
+        "expected time-triggered last call before turn {}, got turn {first_last_call_turn}",
+        first_nudge_turn + 10
     );
     assert_eq!(
         count_user_messages_with(reqs.last().unwrap(), NUDGE_MARKER),

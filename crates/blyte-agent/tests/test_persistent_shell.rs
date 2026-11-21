@@ -99,20 +99,48 @@ fn a_background_job_does_not_hold_the_command() {
 }
 
 #[test]
-fn it_is_faster_than_a_process_per_command() {
+fn reuses_a_single_shell_process_across_commands() {
     let (_d, root, p) = setup();
-    p.exec("true", &root, T).unwrap(); // start the session
-    let t = Instant::now();
-    for _ in 0..30 {
-        LocalShell.exec("true", &root, T).unwrap();
+    assert!(p.is_persistent());
+
+    let harness_pid: u32 = p
+        .exec("echo $$", &root, T)
+        .unwrap()
+        .stdout
+        .trim()
+        .parse()
+        .unwrap();
+    for _ in 0..10 {
+        let pid: u32 = p
+            .exec("echo $$", &root, T)
+            .unwrap()
+            .stdout
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(pid, harness_pid);
     }
-    let old = t.elapsed();
-    let t = Instant::now();
-    for _ in 0..30 {
-        p.exec("true", &root, T).unwrap();
-    }
-    let new = t.elapsed();
-    assert!(new < old, "session {new:?} vs process-per-command {old:?}");
+
+    let user_pid: u32 = p
+        .exec_user("echo $$", &root, T)
+        .unwrap()
+        .stdout
+        .trim()
+        .parse()
+        .unwrap();
+    assert_ne!(user_pid, harness_pid);
+    p.exec_user("cd sub && SESSION_VAR=kept", &root, T).unwrap();
+    let next = p
+        .exec_user(
+            "printf '%s\\n%s\\n%s\\n' \"$$\" \"$PWD\" \"$SESSION_VAR\"",
+            &root,
+            T,
+        )
+        .unwrap();
+    assert_eq!(
+        next.stdout,
+        format!("{user_pid}\n{}/sub\nkept\n", root.display())
+    );
 }
 
 #[test]
