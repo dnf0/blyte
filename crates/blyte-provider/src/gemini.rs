@@ -57,6 +57,10 @@ pub fn vertex_url(project: &str, location: &str, model: &str) -> String {
 /// Provider of OAuth2 access tokens for Vertex AI requests.
 pub trait TokenSource: Send + Sync {
     fn token(&self) -> Result<String, ProviderError>;
+
+    fn token_with_timeout(&self, _limit: Duration) -> Result<String, ProviderError> {
+        self.token()
+    }
 }
 
 impl<F> TokenSource for F
@@ -134,16 +138,16 @@ pub fn output_with_timeout(
     })
 }
 
-impl TokenSource for GcloudTokenSource {
-    fn token(&self) -> Result<String, ProviderError> {
+impl GcloudTokenSource {
+    fn fetch_token(&self, limit: Duration) -> Result<String, ProviderError> {
         let mut cmd = std::process::Command::new("gcloud");
         cmd.args(["auth", "application-default", "print-access-token"]);
-        let output = output_with_timeout(&mut cmd, GCLOUD_TIMEOUT).map_err(|e| {
+        let output = output_with_timeout(&mut cmd, limit).map_err(|e| {
             if e.kind() == std::io::ErrorKind::TimedOut {
-                ProviderError::Auth(
-                    "`gcloud auth application-default print-access-token` did not finish in 60s; run it by hand to see why"
-                        .to_string(),
-                )
+                ProviderError::Auth(format!(
+                    "`gcloud auth application-default print-access-token` did not finish in {}s; run it by hand to see why",
+                    limit.as_secs()
+                ))
             } else {
                 ProviderError::Auth(format!(
                     "failed to execute `gcloud`: {e}; run `gcloud auth application-default login`"
@@ -181,6 +185,16 @@ impl TokenSource for GcloudTokenSource {
     }
 }
 
+impl TokenSource for GcloudTokenSource {
+    fn token(&self) -> Result<String, ProviderError> {
+        self.fetch_token(GCLOUD_TIMEOUT)
+    }
+
+    fn token_with_timeout(&self, limit: Duration) -> Result<String, ProviderError> {
+        self.fetch_token(limit.min(GCLOUD_TIMEOUT))
+    }
+}
+
 /// Vertex AI authentication settings and access token cache.
 pub struct VertexAuth {
     pub project: String,
@@ -204,6 +218,10 @@ impl VertexAuth {
     }
 
     pub fn get_token(&self) -> Result<String, ProviderError> {
+        self.get_token_with_timeout(GCLOUD_TIMEOUT)
+    }
+
+    pub(crate) fn get_token_with_timeout(&self, limit: Duration) -> Result<String, ProviderError> {
         let now = (self.clock)();
         {
             let lock = self.cached_token.lock().unwrap_or_else(|e| e.into_inner());
@@ -215,7 +233,7 @@ impl VertexAuth {
                 }
             }
         }
-        let token = self.token_source.token()?;
+        let token = self.token_source.token_with_timeout(limit)?;
         let mut lock = self.cached_token.lock().unwrap_or_else(|e| e.into_inner());
         *lock = Some((token.clone(), now));
         Ok(token)
@@ -267,10 +285,12 @@ fn no_data_timing(started: Instant) -> StreamTiming {
 
 pub struct Gemini {
     auth: Auth,
-    api_root: String,
+    api_root: Option<String>,
     model: String,
     thinking_level: Option<String>,
     thought_summaries: bool,
+    idle_timeout: Option<Duration>,
+    stream_cap: Option<Duration>,
     last_timing: Mutex<Option<StreamTiming>>,
 }
 
@@ -284,10 +304,12 @@ impl Gemini {
             split_effort(&std::env::var("BLYTE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()));
         Ok(Self {
             auth: Auth::ApiKey(api_key),
-            api_root: API_ROOT.to_string(),
+            api_root: None,
             model,
             thinking_level,
             thought_summaries: thought_summaries_from_env(),
+            idle_timeout: None,
+            stream_cap: None,
             last_timing: Mutex::new(None),
         })
     }
@@ -322,10 +344,12 @@ impl Gemini {
 
         Ok(Self {
             auth: Auth::Vertex(VertexAuth::new(project, location)),
-            api_root: API_ROOT.to_string(),
+            api_root: None,
             model,
             thinking_level,
             thought_summaries: thought_summaries_from_env(),
+            idle_timeout: None,
+            stream_cap: None,
             last_timing: Mutex::new(None),
         })
     }
@@ -335,10 +359,12 @@ impl Gemini {
         let (model, thinking_level) = split_effort(DEFAULT_MODEL);
         Self {
             auth: Auth::ApiKey(api_key.into()),
-            api_root: API_ROOT.to_string(),
+            api_root: None,
             model,
             thinking_level,
             thought_summaries: true,
+            idle_timeout: None,
+            stream_cap: None,
             last_timing: Mutex::new(None),
         }
     }
@@ -348,16 +374,25 @@ impl Gemini {
         let (model, thinking_level) = split_effort(DEFAULT_MODEL);
         Self {
             auth: Auth::Vertex(VertexAuth::new(project, location)),
-            api_root: API_ROOT.to_string(),
+            api_root: None,
             model,
             thinking_level,
             thought_summaries: true,
+            idle_timeout: None,
+            stream_cap: None,
             last_timing: Mutex::new(None),
         }
     }
 
     pub fn with_api_root(mut self, api_root: impl Into<String>) -> Self {
-        self.api_root = api_root.into().trim_end_matches('/').to_string();
+        self.api_root = Some(api_root.into().trim_end_matches('/').to_string());
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_stream_timeouts(mut self, idle: Duration, cap: Duration) -> Self {
+        self.idle_timeout = Some(idle);
+        self.stream_cap = Some(cap);
         self
     }
 
@@ -419,12 +454,12 @@ impl Gemini {
     }
 
     pub fn endpoint_url(&self) -> String {
-        match &self.auth {
-            Auth::ApiKey(_) => format!(
-                "{}/{}:streamGenerateContent?alt=sse",
-                self.api_root, self.model
-            ),
-            Auth::Vertex(v) => vertex_url(&v.project, &v.location, &self.model),
+        match (&self.auth, &self.api_root) {
+            (_, Some(root)) => format!("{root}/{}:streamGenerateContent?alt=sse", self.model),
+            (Auth::ApiKey(_), None) => {
+                format!("{API_ROOT}/{}:streamGenerateContent?alt=sse", self.model)
+            }
+            (Auth::Vertex(v), None) => vertex_url(&v.project, &v.location, &self.model),
         }
     }
 
@@ -926,6 +961,193 @@ impl Gemini {
     }
 }
 
+enum StreamEvent {
+    HeadOk,
+    Chunk(Vec<u8>),
+    Eof,
+    ApiError { status: u16, body: String },
+    TransportError(String),
+    IoError(std::io::Error),
+}
+
+enum HeadOutcome {
+    Ok(std::sync::mpsc::Receiver<StreamEvent>),
+    Api { status: u16, body: String },
+    Transport(String),
+}
+
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<StreamEvent>,
+    buf: Vec<u8>,
+    pos: usize,
+    idle: Duration,
+    cap: Duration,
+    deadline: Instant,
+    eof: bool,
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("timed out: stream exceeded {:?}", self.cap),
+            ));
+        }
+        if self.pos < self.buf.len() {
+            let n = out.len().min(self.buf.len() - self.pos);
+            out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+            self.pos += n;
+            if self.pos == self.buf.len() {
+                self.buf.clear();
+                self.pos = 0;
+            }
+            return Ok(n);
+        }
+        if self.eof {
+            return Ok(0);
+        }
+        loop {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("timed out: stream exceeded {:?}", self.cap),
+                ));
+            }
+            let wait = self.idle.min(remaining);
+            match self.rx.recv_timeout(wait) {
+                Ok(StreamEvent::Chunk(bytes)) => {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    let n = out.len().min(bytes.len());
+                    out[..n].copy_from_slice(&bytes[..n]);
+                    if n < bytes.len() {
+                        self.buf = bytes;
+                        self.pos = n;
+                    }
+                    return Ok(n);
+                }
+                Ok(StreamEvent::Eof) => {
+                    self.eof = true;
+                    return Ok(0);
+                }
+                Ok(StreamEvent::IoError(e)) => return Err(e),
+                Ok(StreamEvent::TransportError(msg)) => return Err(std::io::Error::other(msg)),
+                Ok(StreamEvent::HeadOk) | Ok(StreamEvent::ApiError { .. }) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if Instant::now() >= self.deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("timed out: stream exceeded {:?}", self.cap),
+                        ));
+                    }
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("timed out: idle for {:?}", self.idle),
+                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "stream reader disconnected",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn start_stream_request(
+    agent: ureq::Agent,
+    url: String,
+    auth_header: (&'static str, String),
+    body: Value,
+    idle: Duration,
+    cap: Duration,
+    deadline: Instant,
+) -> HeadOutcome {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return HeadOutcome::Transport(format!("timed out: stream exceeded {cap:?}"));
+    }
+    let ureq_timeout = remaining.saturating_add(Duration::from_secs(5));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (header_name, header_value) = auth_header;
+
+    std::thread::spawn(move || {
+        let resp = agent
+            .post(&url)
+            .timeout(ureq_timeout)
+            .set(header_name, &header_value)
+            .set("content-type", "application/json")
+            .set("Accept", "text/event-stream")
+            .send_json(body);
+
+        match resp {
+            Ok(r) => {
+                if tx.send(StreamEvent::HeadOk).is_err() {
+                    return;
+                }
+                let mut reader = r.into_reader();
+                let mut buf = [0u8; 8192];
+                loop {
+                    match std::io::Read::read(&mut reader, &mut buf) {
+                        Ok(0) => {
+                            drop(reader);
+                            let _ = tx.send(StreamEvent::Eof);
+                            break;
+                        }
+                        Ok(n) => {
+                            if tx.send(StreamEvent::Chunk(buf[..n].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            drop(reader);
+                            let _ = tx.send(StreamEvent::IoError(e));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(ureq::Error::Status(status, r)) => {
+                let body = r.into_string().unwrap_or_default();
+                let _ = tx.send(StreamEvent::ApiError { status, body });
+            }
+            Err(e) => {
+                let _ = tx.send(StreamEvent::TransportError(e.to_string()));
+            }
+        }
+    });
+
+    let wait = idle.min(deadline.saturating_duration_since(Instant::now()));
+    match rx.recv_timeout(wait) {
+        Ok(StreamEvent::HeadOk) => HeadOutcome::Ok(rx),
+        Ok(StreamEvent::ApiError { status, body }) => HeadOutcome::Api { status, body },
+        Ok(StreamEvent::TransportError(msg)) => HeadOutcome::Transport(msg),
+        Ok(StreamEvent::IoError(e)) => HeadOutcome::Transport(e.to_string()),
+        Ok(StreamEvent::Chunk(_)) | Ok(StreamEvent::Eof) => {
+            HeadOutcome::Transport("unexpected stream state before response headers".to_string())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            if Instant::now() >= deadline {
+                HeadOutcome::Transport(format!("timed out: stream exceeded {cap:?}"))
+            } else {
+                HeadOutcome::Transport(format!("timed out: idle for {idle:?}"))
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => HeadOutcome::Transport(
+            "request thread disconnected before response headers".to_string(),
+        ),
+    }
+}
+
 impl Gemini {
     /// One streaming call. `timing` is set once the call has been sent, on success and on error.
     fn complete_timed(
@@ -936,85 +1158,147 @@ impl Gemini {
         let url = self.endpoint_url();
         let agent = crate::streaming_http_client_for(req.timeout);
         let body = self.body(req);
-        let default_cap = Duration::from_secs(crate::model_stream_cap_secs());
-        let cap = req.timeout.map_or(default_cap, |t| default_cap.min(t));
-        let mut started = Instant::now();
+        let base_idle = self
+            .idle_timeout
+            .unwrap_or_else(|| Duration::from_secs(crate::model_idle_timeout_secs()));
+        let base_cap = self
+            .stream_cap
+            .unwrap_or_else(|| Duration::from_secs(crate::model_stream_cap_secs()));
+        let idle = req.timeout.map_or(base_idle, |t| base_idle.min(t));
+        let cap = req.timeout.map_or(base_cap, |t| base_cap.min(t));
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(cap)
+            .unwrap_or_else(|| started + Duration::from_secs(365 * 24 * 3600));
 
-        let resp = match &self.auth {
-            Auth::ApiKey(key) => agent
-                .post(&url)
-                .set("x-goog-api-key", key)
-                .set("content-type", "application/json")
-                .set("Accept", "text/event-stream")
-                .send_json(body),
+        let outcome = match &self.auth {
+            Auth::ApiKey(key) => start_stream_request(
+                agent,
+                url,
+                ("x-goog-api-key", key.clone()),
+                body,
+                idle,
+                cap,
+                deadline,
+            ),
             Auth::Vertex(vertex) => {
-                let token = vertex.get_token()?;
-                let resp = agent
-                    .post(&url)
-                    .set("Authorization", &format!("Bearer {token}"))
-                    .set("content-type", "application/json")
-                    .set("Accept", "text/event-stream")
-                    .send_json(body.clone());
-                if let Err(ureq::Error::Status(401, _)) = &resp {
-                    if let Some(t) = req.timeout {
-                        if started.elapsed() >= t {
+                let rem = deadline.saturating_duration_since(Instant::now());
+                if rem.is_zero() {
+                    *timing = Some(no_data_timing(started));
+                    return Err(crate::with_request_timeout_message(
+                        ProviderError::Transport(format!("timed out: stream exceeded {cap:?}")),
+                        req.timeout,
+                        started,
+                    ));
+                }
+                let token = match vertex.get_token_with_timeout(rem) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if Instant::now() >= deadline {
                             *timing = Some(no_data_timing(started));
-                            return Err(ProviderError::Transport(format!(
-                                "request reached its time limit of {t:?} (timed out)"
-                            )));
+                            return Err(crate::with_request_timeout_message(
+                                ProviderError::Transport(format!(
+                                    "timed out: stream exceeded {cap:?}"
+                                )),
+                                req.timeout,
+                                started,
+                            ));
                         }
+                        return Err(e);
+                    }
+                };
+                let first = start_stream_request(
+                    agent.clone(),
+                    url.clone(),
+                    ("Authorization", format!("Bearer {token}")),
+                    body.clone(),
+                    idle,
+                    cap,
+                    deadline,
+                );
+                if matches!(first, HeadOutcome::Api { status: 401, .. }) {
+                    let rem = deadline.saturating_duration_since(Instant::now());
+                    if rem.is_zero() {
+                        *timing = Some(no_data_timing(started));
+                        return Err(crate::with_request_timeout_message(
+                            ProviderError::Transport(format!("timed out: stream exceeded {cap:?}")),
+                            req.timeout,
+                            started,
+                        ));
                     }
                     vertex.invalidate_token();
-                    let new_token = vertex.get_token()?;
-                    if let Some(t) = req.timeout {
-                        let elapsed = started.elapsed();
-                        if elapsed >= t {
-                            *timing = Some(no_data_timing(started));
-                            return Err(ProviderError::Transport(format!(
-                                "request reached its time limit of {t:?} (timed out)"
-                            )));
+                    let new_token = match vertex.get_token_with_timeout(rem) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            if Instant::now() >= deadline {
+                                *timing = Some(no_data_timing(started));
+                                return Err(crate::with_request_timeout_message(
+                                    ProviderError::Transport(format!(
+                                        "timed out: stream exceeded {cap:?}"
+                                    )),
+                                    req.timeout,
+                                    started,
+                                ));
+                            }
+                            return Err(e);
                         }
-                        let rem = t.saturating_sub(elapsed);
-                        let retry_agent = crate::streaming_http_client_for(Some(rem));
-                        retry_agent
-                            .post(&url)
-                            .set("Authorization", &format!("Bearer {new_token}"))
-                            .set("content-type", "application/json")
-                            .set("Accept", "text/event-stream")
-                            .send_json(body)
-                    } else {
-                        started = Instant::now();
-                        agent
-                            .post(&url)
-                            .set("Authorization", &format!("Bearer {new_token}"))
-                            .set("content-type", "application/json")
-                            .set("Accept", "text/event-stream")
-                            .send_json(body)
-                    }
+                    };
+                    let retry_agent = match req.timeout {
+                        Some(_) => {
+                            let rem = deadline.saturating_duration_since(Instant::now());
+                            if rem.is_zero() {
+                                *timing = Some(no_data_timing(started));
+                                return Err(crate::with_request_timeout_message(
+                                    ProviderError::Transport(format!(
+                                        "timed out: stream exceeded {cap:?}"
+                                    )),
+                                    req.timeout,
+                                    started,
+                                ));
+                            }
+                            crate::streaming_http_client_for(Some(rem))
+                        }
+                        None => agent,
+                    };
+                    start_stream_request(
+                        retry_agent,
+                        url,
+                        ("Authorization", format!("Bearer {new_token}")),
+                        body,
+                        idle,
+                        cap,
+                        deadline,
+                    )
                 } else {
-                    resp
+                    first
                 }
             }
         };
 
-        let result = match resp {
-            Ok(r) => {
-                let reader = std::io::BufReader::new(r.into_reader());
+        let result = match outcome {
+            HeadOutcome::Ok(rx) => {
+                let channel_reader = ChannelReader {
+                    rx,
+                    buf: Vec::new(),
+                    pos: 0,
+                    idle,
+                    cap,
+                    deadline,
+                    eof: false,
+                };
+                let reader = std::io::BufReader::new(channel_reader);
                 let mut call_timing = StreamTiming::default();
                 let parsed = Self::parse_stream_timed(reader, cap, started, &mut call_timing);
                 *timing = Some(call_timing);
                 parsed
             }
-            Err(ureq::Error::Status(status, r)) => {
+            HeadOutcome::Api { status, body } => {
                 *timing = Some(no_data_timing(started));
-                Err(ProviderError::Api {
-                    status,
-                    body: r.into_string().unwrap_or_default(),
-                })
+                Err(ProviderError::Api { status, body })
             }
-            Err(e) => {
+            HeadOutcome::Transport(msg) => {
                 *timing = Some(no_data_timing(started));
-                Err(ProviderError::Transport(e.to_string()))
+                Err(ProviderError::Transport(msg))
             }
         };
         result.map_err(|e| crate::with_request_timeout_message(e, req.timeout, started))
@@ -1050,7 +1334,7 @@ impl Provider for Gemini {
             Auth::ApiKey(key) => key,
             Auth::Vertex(_) => return Ok(Vec::new()),
         };
-        let url = &self.api_root;
+        let url = self.api_root.as_deref().unwrap_or(API_ROOT);
         let agent = crate::http_client();
         let resp = agent.get(url).set("x-goog-api-key", api_key).call();
 

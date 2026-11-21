@@ -109,6 +109,7 @@ pub fn build_streaming_http_client(idle: std::time::Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(20))
         .timeout_read(idle)
+        .timeout_write(idle)
         .build()
 }
 
@@ -126,7 +127,14 @@ pub fn http_client() -> &'static ureq::Agent {
 pub fn streaming_http_client() -> &'static ureq::Agent {
     static CLIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
-        build_streaming_http_client(std::time::Duration::from_secs(model_idle_timeout_secs()))
+        let idle = std::time::Duration::from_secs(model_idle_timeout_secs());
+        let cap = std::time::Duration::from_secs(model_stream_cap_secs());
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(20))
+            .timeout_read(idle)
+            .timeout_write(idle)
+            .timeout(cap.saturating_add(std::time::Duration::from_secs(5)))
+            .build()
     })
 }
 
@@ -155,9 +163,12 @@ pub(crate) fn streaming_http_client_for(timeout: Option<std::time::Duration>) ->
         Some(t) => {
             let connect = std::time::Duration::from_secs(20).min(t);
             let idle = std::time::Duration::from_secs(model_idle_timeout_secs()).min(t);
+            let cap = std::time::Duration::from_secs(model_stream_cap_secs()).min(t);
             ureq::AgentBuilder::new()
                 .timeout_connect(connect)
                 .timeout_read(idle)
+                .timeout_write(idle)
+                .timeout(cap.saturating_add(std::time::Duration::from_secs(5)))
                 .build()
         }
     }

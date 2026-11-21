@@ -267,3 +267,427 @@ fn chatgpt_request_timeout_and_quick_reply() {
         .expect("quick reply with 10s timeout should succeed");
     assert_eq!(resp.text, "hello from chatgpt");
 }
+
+fn read_http_request_opt(stream: &mut std::net::TcpStream) -> bool {
+    let mut buf = [0u8; 1024];
+    let mut total = Vec::new();
+    let mut header_end = None;
+    let mut content_len = 0usize;
+    while let Ok(n) = stream.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        total.extend_from_slice(&buf[..n]);
+        if header_end.is_none() {
+            if let Some(pos) = total.windows(4).position(|w| w == b"\r\n\r\n") {
+                let end = pos + 4;
+                header_end = Some(end);
+                let head = String::from_utf8_lossy(&total[..end]);
+                for line in head.lines() {
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.trim().eq_ignore_ascii_case("content-length") {
+                            content_len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(end) = header_end {
+            if total.len() >= end + content_len {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn req_without_timeout() -> Request {
+    Request {
+        system: String::new(),
+        messages: vec![Message::User("hi".into())],
+        tools: Vec::new(),
+        max_output_tokens: None,
+        timeout: None,
+    }
+}
+
+fn run_guarded<T: Send + 'static>(
+    guard: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> (T, Duration) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let res = f();
+        let _ = tx.send((res, started.elapsed()));
+    });
+    match rx.recv_timeout(guard) {
+        Ok(pair) => pair,
+        Err(_) => panic!(
+            "call hung past guard of {guard:?} (elapsed {:?})",
+            started.elapsed()
+        ),
+    }
+}
+
+#[test]
+fn reused_connection_stalling_before_headers_times_out() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let reused_second = Arc::new(AtomicBool::new(false));
+    let connections_srv = connections.clone();
+    let reused_srv = reused_second.clone();
+
+    std::thread::spawn(move || {
+        let sse_body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"first reply\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":3}}\n\n";
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else {
+                break;
+            };
+            let idx = connections_srv.fetch_add(1, Ordering::SeqCst);
+            let reused_conn = reused_srv.clone();
+            std::thread::spawn(move || {
+                if idx == 0 {
+                    if !read_http_request_opt(&mut stream) {
+                        return;
+                    }
+                    let chunk = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                        sse_body.len(),
+                        sse_body
+                    );
+                    let _ = stream.write_all(chunk.as_bytes());
+                    let _ = stream.flush();
+                    if read_http_request_opt(&mut stream) {
+                        reused_conn.store(true, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_secs(30));
+                    }
+                } else {
+                    let _ = read_http_request_opt(&mut stream);
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+            });
+        }
+    });
+
+    let p = Gemini::new_api_key("test-key")
+        .with_api_root(format!("http://{addr}"))
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+    let first = p
+        .complete(&req_without_timeout())
+        .expect("first call on pooled connection should succeed");
+    assert_eq!(first.text, "first reply");
+
+    let (second_res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        p.complete(&req_without_timeout())
+    });
+
+    assert!(
+        reused_second.load(Ordering::SeqCst) && connections.load(Ordering::SeqCst) == 1,
+        "client opened a new connection instead of reusing the pooled one; reused={}, connections={}",
+        reused_second.load(Ordering::SeqCst),
+        connections.load(Ordering::SeqCst)
+    );
+    let err = second_res.expect_err("second call should time out");
+    assert!(
+        err.is_timeout(),
+        "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "expected second call to time out in under 3s, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn fresh_connection_stalling_before_headers_times_out() {
+    let stall_url = spawn_stalling_server();
+    let p = Gemini::new_api_key("test-key")
+        .with_api_root(stall_url)
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        p.complete(&req_without_timeout())
+    });
+    let err = res.expect_err("fresh stalling connection should time out");
+    assert!(
+        err.is_timeout(),
+        "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "expected timeout in under 3s, took {elapsed:?}"
+    );
+}
+
+fn spawn_trickle_without_newline_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_http_request(&mut stream);
+            let head =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+            for _ in 0..150 {
+                std::thread::sleep(Duration::from_millis(200));
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                let _ = stream.flush();
+            }
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn trickle_without_newline_hits_the_cap() {
+    let url = spawn_trickle_without_newline_server();
+    let p = Gemini::new_api_key("test-key")
+        .with_api_root(url)
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        p.complete(&req_without_timeout())
+    });
+    let err = res.expect_err("trickling stream should hit cap");
+    assert!(
+        err.is_timeout(),
+        "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(2) && elapsed <= Duration::from_secs(5),
+        "expected timeout between 2s and 5s, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn stall_after_first_chunk_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_http_request(&mut stream);
+            let msg = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"first\"}]}}]}\n\n";
+            let _ = stream.write_all(msg.as_bytes());
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+    let p = Gemini::new_api_key("test-key")
+        .with_api_root(format!("http://{addr}"))
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        p.complete(&req_without_timeout())
+    });
+    let err = res.expect_err("stream stalling after first chunk should time out");
+    assert!(
+        err.is_timeout(),
+        "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "expected timeout in under 3s after first chunk, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn slow_but_steady_stream_succeeds() {
+    let chunks = [
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"one \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"two \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"three \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"four \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"five\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n\n",
+    ];
+    const COMBINED: &str = concat!(
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"one \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"two \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"three \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"four \"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"five\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n\n",
+    );
+    let fast_url = spawn_quick_server("text/event-stream", COMBINED);
+    let p_fast = Gemini::new_api_key("test-key")
+        .with_api_root(fast_url)
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(10));
+    let fast_resp = p_fast
+        .complete(&req_without_timeout())
+        .expect("single-shot response should succeed");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_http_request(&mut stream);
+            let head =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+            for (i, chunk) in chunks.iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                if stream.write_all(chunk.as_bytes()).is_err() {
+                    break;
+                }
+                let _ = stream.flush();
+            }
+        }
+    });
+
+    let p_slow = Gemini::new_api_key("test-key")
+        .with_api_root(format!("http://{addr}"))
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(10));
+    let slow_resp = p_slow
+        .complete(&req_without_timeout())
+        .expect("slow steady stream should succeed");
+    assert_eq!(slow_resp.text, fast_resp.text);
+    assert_eq!(slow_resp.text, "one two three four five");
+    assert_eq!(slow_resp.finish_reason, fast_resp.finish_reason);
+    assert_eq!(slow_resp.usage, fast_resp.usage);
+}
+
+#[test]
+fn request_timeout_shorter_than_cap_wins() {
+    let url = spawn_trickle_without_newline_server();
+    let p = Gemini::new_api_key("test-key")
+        .with_api_root(url)
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(10));
+    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        p.complete(&req_with_timeout(1))
+    });
+    let err = res.expect_err("request timeout shorter than cap should win");
+    assert!(
+        err.is_timeout(),
+        "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "expected timeout in under 3s, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn abandoned_helper_thread_ends() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+    let addr = listener.local_addr().unwrap();
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_http_request(&mut stream);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
+            let mut buf = [0u8; 64];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = closed_tx.send(Ok(Instant::now()));
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) =>
+                    {
+                        let _ = closed_tx.send(Ok(Instant::now()));
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = closed_tx.send(Err(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let cap = Duration::from_secs(3);
+    let p = Gemini::new_api_key("test-key")
+        .with_api_root(format!("http://{addr}"))
+        .with_stream_timeouts(Duration::from_secs(1), cap);
+    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        p.complete(&req_without_timeout())
+    });
+    let returned_at = Instant::now();
+    let err = res.expect_err("stalling call should time out");
+    assert!(
+        err.is_timeout(),
+        "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "expected call to time out in under 3s, took {elapsed:?}"
+    );
+
+    let max_close_wait = cap + Duration::from_secs(10);
+    match closed_rx.recv_timeout(max_close_wait) {
+        Ok(Ok(closed_at)) => {
+            let since_return = closed_at.saturating_duration_since(returned_at);
+            assert!(
+                since_return <= max_close_wait,
+                "client closed connection after {since_return:?}, exceeding {max_close_wait:?}"
+            );
+        }
+        Ok(Err(e)) => panic!("server error waiting for client close: {e}"),
+        Err(_) => panic!(
+            "abandoned helper thread did not close connection within {max_close_wait:?} after call returned"
+        ),
+    }
+}
+
+#[test]
+fn vertex_fresh_connection_stalling_before_headers_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+    let addr = listener.local_addr().unwrap();
+    let (auth_tx, auth_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let mut total = Vec::new();
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                total.extend_from_slice(&buf[..n]);
+                if total.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&total).to_ascii_lowercase();
+            let _ = auth_tx.send(head.contains("authorization: bearer vertex-test-token"));
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+
+    let p = Gemini::new_vertex("test-project", "global")
+        .with_token_source(|| Ok("vertex-test-token".to_string()))
+        .with_api_root(format!("http://{addr}"))
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        p.complete(&req_without_timeout())
+    });
+    let err = res.expect_err("vertex stalling call should time out");
+    assert!(
+        err.is_timeout(),
+        "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "expected timeout in under 3s, took {elapsed:?}"
+    );
+    assert!(
+        auth_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false),
+        "expected Vertex Authorization Bearer header on request"
+    );
+}
