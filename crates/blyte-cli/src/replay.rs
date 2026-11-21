@@ -175,13 +175,17 @@ fn read_checks(path: &Path) -> Result<(bool, Vec<String>), String> {
         };
         flags.push(s.to_string());
     }
-    if let Some(mr_val) = val.get("model_review").filter(|v| !v.is_null()) {
-        let mr: crate::model_review::ModelReviewResult = serde_json::from_value(mr_val.clone())
-            .map_err(|e| format!("invalid model_review: {e}"))?;
-        if let Some(flag) = mr.flag() {
-            if !flags.iter().any(|f| f.starts_with("model review")) {
-                flags.push(flag);
+    match crate::queue_actions::parse_stored_model_review(path, &val) {
+        Ok(Some(mr)) => {
+            if let Some(flag) = mr.flag() {
+                if !flags.iter().any(|f| f.starts_with("model review")) {
+                    flags.push(flag);
+                }
             }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            flags.push(format!("model review unreadable: {e}"));
         }
     }
     Ok((true, flags))
