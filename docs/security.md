@@ -76,6 +76,26 @@ commands it runs are cut off.
 `--container` (set the container's network instead), or on a Linux kernel without Landlock
 network support. Package installs need the network, so install dependencies before an offline run.
 
+## The orchestrator
+
+Under `--orchestrate`, the orchestrator's `bash` shell runs inside the same host sandbox as any
+other run, with `--network=off` by default (`--network=on` turns the network back on;
+`--sandbox=off` turns the sandbox off). When started from a linked git worktree, writes are also
+allowed in the main checkout's `.wt/` and the git common directory.
+
+blyte's own commands (`dispatch`, `wait`, `status`, `review`, `plan`, `init`, `clean`) are run
+through the `blyte` tool on the host in the main checkout, outside the shell's sandbox, so
+dispatched implementers can start their own sandboxes.
+
+A shell command that must leave the sandbox (for example `git push` or `gh`) can be requested with
+`unsandboxed: true` and a one-line `reason`. In a conversation at a terminal, blyte prompts on
+`/dev/tty` and runs the command outside the sandbox only when you answer `y` or `yes`. In a
+one-shot run, or when no terminal is attached, it is refused.
+
+To allow specific command prefixes without prompting, list them one per line in
+`$XDG_CONFIG_HOME/blyte/allow-unsandboxed` (or `~/.config/blyte/allow-unsandboxed`). Blank lines are
+ignored. By default no file exists and nothing is allowed in advance.
+
 ## Containers
 
 With `--container`, commands run inside that container and the host sandbox does not apply.

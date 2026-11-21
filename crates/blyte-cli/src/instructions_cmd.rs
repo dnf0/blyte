@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
+use blyte_agent::approval::{ApprovalConfig, NoApprover};
 use blyte_agent::orchestrator::Answers;
 use blyte_agent::run::ORCHESTRATOR_FIXED;
 
@@ -25,7 +27,27 @@ pub fn repo_root() -> Result<PathBuf, String> {
 }
 
 pub fn render(dispatch_tool: bool, answers: Answers, root: &Path) -> Result<String, String> {
-    let built = orchestrator_text::build(dispatch_tool, answers, root)?;
+    render_with_sandbox(dispatch_tool, answers, root, true)
+}
+
+pub fn render_with_sandbox(
+    dispatch_tool: bool,
+    answers: Answers,
+    root: &Path,
+    sandbox_on: bool,
+) -> Result<String, String> {
+    let allowed_in_advance = if sandbox_on {
+        crate::approval_file::load()?.len()
+    } else {
+        0
+    };
+    let built = orchestrator_text::build_with_sandbox(
+        dispatch_tool,
+        answers,
+        root,
+        sandbox_on,
+        allowed_in_advance,
+    )?;
     let mut out = String::new();
     for line in &built.start_lines {
         out.push_str(line);
@@ -46,8 +68,37 @@ pub fn render(dispatch_tool: bool, answers: Answers, root: &Path) -> Result<Stri
     }
     out.push('\n');
     out.push_str("## Tool descriptions\n");
-    for tool in blyte_agent::tools::specs() {
-        out.push_str(&format!("### {}\n{}\n\n", tool.name, tool.description));
+    let prev_approval = blyte_agent::tools::approval();
+    if sandbox_on {
+        blyte_agent::tools::set_approval(Some(ApprovalConfig {
+            rules: Vec::new(),
+            approver: Arc::new(NoApprover),
+        }));
+    } else {
+        blyte_agent::tools::set_approval(None);
+    }
+    let specs = blyte_agent::tools::specs();
+    blyte_agent::tools::set_approval(prev_approval);
+    for tool in specs {
+        out.push_str(&format!("### {}\n{}\n", tool.name, tool.description));
+        if tool.name == "bash" {
+            if let Some(props) = tool
+                .parameters
+                .get("properties")
+                .and_then(|v| v.as_object())
+            {
+                for prop in ["unsandboxed", "reason"] {
+                    if let Some(desc) = props
+                        .get(prop)
+                        .and_then(|v| v.get("description"))
+                        .and_then(|v| v.as_str())
+                    {
+                        out.push_str(&format!("- `{prop}`: {desc}\n"));
+                    }
+                }
+            }
+        }
+        out.push('\n');
     }
     out.push_str("The request and a description of the environment are added when a run starts.\n");
     Ok(out)

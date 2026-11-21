@@ -1,5 +1,6 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Configuration options for launching the interactive REPL harness.
 #[derive(Debug, Clone)]
@@ -15,6 +16,10 @@ pub struct ReplConfig {
     pub orchestrate: bool,
     pub dispatch_cmd: Option<String>,
     pub fold_budget: Option<usize>,
+    pub sandbox: String,
+    pub network: Option<String>,
+    pub allow_read: Vec<PathBuf>,
+    pub pass_env: Vec<String>,
 }
 
 impl Default for ReplConfig {
@@ -31,6 +36,10 @@ impl Default for ReplConfig {
             orchestrate: false,
             dispatch_cmd: None,
             fold_budget: None,
+            sandbox: "on".to_string(),
+            network: None,
+            allow_read: Vec::new(),
+            pass_env: Vec::new(),
         }
     }
 }
@@ -49,7 +58,11 @@ pub struct ReplSession {
     pub orchestrate: bool,
     pub dispatch_cmd: Option<String>,
     pub fold_budget: Option<usize>,
-    pub orchestrator_start_lines: Option<[String; 2]>,
+    pub sandbox: String,
+    pub network: String,
+    pub allow_read: Vec<PathBuf>,
+    pub pass_env: Vec<String>,
+    pub orchestrator_start_lines: Option<[String; 3]>,
     pub state: blyte_agent::state::State,
     pub session_id: String,
 }
@@ -81,11 +94,34 @@ impl ReplSession {
         let mut state = blyte_agent::state::State::new(goal, verification_cmd);
         state.runtime.conversation = Some(Vec::new());
 
+        let network = match &config.network {
+            Some(v) => v.clone(),
+            None if config.orchestrate && config.sandbox == "on" && config.container.is_none() => {
+                "off".to_string()
+            }
+            None => "on".to_string(),
+        };
+
         let orchestrator_start_lines = if config.orchestrate {
+            let sandbox_on = config.sandbox == "on";
+            let allowed_count = if sandbox_on {
+                let rules = crate::approval_file::load()?;
+                let count = rules.len();
+                blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
+                    rules,
+                    approver: Arc::new(crate::tty_approver::TtyApprover),
+                }));
+                count
+            } else {
+                blyte_agent::tools::set_approval(None);
+                0
+            };
             Some(crate::orchestrator_text::set_state_instructions(
                 &mut state,
                 config.dispatch_cmd.is_some(),
                 &config.repo_root,
+                sandbox_on,
+                allowed_count,
             )?)
         } else {
             None
@@ -107,6 +143,10 @@ impl ReplSession {
             orchestrate: config.orchestrate,
             dispatch_cmd: config.dispatch_cmd.clone(),
             fold_budget: config.fold_budget,
+            sandbox: config.sandbox.clone(),
+            network,
+            allow_read: config.allow_read.clone(),
+            pass_env: config.pass_env.clone(),
             orchestrator_start_lines,
             state,
             session_id,
@@ -134,14 +174,10 @@ impl ReplSession {
             max_cost_usd: None,
             report: None,
             fold_budget: self.fold_budget,
-            sandbox: if self.orchestrate {
-                "off".into()
-            } else {
-                "on".into()
-            },
-            network: "on".into(),
-            allow_read: Vec::new(),
-            pass_env: Vec::new(),
+            sandbox: self.sandbox.clone(),
+            network: self.network.clone(),
+            allow_read: self.allow_read.clone(),
+            pass_env: self.pass_env.clone(),
             research: false,
             claim_check: false,
             base_check: false,
@@ -304,15 +340,19 @@ pub fn render_banner_to<W: Write>(writer: &mut W, session: &ReplSession) -> std:
     writeln!(writer, "  Model      : {}", model)?;
     if session.orchestrate {
         writeln!(writer, "  Mode       : orchestrator")?;
-        if let Some([process_line, repo_line]) = &session.orchestrator_start_lines {
+        if let Some([process_line, repo_line, sandbox_line]) = &session.orchestrator_start_lines {
             let process = process_line
                 .strip_prefix("process: ")
                 .unwrap_or(process_line);
             let repo_rules = repo_line
                 .strip_prefix("repository rules: ")
                 .unwrap_or(repo_line);
+            let sandbox = sandbox_line
+                .strip_prefix("sandbox: ")
+                .unwrap_or(sandbox_line);
             writeln!(writer, "  Process    : {}", process)?;
             writeln!(writer, "  Repo rules : {}", repo_rules)?;
+            writeln!(writer, "  Sandbox    : {}", sandbox)?;
         }
     } else {
         writeln!(writer, "  Gate       : {}", gate)?;

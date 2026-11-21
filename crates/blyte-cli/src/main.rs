@@ -105,7 +105,13 @@ fn main() {
                 } else {
                     blyte_agent::orchestrator::Answers::Person
                 };
-                match blyte_cli::instructions_cmd::render(args.dispatch_tool, answers, &root) {
+                let sandbox_on = args.sandbox.as_deref().unwrap_or(&cli.sandbox) == "on";
+                match blyte_cli::instructions_cmd::render_with_sandbox(
+                    args.dispatch_tool,
+                    answers,
+                    &root,
+                    sandbox_on,
+                ) {
                     Ok(text) => {
                         print!("{text}");
                         std::process::exit(0);
@@ -348,6 +354,10 @@ fn main() {
         orchestrate: cli.orchestrate,
         dispatch_cmd: cli.dispatch_cmd,
         fold_budget: cli.fold_budget,
+        sandbox: cli.sandbox,
+        network: cli.network,
+        allow_read: cli.allow_read,
+        pass_env: cli.pass_env,
     };
     if let Err(e) = blyte_cli::repl::run_repl(repl_config) {
         eprintln!("REPL error: {e}");

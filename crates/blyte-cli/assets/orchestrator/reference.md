@@ -49,10 +49,6 @@ Each foreground `blyte` call and shell command times out after 300 s. Calling `b
 - Each run's files: `.wt/<id>.json` (the summary), `.wt/<id>.log`, `.wt/<id>.task.md` (the task text
   it was given), and for research `.wt/<id>.report.md`.
 
-The shell is sandboxed: it can write only in the repository and temporary directories, cannot read
-credentials and has no network. A command that must leave the sandbox (for example `git push`) takes
-`unsandboxed` with a reason and runs only when the user approves.
-
 ### What a run returns
 
 One JSON object, also saved to `.wt/<id>.json`: `outcome`, `exit` (0 only for `verified`), `commits`,
