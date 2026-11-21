@@ -509,7 +509,12 @@ fn resolve_current_run_tips(root: &Path, request: &str) -> Result<Vec<CombinedRu
         };
         let branch = branch_hint.unwrap_or_else(|| format!("wip/{}", info.id));
         let rev = format!("refs/heads/{branch}^{{commit}}");
-        let sha = git_rev_parse(root, &rev).unwrap_or_default();
+        let sha = git_rev_parse(root, &rev).map_err(|e| {
+            format!(
+                "run {}: branch {branch} does not resolve to a commit: {e}",
+                info.id
+            )
+        })?;
         tips.insert(info.id, sha);
     }
     Ok(tips
