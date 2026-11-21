@@ -1,3 +1,9 @@
+## v0.56.0 (2026-11-21)
+
+### Feat
+
+- **surface**: groundwork for a thin orchestrator: lean tasks, a secret on every POST, approval, request ids, publish functions, fresh review (#398)
+
 ## v0.55.0 (2026-11-21)
 
 ### Feat
