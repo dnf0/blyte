@@ -162,7 +162,7 @@ at a terminal and refused in a one-shot run.
 
 **Files.** Change `crates/blyte-cli/src/task_runner.rs`, `crates/blyte-cli/src/repl.rs`,
 `crates/blyte-cli/src/cli.rs` if a flag's type must change, `crates/blyte-cli/src/instructions_cmd.rs`.
-Create `crates/blyte-cli/src/approval_file.rs`, `crates/blyte-cli/src/tty_approver.rs`,
+Change `crates/blyte-cli/assets/orchestrator/reference.md` and `crates/blyte-cli/src/orchestrator_text.rs` for the sandbox paragraph. Create `crates/blyte-cli/src/approval_file.rs`, `crates/blyte-cli/src/tty_approver.rs`,
 `crates/blyte-cli/tests/test_orchestrator_sandbox.rs`. Change `docs/security.md`.
 
 **What to build.**
@@ -189,6 +189,11 @@ Create `crates/blyte-cli/src/approval_file.rs`, `crates/blyte-cli/src/tty_approv
   `sandbox: off`.
 - `blyte instructions` prints the `bash` tool's description with the two new properties, as the
   run would see it.
+- The reference's paragraph that begins `The shell is sandboxed:` is true only with the sandbox
+  on. Move it out of `crates/blyte-cli/assets/orchestrator/reference.md` into the text built at
+  start (and by `blyte instructions`), so it is given only when the sandbox is on; with
+  `--sandbox off` the orchestrator is told `The shell is not sandboxed.` in its place. Add both
+  cases to the tests.
 - `docs/security.md`: replace what it says about the orchestrator's shell with the new behaviour,
   in the same plain style.
 
