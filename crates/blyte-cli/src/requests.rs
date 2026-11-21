@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::cli::ReviewVerdict;
 use crate::combine::{CombineRecord, CombineState, CombinedRun};
 use crate::serve::Surface;
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Readiness {
@@ -45,22 +48,9 @@ impl Publisher for RealPublisher {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ReportedFailure {
-    Record {
-        state: CombineState,
-        runs: Vec<CombinedRun>,
-    },
-    Error {
-        error: String,
-    },
-}
-
 #[derive(Default)]
 struct RequestsInner {
     running: HashSet<String>,
-    last_reported: HashMap<String, ReportedFailure>,
-    last_error: HashMap<String, String>,
 }
 
 pub struct RequestsState {
@@ -112,10 +102,31 @@ pub struct CommitSummary {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishedRecord {
-    pub pushed: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptResult {
+    Combined,
+    Conflict,
+    CheckFailed,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptRecord {
+    pub runs: Vec<CombinedRun>,
+    pub result: AttemptResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub reported: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -354,10 +365,40 @@ fn combine_record_path(root: &Path, request: &str) -> PathBuf {
         .join(format!("{request}.json"))
 }
 
+fn attempt_record_path(root: &Path, request: &str) -> PathBuf {
+    root.join(".wt")
+        .join("combined")
+        .join(format!("{request}.attempt.json"))
+}
+
 fn published_record_path(root: &Path, request: &str) -> PathBuf {
     root.join(".wt")
         .join("combined")
         .join(format!("{request}.published.json"))
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T, label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+    let mut json = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("failed to serialize {label}: {e}"))?;
+    json.push('\n');
+    let mut tmp_name = path.as_os_str().to_os_string();
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    tmp_name.push(format!(".tmp.{}.{seq}", std::process::id()));
+    let tmp_path = PathBuf::from(tmp_name);
+    std::fs::write(&tmp_path, json)
+        .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!(
+            "failed to rename {} to {}: {e}",
+            tmp_path.display(),
+            path.display()
+        )
+    })
 }
 
 pub fn load_combine_record(root: &Path, request: &str) -> Result<Option<CombineRecord>, String> {
@@ -370,6 +411,35 @@ pub fn load_combine_record(root: &Path, request: &str) -> Result<Option<CombineR
     let record: CombineRecord = serde_json::from_str(&raw)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
     Ok(Some(record))
+}
+
+pub fn load_attempt_record(root: &Path, request: &str) -> Result<Option<AttemptRecord>, String> {
+    let path = attempt_record_path(root, request);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("failed to read {}: {e}", path.display())),
+    };
+    let record: AttemptRecord = serde_json::from_str(&raw)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    if record.result == AttemptResult::Error
+        && record.error.as_deref().is_none_or(|s| s.trim().is_empty())
+    {
+        return Err(format!(
+            "invalid attempt file {}: result error is missing error text",
+            path.display()
+        ));
+    }
+    Ok(Some(record))
+}
+
+pub fn write_attempt_record(
+    root: &Path,
+    request: &str,
+    record: &AttemptRecord,
+) -> Result<(), String> {
+    let path = attempt_record_path(root, request);
+    write_json_atomic(&path, record, "attempt record")
 }
 
 pub fn load_published_record(root: &Path, request: &str) -> Result<PublishedRecord, String> {
@@ -388,14 +458,7 @@ pub fn write_published_record(
     record: &PublishedRecord,
 ) -> Result<(), String> {
     let path = published_record_path(root, request);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    }
-    let json = serde_json::to_string_pretty(record)
-        .map_err(|e| format!("failed to serialize published record: {e}"))?;
-    std::fs::write(&path, json + "\n")
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    write_json_atomic(&path, record, "published record")
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -420,10 +483,7 @@ fn git_commit_subject(root: &Path, sha: &str) -> Result<String, String> {
         .map_err(|e| format!("failed to read subject for commit {sha}: {e}"))
 }
 
-fn resolve_current_run_tips(
-    root: &Path,
-    request: &str,
-) -> Result<Option<BTreeMap<String, String>>, String> {
+fn resolve_current_run_tips(root: &Path, request: &str) -> Result<Vec<CombinedRun>, String> {
     let wt_dir = root.join(".wt");
     let entries = list_start_files(&wt_dir)?;
     let mut tips = BTreeMap::new();
@@ -433,48 +493,53 @@ fn resolve_current_run_tips(
             continue;
         }
         let summary_path = wt_dir.join(format!("{}.json", info.id));
-        let branch_hint = match std::fs::read_to_string(&summary_path) {
-            Ok(raw) => {
-                let val: serde_json::Value = serde_json::from_str(&raw)
-                    .map_err(|e| format!("failed to parse {}: {e}", summary_path.display()))?;
-                match val.get("branch") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(serde_json::Value::String(s)) => Some(s.clone()),
-                    Some(_) => {
-                        return Err(format!(
-                            "summary file {} has non-string branch",
-                            summary_path.display()
-                        ));
-                    }
-                }
+        let raw = std::fs::read_to_string(&summary_path)
+            .map_err(|e| format!("failed to read {}: {e}", summary_path.display()))?;
+        let val: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("failed to parse {}: {e}", summary_path.display()))?;
+        let branch_hint = match val.get("branch") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                return Err(format!(
+                    "summary file {} has non-string branch",
+                    summary_path.display()
+                ));
             }
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("failed to read {}: {e}", summary_path.display())),
         };
         let branch = branch_hint.unwrap_or_else(|| format!("wip/{}", info.id));
         let rev = format!("refs/heads/{branch}^{{commit}}");
-        match git_rev_parse(root, &rev) {
-            Ok(sha) => {
-                tips.insert(info.id, sha);
-            }
-            Err(_) => return Ok(None),
-        }
+        let sha = git_rev_parse(root, &rev).unwrap_or_default();
+        tips.insert(info.id, sha);
     }
-    Ok(Some(tips))
+    Ok(tips
+        .into_iter()
+        .map(|(id, tip)| CombinedRun { id, tip })
+        .collect())
 }
 
-fn record_runs_match_tips(record: &CombineRecord, tips: &BTreeMap<String, String>) -> bool {
-    if record.runs.len() != tips.len() {
+fn sorted_runs(mut runs: Vec<CombinedRun>) -> Vec<CombinedRun> {
+    runs.sort_by(|a, b| a.id.cmp(&b.id));
+    runs
+}
+
+fn record_runs_match_tips(record: &CombineRecord, current_runs: &[CombinedRun]) -> bool {
+    if record.runs.len() != current_runs.len() {
         return false;
     }
-    record
-        .runs
-        .iter()
-        .all(|r| tips.get(&r.id).map(String::as_str) == Some(r.tip.as_str()))
+    sorted_runs(record.runs.clone()) == current_runs
+}
+
+fn combine_record_tip(record: &CombineRecord) -> &str {
+    record.commits.last().unwrap_or(&record.base).as_str()
+}
+
+fn is_record_pushed(published: &PublishedRecord, record: &CombineRecord) -> bool {
+    published.pushed_commit.as_deref() == Some(combine_record_tip(record))
 }
 
 fn branch_matches_record(root: &Path, record: &CombineRecord) -> bool {
-    let expected = record.commits.last().unwrap_or(&record.base).as_str();
+    let expected = combine_record_tip(record);
     let rev = format!("refs/heads/{}^{{commit}}", record.branch);
     git_rev_parse(root, &rev).is_ok_and(|actual| actual == expected)
 }
@@ -529,6 +594,81 @@ impl Drop for RunningGuard {
     }
 }
 
+fn retry_failure_message(
+    root: &Path,
+    request: &str,
+    attempt: &AttemptRecord,
+) -> Result<String, String> {
+    let path = attempt_record_path(root, request);
+    match attempt.result {
+        AttemptResult::Conflict | AttemptResult::CheckFailed => {
+            let expected_state = match attempt.result {
+                AttemptResult::Conflict => CombineState::Conflict,
+                AttemptResult::CheckFailed => CombineState::CheckFailed,
+                AttemptResult::Combined | AttemptResult::Error => unreachable!(),
+            };
+            match load_combine_record(root, request)? {
+                Some(rec) if rec.state == expected_state => Ok(format_record_failure(&rec)),
+                _ => Err(format!(
+                    "attempt file {} has result {:?} without a matching combine record",
+                    path.display(),
+                    attempt.result
+                )),
+            }
+        }
+        AttemptResult::Error => {
+            let err_text = attempt.error.as_deref().ok_or_else(|| {
+                format!(
+                    "attempt file {} has result error without error text",
+                    path.display()
+                )
+            })?;
+            Ok(format_error_failure(request, err_text))
+        }
+        AttemptResult::Combined => Err(format!(
+            "cannot format failure message for combined attempt {}",
+            path.display()
+        )),
+    }
+}
+
+fn record_and_report_failure(
+    root: &Path,
+    session: &crate::session::Session,
+    request: &str,
+    runs: Vec<CombinedRun>,
+    result: AttemptResult,
+    error: Option<String>,
+    msg: &str,
+) {
+    let mut attempt = AttemptRecord {
+        runs,
+        result,
+        error,
+        reported: false,
+    };
+    if let Err(e) = write_attempt_record(root, request, &attempt) {
+        session.record_error(&format!(
+            "failed to write attempt record for {request}: {e}"
+        ));
+    }
+    match session.queue_for_request(request, msg) {
+        Ok(_) => {
+            attempt.reported = true;
+            if let Err(e) = write_attempt_record(root, request, &attempt) {
+                session.record_error(&format!(
+                    "failed to write attempt record for {request}: {e}"
+                ));
+            }
+        }
+        Err(e) => {
+            session.record_error(&format!(
+                "failed to queue combine failure for {request}: {e}"
+            ));
+        }
+    }
+}
+
 pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
     crate::dispatch::validate_request_id(request)?;
     match request_readiness(&surface.root, request)? {
@@ -536,40 +676,33 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
         Readiness::Ready => {}
     }
 
-    let existing_record = load_combine_record(&surface.root, request)?;
-    let current_tips = resolve_current_run_tips(&surface.root, request)?;
-
-    if let (Some(ref rec), Some(ref tips)) = (&existing_record, &current_tips) {
-        if rec.state == CombineState::Combined
-            && record_runs_match_tips(rec, tips)
-            && branch_matches_record(&surface.root, rec)
-        {
-            return Ok(false);
-        }
-    }
+    let current_runs = resolve_current_run_tips(&surface.root, request)?;
 
     {
         let mut inner = surface.requests.lock_inner();
         if inner.running.contains(request) {
             return Ok(false);
         }
-        if let (Some(ref rec), Some(ref tips)) = (&existing_record, &current_tips) {
-            if matches!(
-                rec.state,
-                CombineState::Conflict | CombineState::CheckFailed
-            ) && record_runs_match_tips(rec, tips)
-            {
-                let key = ReportedFailure::Record {
-                    state: rec.state,
-                    runs: rec.runs.clone(),
-                };
-                if inner.last_reported.get(request) == Some(&key) {
-                    return Ok(false);
+        if let Some(mut attempt) = load_attempt_record(&surface.root, request)? {
+            if attempt.runs == current_runs {
+                if attempt.result != AttemptResult::Combined && !attempt.reported {
+                    let msg = retry_failure_message(&surface.root, request, &attempt)?;
+                    match surface.session.queue_for_request(request, &msg) {
+                        Ok(_) => {
+                            attempt.reported = true;
+                            write_attempt_record(&surface.root, request, &attempt)?;
+                        }
+                        Err(e) => {
+                            surface.session.record_error(&format!(
+                                "failed to queue combine failure for {request}: {e}"
+                            ));
+                        }
+                    }
                 }
+                return Ok(false);
             }
         }
         inner.running.insert(request.to_string());
-        inner.last_error.remove(request);
     }
 
     let root = surface.root.clone();
@@ -588,9 +721,27 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
 
         match code {
             0 => {
-                let mut inner = requests_state.lock_inner();
-                inner.last_error.remove(&request_owned);
-                inner.last_reported.remove(&request_owned);
+                let runs = match load_combine_record(&root, &request_owned) {
+                    Ok(Some(rec)) => sorted_runs(rec.runs),
+                    Ok(None) => current_runs,
+                    Err(e) => {
+                        session.record_error(&format!(
+                            "failed to read combine record after combine for {request_owned}: {e}"
+                        ));
+                        current_runs
+                    }
+                };
+                let attempt = AttemptRecord {
+                    runs,
+                    result: AttemptResult::Combined,
+                    error: None,
+                    reported: false,
+                };
+                if let Err(e) = write_attempt_record(&root, &request_owned, &attempt) {
+                    session.record_error(&format!(
+                        "failed to write attempt record for {request_owned}: {e}"
+                    ));
+                }
             }
             1 => match load_combine_record(&root, &request_owned) {
                 Ok(Some(rec))
@@ -599,24 +750,22 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
                         CombineState::Conflict | CombineState::CheckFailed
                     ) =>
                 {
-                    let key = ReportedFailure::Record {
-                        state: rec.state,
-                        runs: rec.runs.clone(),
+                    let result = match rec.state {
+                        CombineState::Conflict => AttemptResult::Conflict,
+                        CombineState::CheckFailed => AttemptResult::CheckFailed,
+                        CombineState::Combined => unreachable!(),
                     };
+                    let runs = sorted_runs(rec.runs.clone());
                     let msg = format_record_failure(&rec);
-                    let should_queue = {
-                        let mut inner = requests_state.lock_inner();
-                        inner.last_error.remove(&request_owned);
-                        if inner.last_reported.get(&request_owned) == Some(&key) {
-                            false
-                        } else {
-                            inner.last_reported.insert(request_owned.clone(), key);
-                            true
-                        }
-                    };
-                    if should_queue {
-                        let _ = session.queue_for_request(&request_owned, &msg);
-                    }
+                    record_and_report_failure(
+                        &root,
+                        &session,
+                        &request_owned,
+                        runs,
+                        result,
+                        None,
+                        &msg,
+                    );
                 }
                 Ok(_) => {
                     let err_text = String::from_utf8_lossy(&err).trim().to_string();
@@ -625,10 +774,28 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
                     } else {
                         err_text
                     };
-                    report_combine_error(&requests_state, &session, &request_owned, err_text);
+                    let msg = format_error_failure(&request_owned, &err_text);
+                    record_and_report_failure(
+                        &root,
+                        &session,
+                        &request_owned,
+                        current_runs,
+                        AttemptResult::Error,
+                        Some(err_text),
+                        &msg,
+                    );
                 }
                 Err(e) => {
-                    report_combine_error(&requests_state, &session, &request_owned, e);
+                    let msg = format_error_failure(&request_owned, &e);
+                    record_and_report_failure(
+                        &root,
+                        &session,
+                        &request_owned,
+                        current_runs,
+                        AttemptResult::Error,
+                        Some(e),
+                        &msg,
+                    );
                 }
             },
             other => {
@@ -638,37 +805,21 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
                 } else {
                     err_text
                 };
-                report_combine_error(&requests_state, &session, &request_owned, err_text);
+                let msg = format_error_failure(&request_owned, &err_text);
+                record_and_report_failure(
+                    &root,
+                    &session,
+                    &request_owned,
+                    current_runs,
+                    AttemptResult::Error,
+                    Some(err_text),
+                    &msg,
+                );
             }
         }
     });
 
     Ok(true)
-}
-
-fn report_combine_error(
-    requests_state: &RequestsState,
-    session: &crate::session::Session,
-    request: &str,
-    err_text: String,
-) {
-    let key = ReportedFailure::Error {
-        error: err_text.clone(),
-    };
-    let msg = format_error_failure(request, &err_text);
-    let should_queue = {
-        let mut inner = requests_state.lock_inner();
-        inner.last_error.insert(request.to_string(), err_text);
-        if inner.last_reported.get(request) == Some(&key) {
-            false
-        } else {
-            inner.last_reported.insert(request.to_string(), key);
-            true
-        }
-    };
-    if should_queue {
-        let _ = session.queue_for_request(request, &msg);
-    }
 }
 
 fn resolve_commit_summaries(root: &Path, shas: &[String]) -> Result<Vec<CommitSummary>, String> {
@@ -746,20 +897,19 @@ pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
 }
 
 fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -> RequestStatus {
-    let (is_combining, last_error) = {
-        let inner = surface.requests.lock_inner();
-        (
-            inner.running.contains(&request),
-            inner.last_error.get(&request).cloned(),
-        )
-    };
+    let is_combining = surface.requests.is_combining(&request);
 
     let record_res = load_combine_record(&surface.root, &request);
     let published_res = load_published_record(&surface.root, &request);
+    let attempt_res = load_attempt_record(&surface.root, &request);
 
-    let (pushed, pull_request_url) = match &published_res {
-        Ok(p) => (p.pushed, p.pull_request_url.clone()),
-        Err(_) => (false, None),
+    let (pushed, pull_request_url) = match (&published_res, &record_res) {
+        (Ok(p), Ok(Some(rec))) => (
+            rec.state == CombineState::Combined && is_record_pushed(p, rec),
+            p.pull_request_url.clone(),
+        ),
+        (Ok(p), _) => (false, p.pull_request_url.clone()),
+        (Err(_), _) => (false, None),
     };
 
     let mut status = RequestStatus {
@@ -795,6 +945,15 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
         return status;
     }
 
+    let attempt = match attempt_res {
+        Ok(a) => a,
+        Err(e) => {
+            status.state = "error".to_string();
+            status.error = Some(e);
+            return status;
+        }
+    };
+
     let record = match record_res {
         Ok(r) => r,
         Err(e) => {
@@ -819,12 +978,7 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
             status
         }
         Ok(Readiness::Ready) => {
-            if let Some(err_text) = last_error {
-                status.state = "error".to_string();
-                status.error = Some(err_text);
-                return status;
-            }
-            let current_tips = match resolve_current_run_tips(&surface.root, &request) {
+            let current_runs = match resolve_current_run_tips(&surface.root, &request) {
                 Ok(t) => t,
                 Err(e) => {
                     status.state = "error".to_string();
@@ -832,15 +986,19 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
                     return status;
                 }
             };
+            if let Some(ref att) = attempt {
+                if att.runs == current_runs && att.result == AttemptResult::Error {
+                    status.state = "error".to_string();
+                    status.error = att.error.clone();
+                    return status;
+                }
+            }
             let Some(rec) = record else {
                 status.state = "waiting".to_string();
                 status.waiting_reasons = vec!["waiting to combine".to_string()];
                 return status;
             };
-            let matches_current = current_tips
-                .as_ref()
-                .is_some_and(|tips| record_runs_match_tips(&rec, tips));
-            if !matches_current {
+            if !record_runs_match_tips(&rec, &current_runs) {
                 status.state = "waiting".to_string();
                 status.waiting_reasons = vec!["waiting to combine".to_string()];
                 populate_record_metadata(&surface.root, &rec, &mut status);
@@ -924,15 +1082,22 @@ pub fn push_request(surface: &Surface, request: &str) -> Result<(), RequestActio
 
     match surface.publisher.push_branch(&surface.root, &record.branch) {
         Ok(()) => {
-            published.pushed = true;
+            let rev = format!("refs/heads/{}^{{commit}}", record.branch);
+            let branch_commit =
+                git_rev_parse(&surface.root, &rev).map_err(RequestActionError::Internal)?;
+            published.pushed_commit = Some(branch_commit);
             write_published_record(&surface.root, request, &published)
                 .map_err(RequestActionError::Internal)?;
-            let _ = surface.session.record_decision(
+            if let Err(e) = surface.session.record_decision(
                 request,
                 "push",
                 Some(&format!("pushed {}", record.branch)),
                 None,
-            );
+            ) {
+                surface.session.record_error(&format!(
+                    "failed to record push decision for {request}: {e}"
+                ));
+            }
             Ok(())
         }
         Err(e) => {
@@ -977,7 +1142,7 @@ pub fn open_request_pull_request(
 
     let mut published =
         load_published_record(&surface.root, request).map_err(RequestActionError::Internal)?;
-    if !published.pushed {
+    if !is_record_pushed(&published, &record) {
         return Err(RequestActionError::Conflict(format!(
             "branch {} must be pushed before opening a pull request",
             record.branch
@@ -992,9 +1157,15 @@ pub fn open_request_pull_request(
             published.pull_request_url = Some(url.clone());
             write_published_record(&surface.root, request, &published)
                 .map_err(RequestActionError::Internal)?;
-            let _ = surface
-                .session
-                .record_decision(request, "pull_request", Some(&url), None);
+            if let Err(e) =
+                surface
+                    .session
+                    .record_decision(request, "pull_request", Some(&url), None)
+            {
+                surface.session.record_error(&format!(
+                    "failed to record pull_request decision for {request}: {e}"
+                ));
+            }
             Ok(url)
         }
         Err(e) => {

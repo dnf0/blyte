@@ -8,7 +8,8 @@ use blyte_cli::combine::{CombineRecord, CombineState};
 use blyte_cli::http::{Request, Response};
 use blyte_cli::queue_actions::{record_verdict, set_hold};
 use blyte_cli::requests::{
-    maybe_combine, request_readiness, Publisher, Readiness, RealPublisher, RequestsState,
+    load_attempt_record, load_published_record, maybe_combine, request_readiness,
+    write_attempt_record, AttemptResult, Publisher, Readiness, RealPublisher, RequestsState,
 };
 use blyte_cli::serve::{generate_token, route, Surface, TOKEN_HEADER};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
@@ -901,4 +902,343 @@ fn combine_exit_two_reports_error_once_and_surfaces_in_api() {
     }
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(prompts.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn check_failed_does_not_rerun_on_second_trigger_or_restart_and_retries_unreported() {
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("gate-runs.log");
+    let gate = format!("echo run >> {} && false", marker.display());
+    let (repo, base) = init_repo_with_gate(&gate);
+    let root = repo.path();
+
+    create_run_branch(root, "CF1", &base, "cf.txt", "v1\n", "feat: cf");
+    write_start_file(root, "CF1", Some("req-cf"), &base, 100, false);
+    write_summary(root, "CF1", "verified", Some("wip/CF1"));
+    write_checks(root, "CF1", &[]);
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+
+    assert!(maybe_combine(&surface, "req-cf").unwrap());
+    surface.requests.wait_for_idle("req-cf");
+    wait_for_idle_entries(&surface.session, 1);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+
+    let attempt = load_attempt_record(root, "req-cf").unwrap().unwrap();
+    assert_eq!(attempt.result, AttemptResult::CheckFailed);
+    assert!(attempt.reported);
+    assert!(attempt.error.is_none());
+
+    assert!(!maybe_combine(&surface, "req-cf").unwrap());
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+
+    let (restarted, restarted_prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&restarted, "req-cf").unwrap());
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(restarted_prompts.lock().unwrap().is_empty());
+
+    let gate_count = std::fs::read_to_string(&marker).unwrap().lines().count();
+    assert_eq!(gate_count, 1);
+
+    let mut unreported = attempt;
+    unreported.reported = false;
+    write_attempt_record(root, "req-cf", &unreported).unwrap();
+
+    assert!(!maybe_combine(&restarted, "req-cf").unwrap());
+    wait_for_idle_entries(&restarted.session, 1);
+    assert_eq!(restarted_prompts.lock().unwrap().len(), 1);
+    assert!(
+        load_attempt_record(root, "req-cf")
+            .unwrap()
+            .unwrap()
+            .reported
+    );
+    let gate_count_after_retry = std::fs::read_to_string(&marker).unwrap().lines().count();
+    assert_eq!(gate_count_after_retry, 1);
+}
+
+#[test]
+fn error_request_does_not_rerun_and_persists_error_state_after_restart() {
+    let (repo, base1) = init_repo_with_gate("true");
+    let root = repo.path();
+
+    std::fs::write(root.join("extra.txt"), "second base\n").unwrap();
+    git(root, &["add", "extra.txt"]);
+    git(root, &["commit", "-m", "second base commit"]);
+    let base2 = git(root, &["rev-parse", "HEAD"]);
+
+    create_run_branch(root, "EB1", &base1, "b1.txt", "1\n", "feat: from base1");
+    write_start_file(root, "EB1", Some("req-diffbase"), &base1, 100, false);
+    write_summary(root, "EB1", "verified", Some("wip/EB1"));
+    write_checks(root, "EB1", &[]);
+
+    create_run_branch(root, "EB2", &base2, "b2.txt", "2\n", "feat: from base2");
+    write_start_file(root, "EB2", Some("req-diffbase"), &base2, 101, false);
+    write_summary(root, "EB2", "verified", Some("wip/EB2"));
+    write_checks(root, "EB2", &[]);
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+
+    assert!(maybe_combine(&surface, "req-diffbase").unwrap());
+    surface.requests.wait_for_idle("req-diffbase");
+    wait_for_idle_entries(&surface.session, 1);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+
+    let attempt = load_attempt_record(root, "req-diffbase").unwrap().unwrap();
+    assert_eq!(attempt.result, AttemptResult::Error);
+    assert!(attempt.reported);
+    assert!(attempt
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("different base commits"));
+
+    assert!(!maybe_combine(&surface, "req-diffbase").unwrap());
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+
+    let (restarted, restarted_prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&restarted, "req-diffbase").unwrap());
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(restarted_prompts.lock().unwrap().is_empty());
+
+    let reqs = parse_json(&route(&restarted, &get("/api/requests"), now_secs()));
+    let item = &reqs.as_array().unwrap()[0];
+    assert_eq!(item["request"], "req-diffbase");
+    assert_eq!(item["state"], "error");
+    assert!(item["error"]
+        .as_str()
+        .unwrap()
+        .contains("different base commits"));
+}
+
+#[test]
+fn changing_run_tip_triggers_combine_again() {
+    let (repo, base) = init_repo_with_gate("test -f pass.flag");
+    let root = repo.path();
+
+    let tip1 = create_run_branch(root, "TC1", &base, "work.txt", "v1\n", "feat: first try");
+    write_start_file(root, "TC1", Some("req-tipchange"), &base, 100, false);
+    write_summary(root, "TC1", "verified", Some("wip/TC1"));
+    write_checks(root, "TC1", &[]);
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+
+    assert!(maybe_combine(&surface, "req-tipchange").unwrap());
+    surface.requests.wait_for_idle("req-tipchange");
+    wait_for_idle_entries(&surface.session, 1);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+    assert!(!maybe_combine(&surface, "req-tipchange").unwrap());
+
+    let wt = root.join(".wt/TC1");
+    std::fs::write(wt.join("pass.flag"), "ok\n").unwrap();
+    git(&wt, &["add", "pass.flag"]);
+    git(&wt, &["commit", "-m", "fix: make gate pass"]);
+    let tip2 = git(&wt, &["rev-parse", "HEAD"]);
+    assert_ne!(tip1, tip2);
+
+    assert!(maybe_combine(&surface, "req-tipchange").unwrap());
+    surface.requests.wait_for_idle("req-tipchange");
+
+    let attempt = load_attempt_record(root, "req-tipchange").unwrap().unwrap();
+    assert_eq!(attempt.result, AttemptResult::Combined);
+    assert_eq!(attempt.runs.len(), 1);
+    assert_eq!(attempt.runs[0].tip, tip2);
+
+    let reqs = parse_json(&route(&surface, &get("/api/requests"), now_secs()));
+    let item = &reqs.as_array().unwrap()[0];
+    assert_eq!(item["state"], "combined");
+    assert!(!maybe_combine(&surface, "req-tipchange").unwrap());
+}
+
+#[test]
+fn push_then_rebuild_invalidates_pushed_and_blocks_pr_until_repushed() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "RP1", &base, "item.txt", "v1\n", "feat: v1");
+    write_start_file(root, "RP1", Some("req-repush"), &base, now, false);
+    write_summary(root, "RP1", "verified", Some("wip/RP1"));
+    write_checks(root, "RP1", &[]);
+
+    let fake = FakePublisher::ok("https://github.com/example/repo/pull/99");
+    let (surface, _prompts) = make_surface(root.to_path_buf(), fake.clone());
+
+    assert!(maybe_combine(&surface, "req-repush").unwrap());
+    surface.requests.wait_for_idle("req-repush");
+
+    let push1 = route(
+        &surface,
+        &post_json_with_token(
+            "/api/requests/req-repush/push",
+            Some(&surface.token),
+            &json!({}),
+        ),
+        now,
+    );
+    assert_eq!(push1.status, 200);
+
+    let pr1 = route(
+        &surface,
+        &post_json_with_token(
+            "/api/requests/req-repush/pull-request",
+            Some(&surface.token),
+            &json!({ "title": "PR v1", "body": "initial" }),
+        ),
+        now,
+    );
+    assert_eq!(pr1.status, 200);
+
+    let wt = root.join(".wt/RP1");
+    std::fs::write(wt.join("item.txt"), "v2\n").unwrap();
+    git(&wt, &["add", "item.txt"]);
+    git(&wt, &["commit", "-m", "feat: v2"]);
+
+    assert!(maybe_combine(&surface, "req-repush").unwrap());
+    surface.requests.wait_for_idle("req-repush");
+
+    let reqs_after_rebuild = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let item = &reqs_after_rebuild.as_array().unwrap()[0];
+    assert_eq!(item["state"], "combined");
+    assert_eq!(item["pushed"], false);
+    assert_eq!(
+        item["pull_request_url"],
+        "https://github.com/example/repo/pull/99"
+    );
+
+    let pr_blocked = route(
+        &surface,
+        &post_json_with_token(
+            "/api/requests/req-repush/pull-request",
+            Some(&surface.token),
+            &json!({ "title": "PR v2", "body": "updated" }),
+        ),
+        now + 2,
+    );
+    assert_eq!(pr_blocked.status, 409);
+
+    let push2 = route(
+        &surface,
+        &post_json_with_token(
+            "/api/requests/req-repush/push",
+            Some(&surface.token),
+            &json!({}),
+        ),
+        now + 3,
+    );
+    assert_eq!(push2.status, 200);
+
+    let reqs_after_repush = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let item2 = &reqs_after_repush.as_array().unwrap()[0];
+    assert_eq!(item2["pushed"], true);
+    assert_eq!(
+        item2["pull_request_url"],
+        "https://github.com/example/repo/pull/99"
+    );
+
+    let pr_ok = route(
+        &surface,
+        &post_json_with_token(
+            "/api/requests/req-repush/pull-request",
+            Some(&surface.token),
+            &json!({ "title": "PR v2", "body": "updated" }),
+        ),
+        now + 5,
+    );
+    assert_eq!(pr_ok.status, 200);
+}
+
+#[test]
+fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "BA1", &base, "ba.txt", "a\n", "feat: ba");
+    write_start_file(root, "BA1", Some("req-bad-attempt"), &base, now, false);
+    write_summary(root, "BA1", "verified", Some("wip/BA1"));
+    write_checks(root, "BA1", &[]);
+
+    create_run_branch(root, "BP1", &base, "bp.txt", "p\n", "feat: bp");
+    write_start_file(root, "BP1", Some("req-old-pub"), &base, now + 1, false);
+    write_summary(root, "BP1", "verified", Some("wip/BP1"));
+    write_checks(root, "BP1", &[]);
+
+    let combined_dir = root.join(".wt/combined");
+    std::fs::create_dir_all(&combined_dir).unwrap();
+    let bad_attempt_path = combined_dir.join("req-bad-attempt.attempt.json");
+    std::fs::write(&bad_attempt_path, "{not valid json").unwrap();
+
+    let (surface, _prompts) = make_surface(root.to_path_buf(), FakePublisher::ok("https://pr"));
+
+    let attempt_err = load_attempt_record(root, "req-bad-attempt").unwrap_err();
+    assert!(
+        attempt_err.contains("req-bad-attempt.attempt.json"),
+        "{attempt_err}"
+    );
+    let trigger_err = maybe_combine(&surface, "req-bad-attempt").unwrap_err();
+    assert!(
+        trigger_err.contains("req-bad-attempt.attempt.json"),
+        "{trigger_err}"
+    );
+
+    assert!(maybe_combine(&surface, "req-old-pub").unwrap());
+    surface.requests.wait_for_idle("req-old-pub");
+
+    let old_pub_path = combined_dir.join("req-old-pub.published.json");
+    std::fs::write(
+        &old_pub_path,
+        "{\"pushed\":true,\"pull_request_url\":null}\n",
+    )
+    .unwrap();
+
+    let pub_err = load_published_record(root, "req-old-pub").unwrap_err();
+    assert!(pub_err.contains("req-old-pub.published.json"), "{pub_err}");
+
+    let runs_resp = route(&surface, &get("/api/runs"), now + 2);
+    assert_eq!(runs_resp.status, 200);
+    let session_entries = surface.session.entries_after(0, Duration::from_millis(50));
+    assert!(session_entries.iter().any(|e| matches!(
+        &e.body,
+        EntryBody::Error { message } if message.contains("req-bad-attempt.attempt.json")
+    )));
+
+    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 3));
+    let items = reqs.as_array().unwrap();
+    let bad_attempt_item = items
+        .iter()
+        .find(|v| v["request"] == "req-bad-attempt")
+        .unwrap();
+    assert_eq!(bad_attempt_item["state"], "error");
+    assert!(bad_attempt_item["error"]
+        .as_str()
+        .unwrap()
+        .contains("req-bad-attempt.attempt.json"));
+
+    let old_pub_item = items
+        .iter()
+        .find(|v| v["request"] == "req-old-pub")
+        .unwrap();
+    assert_eq!(old_pub_item["state"], "error");
+    assert!(old_pub_item["error"]
+        .as_str()
+        .unwrap()
+        .contains("req-old-pub.published.json"));
+
+    let pr_resp = route(
+        &surface,
+        &post_json_with_token(
+            "/api/requests/req-old-pub/pull-request",
+            Some(&surface.token),
+            &json!({ "title": "Old shape", "body": "" }),
+        ),
+        now + 4,
+    );
+    assert_eq!(pr_resp.status, 500);
+    assert!(parse_json(&pr_resp)["error"]
+        .as_str()
+        .unwrap()
+        .contains("req-old-pub.published.json"));
 }

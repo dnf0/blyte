@@ -406,7 +406,11 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
         }
         if let Some(ref req_id) = run.request {
             if triggered.insert(req_id.clone()) {
-                let _ = crate::requests::maybe_combine(surface, req_id);
+                if let Err(e) = crate::requests::maybe_combine(surface, req_id) {
+                    surface
+                        .session
+                        .record_error(&format!("combine trigger failed for {req_id}: {e}"));
+                }
             }
         }
     }
@@ -507,7 +511,11 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
     if action == Action::Accept {
         match crate::requests::run_request_id(&surface.root, &decision.run) {
             Ok(Some(req_id)) => {
-                let _ = crate::requests::maybe_combine(surface, &req_id);
+                if let Err(e) = crate::requests::maybe_combine(surface, &req_id) {
+                    surface
+                        .session
+                        .record_error(&format!("combine trigger failed for {req_id}: {e}"));
+                }
             }
             Ok(None) => {}
             Err(e) => return json_error(500, e),
