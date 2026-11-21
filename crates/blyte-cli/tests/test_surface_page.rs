@@ -16,6 +16,7 @@ fn page_has_its_parts() {
         "report-reader",
         "attached-reports",
         "lost-server",
+        "missing-token",
     ] {
         let needle = format!("id=\"{id}\"");
         assert!(
@@ -332,4 +333,21 @@ assert.strictEqual(threadEl.querySelector('[data-seq="109"]').statusEl.className
 assert.strictEqual(threadEl.querySelector('[data-seq="109"]').statusEl.textContent, "still waiting");
 "#;
     run_surface_script(harness);
+}
+
+#[test]
+fn page_carries_surface_token_handling() {
+    let html = load_surface_html();
+    assert!(
+        html.contains("Cannot send until this page is opened from the URL blyte printed."),
+        "missing missing-token banner text"
+    );
+    assert!(
+        html.contains("X-Blyte-Token"),
+        "missing surface token request header name"
+    );
+    assert!(
+        html.contains("sessionStorage") && html.contains("replaceState"),
+        "missing fragment token persistence and address-bar cleanup"
+    );
 }
