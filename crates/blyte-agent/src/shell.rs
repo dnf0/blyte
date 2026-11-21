@@ -182,6 +182,11 @@ pub trait Shell: Send + Sync {
     /// A worker that knows it is inside a container does not go looking for the host.
     fn describe(&self) -> String;
 
+    /// Whether a background job started with its output redirected stays alive after a command returns.
+    fn keeps_background_jobs(&self) -> bool {
+        false
+    }
+
     /// Which binaries exist **in the execution environment**, not on the orchestrator's host.
     fn available_binaries(&self, cwd: &Path, candidates: &[&'static str]) -> Vec<String> {
         // One probe rather than N: a remote or containerised shell pays a round trip per call,
@@ -411,6 +416,10 @@ impl Shell for LocalShell {
     fn describe(&self) -> String {
         "Commands run directly on this machine, in the workspace directory.".into()
     }
+
+    fn keeps_background_jobs(&self) -> bool {
+        true
+    }
 }
 
 /// Commands run inside an already-running container via `docker exec`.
@@ -442,6 +451,10 @@ impl Shell for ContainerShell {
              installed there, not on the host.",
             self.workdir.display()
         )
+    }
+
+    fn keeps_background_jobs(&self) -> bool {
+        true
     }
 }
 
@@ -961,6 +974,10 @@ impl Shell for PersistentShell {
             self.fallback.describe()
         )
     }
+
+    fn keeps_background_jobs(&self) -> bool {
+        true
+    }
 }
 
 impl Drop for PersistentShell {
@@ -970,5 +987,30 @@ impl Drop for PersistentShell {
                 s.close();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_shell_reports_keeping_background_jobs() {
+        assert!(LocalShell::new().keeps_background_jobs());
+    }
+
+    #[test]
+    fn container_shell_reports_keeping_background_jobs() {
+        let shell = ContainerShell {
+            container_id: "test-container".into(),
+            workdir: PathBuf::from("/workspace"),
+        };
+        assert!(shell.keeps_background_jobs());
+    }
+
+    #[test]
+    fn persistent_shell_reports_keeping_background_jobs() {
+        let shell = PersistentShell::local(PathBuf::from("/tmp"));
+        assert!(shell.keeps_background_jobs());
     }
 }
