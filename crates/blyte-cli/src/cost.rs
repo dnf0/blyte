@@ -31,7 +31,8 @@ impl Default for Totals {
 /// - `since`: entries with timestamp >= `since`
 /// - `repo`: entries with matching repository path
 ///
-/// Entries with `dispatch: Some(_)` count toward `implementers_usd` and `runs`.
+/// Entries with `dispatch: Some(_)` count toward `implementers_usd`, and toward `runs` unless
+/// `outcome == "turn"`.
 /// Entries without dispatch count toward `orchestrator_usd`.
 /// An entry with `cost_usd: None` adds 0 to cost totals.
 pub fn totals(
@@ -64,7 +65,9 @@ pub fn totals(
         let cost = entry.cost_usd.unwrap_or(0.0);
         if entry.dispatch.is_some() {
             implementers_usd += cost;
-            runs += 1;
+            if entry.outcome != "turn" {
+                runs += 1;
+            }
         } else {
             orchestrator_usd += cost;
         }

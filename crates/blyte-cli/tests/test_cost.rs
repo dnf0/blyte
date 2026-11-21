@@ -158,3 +158,63 @@ fn cost_cli_with_entries_and_filters() {
         "blyte $0.35 (orchestrator $0.00, implementers $0.35 in 1 runs)"
     );
 }
+
+fn ledger_entry(
+    outcome: &str,
+    dispatch: Option<&str>,
+    cost_usd: Option<f64>,
+) -> blyte_cli::usage_log::Entry {
+    blyte_cli::usage_log::Entry {
+        ts: 1000,
+        repo: "/repo/a".into(),
+        session: Some("sess-1".into()),
+        dispatch: dispatch.map(String::from),
+        research: false,
+        model: "m1".into(),
+        outcome: outcome.into(),
+        turns: 1,
+        input: 100,
+        cached: 0,
+        output: 50,
+        thinking: 0,
+        cost_usd,
+    }
+}
+
+#[test]
+fn turn_lines_do_not_count_as_runs() {
+    let entries = vec![
+        ledger_entry("turn", Some("d1"), Some(0.10)),
+        ledger_entry("turn", Some("d1"), Some(0.20)),
+        ledger_entry("turn", Some("d1"), Some(0.30)),
+        ledger_entry("verified", Some("d1"), Some(0.05)),
+    ];
+    let t = blyte_cli::cost::totals(&entries, None, None, None);
+    assert_eq!(t.runs, 1);
+    assert!((t.implementers_usd - 0.65).abs() < 1e-9);
+    assert_eq!(t.orchestrator_usd, 0.0);
+}
+
+#[test]
+fn old_ledger_totals_unchanged() {
+    let entries = vec![
+        ledger_entry("verified", Some("d1"), Some(0.25)),
+        ledger_entry("budgetexhausted", Some("d2"), Some(0.35)),
+    ];
+    let t = blyte_cli::cost::totals(&entries, None, None, None);
+    assert_eq!(t.runs, 2);
+    assert!((t.implementers_usd - 0.60).abs() < 1e-9);
+    assert_eq!(t.orchestrator_usd, 0.0);
+}
+
+#[test]
+fn a_killed_run_keeps_its_cost() {
+    let entries = vec![
+        ledger_entry("turn", Some("d1"), Some(0.15)),
+        ledger_entry("turn", Some("d1"), Some(0.25)),
+    ];
+    let t = blyte_cli::cost::totals(&entries, None, None, None);
+    assert_eq!(t.runs, 0);
+    assert!((t.implementers_usd - 0.40).abs() < 1e-9);
+    assert_eq!(t.orchestrator_usd, 0.0);
+}
