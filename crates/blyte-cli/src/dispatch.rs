@@ -228,7 +228,35 @@ fn append_source_state(path: &Path, block: &str) {
     }
 }
 
+pub fn validate_request_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("invalid --request value: must not be empty".to_string());
+    }
+    if id.len() > 64 {
+        return Err(format!(
+            "invalid --request value {:?}: must be at most 64 characters",
+            id
+        ));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "invalid --request value {:?}: only ASCII letters, digits, '-' and '_' are allowed",
+            id
+        ));
+    }
+    Ok(())
+}
+
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
+    if let Some(ref req) = args.request {
+        if let Err(e) = validate_request_id(req) {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    }
     if let Ok(home) = crate::skill::home_dir() {
         if let Ok(Some(path)) = crate::skill::ensure_context_block(&home) {
             eprintln!(
@@ -621,6 +649,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "tags": tags,
         "plan": args.plan,
         "plan_task": args.plan_task,
+        "request": args.request,
         "base": args.base,
     });
     if let Some(ref s) = session {
@@ -1078,6 +1107,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "max_seconds": max_seconds,
         "plan": args.plan,
         "plan_task": args.plan_task,
+        "request": args.request,
         "base": args.base,
         "base_sha": base_commit,
         "base_check": base_check,

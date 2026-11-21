@@ -185,6 +185,10 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "TEXT")]
     pub plan_task: Option<String>,
 
+    /// Request identifier this dispatch belongs to
+    #[arg(long, value_name = "ID")]
+    pub request: Option<String>,
+
     /// The commit a new worktree starts from
     #[arg(long, default_value = "HEAD")]
     pub base: String,
