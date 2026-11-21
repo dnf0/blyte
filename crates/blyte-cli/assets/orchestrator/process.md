@@ -51,7 +51,10 @@ unblocks a task, dispatch it before reviewing the next result.
 
 ### Review
 
-Read `blyte review <id>` for every run.
+Read `blyte review <id>` for every run, before any `--diff`. Everything you run stays in the
+conversation, so trim long output (`| tail -n 40`, `grep`), and read the review, not the files in
+the implementer's worktree. (Measured 2026-11-21: without these two lines, three runs of three did
+the opposite.)
 
 - When the gate passed, check the scope (only the named files, in the commit asked for), that every
   deviation in the implementer's report is justified, and anything under `== host commands`.
