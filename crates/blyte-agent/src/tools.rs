@@ -472,19 +472,12 @@ pub fn available_binaries(shell: &dyn Shell, root: &Path) -> Vec<String> {
     shell.available_binaries(root, &all)
 }
 
-const BASH_BACKGROUND_KEPT: &str = "A background job started with its output redirected keeps \
-     running after the command returns, and nothing reports when it exits.";
-const BASH_BACKGROUND_ENDED: &str = "Background jobs end with the command.";
-
-fn bash_description(keeps_background_jobs: bool) -> String {
-    let background = if keeps_background_jobs {
-        BASH_BACKGROUND_KEPT
-    } else {
-        BASH_BACKGROUND_ENDED
-    };
+fn bash_description() -> String {
     format!(
         "Run a shell command in the workspace and wait for it to finish. \
-         Commands run to completion (up to {}s). {background} \
+         Commands run to completion (up to {}s). \
+         A background job started with its output redirected keeps running after the command \
+         returns, and nothing reports when it exits. \
          Output over {} lines is elided in the middle. \
          To find files or search file contents use the `glob` and `grep` tools, not \
          `find`, `grep -r` or `rg` in the shell; they respect .gitignore, are capped \
@@ -495,15 +488,6 @@ fn bash_description(keeps_background_jobs: bool) -> String {
 }
 
 pub fn specs() -> Vec<ToolSpec> {
-    specs_with_background(true)
-}
-
-/// Tool specifications with the `bash` description tailored to `shell`.
-pub fn specs_for_shell(shell: &dyn Shell) -> Vec<ToolSpec> {
-    specs_with_background(shell.keeps_background_jobs())
-}
-
-fn specs_with_background(keeps_background_jobs: bool) -> Vec<ToolSpec> {
     let mut tools = vec![
         ToolSpec {
             name: "read".into(),
@@ -531,7 +515,7 @@ fn specs_with_background(keeps_background_jobs: bool) -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bash".into(),
-            description: bash_description(keeps_background_jobs),
+            description: bash_description(),
             parameters: json!({"type":"object","properties":{
                 "command":{"type":"string"}},"required":["command"]}),
         },
@@ -985,66 +969,24 @@ fn execute_unbounded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{Output, Shell};
 
-    struct StubShell {
-        keeps_background: bool,
-    }
-
-    impl Shell for StubShell {
-        fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
-            unreachable!()
-        }
-
-        fn describe(&self) -> String {
-            String::new()
-        }
-
-        fn keeps_background_jobs(&self) -> bool {
-            self.keeps_background
-        }
-    }
-
-    fn bash_desc(specs: &[ToolSpec]) -> &str {
-        &specs
+    #[test]
+    fn bash_description_says_background_jobs_keep_running() {
+        let all = specs();
+        let desc = &all
             .iter()
             .find(|t| t.name == "bash")
             .expect("bash spec missing")
-            .description
-    }
-
-    #[test]
-    fn bash_description_when_shell_keeps_background_jobs() {
-        let shell = StubShell {
-            keeps_background: true,
-        };
-        let from_shell = specs_for_shell(&shell);
-        let desc = bash_desc(&from_shell);
-        assert!(desc.contains(BASH_BACKGROUND_KEPT), "got {desc:?}");
-        assert!(!desc.contains(BASH_BACKGROUND_ENDED), "got {desc:?}");
+            .description;
+        assert!(
+            desc.contains(
+                "A background job started with its output redirected keeps running after the command returns, and nothing reports when it exits."
+            ),
+            "got {desc:?}"
+        );
         assert!(
             !desc.contains("there is no background mode"),
             "got {desc:?}"
         );
-        assert!(!desc.contains("nothing to poll"), "got {desc:?}");
-
-        let default_specs = specs();
-        assert_eq!(bash_desc(&default_specs), desc);
-    }
-
-    #[test]
-    fn bash_description_when_shell_ends_background_jobs() {
-        let shell = StubShell {
-            keeps_background: false,
-        };
-        let from_shell = specs_for_shell(&shell);
-        let desc = bash_desc(&from_shell);
-        assert!(desc.contains(BASH_BACKGROUND_ENDED), "got {desc:?}");
-        assert!(!desc.contains(BASH_BACKGROUND_KEPT), "got {desc:?}");
-        assert!(
-            !desc.contains("there is no background mode"),
-            "got {desc:?}"
-        );
-        assert!(!desc.contains("nothing to poll"), "got {desc:?}");
     }
 }
