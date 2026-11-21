@@ -344,3 +344,200 @@ given entries, can block on a channel until released, and can fail or panic on r
 12. The existing tests of the terminal session pass unmodified.
 
 **Commit message:** `feat(session): a session worker with a numbered log that other threads can follow`
+
+## The interface between the server (S6) and the page (S7)
+
+Every response is JSON unless stated. Every failure is a 4xx or 5xx with `{"error": "<text>"}`.
+
+| Request | Response |
+|---|---|
+| `GET /api/session` | `{"session_id","repo","started_at","model","effort","effort_supported","busy","queued","last_seq"}` |
+| `GET /api/session/events?after=<seq>&wait_ms=<n>` | `{"entries":[<entry>...],"last_seq":<n>}`; waits up to `wait_ms` (at most 25000) when there is nothing after `after` |
+| `POST /api/session/messages` `{"text","reports":["<run id>"...]}` | `{"seq":<n>}` |
+| `GET /api/models` | `{"models":[{"id","effort_supported"}...]}` |
+| `POST /api/session/model` `{"model"}` | as `GET /api/session` |
+| `POST /api/session/effort` `{"effort":"low"\|"medium"\|"high"\|null}` | as `GET /api/session` |
+| `GET /api/runs` | the `LiveRuns` of task S4, each finished run with one more field `hold` (`{"note","ts"}` or `null`) |
+| `GET /api/runs/<id>/diff` | `text/plain`: the run's diff |
+| `POST /api/runs/<id>/decision` `{"action","note"}` | `{"decision":{"run","action","note","orchestrator_message"},"seq":<n>}`; `action` is `accept`, `send_back`, `redo`, `hold` or `mark_read` |
+| `GET /api/map` | as `blyte mock` serves it |
+
+An entry is `{"seq","ts","kind",...}` with `kind` one of `user_message` (`text`, `reports`,
+`queued`), `turn` (`n`, `text`, `input_tokens`, `output_tokens`, `cost_usd`), `tool_started`
+(`name`, `input`), `tool_finished` (`name`, `summary`, `is_error`), `retry` (`attempt`, `max`,
+`wait_ms`, `reason`), `error` (`message`), `idle` (`turns`, `cost_usd`), `model_changed`
+(`model`), `effort_changed` (`effort`), `decision` (`run`, `action`, `note`).
+
+### Task S4: the runs of this repository, as they are now
+
+**Depends on:** none (the mock fixes are already on this branch). **Siblings:** S1, S2, S3 and S7
+run at the same time in other worktrees; none of their code is needed. Do not read holds here
+(`queue_actions.rs` is task S3's).
+
+**Goal.** One function that gives the surface the current repository's runs as they stand now:
+those in progress, and those finished, in the shape the mock's review queue already draws.
+
+**Files.** `crates/blyte-cli/src/live_runs.rs` (exists, empty) and a new
+`crates/blyte-cli/tests/test_live_runs.rs`. `crates/blyte-cli/src/replay.rs` only to make an
+existing private function `pub(crate)` or to split `collect` so both callers share its code;
+`collect`'s results must not change. No other file.
+
+**What to build.**
+
+```rust
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LiveRuns {
+    pub generated_at: u64,
+    pub repo: String,
+    pub running: Vec<RunningRun>,
+    pub runs: Vec<crate::replay::Run>,
+    pub skipped: Vec<crate::replay::Skipped>,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RunningRun {
+    pub key: String, pub id: String, pub research: bool, pub title: String, pub task: String,
+    pub plan_file: Option<String>, pub plan_task: Option<String>, pub started_at: Option<u64>,
+    pub turns: u64, pub gate_running: bool, pub activity: String,
+}
+pub fn collect(root: &Path, now: u64, days: u64) -> Result<LiveRuns, String>
+```
+
+- `root` is the repository's main checkout. Only its own runs are returned (`<root>/.wt/`), not
+  those of other repositories on the machine. A `root` that is not a directory is an `Err`
+  naming it. A repository with no `.wt` directory gives empty lists.
+- `runs`: exactly what `crate::replay::collect` returns for this repository alone and the same
+  `days`, built by the same code (titles, groups, flags, cards, verdicts, reports), newest
+  `finished_at` first.
+- `running`: the runs `replay::collect` reports as skipped with the reason `still running`, with
+  their fields from the same job listing (`activity` is the job's current-activity text, `turns`
+  and `gate_running` as the job has them), oldest `started_at` first. They are not in `skipped`.
+- `skipped`: the remaining skipped entries, unchanged.
+- `repo`: the name `replay` gives the runs of this repository.
+
+No fallbacks: a file that cannot be read or parsed is reported the way `replay::collect` already
+reports it (in `skipped`, with its reason), never dropped silently and never replaced with a
+default. Add no comments to code. Nothing here needs to be resumable.
+
+**Tests** (`cargo test -p blyte --test test_live_runs`), each on a temporary git repository with
+hand-written `.wt/` files in the shape `test_replay.rs` writes them (reuse its helpers by
+copying what is needed):
+
+1. `finished_runs_match_replay`: two finished runs (one code, one research with a report file):
+   `runs` equals, as JSON, the runs `replay::collect` gives for the same root.
+2. `running_run_is_listed_not_skipped`: a run with a live status file in the shape the existing
+   tests use for a running run: it is in `running` with its title and `turns`, and in neither
+   `runs` nor `skipped`.
+3. `other_repositories_are_left_out`: a second temporary repository with its own finished run is
+   not in the result for the first.
+4. `unreadable_run_is_reported`: a finished run whose summary file is not valid JSON is in
+   `skipped` with a reason, and the other runs are still returned.
+5. `no_wt_directory_is_empty`; `missing_root_is_an_error`.
+6. `order`: `runs` newest first, `running` oldest first.
+7. The existing replay tests pass unmodified.
+
+**Commit message:** `feat(surface): the current repository's running and finished runs`
+
+### Task S7: the page of the live surface
+
+**Depends on:** none (the mock page with the report reader is already on this branch).
+**Siblings:** S1 to S5 run at the same time in other worktrees. The server that answers this
+page's requests is a later task (S6) and does not exist yet: build the page against the
+interface written above, in the section "The interface between the server (S6) and the page
+(S7)" of this plan, which is copied here in full when this task is dispatched.
+
+**Goal.** The page a developer works in: the conversation with the orchestrator and the review
+queue on the left, the map on the right, all on live data from the session server.
+
+**Files.** A new `crates/blyte-cli/assets/surface/index.html` (one file, inline style and
+script, no external script, style or font) and a new
+`crates/blyte-cli/tests/test_surface_page.rs` (reads the file with
+`concat!(env!("CARGO_MANIFEST_DIR"), "/assets/surface/index.html")`). Do not change the mock
+page or any other file.
+
+**How.** Start from a copy of `crates/blyte-cli/assets/mock/index.html` and keep its look, its
+layout (Design and Review tabs on the left, map with Runs, System and Data tabs on the right,
+Wide), its review cards, its report reader and its map code. Remove everything that exists only
+for the mock: the replay bar and clock, play and speed, the guide, the check-in, the record and
+its buttons, the offer bar, the `skipped` and `session` counters, the repository picker, and any
+code that reads `/api/replay`. The header shows `blyte`, the repository name, and the counters
+`wip` (runs in progress) and `waiting` (groups with undecided results).
+
+**What to build.**
+
+1. **Start-up.** `GET /api/session`, then follow the log: request
+   `/api/session/events?after=<last seq seen>&wait_ms=25000` again as soon as each response
+   arrives. Every entry is drawn once, in `seq` order; reloading the page starts from `after=0`
+   and redraws the whole conversation.
+2. **The conversation** (Design tab), one element per entry, each with `data-seq`:
+   - `user_message`: the developer's message; `with report <id>` when it has reports; a
+     `queued` mark while it has not started.
+   - `turn`: the orchestrator's text, drawn with the page's `renderReportMarkdown` (never as
+     HTML from the model).
+   - `tool_started`: one line with the tool name and the first line of its input, marked as
+     running; the matching `tool_finished` (the next one with the same name) replaces the mark
+     with its summary, in the error colour when `is_error`. Lines of consecutive tools are
+     compact; the full input is under a `<details>`.
+   - `retry`: `model call failed (<reason>); retry <attempt> of <max> in <seconds> s`.
+   - `error`: the message, in the error colour.
+   - `idle`: a quiet line: `<turns> turns` and the cost as `USD <amount>` to two decimals, or
+     `cost not known` when it is `null`.
+   - `model_changed`, `effort_changed`, `decision`: one quiet line each.
+   The view follows the newest entry unless the developer has scrolled up.
+3. **Working state.** While the session is busy (from `GET /api/session` at start, then from
+   the entries: busy after a `user_message`, not busy after an `idle` with nothing queued) the
+   header shows `working` and the send button reads `Queue`; otherwise `Send`.
+4. **Sending.** The message box posts to `/api/session/messages` with the attached reports'
+   run ids (the chips from the report reader's `Use in conversation`). The message appears when
+   its entry arrives from the log, not before. A refused request shows its `error` text beside
+   the box and keeps the typed text.
+5. **Model and effort.** Two selects in the header (`id="model-select"`, `id="effort-select"`),
+   filled from `GET /api/models` and `GET /api/session`. Changing one posts it and applies the
+   response. The effort select is disabled when `effort_supported` is false. A refused change
+   shows its `error` text and puts the select back.
+6. **The review queue.** `GET /api/runs` at start, every 5 seconds, and at once after a
+   `decision` entry. Finished runs are drawn as the mock draws them (groups, cards, research
+   items, the report reader). Runs in progress are listed above the groups, one line each: id,
+   title, turn count, activity, `gate` when `gate_running`. A held run shows its note and stays
+   in the queue under a `Held` heading at the end of its group.
+   - `Accept`, `Redo`, `Mark read` post `/api/runs/<id>/decision` at once.
+   - `Send back` and `Hold` open a one-line note field in the card (not a browser prompt); the
+     decision is posted when the note is submitted; an empty note is not sent.
+   - `Accept all clean` posts `accept` for each clean card of the group, one after another, and
+     stops at the first refusal.
+   - A refused decision shows its `error` text in the card. A card is removed or changed only
+     from the next `/api/runs` response, never optimistically.
+   - `Details` on a code run loads `/api/runs/<id>/diff` and shows it as text in the card.
+7. **The map.** As in the mock, from `GET /api/map`; the Runs tab's counts come from
+   `/api/runs`.
+8. **Losing the server.** When a request fails at the network level, a bar across the top says
+   `No answer from blyte. Trying again.` and the request is tried again after 1, 2, 4, then 8
+   seconds (8 from then on); the bar goes when a request succeeds. Nothing stale is presented
+   as current: while the bar is shown the queue is dimmed.
+
+No fallbacks: an unknown entry `kind`, or a response missing a field this plan names, is shown
+as an error line naming what was wrong (`unknown entry kind <kind>`); it is not skipped and no
+default is substituted. Everything from the server is passed through `escapeHtml` before it is
+placed in the page. Add no comments to code. Nothing here needs to be resumable.
+
+**Tests** (`cargo test -p blyte --test test_surface_page`):
+
+1. `page_has_its_parts`: the ids `conversation`, `conversation-form`, `model-select`,
+   `effort-select`, `queue`, `map`, `report-reader`, `attached-reports`, `lost-server`.
+2. `page_calls_every_route`: the strings `/api/session`, `/api/session/events`,
+   `/api/session/messages`, `/api/models`, `/api/session/model`, `/api/session/effort`,
+   `/api/runs`, `/decision`, `/diff` and `/api/map`.
+3. `page_handles_every_entry_kind`: each of the ten kinds appears as a quoted string, and
+   `unknown entry kind` appears.
+4. `mock_only_parts_are_gone`: none of `/api/replay`, `guide-close`, `checkin-skip`,
+   `Save record`, `Next arrival`.
+5. `no_external_resources`: no `http://` or `https://` in a `src=` or `href=` attribute, no
+   `@import`, and no `window.prompt(`, `alert(` or `confirm(`.
+6. `no_raw_html_from_the_server`: the function that draws a `turn` (name it `renderTurn`) calls
+   `renderReportMarkdown(`; the page contains `function escapeHtml`.
+
+Also extract the page's inline script to a temporary file and run `node --check` on it; and, with
+`node`, run the functions that draw entries (`renderEntry` for each of the ten kinds, and an
+unknown kind) on hand-written entries and check each returns a string containing its `data-seq`.
+Say in the final message what you ran and what it printed.
+
+**Commit message:** `feat(surface): the page of the live surface, on the session server's interface`
