@@ -55,9 +55,13 @@ the credentials and the network; `blyte review` flags `git push` in a log after 
    has drafted to a file the user can read first. `/pr` refuses the default branch and never merges.
    A one-shot run has no such command and always ends at a local branch.
 
-   Considered and not chosen: a `push` tool the model calls and the user confirms each time. It
-   needs a way to ask a question mid-run, and a habit of confirming is weaker than the model not
-   having the capability at all. Also not chosen: a flag that lets an unattended run push.
+   The user can also ask in plain words ("open the PR"). The model then calls a `propose_pr` tool,
+   which pushes nothing: it makes the surface show the branch, the title and a yes-or-no question.
+   blyte's code pushes only on the user's keypress. The model never decides whether permission was
+   given, so a sentence in the chat or in a file cannot stand in for it. In a one-shot run the tool
+   is refused.
+
+   Not chosen: a flag that lets an unattended run push.
 
    Outside blyte, and recommended whatever is built here: protect the default branch on GitHub, so
    that a direct push or an unreviewed merge is refused by the server.
@@ -79,10 +83,10 @@ the credentials and the network; `blyte review` flags `git push` in a log after 
 2. What the package caches need: a check that downloads dependencies has no network in the shell.
 3. That `git cherry-pick`, `git merge` and `git commit` in the main checkout and in a linked
    worktree work inside the sandbox on macOS and Linux.
-4. How the surface (PR #377) handles a command the user types, which `/pr` would be added to.
+4. How the surface (PR #377) handles a command the user types, which `/pr` would be added to, and whether it can ask the user a yes-or-no question mid-run, which `propose_pr` needs.
 
 ## Out of scope
 
 - The implementer's sandbox.
-- Approval prompts of any kind.
+- Approval prompts for anything other than pushing.
 - Windows.
