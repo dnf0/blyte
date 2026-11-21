@@ -1,3 +1,9 @@
+## v0.55.0 (2026-11-21)
+
+### Feat
+
+- **orchestrator**: sandbox the orchestrator's shell; leave it only with the user's approval (#382)
+
 ## v0.54.0 (2026-11-21)
 
 ### Feat
