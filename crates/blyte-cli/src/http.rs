@@ -36,7 +36,7 @@ impl Response {
         Response {
             status,
             content_type: "application/json",
-            body: serde_json::to_vec(value).unwrap_or_default(),
+            body: serde_json::to_vec(value).expect("a JSON value serialises"),
         }
     }
 
