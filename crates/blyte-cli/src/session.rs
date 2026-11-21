@@ -473,7 +473,7 @@ fn format_prompt(text: &str, attachments: &[Attachment]) -> String {
     out
 }
 
-fn model_supports_effort(model: &str) -> bool {
+pub(crate) fn model_supports_effort(model: &str) -> bool {
     blyte_provider::detect_provider_kind(Some(model)) == blyte_provider::ProviderKind::Gemini
 }
 

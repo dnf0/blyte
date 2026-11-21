@@ -1,5 +1,6 @@
-use blyte_cli::cli::{apply_orchestrate_defaults, Cli};
+use blyte_cli::cli::{apply_orchestrate_defaults, Cli, SurfaceArgs};
 use clap::{CommandFactory, FromArgMatches};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// Restore the default SIGPIPE behaviour.
@@ -28,6 +29,13 @@ fn main() {
 
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let has_surface_flags = cli.port.is_some() || cli.no_open || cli.days.is_some();
+    if has_surface_flags && (cli.terminal || cli.prompt.is_some() || cli.command.is_some()) {
+        eprintln!(
+            "error: --port, --no-open, and --days cannot be used with --terminal, a prompt, or a subcommand"
+        );
+        std::process::exit(2);
+    }
     apply_orchestrate_defaults(&mut cli, &matches);
 
     if let Some(cmd) = cli.command {
@@ -266,6 +274,38 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+
+    let use_terminal = cli.terminal || !std::io::stdin().is_terminal();
+    if !use_terminal {
+        cli.orchestrate = true;
+        apply_orchestrate_defaults(&mut cli, &matches);
+        let surface_args = SurfaceArgs {
+            port: cli.port.unwrap_or(0),
+            no_open: cli.no_open,
+            days: cli.days.unwrap_or(14),
+        };
+        let cwd = match std::env::current_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("blyte: cannot determine current directory: {e}");
+                std::process::exit(1);
+            }
+        };
+        let repl_config = blyte_cli::repl::ReplConfig {
+            repo_root: cwd,
+            model: cli.model,
+            gate: cli.gate,
+            context_strategy: cli.context,
+            container: cli.container,
+            max_turns: cli.max_turns,
+            max_gates: cli.max_gates,
+            rollback: cli.rollback,
+            orchestrate: cli.orchestrate,
+            dispatch_cmd: cli.dispatch_cmd,
+            fold_budget: cli.fold_budget,
+        };
+        std::process::exit(blyte_cli::serve::run(&surface_args, repl_config));
     }
 
     let repl_config = blyte_cli::repl::ReplConfig {
