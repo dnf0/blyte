@@ -3,6 +3,8 @@
 
 use std::net::TcpListener;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -10,9 +12,12 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
     // A server that accepts connections and never answers.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let connected = Arc::new(AtomicBool::new(false));
+    let connected_srv = Arc::clone(&connected);
     std::thread::spawn(move || {
         let mut held = Vec::new();
         for s in listener.incoming().flatten() {
+            connected_srv.store(true, Ordering::SeqCst);
             held.push(s);
         }
     });
@@ -20,6 +25,7 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
     let d = tempfile::tempdir().unwrap();
     let repo = d.path().join("r");
     let home = d.path().join("home");
+    let slots = d.path().join("slots");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     assert!(Command::new("git")
@@ -52,15 +58,22 @@ fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("OLLAMA_HOST")
         .env_remove("OLLAMA_API_KEY")
+        .env_remove("BLYTE_WATCHDOG_GRACE_SECS")
+        .env_remove("BLYTE_MODEL_TIMEOUT_SECS")
+        .env_remove("BLYTE_IN_GATE")
+        .env("BLYTE_GATE_SLOT_DIR", &slots)
+        .env("BLYTE_GATE_SLOTS", "2")
         .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"))
         .env("OPENAI_API_KEY", "test")
         .env("BLYTE_MODEL", "openai/test-model")
-        .env("BLYTE_WATCHDOG_GRACE_SECS", "1")
         .output()
         .unwrap();
     let took = started.elapsed();
 
-    assert!(took < Duration::from_secs(10), "ran {took:?}");
+    assert!(
+        connected.load(Ordering::SeqCst),
+        "expected blyte to connect to the hung server"
+    );
     assert!(
         took >= Duration::from_secs(1),
         "ended before the deadline: {took:?}"

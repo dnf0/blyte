@@ -165,6 +165,16 @@ pub fn check_claims(
     claims: &[Claim],
     deadline: Option<std::time::Instant>,
 ) -> ClaimCheck {
+    check_claims_with_clock(provider, claims, deadline, &std::time::Instant::now)
+}
+
+/// Like [`check_claims`], reading the current time from `now`.
+pub fn check_claims_with_clock(
+    provider: &dyn Provider,
+    claims: &[Claim],
+    deadline: Option<std::time::Instant>,
+    now: &(dyn Fn() -> std::time::Instant + Sync),
+) -> ClaimCheck {
     let capped = claims.len().min(MAX_CLAIMS);
     let to_check = &claims[..capped];
     let batches: Vec<&[Claim]> = to_check.chunks(BATCH_SIZE).collect();
@@ -185,7 +195,7 @@ pub fn check_claims(
         let mut out_of_time = false;
         for _attempt in 0..2 {
             if let Some(d) = deadline {
-                let time_left = d.saturating_duration_since(std::time::Instant::now());
+                let time_left = d.saturating_duration_since(now());
                 if time_left.is_zero() {
                     out_of_time = true;
                     break;
@@ -205,7 +215,7 @@ pub fn check_claims(
                     if let ProviderError::NoAnswer { usage, .. } = &e {
                         add_usage(&mut out.usage, usage);
                     }
-                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    if deadline.is_some_and(|d| now() >= d) {
                         out_of_time = true;
                         break;
                     }

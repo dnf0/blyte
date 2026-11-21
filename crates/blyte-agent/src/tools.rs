@@ -722,7 +722,22 @@ pub fn execute_with_deadline(
     args: &Value,
     deadline: Option<std::time::Instant>,
 ) -> ToolOutcome {
-    let mut outcome = execute_unbounded(root, shell, fs, name, args, deadline);
+    let command_timeout = match deadline {
+        Some(d) => COMMAND_TIMEOUT.min(d.saturating_duration_since(std::time::Instant::now())),
+        None => COMMAND_TIMEOUT,
+    };
+    execute_with_timeout(root, shell, fs, name, args, command_timeout)
+}
+
+pub fn execute_with_timeout(
+    root: &Path,
+    shell: &dyn Shell,
+    fs: &dyn Fs,
+    name: &str,
+    args: &Value,
+    timeout: Duration,
+) -> ToolOutcome {
+    let mut outcome = execute_unbounded(root, shell, fs, name, args, COMMAND_TIMEOUT.min(timeout));
     outcome.content = if name == "read" {
         bound_output_with(&outcome.content, READ_LINE_BUDGET, READ_LINE_CHARS)
     } else if name == "grep" {
@@ -740,12 +755,8 @@ fn execute_unbounded(
     fs: &dyn Fs,
     name: &str,
     args: &Value,
-    deadline: Option<std::time::Instant>,
+    command_timeout: Duration,
 ) -> ToolOutcome {
-    let command_timeout = match deadline {
-        Some(d) => COMMAND_TIMEOUT.min(d.saturating_duration_since(std::time::Instant::now())),
-        None => COMMAND_TIMEOUT,
-    };
     let s = |k: &str| {
         args.get(k)
             .and_then(|v| v.as_str())
