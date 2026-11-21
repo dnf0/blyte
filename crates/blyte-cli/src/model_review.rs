@@ -9,6 +9,83 @@ pub struct Concern {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelReviewResult {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub concerns: Vec<Concern>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ModelReviewResult {
+    pub fn ok(model: String, cost_usd: Option<f64>, concerns: Vec<Concern>) -> Self {
+        Self {
+            status: "ok".to_string(),
+            model: Some(model),
+            cost_usd,
+            concerns,
+            error: None,
+        }
+    }
+
+    pub fn failed(model: Option<String>, cost_usd: Option<f64>, error: impl Into<String>) -> Self {
+        Self {
+            status: "failed".to_string(),
+            model,
+            cost_usd,
+            concerns: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn has_findings(&self) -> bool {
+        self.status == "ok" && !self.concerns.is_empty()
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.status != "ok" || self.error.is_some()
+    }
+
+    pub fn waits_in_queue(&self) -> bool {
+        self.has_findings() || self.is_failed()
+    }
+
+    pub fn flag(&self) -> Option<String> {
+        if self.is_failed() {
+            let reason = self.error.as_deref().unwrap_or("unknown error");
+            return Some(sanitize_flag(format!("model review failed: {reason}")));
+        }
+        if self.has_findings() {
+            let first = format_concern(&self.concerns[0]);
+            let msg = if self.concerns.len() == 1 {
+                format!("model review (1 concern): {first}")
+            } else {
+                format!(
+                    "model review ({} concerns): {first} (and {} more)",
+                    self.concerns.len(),
+                    self.concerns.len() - 1
+                )
+            };
+            return Some(sanitize_flag(msg));
+        }
+        None
+    }
+}
+
+fn sanitize_flag(flag: String) -> String {
+    let single_line = flag.lines().next().unwrap_or("").to_string();
+    if single_line.chars().count() > 200 {
+        single_line.chars().take(200).collect()
+    } else {
+        single_line
+    }
+}
+
 pub const SYSTEM_PROMPT: &str = "\
 You are a senior software engineer performing a first review of a code diff against a task specification.
 Review the diff against the task. Raise only concrete problems a reviewer must look at:
@@ -212,30 +289,16 @@ pub fn format_concern(c: &Concern) -> String {
     }
 }
 
-pub fn run(root: &Path, id: &str, base: &str, wt: &Path) {
+pub fn run(root: &Path, id: &str, base: &str, wt: &Path) -> ModelReviewResult {
     let start_path = root.join(".wt").join(format!("{id}.start.json"));
     let task_text = match read_task_text(root, &start_path) {
         Some(t) => t,
         None => {
-            println!("== model review");
-            println!("skipped: task file not found");
-            return;
+            let result = ModelReviewResult::failed(None, None, "task file not found");
+            save_review(root, id, None, None, Vec::new(), result.error.clone());
+            return result;
         }
     };
-
-    let stat_out = Command::new("git")
-        .args(["diff", "--stat", &format!("{base}..HEAD")])
-        .current_dir(wt)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-
-    let diff_out = Command::new("git")
-        .args(["diff", &format!("{base}..HEAD")])
-        .current_dir(wt)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
 
     if let Some(env_path) = crate::env_file::default_path() {
         let _ = crate::env_file::load(&env_path);
@@ -245,9 +308,9 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) {
         Ok(Some((cfg, _))) => Some(cfg),
         Ok(None) => None,
         Err(e) => {
-            println!("== model review");
-            println!("error: {e}");
-            return;
+            let result = ModelReviewResult::failed(None, None, e);
+            save_review(root, id, None, None, Vec::new(), result.error.clone());
+            return result;
         }
     };
     let dispatch_cfg = repo_config.map(|c| c.dispatch).unwrap_or_default();
@@ -260,26 +323,141 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) {
     let provider = match blyte_provider::resolve_provider(model) {
         Ok(p) => p,
         Err(blyte_provider::ProviderError::MissingKey(key)) => {
-            println!("== model review");
-            println!("skipped: no API key (set {key})");
-            return;
+            let result = ModelReviewResult::failed(None, None, format!("no API key (set {key})"));
+            save_review(root, id, None, None, Vec::new(), result.error.clone());
+            return result;
         }
         Err(e) => {
-            println!("== model review");
-            println!("error: {e}");
-            return;
+            let result = ModelReviewResult::failed(None, None, e.to_string());
+            save_review(root, id, None, None, Vec::new(), result.error.clone());
+            return result;
         }
     };
+
+    run_with_task_and_provider(root, id, base, wt, &task_text, provider.as_ref())
+}
+
+pub fn run_with_provider(
+    root: &Path,
+    id: &str,
+    base: &str,
+    wt: &Path,
+    provider: &dyn blyte_provider::Provider,
+) -> ModelReviewResult {
+    let start_path = root.join(".wt").join(format!("{id}.start.json"));
+    let task_text = match read_task_text(root, &start_path) {
+        Some(t) => t,
+        None => {
+            let result =
+                ModelReviewResult::failed(Some(provider.model_id()), None, "task file not found");
+            save_review(
+                root,
+                id,
+                result.model.as_deref(),
+                None,
+                Vec::new(),
+                result.error.clone(),
+            );
+            return result;
+        }
+    };
+    run_with_task_and_provider(root, id, base, wt, &task_text, provider)
+}
+
+fn run_with_task_and_provider(
+    root: &Path,
+    id: &str,
+    base: &str,
+    wt: &Path,
+    task_text: &str,
+    provider: &dyn blyte_provider::Provider,
+) -> ModelReviewResult {
     let model_id = provider.model_id();
 
-    let req = build_request(&task_text, &stat_out, &diff_out);
+    let stat_out = match Command::new("git")
+        .args(["diff", "--stat", &format!("{base}..HEAD")])
+        .current_dir(wt)
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Ok(o) => {
+            let err = format!(
+                "git diff --stat failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            save_review(
+                root,
+                id,
+                Some(&model_id),
+                None,
+                Vec::new(),
+                Some(err.clone()),
+            );
+            return ModelReviewResult::failed(Some(model_id), None, err);
+        }
+        Err(e) => {
+            let err = format!("git diff --stat failed: {e}");
+            save_review(
+                root,
+                id,
+                Some(&model_id),
+                None,
+                Vec::new(),
+                Some(err.clone()),
+            );
+            return ModelReviewResult::failed(Some(model_id), None, err);
+        }
+    };
+
+    let diff_out = match Command::new("git")
+        .args(["diff", &format!("{base}..HEAD")])
+        .current_dir(wt)
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => {
+            let err = format!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            save_review(
+                root,
+                id,
+                Some(&model_id),
+                None,
+                Vec::new(),
+                Some(err.clone()),
+            );
+            return ModelReviewResult::failed(Some(model_id), None, err);
+        }
+        Err(e) => {
+            let err = format!("git diff failed: {e}");
+            save_review(
+                root,
+                id,
+                Some(&model_id),
+                None,
+                Vec::new(),
+                Some(err.clone()),
+            );
+            return ModelReviewResult::failed(Some(model_id), None, err);
+        }
+    };
+
+    let req = build_request(task_text, &stat_out, &diff_out);
     let resp = match provider.complete(&req) {
         Ok(r) => r,
         Err(e) => {
-            println!("== model review");
-            println!("error: {e}");
-            save_review(root, id, &model_id, None, Vec::new(), Some(e.to_string()));
-            return;
+            let err = e.to_string();
+            save_review(
+                root,
+                id,
+                Some(&model_id),
+                None,
+                Vec::new(),
+                Some(err.clone()),
+            );
+            return ModelReviewResult::failed(Some(model_id), None, err);
         }
     };
 
@@ -292,27 +470,47 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) {
         }
         Err(e) => {
             let err_msg = parse_error_message(&e, resp.finish_reason.as_deref());
-            println!("== model review");
-            println!("error: {err_msg}");
-            save_review(root, id, &model_id, cost_usd, Vec::new(), Some(err_msg));
-            return;
+            save_review(
+                root,
+                id,
+                Some(&model_id),
+                cost_usd,
+                Vec::new(),
+                Some(err_msg.clone()),
+            );
+            return ModelReviewResult::failed(Some(model_id), cost_usd, err_msg);
         }
     };
 
-    let cost_str = match cost_usd {
+    save_review(root, id, Some(&model_id), cost_usd, concerns.clone(), None);
+    ModelReviewResult::ok(model_id, cost_usd, concerns)
+}
+
+pub fn print_result(result: &ModelReviewResult) {
+    if result.is_failed() {
+        let err = result.error.as_deref().unwrap_or("unknown error");
+        println!("== model review");
+        if err == "task file not found" || err.starts_with("no API key (set ") {
+            println!("skipped: {err}");
+        } else {
+            println!("error: {err}");
+        }
+        return;
+    }
+
+    let model_id = result.model.as_deref().unwrap_or("?");
+    let cost_str = match result.cost_usd {
         Some(c) => format!("${c:.4}"),
         None => "?".to_string(),
     };
     println!("== model review (trial: {model_id}, {cost_str})");
-    if concerns.is_empty() {
+    if result.concerns.is_empty() {
         println!("nothing raised");
     } else {
-        for c in &concerns {
+        for c in &result.concerns {
             println!("{}", format_concern(c));
         }
     }
-
-    save_review(root, id, &model_id, cost_usd, concerns, None);
 }
 
 fn read_task_text(root: &Path, start_path: &Path) -> Option<String> {
@@ -332,7 +530,7 @@ fn read_task_text(root: &Path, start_path: &Path) -> Option<String> {
 fn save_review(
     root: &Path,
     id: &str,
-    model: &str,
+    model: Option<&str>,
     cost_usd: Option<f64>,
     concerns: Vec<Concern>,
     error: Option<String>,
@@ -537,7 +735,7 @@ Overall looks okay otherwise.
         save_review(
             dir.path(),
             "T1",
-            "gemini/gemini-3.8-flash",
+            Some("gemini/gemini-3.8-flash"),
             Some(0.0012),
             concerns,
             None,

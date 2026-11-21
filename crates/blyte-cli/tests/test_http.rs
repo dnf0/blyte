@@ -520,3 +520,18 @@ fn case_insensitive_headers_and_allowed_hosts() {
         assert_eq!(resp.body_str(), "abc");
     }
 }
+
+#[test]
+fn request_headers_are_passed_to_handler() {
+    let port = start_server(|req| {
+        let values: Vec<&str> = req.header_values("X-Blyte-Token").collect();
+        Response::text(200, &values.join(","))
+    });
+
+    let req = format!(
+        "POST /check HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nx-blyte-token: first\r\nX-Blyte-Token: second\r\n\r\n"
+    );
+    let resp = send_raw(port, req.as_bytes());
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body_str(), "first,second");
+}

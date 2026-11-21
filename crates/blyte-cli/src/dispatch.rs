@@ -228,7 +228,35 @@ fn append_source_state(path: &Path, block: &str) {
     }
 }
 
+pub fn validate_request_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("invalid --request value: must not be empty".to_string());
+    }
+    if id.len() > 64 {
+        return Err(format!(
+            "invalid --request value {:?}: must be at most 64 characters",
+            id
+        ));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "invalid --request value {:?}: only ASCII letters, digits, '-' and '_' are allowed",
+            id
+        ));
+    }
+    Ok(())
+}
+
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
+    if let Some(ref req) = args.request {
+        if let Err(e) = validate_request_id(req) {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    }
     if let Ok(home) = crate::skill::home_dir() {
         if let Ok(Some(path)) = crate::skill::ensure_context_block(&home) {
             eprintln!(
@@ -621,6 +649,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "tags": tags,
         "plan": args.plan,
         "plan_task": args.plan_task,
+        "request": args.request,
         "base": args.base,
     });
     if let Some(ref s) = session {
@@ -1078,6 +1107,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "max_seconds": max_seconds,
         "plan": args.plan,
         "plan_task": args.plan_task,
+        "request": args.request,
         "base": args.base,
         "base_sha": base_commit,
         "base_check": base_check,
@@ -1348,6 +1378,15 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         research_report,
     };
 
+    if outcome == "verified" && !args.research {
+        if let Err(err) = crate::queue_actions::evaluate_verified_run(&root, &args.id) {
+            eprintln!(
+                "warning: post-dispatch review check failed for {}: {err}",
+                args.id
+            );
+        }
+    }
+
     finish_summary(&summary, &wt_parent)
 }
 
@@ -1384,7 +1423,7 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         return 0;
     }
 
-    let data = match crate::queue_actions::compute_review(&root, &args.id, args.diff) {
+    let mut data = match crate::queue_actions::compute_review(&root, &args.id, args.diff) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: {e}");
@@ -1392,20 +1431,50 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         }
     };
 
-    if let Err(e) = crate::queue_actions::write_checks_file(
-        &root,
-        &args.id,
-        &data.checks.flags,
-        &data.fallbacks,
-    ) {
-        eprintln!("{e}");
-        return 2;
+    let stored_model_review = if args.model_review {
+        None
+    } else {
+        match crate::queue_actions::read_stored_model_review(&root, &args.id) {
+            Ok(mr) => mr,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
+    };
+    if let Some(ref mr) = stored_model_review {
+        if let Some(flag) = mr.flag() {
+            if !data
+                .checks
+                .flags
+                .iter()
+                .any(|f| f.starts_with("model review"))
+            {
+                data.checks.flags.push(flag);
+            }
+        }
+    }
+
+    if !args.model_review {
+        if let Err(e) = crate::queue_actions::write_checks_file(
+            &root,
+            &args.id,
+            &data.checks.flags,
+            &data.fallbacks,
+            stored_model_review.as_ref(),
+        ) {
+            eprintln!("{e}");
+            return 2;
+        }
     }
 
     let crate::queue_actions::ReviewComputation {
         wt,
         wt_exists,
+        is_research: _,
         base,
+        task_text: _,
+        changed_files: _,
         commits_out,
         files_out,
         tree_out,
@@ -1416,8 +1485,8 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         quote_problems,
         claim_check,
         claim_check_skipped,
-        checks,
-        fallbacks: _,
+        mut checks,
+        fallbacks,
     } = data;
 
     println!("== checks");
@@ -1531,7 +1600,34 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     }
 
     if args.model_review && wt_exists {
-        crate::model_review::run(&root, &args.id, &base, &wt);
+        let mr = crate::model_review::run(&root, &args.id, &base, &wt);
+        crate::model_review::print_result(&mr);
+        if let Some(flag) = mr.flag() {
+            checks.flags.push(flag);
+        }
+        if let Err(e) = crate::queue_actions::write_checks_file(
+            &root,
+            &args.id,
+            &checks.flags,
+            &fallbacks,
+            Some(&mr),
+        ) {
+            eprintln!("{e}");
+            return 2;
+        }
+    } else if args.model_review {
+        if let Err(e) = crate::queue_actions::write_checks_file(
+            &root,
+            &args.id,
+            &checks.flags,
+            &fallbacks,
+            None,
+        ) {
+            eprintln!("{e}");
+            return 2;
+        }
+    } else if let Some(ref mr) = stored_model_review {
+        crate::model_review::print_result(mr);
     }
 
     0

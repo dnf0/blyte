@@ -479,6 +479,7 @@ impl<'a> Runner<'a> {
         state: &State,
         last_failed: &[String],
         deadline: &mut Option<std::time::Instant>,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> (bool, String, u64, Vec<String>) {
         let (_guard, wait_ms) = if gate_slots::enabled() && !gate_slots::nested() {
             let max_slots = gate_slots::slots();
@@ -509,7 +510,8 @@ impl<'a> Runner<'a> {
 
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         if steps.len() <= 1 {
-            let (passed, output) = self.run_step(&state.orchestrator.verification_cmd, *deadline);
+            let (passed, output) =
+                self.run_step(&state.orchestrator.verification_cmd, *deadline, now);
             let failed = if passed {
                 Vec::new()
             } else {
@@ -528,11 +530,11 @@ impl<'a> Runner<'a> {
         let mut failures = Vec::new();
         let mut failed_steps = Vec::new();
         for &step in &first_group {
-            let (passed, output) = self.run_step(step, *deadline);
+            let (passed, output) = self.run_step(step, *deadline, now);
             if !passed {
                 failed_steps.push(step.to_string());
                 failures.push(format!("$ {step}\n{output}"));
-                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                if deadline.is_some_and(|d| now() >= d) {
                     break;
                 }
             }
@@ -561,11 +563,11 @@ impl<'a> Runner<'a> {
             );
         }
         for &step in &second_group {
-            let (passed, output) = self.run_step(step, *deadline);
+            let (passed, output) = self.run_step(step, *deadline, now);
             if !passed {
                 failed_steps.push(step.to_string());
                 failures.push(format!("$ {step}\n{output}"));
-                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                if deadline.is_some_and(|d| now() >= d) {
                     break;
                 }
             }
@@ -588,8 +590,13 @@ impl<'a> Runner<'a> {
     }
 
     /// Run one gate command: exit status and its bounded output.
-    fn run_step(&self, cmd: &str, deadline: Option<std::time::Instant>) -> (bool, String) {
-        self.run_step_in(cmd, &self.root, deadline)
+    fn run_step(
+        &self,
+        cmd: &str,
+        deadline: Option<std::time::Instant>,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
+    ) -> (bool, String) {
+        self.run_step_in(cmd, &self.root, deadline, now)
     }
 
     fn run_step_in(
@@ -597,10 +604,11 @@ impl<'a> Runner<'a> {
         cmd: &str,
         dir: &Path,
         deadline: Option<std::time::Instant>,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> (bool, String) {
         let timeout = match deadline {
             Some(d) => {
-                let left = d.saturating_duration_since(std::time::Instant::now());
+                let left = d.saturating_duration_since(now());
                 if left.is_zero() {
                     return (false, "exit 124\ngate ran out of time".into());
                 }
@@ -612,7 +620,7 @@ impl<'a> Runner<'a> {
         match self.shell.exec(&wrapped, dir, timeout) {
             Ok(o) => {
                 let body = tools::bound_output(o.merged().trim_end());
-                if o.exit_code != 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                if o.exit_code != 0 && deadline.is_some_and(|d| now() >= d) {
                     if body.is_empty() {
                         return (false, format!("exit {}\ngate ran out of time", o.exit_code));
                     }
@@ -626,7 +634,7 @@ impl<'a> Runner<'a> {
             // A gate that cannot execute has not passed. Treating an error as success is how
             // an ungated run gets mistaken for a verified one.
             Err(e) => {
-                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                if deadline.is_some_and(|d| now() >= d) {
                     return (false, format!("gate ran out of time: {e}"));
                 }
                 (false, format!("verification command could not run: {e}"))
@@ -711,7 +719,7 @@ impl<'a> Runner<'a> {
 
         let mut all_failed = true;
         for step in failing_steps {
-            let (passed, _) = self.run_step_in(step, &wt_path, None);
+            let (passed, _) = self.run_step_in(step, &wt_path, None, &std::time::Instant::now);
             if passed {
                 all_failed = false;
             }
@@ -777,6 +785,7 @@ impl<'a> Runner<'a> {
     fn run_claim_check(
         &self,
         deadline: Option<std::time::Instant>,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> Option<claim_check::ClaimCheck> {
         if !self.claim_check {
             return None;
@@ -808,7 +817,12 @@ impl<'a> Runner<'a> {
                 read: &read,
             },
         );
-        Some(claim_check::check_claims(self.provider, &claims, deadline))
+        Some(claim_check::check_claims_with_clock(
+            self.provider,
+            &claims,
+            deadline,
+            now,
+        ))
     }
 
     fn reset_to(&self, commit: &str) {
@@ -819,25 +833,34 @@ impl<'a> Runner<'a> {
         );
     }
 
-    fn elapsed_fraction(&self, deadline: Option<std::time::Instant>) -> Option<f64> {
+    fn elapsed_fraction(
+        &self,
+        deadline: Option<std::time::Instant>,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
+    ) -> Option<f64> {
         let max_duration = self.budget.max_duration?;
         let deadline = deadline?;
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(now());
         Some(max_duration.saturating_sub(remaining).as_secs_f64() / max_duration.as_secs_f64())
     }
 
     pub fn run(&self, state: &mut State) -> (Outcome, RunReport) {
-        let deadline = self
-            .budget
-            .max_duration
-            .map(|d| std::time::Instant::now() + d);
-        self.run_until(state, deadline)
+        self.run_with_clock(state, &std::time::Instant::now)
+    }
+
+    /// Like [`run`](Self::run), reading the current time from `now`.
+    pub fn run_with_clock(
+        &self,
+        state: &mut State,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
+    ) -> (Outcome, RunReport) {
+        self.run_until(state, now)
     }
 
     fn run_until(
         &self,
         state: &mut State,
-        deadline: Option<std::time::Instant>,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> (Outcome, RunReport) {
         let is_empty_conversation = state
             .runtime
@@ -881,6 +904,10 @@ impl<'a> Runner<'a> {
             }
         }
 
+        let baseline = self.checkpoint();
+        let start_fp = self.fingerprint();
+        let deadline = self.budget.max_duration.map(|d| now() + d);
+
         let loop_deadline = match (
             self.research && self.claim_check,
             deadline,
@@ -895,8 +922,11 @@ impl<'a> Runner<'a> {
             &mut history,
             &mut seen_names,
             &system,
+            baseline,
+            start_fp,
             loop_deadline,
             deadline,
+            now,
         );
         if self.research
             && outcome != Outcome::Verified
@@ -911,7 +941,7 @@ impl<'a> Runner<'a> {
                 report.quote_problems = Some(problems);
             }
             if report.claim_check.is_none() && report.claim_check_skipped.is_none() {
-                if let Some(cc) = self.run_claim_check(deadline) {
+                if let Some(cc) = self.run_claim_check(deadline, now) {
                     report.usage.input += cc.usage.input;
                     report.usage.cached += cc.usage.cached;
                     report.usage.output += cc.usage.output;
@@ -931,19 +961,22 @@ impl<'a> Runner<'a> {
         (outcome, report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_loop(
         &self,
         state: &mut State,
         history: &mut Vec<Message>,
         seen_names: &mut HashSet<String>,
         system: &str,
+        baseline: Option<String>,
+        start_fp: Option<String>,
         deadline: Option<std::time::Instant>,
         claim_deadline: Option<std::time::Instant>,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> (Outcome, RunReport) {
         let mut deadline = deadline;
         let mut report = RunReport::default();
         let specs = tools::specs();
-        let baseline = self.checkpoint();
         let mut last_sent: Option<Vec<Message>> = None;
         let mut last_failed: Vec<String> = Vec::new();
         let mut last_fingerprint: Option<String> = None;
@@ -951,7 +984,6 @@ impl<'a> Runner<'a> {
         let mut repeats: u32 = 0;
         let mut read_warn_sent = false;
         let mut read_loop_turn: Option<u32> = None;
-        let start_fp = self.fingerprint();
         let mut change_fp = start_fp.clone();
         let mut progressed = false;
         let mut nudge_turn: Option<u32> = None;
@@ -972,7 +1004,7 @@ impl<'a> Runner<'a> {
 
         if self.base_check && !gate_steps(&state.orchestrator.verification_cmd).is_empty() {
             let (passed, output, _wait_ms, failing_steps) =
-                self.run_gate(state, &[], &mut deadline);
+                self.run_gate(state, &[], &mut deadline, now);
             if !passed {
                 let steps = failing_steps.join("; ");
                 let lines: Vec<&str> = output.lines().collect();
@@ -993,7 +1025,7 @@ impl<'a> Runner<'a> {
             if read_loop_turn.is_some_and(|t| turn > t + READ_LOOP_GRACE_TURNS) {
                 return (Outcome::BudgetExhausted, report);
             }
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if deadline.is_some_and(|d| now() >= d) {
                 return (Outcome::BudgetExhausted, report);
             }
             if let Some(cap) = state.orchestrator.max_cost_usd {
@@ -1017,7 +1049,7 @@ impl<'a> Runner<'a> {
                 } else if let (Some(max_duration), Some(deadline)) =
                     (self.budget.max_duration, deadline)
                 {
-                    let time_left = deadline.saturating_duration_since(std::time::Instant::now());
+                    let time_left = deadline.saturating_duration_since(now());
                     if time_left.as_secs_f64() < max_duration.as_secs_f64() * 0.1 {
                         wrap_up_sent = true;
                         let m = ((time_left.as_secs_f64() / 60.0).ceil() as u64).max(1);
@@ -1060,7 +1092,7 @@ impl<'a> Runner<'a> {
                 && state.runtime.conversation.is_none()
                 && !progressed
             {
-                let elapsed = self.elapsed_fraction(deadline);
+                let elapsed = self.elapsed_fraction(deadline, now);
                 if nudge_turn.is_none()
                     && (turn > NO_PROGRESS_TURNS
                         || (turn > NO_PROGRESS_MIN_TURNS
@@ -1168,7 +1200,7 @@ impl<'a> Runner<'a> {
             let mut failed_attempts: Vec<FailedAttempt> = Vec::new();
             let resp = loop {
                 if let Some(d) = deadline {
-                    let time_left = d.saturating_duration_since(std::time::Instant::now());
+                    let time_left = d.saturating_duration_since(now());
                     if time_left.is_zero() {
                         return (Outcome::BudgetExhausted, report);
                     }
@@ -1209,9 +1241,7 @@ impl<'a> Runner<'a> {
                         };
                         // An exhausted quota is reported as an error even past the deadline:
                         // the operator needs to see it to switch provider.
-                        if quota_exhausted(&e).is_none()
-                            && deadline.is_some_and(|d| std::time::Instant::now() >= d)
-                        {
+                        if quota_exhausted(&e).is_none() && deadline.is_some_and(|d| now() >= d) {
                             push_deadline_turn(&mut report);
                             return (Outcome::BudgetExhausted, report);
                         }
@@ -1225,7 +1255,7 @@ impl<'a> Runner<'a> {
                             };
                             attempt += 1;
                             let wait = retry_wait(&e, attempt);
-                            if deadline.is_some_and(|d| std::time::Instant::now() + wait >= d) {
+                            if deadline.is_some_and(|d| now() + wait >= d) {
                                 push_deadline_turn(&mut report);
                                 return (Outcome::BudgetExhausted, report);
                             }
@@ -1337,7 +1367,7 @@ impl<'a> Runner<'a> {
                     change_fp = current_fp;
                 }
                 for call in &resp.tool_calls {
-                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    if deadline.is_some_and(|d| now() >= d) {
                         report.turn_usage.last_mut().unwrap().tools_ms =
                             tools_start.elapsed().as_millis() as u64;
                         return (Outcome::BudgetExhausted, report);
@@ -1368,14 +1398,19 @@ impl<'a> Runner<'a> {
                             .collect()
                     } else {
                         let clean = |s: &str| s.trim_end().replace('\n', " ↵ ");
-                        let text = call
-                            .arguments
-                            .get("command")
-                            .or_else(|| call.arguments.get("pattern"))
-                            .or_else(|| call.arguments.get("path"))
-                            .and_then(|v| v.as_str())
-                            .map(clean)
-                            .unwrap_or_else(|| clean(&call.arguments.to_string()));
+                        let text = if call.name == "blyte" {
+                            format_blyte_tool_input(&call.arguments)
+                                .map(|s| clean(&s))
+                                .unwrap_or_else(|| clean(&call.arguments.to_string()))
+                        } else {
+                            call.arguments
+                                .get("command")
+                                .or_else(|| call.arguments.get("pattern"))
+                                .or_else(|| call.arguments.get("path"))
+                                .and_then(|v| v.as_str())
+                                .map(clean)
+                                .unwrap_or_else(|| clean(&call.arguments.to_string()))
+                        };
                         if text.chars().count() > 2000 {
                             let mut cut: String = text.chars().take(2000).collect();
                             cut.push('…');
@@ -1399,13 +1434,16 @@ impl<'a> Runner<'a> {
                             is_error: true,
                         }
                     } else {
-                        tools::execute_with_deadline(
+                        let tool_timeout = deadline
+                            .map(|d| d.saturating_duration_since(now()))
+                            .unwrap_or(tools::COMMAND_TIMEOUT);
+                        tools::execute_with_timeout(
                             &self.root,
                             self.shell,
                             self.fs,
                             &call.name,
                             &call.arguments,
-                            deadline,
+                            tool_timeout,
                         )
                     };
 
@@ -1526,7 +1564,7 @@ impl<'a> Runner<'a> {
             });
             let gate_start = std::time::Instant::now();
             let (mut passed, mut output, wait_ms, failing) =
-                self.run_gate(state, &last_failed, &mut deadline);
+                self.run_gate(state, &last_failed, &mut deadline, now);
             last_failed = failing;
             if passed && self.research {
                 let mut problems = self.check_report_quotes(seen_names);
@@ -1537,7 +1575,7 @@ impl<'a> Runner<'a> {
                 problems.truncate(research_check::MAX_PROBLEMS);
                 report.quote_problems = Some(problems);
                 if passed {
-                    if let Some(cc) = self.run_claim_check(claim_deadline) {
+                    if let Some(cc) = self.run_claim_check(claim_deadline, now) {
                         report.usage.input += cc.usage.input;
                         report.usage.cached += cc.usage.cached;
                         report.usage.output += cc.usage.output;
@@ -1577,7 +1615,7 @@ impl<'a> Runner<'a> {
                 return (Outcome::Verified, report);
             }
             report.gate_failures.push(cut_gate_output(&output));
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if deadline.is_some_and(|d| now() >= d) {
                 return (Outcome::BudgetExhausted, report);
             }
 
@@ -1783,6 +1821,32 @@ pub fn cut_gate_output(output: &str) -> String {
     pieces.join("\n")
 }
 
+fn format_blyte_arg(arg: &str) -> String {
+    if arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    {
+        serde_json::to_string(arg).unwrap_or_else(|_| format!("\"{arg}\""))
+    } else {
+        arg.to_string()
+    }
+}
+
+pub fn format_blyte_tool_input(args: &serde_json::Value) -> Option<String> {
+    let raw_args = args.get("args")?.as_array()?;
+    let mut parts = Vec::with_capacity(raw_args.len() + 1);
+    parts.push("blyte".to_string());
+    for item in raw_args {
+        parts.push(format_blyte_arg(item.as_str()?));
+    }
+    let mut cmd = parts.join(" ");
+    if args.get("background").and_then(|v| v.as_bool()) == Some(true) {
+        cmd.push_str(" (background)");
+    }
+    Some(cmd)
+}
+
 /// Extracts a concise, human-readable target descriptor from a tool call's arguments.
 ///
 /// Deterministic and zero-latency: formats tool targets without LLM invocation to
@@ -1861,6 +1925,11 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
                     }
                 }
                 return format!("pattern '{pattern}'");
+            }
+        }
+        "blyte" => {
+            if let Some(cmd) = format_blyte_tool_input(args) {
+                return cmd;
             }
         }
         _ => {}

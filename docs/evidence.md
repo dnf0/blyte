@@ -302,3 +302,8 @@ a spec that already existed, which favours going straight to an implementer; a r
 splitting into tasks or a decision was not tested. The results were compared by the check and by
 what each diff contains, not read line by line. Arm B's corrections came through the repository
 file, not the default process itself.
+
+**What changed.** The default process no longer asks the orchestrator to write out names,
+signatures and tests, which is what made it read the code before dispatching. It now passes on the
+request and its decisions, and leaves reading the code to the implementer. This change has not yet
+been measured.

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use blyte_agent::fs::LocalFs;
 use blyte_agent::shell::LocalShell;
-use blyte_agent::tools::{execute, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS};
+use blyte_agent::tools::{execute, set_blyte_request, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS};
 use serde_json::json;
 
 static BLYTE_TOOL_LOCK: Mutex<()> = Mutex::new(());
@@ -230,4 +230,214 @@ fn nonzero_exit_returns_error_with_stderr_text() {
         "content was: {:?}",
         out.content
     );
+}
+
+#[test]
+fn wait_exit_2_is_still_waiting_not_error() {
+    let root = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = write_script(
+        scripts.path(),
+        "fake-blyte",
+        "#!/bin/sh\necho 'still running: IS1' >&2\nexit 2\n",
+    );
+    let _g = BlyteToolGuard::acquire(Some(script));
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["wait", "--any", "IS1"]}),
+    );
+    assert!(!out.is_error, "expected non-error, got: {:?}", out.content);
+    assert_eq!(out.content.lines().next(), Some("still waiting"));
+    assert!(
+        out.content.contains("still running: IS1"),
+        "content was: {:?}",
+        out.content
+    );
+}
+
+#[test]
+fn wait_exit_1_and_non_wait_exit_2_remain_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = write_script(
+        scripts.path(),
+        "fake-blyte",
+        "#!/bin/sh\nif [ \"$1\" = \"wait\" ]; then echo 'no dispatch IS1 here' >&2; exit 1; fi\nexit 2\n",
+    );
+    let _g = BlyteToolGuard::acquire(Some(script));
+
+    let wait_err = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["wait", "--any", "IS1"]}),
+    );
+    assert!(wait_err.is_error);
+    assert_eq!(wait_err.content.lines().next(), Some("exit 1"));
+
+    let status_err = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["status", "IS1"]}),
+    );
+    assert!(status_err.is_error);
+    assert_eq!(status_err.content.lines().next(), Some("exit 2"));
+}
+
+struct RequestReset;
+
+impl Drop for RequestReset {
+    fn drop(&mut self) {
+        set_blyte_request(None);
+    }
+}
+
+#[test]
+fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
+    let root = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let bg_log = root.path().join("bg.args");
+    let refused_marker = root.path().join("refused.ran");
+    let script = write_script(
+        scripts.path(),
+        "fake-blyte",
+        &format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\nprintf '%s\\n' \"$@\" > '{}'\n",
+            bg_log.display()
+        ),
+    );
+    let _g = BlyteToolGuard::acquire(Some(script));
+    let _reset = RequestReset;
+
+    set_blyte_request(Some("r1700000000-1".to_string()));
+
+    let fg = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md"]}),
+    );
+    assert!(!fg.is_error, "{}", fg.content);
+    let fg_lines: Vec<&str> = fg.content.lines().collect();
+    assert_eq!(
+        fg_lines,
+        vec!["dispatch", "T1", "t.md", "--request", "r1700000000-1"]
+    );
+
+    let with_sep = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md", "--", "extra"]}),
+    );
+    assert!(!with_sep.is_error, "{}", with_sep.content);
+    let sep_lines: Vec<&str> = with_sep.content.lines().collect();
+    assert_eq!(
+        sep_lines,
+        vec![
+            "dispatch",
+            "T1",
+            "t.md",
+            "--request",
+            "r1700000000-1",
+            "--",
+            "extra"
+        ]
+    );
+
+    let status_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["status", "T1"]}),
+    );
+    assert!(!status_out.is_error, "{}", status_out.content);
+    let status_lines: Vec<&str> = status_out.content.lines().collect();
+    assert_eq!(status_lines, vec!["status", "T1"]);
+
+    let _ = std::fs::remove_file(&bg_log);
+    let bg = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T2", "t.md"], "background": true}),
+    );
+    assert!(!bg.is_error, "{}", bg.content);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let bg_args = loop {
+        if let Ok(raw) = std::fs::read_to_string(&bg_log) {
+            if !raw.is_empty() {
+                break raw;
+            }
+        }
+        assert!(Instant::now() < deadline, "background script did not run");
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let bg_lines: Vec<&str> = bg_args.lines().collect();
+    assert_eq!(
+        bg_lines,
+        vec!["dispatch", "T2", "t.md", "--request", "r1700000000-1"]
+    );
+
+    let touch_script = write_script(
+        scripts.path(),
+        "fake-blyte-refuse",
+        &format!("#!/bin/sh\ntouch '{}'\n", refused_marker.display()),
+    );
+    set_blyte_tool(Some(touch_script));
+
+    for bad_args in [
+        json!({"args": ["dispatch", "T3", "t.md", "--request", "spoofed"]}),
+        json!({"args": ["dispatch", "T3", "t.md", "--request=spoofed"]}),
+        json!({"args": ["dispatch", "--request", "spoofed", "T3", "t.md"]}),
+        json!({"args": ["dispatch", "T3", "t.md", "--request", "spoofed"], "background": true}),
+    ] {
+        let out = execute(root.path(), &LocalShell, &LocalFs, "blyte", &bad_args);
+        assert!(out.is_error, "expected error for {bad_args}");
+        assert!(
+            out.content.contains("--request"),
+            "unexpected error for {bad_args}: {}",
+            out.content
+        );
+    }
+    assert!(!refused_marker.exists(), "refused dispatch ran executable");
+
+    set_blyte_request(None);
+    let refused_no_req = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T4", "t.md", "--request", "spoofed"]}),
+    );
+    assert!(refused_no_req.is_error);
+    assert!(!refused_marker.exists());
+
+    let echo_script = write_script(
+        scripts.path(),
+        "fake-blyte-echo",
+        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+    );
+    set_blyte_tool(Some(echo_script));
+    let no_req = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T5", "t.md"]}),
+    );
+    assert!(!no_req.is_error, "{}", no_req.content);
+    let no_req_lines: Vec<&str> = no_req.content.lines().collect();
+    assert_eq!(no_req_lines, vec!["dispatch", "T5", "t.md"]);
 }

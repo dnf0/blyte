@@ -101,6 +101,230 @@ fn sanitize_flag(flag: String) -> String {
     }
 }
 
+const KNOWN_FILE_EXTENSIONS: &[&str] = &[
+    "rs",
+    "py",
+    "pyi",
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "go",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "cxx",
+    "hpp",
+    "hh",
+    "java",
+    "kt",
+    "kts",
+    "scala",
+    "cs",
+    "fs",
+    "rb",
+    "php",
+    "swift",
+    "m",
+    "mm",
+    "zig",
+    "nim",
+    "lua",
+    "pl",
+    "pm",
+    "r",
+    "jl",
+    "ex",
+    "exs",
+    "erl",
+    "hrl",
+    "hs",
+    "ml",
+    "mli",
+    "clj",
+    "cljs",
+    "el",
+    "vim",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "ps1",
+    "bat",
+    "cmd",
+    "sql",
+    "toml",
+    "yaml",
+    "yml",
+    "json",
+    "jsonc",
+    "json5",
+    "xml",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "vue",
+    "svelte",
+    "astro",
+    "md",
+    "mdx",
+    "rst",
+    "txt",
+    "adoc",
+    "tex",
+    "csv",
+    "tsv",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "properties",
+    "lock",
+    "mod",
+    "sum",
+    "proto",
+    "thrift",
+    "avsc",
+    "graphql",
+    "gql",
+    "prisma",
+    "tf",
+    "tfvars",
+    "hcl",
+    "nix",
+    "dhall",
+    "star",
+    "bzl",
+    "cmake",
+    "mk",
+    "gradle",
+    "sbt",
+    "cabal",
+    "gemspec",
+    "podspec",
+    "csproj",
+    "fsproj",
+    "sln",
+    "plist",
+    "svg",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "ico",
+    "webp",
+    "woff",
+    "woff2",
+    "ttf",
+    "eot",
+    "wasm",
+    "wat",
+    "dockerfile",
+];
+
+const KNOWN_EXTENSIONLESS_FILES: &[&str] = &[
+    "Makefile",
+    "Dockerfile",
+    "Containerfile",
+    "Justfile",
+    "Procfile",
+    "Gemfile",
+    "Rakefile",
+    "Brewfile",
+    "Vagrantfile",
+    "LICENSE",
+    "CHANGELOG",
+    "README",
+    "OWNERS",
+    "CODEOWNERS",
+    "BUILD",
+    "WORKSPACE",
+];
+
+fn looks_like_file_reference(raw: &str) -> bool {
+    let token = raw
+        .trim_start_matches(|c: char| {
+            matches!(
+                c,
+                '`' | '\'' | '"' | '(' | '[' | '{' | '<' | '*' | ',' | ';' | ':'
+            )
+        })
+        .trim_end_matches(|c: char| {
+            matches!(
+                c,
+                '`' | '\'' | '"' | ')' | ']' | '}' | '>' | '*' | ',' | ';' | ':' | '.' | '!' | '?'
+            )
+        });
+    if token.is_empty()
+        || token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.contains("://")
+    {
+        return false;
+    }
+
+    let last_segment = token.rsplit('/').next().unwrap_or(token);
+    if last_segment.is_empty() {
+        return false;
+    }
+    if KNOWN_EXTENSIONLESS_FILES.contains(&last_segment) {
+        return true;
+    }
+
+    if let Some((stem, ext)) = last_segment.rsplit_once('.') {
+        let valid_stem = !stem.is_empty()
+            && stem
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if !valid_stem || ext.is_empty() {
+            return false;
+        }
+        let lower_ext = ext.to_ascii_lowercase();
+        if KNOWN_FILE_EXTENSIONS.contains(&lower_ext.as_str()) {
+            return true;
+        }
+        if token.contains('/')
+            && ext.len() <= 6
+            && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns whether the task text names any file or file path.
+pub fn task_names_files(task: &str) -> bool {
+    task.split_whitespace().any(looks_like_file_reference)
+}
+
+fn is_unnamed_files_flag(flag: &str) -> bool {
+    flag.starts_with("files not named in the task")
+}
+
+/// Returns whether a verified run should receive a fresh model review.
+pub fn should_run_model_review(
+    flags: &[String],
+    task_text: Option<&str>,
+    risky_matches: &[String],
+) -> bool {
+    if !risky_matches.is_empty() {
+        return true;
+    }
+    let names_files = task_text.is_some_and(task_names_files);
+    flags
+        .iter()
+        .any(|f| names_files || !is_unnamed_files_flag(f))
+}
+
 /// Build the flags list. Each flag is one line of at most 200 characters.
 pub fn build(
     task: Option<&str>,

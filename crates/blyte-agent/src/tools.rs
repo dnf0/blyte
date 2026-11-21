@@ -23,10 +23,23 @@ static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec:
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
+thread_local! {
+    static BLYTE_REQUEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
 
 pub const BLYTE_TOOL_COMMANDS: [&str; 7] = [
     "dispatch", "wait", "status", "review", "plan", "init", "clean",
 ];
+
+pub fn set_blyte_request(request: Option<String>) {
+    BLYTE_REQUEST.with(|slot| {
+        *slot.borrow_mut() = request;
+    });
+}
+
+pub fn blyte_request() -> Option<String> {
+    BLYTE_REQUEST.with(|slot| slot.borrow().clone())
+}
 
 pub fn set_blyte_tool(exe: Option<std::path::PathBuf>) {
     match BLYTE_TOOL.write() {
@@ -709,7 +722,22 @@ pub fn execute_with_deadline(
     args: &Value,
     deadline: Option<std::time::Instant>,
 ) -> ToolOutcome {
-    let mut outcome = execute_unbounded(root, shell, fs, name, args, deadline);
+    let command_timeout = match deadline {
+        Some(d) => COMMAND_TIMEOUT.min(d.saturating_duration_since(std::time::Instant::now())),
+        None => COMMAND_TIMEOUT,
+    };
+    execute_with_timeout(root, shell, fs, name, args, command_timeout)
+}
+
+pub fn execute_with_timeout(
+    root: &Path,
+    shell: &dyn Shell,
+    fs: &dyn Fs,
+    name: &str,
+    args: &Value,
+    timeout: Duration,
+) -> ToolOutcome {
+    let mut outcome = execute_unbounded(root, shell, fs, name, args, COMMAND_TIMEOUT.min(timeout));
     outcome.content = if name == "read" {
         bound_output_with(&outcome.content, READ_LINE_BUDGET, READ_LINE_CHARS)
     } else if name == "grep" {
@@ -727,12 +755,8 @@ fn execute_unbounded(
     fs: &dyn Fs,
     name: &str,
     args: &Value,
-    deadline: Option<std::time::Instant>,
+    command_timeout: Duration,
 ) -> ToolOutcome {
-    let command_timeout = match deadline {
-        Some(d) => COMMAND_TIMEOUT.min(d.saturating_duration_since(std::time::Instant::now())),
-        None => COMMAND_TIMEOUT,
-    };
     let s = |k: &str| {
         args.get(k)
             .and_then(|v| v.as_str())
@@ -1113,10 +1137,30 @@ fn execute_unbounded(
                 return ToolOutcome::err("only dispatch can run in the background");
             }
 
+            let mut exec_args = cmd_args.clone();
+            if first == "dispatch" {
+                if cmd_args
+                    .iter()
+                    .skip(1)
+                    .any(|a| a == "--request" || a.starts_with("--request="))
+                {
+                    return ToolOutcome::err("do not pass --request; blyte sets it automatically");
+                }
+                if let Some(req_id) = blyte_request() {
+                    if let Some(pos) = exec_args.iter().position(|a| a == "--") {
+                        exec_args.insert(pos, req_id);
+                        exec_args.insert(pos, "--request".to_string());
+                    } else {
+                        exec_args.push("--request".to_string());
+                        exec_args.push(req_id);
+                    }
+                }
+            }
+
             let parent_session = dispatch_parent_session();
             let mut cmd_builder = std::process::Command::new(&exe);
             cmd_builder
-                .args(&cmd_args)
+                .args(&exec_args)
                 .env("BLYTE_DISPATCH_PARENT", &parent_session)
                 .stdin(std::process::Stdio::null());
             if root.is_dir() {
@@ -1145,6 +1189,22 @@ fn execute_unbounded(
 
             match run_command_bounded(cmd_builder, command_timeout) {
                 Ok((0, stdout, _stderr)) => ToolOutcome::ok(stdout),
+                Ok((2, stdout, stderr)) if first == "wait" => {
+                    let lines: Vec<&str> = stderr.lines().collect();
+                    let tail = if lines.len() > OUTPUT_LINE_BUDGET {
+                        lines[lines.len() - OUTPUT_LINE_BUDGET..].join("\n")
+                    } else {
+                        stderr.trim_end().to_string()
+                    };
+                    let mut parts = vec!["still waiting".to_string()];
+                    if !stdout.trim().is_empty() {
+                        parts.push(stdout.trim_end().to_string());
+                    }
+                    if !tail.trim().is_empty() {
+                        parts.push(tail);
+                    }
+                    ToolOutcome::ok(parts.join("\n"))
+                }
                 Ok((code, stdout, stderr)) => {
                     let lines: Vec<&str> = stderr.lines().collect();
                     let tail = if lines.len() > OUTPUT_LINE_BUDGET {

@@ -43,9 +43,53 @@ pub fn comment_mode(value: Option<&str>) -> Result<CommentMode, String> {
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReviewConfig {
+    #[serde(default)]
+    pub risky: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepoConfig {
     #[serde(default)]
     pub dispatch: DispatchConfig,
+    #[serde(default)]
+    pub review: ReviewConfig,
+}
+
+pub fn match_risky_paths(
+    patterns: &[String],
+    changed_files: &[String],
+) -> Result<Vec<String>, String> {
+    if patterns.is_empty() || changed_files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let set = build_risky_globset(patterns)?;
+    let mut matched = Vec::new();
+    for file in changed_files {
+        if set.is_match(file) && !matched.contains(file) {
+            matched.push(file.clone());
+        }
+    }
+    Ok(matched)
+}
+
+fn build_risky_globset(patterns: &[String]) -> Result<globset::GlobSet, String> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for raw in patterns {
+        let pat = raw.trim();
+        if pat.is_empty() {
+            return Err("[review] risky contains an empty glob".to_string());
+        }
+        let glob = globset::GlobBuilder::new(pat)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| format!("[review] risky glob `{raw}` is invalid: {e}"))?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("[review] risky globs are invalid: {e}"))
 }
 
 pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
@@ -73,6 +117,10 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let main = main_checkout(root).unwrap_or_else(|| root.to_path_buf());
     expand_allow_read(&config.dispatch.allow_read, home.as_deref(), &main)?;
+    if !config.review.risky.is_empty() {
+        build_risky_globset(&config.review.risky)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
     Ok(Some(config))
 }
 

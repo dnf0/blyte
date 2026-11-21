@@ -59,13 +59,14 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
         .success());
     let report = d.path().join("report.json");
 
+    let slots = d.path().join("slots");
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args([
             "say done",
             "--gate",
             "sleep 120",
             "--max-seconds",
-            "2",
+            "3",
             "--sandbox",
             "off",
             "--report",
@@ -80,10 +81,14 @@ fn a_run_stopped_in_its_gate_reports_the_gate_and_its_progress() {
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("OLLAMA_HOST")
         .env_remove("OLLAMA_API_KEY")
+        .env_remove("BLYTE_WATCHDOG_GRACE_SECS")
+        .env_remove("BLYTE_MODEL_TIMEOUT_SECS")
+        .env_remove("BLYTE_IN_GATE")
+        .env("BLYTE_GATE_SLOT_DIR", &slots)
+        .env("BLYTE_GATE_SLOTS", "2")
         .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"))
         .env("OPENAI_API_KEY", "test")
         .env("BLYTE_MODEL", "openai/gemini-3.8-flash")
-        .env("BLYTE_WATCHDOG_GRACE_SECS", "1")
         .output()
         .unwrap();
     assert_eq!(

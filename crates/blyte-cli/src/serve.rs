@@ -11,11 +11,14 @@ use crate::cli::SurfaceArgs;
 use crate::http::{Request, Response};
 use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
-use crate::session::{AgentRunner, Attachment, Session};
+use crate::session::{AgentRunner, AnswerError, ApprovalAnswer, Attachment, Session};
+
+pub const TOKEN_HEADER: &str = "X-Blyte-Token";
 
 const INDEX_HTML: &str = include_str!("../assets/surface/index.html");
 const MAX_WAIT_MS: u64 = 25_000;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const TOKEN_BYTES: usize = 32;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -26,6 +29,45 @@ pub struct Surface {
     pub session_id: String,
     pub started_at: u64,
     pub days: u64,
+    pub token: String,
+}
+
+pub fn generate_token() -> Result<String, String> {
+    let mut bytes = [0u8; TOKEN_BYTES];
+    let mut file = std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("failed to open /dev/urandom: {e}"))?;
+    file.read_exact(&mut bytes)
+        .map_err(|e| format!("failed to read /dev/urandom: {e}"))?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(out)
+}
+
+pub fn constant_time_eq(provided: &[u8], expected: &[u8]) -> bool {
+    let mut diff = provided.len() ^ expected.len();
+    for (i, &exp) in expected.iter().enumerate() {
+        let prov = provided.get(i).copied().unwrap_or(0);
+        diff |= usize::from(prov ^ exp);
+    }
+    std::hint::black_box(diff) == 0
+}
+
+fn has_valid_token(surface: &Surface, req: &Request) -> bool {
+    if surface.token.is_empty() {
+        return false;
+    }
+    let mut values = req.header_values(TOKEN_HEADER);
+    let Some(provided) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    constant_time_eq(provided.as_bytes(), surface.token.as_bytes())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -285,6 +327,42 @@ fn handle_post_effort(surface: &Surface, req: &Request) -> Response {
     session_response(surface)
 }
 
+fn handle_post_approval(surface: &Surface, id: &str, req: &Request) -> Response {
+    let obj = match parse_json_object(&req.body) {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    if obj.len() != 1 {
+        return json_error(400, "request body must contain only field answer");
+    }
+    let answer = match obj.get("answer") {
+        Some(serde_json::Value::String(s)) if s == "yes" => ApprovalAnswer::Yes,
+        Some(serde_json::Value::String(s)) if s == "no" => ApprovalAnswer::No,
+        Some(serde_json::Value::String(other)) => {
+            return json_error(
+                400,
+                format!("field answer must be \"yes\" or \"no\", got '{other}'"),
+            );
+        }
+        Some(_) => return json_error(400, "field answer must be \"yes\" or \"no\""),
+        None => return json_error(400, "missing required field: answer"),
+    };
+    match surface.session.answer_approval(id, answer) {
+        Ok(seq) => Response::json(
+            200,
+            &serde_json::json!({
+                "id": id,
+                "answer": answer.as_str(),
+                "seq": seq,
+            }),
+        ),
+        Err(AnswerError::NotFound) => json_error(404, format!("unknown approval id: {id}")),
+        Err(AnswerError::AlreadyAnswered) => {
+            json_error(409, format!("approval {id} has already been answered"))
+        }
+    }
+}
+
 fn handle_runs(surface: &Surface, now: u64) -> Response {
     let mut live = match crate::live_runs::collect(&surface.root, now, surface.days) {
         Ok(l) => l,
@@ -435,6 +513,13 @@ fn handle_map(surface: &Surface) -> Response {
 }
 
 pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
+    if req.method == "POST" && !has_valid_token(surface, req) {
+        return json_error(
+            403,
+            "missing or invalid surface token; open the page from the URL blyte printed",
+        );
+    }
+
     if let Some((status, content_type, body)) = crate::dashboard::shared_asset(&req.path) {
         if req.method != "GET" {
             return method_not_allowed(req);
@@ -502,6 +587,14 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
             handle_map(surface)
         }
         path => {
+            if let Some(id) = path.strip_prefix("/api/session/approvals/") {
+                if !id.is_empty() && !id.contains('/') {
+                    if req.method != "POST" {
+                        return method_not_allowed(req);
+                    }
+                    return handle_post_approval(surface, id, req);
+                }
+            }
             if let Some(rest) = path.strip_prefix("/api/runs/") {
                 if let Some(id) = rest.strip_suffix("/diff") {
                     if !id.is_empty() && !id.contains('/') {
@@ -701,7 +794,9 @@ pub fn run_with_io(
     config.repo_root = root.clone();
 
     let model = resolve_initial_model(&config);
-    let session = Session::start(Box::new(AgentRunner::new(&config)), model);
+    let session = Session::start_with(model, |approver| {
+        Box::new(AgentRunner::new(&config, approver))
+    });
     let started_dur = match now_duration() {
         Ok(d) => d,
         Err(e) => {
@@ -711,6 +806,13 @@ pub fn run_with_io(
     };
     let started_at = started_dur.as_secs();
     let session_id = new_session_id(started_dur.as_nanos());
+    let token = match generate_token() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
 
     let bind_addr = format!("127.0.0.1:{}", args.port);
     let listener = match TcpListener::bind(&bind_addr) {
@@ -754,7 +856,7 @@ pub fn run_with_io(
         return 1;
     }
 
-    let url = format!("http://127.0.0.1:{actual_port}/");
+    let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
     let _ = writeln!(out, "blyte: surface at {url}");
     let _ = out.flush();
     if !args.no_open {
@@ -768,6 +870,7 @@ pub fn run_with_io(
         session_id,
         started_at,
         days: args.days,
+        token,
     });
 
     let serve_result = crate::http::serve(listener, move |req| match now_duration() {

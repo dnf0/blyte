@@ -4,10 +4,13 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::RwLock;
 
 use blyte_cli::skill::SKILL_MD;
 use blyte_cli::update::{asset_name, parse_version};
+
+static EXEC_LOCK: RwLock<()> = RwLock::new(());
 
 struct Env {
     _dir: tempfile::TempDir,
@@ -22,34 +25,48 @@ fn exe(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+fn spawn_output(cmd: &mut Command) -> Output {
+    let child = {
+        let _guard = EXEC_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    child.wait_with_output().unwrap()
+}
+
 /// A copy of blyte in a temp dir, a stand-in gh serving `tag` and a release binary that prints
 /// `new_version` (or fails when `broken`), and an empty HOME.
 fn setup(tag: &str, broken: bool) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin/blyte");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_blyte"), &bin).unwrap();
     let log = dir.path().join("calls.log");
     let release = dir.path().join("release-blyte");
-    if broken {
-        exe(&release, "#!/bin/sh\nexit 1\n");
-    } else {
+    let gh = dir.path().join("gh");
+    {
+        let _guard = EXEC_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        std::fs::copy(env!("CARGO_BIN_EXE_blyte"), &bin).unwrap();
+        if broken {
+            exe(&release, "#!/bin/sh\nexit 1\n");
+        } else {
+            exe(
+                &release,
+                &format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'blyte 9.9.9 (test)'; exit 0; fi\necho \"$@\" >> \"{}\"\n",
+                    log.display()
+                ),
+            );
+        }
         exe(
-            &release,
+            &gh,
             &format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'blyte 9.9.9 (test)'; exit 0; fi\necho \"$@\" >> {}\n",
-                log.display()
+                "#!/bin/sh\ncase \"$2\" in\n  view) echo '{tag}' ;;\n  download) while [ $# -gt 0 ]; do [ \"$1\" = -O ] && out=$2; shift; done; cp \"{}\" \"$out\" ;;\nesac\n",
+                release.display()
             ),
         );
     }
-    let gh = dir.path().join("gh");
-    exe(
-        &gh,
-        &format!(
-            "#!/bin/sh\ncase \"$2\" in\n  view) echo '{tag}' ;;\n  download) while [ $# -gt 0 ]; do [ \"$1\" = -O ] && out=$2; shift; done; cp {} \"$out\" ;;\nesac\n",
-            release.display()
-        ),
-    );
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     Env {
@@ -62,22 +79,23 @@ fn setup(tag: &str, broken: bool) -> Env {
 }
 
 fn run(e: &Env, args: &[&str]) -> (i32, String) {
-    let out = Command::new(&e.bin)
-        .arg("update")
+    let mut cmd = Command::new(&e.bin);
+    cmd.arg("update")
         .args(args)
         .env("BLYTE_GH", &e.gh)
         .env("HOME", &e.home)
         .env("XDG_CONFIG_HOME", &e.home)
-        .output()
-        .unwrap();
+        .env("BLYTE_ENV_FILE", "");
+    let out = spawn_output(&mut cmd);
     let text =
         String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     (out.status.code().unwrap_or(-1), text)
 }
 
 fn version(bin: &Path) -> String {
-    String::from_utf8_lossy(&Command::new(bin).arg("--version").output().unwrap().stdout)
-        .into_owned()
+    let mut cmd = Command::new(bin);
+    cmd.arg("--version");
+    String::from_utf8_lossy(&spawn_output(&mut cmd).stdout).into_owned()
 }
 
 #[test]
@@ -112,10 +130,13 @@ fn update_replaces_the_binary_keeps_the_old_one_and_rolls_back() {
     assert_eq!(std::fs::read(&prev).unwrap(), before);
 
     // Roll back with the previous build (the real blyte), which is now blyte.prev.
-    let out = Command::new(&prev)
+    let mut rollback_cmd = Command::new(&prev);
+    rollback_cmd
         .args(["update", "--rollback"])
-        .output()
-        .unwrap();
+        .env("HOME", &e.home)
+        .env("XDG_CONFIG_HOME", &e.home)
+        .env("BLYTE_ENV_FILE", "");
+    let out = spawn_output(&mut rollback_cmd);
     assert!(
         out.status.success(),
         "{}",

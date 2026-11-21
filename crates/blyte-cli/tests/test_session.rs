@@ -2,7 +2,10 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use blyte_cli::session::{Attachment, Entry, EntryBody, PromptRunner, Session};
+use blyte_agent::approval::{Approval, Approver};
+use blyte_cli::session::{
+    AnswerError, ApprovalAnswer, Attachment, Entry, EntryBody, PromptRunner, Session,
+};
 
 enum ScriptAction {
     Ok(Vec<EntryBody>),
@@ -782,4 +785,302 @@ fn dropping_last_handle_stops_worker_after_prompt_in_progress() {
         .map(|c| c.prompt.clone())
         .collect();
     assert_eq!(recorded, vec!["in progress"]);
+}
+
+#[test]
+fn approval_ask_blocks_until_answered_yes_and_no() {
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start(Box::new(runner), "gemini-4-neon".into());
+
+    let approver = session.approver();
+    let (done_tx, done_rx) = mpsc::channel();
+    let cmd1 = "git push origin main && echo '<script>alert(1)</script>'";
+    let reason1 = "publish verified commits";
+    let t1 = std::thread::spawn(move || {
+        let decision = approver.ask(cmd1, reason1);
+        let _ = done_tx.send(decision);
+    });
+
+    let req1_entries = wait_for_entries(&session, 1);
+    let id1 = match &req1_entries[0].body {
+        EntryBody::ApprovalRequested {
+            id,
+            command,
+            reason,
+        } => {
+            assert_eq!(command, cmd1);
+            assert_eq!(reason, reason1);
+            id.clone()
+        }
+        other => panic!("expected ApprovalRequested, got {other:?}"),
+    };
+
+    assert!(done_rx.recv_timeout(Duration::from_millis(120)).is_err());
+
+    let ans1_seq = session.answer_approval(&id1, ApprovalAnswer::Yes).unwrap();
+    assert_eq!(ans1_seq, 2);
+    let outcome1 = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(outcome1, Approval::Approved);
+    t1.join().unwrap();
+
+    let after_ans1 = wait_for_entries(&session, 2);
+    assert_eq!(
+        after_ans1[1].body,
+        EntryBody::ApprovalAnswered {
+            id: id1.clone(),
+            command: cmd1.to_string(),
+            answer: "yes".to_string(),
+        }
+    );
+
+    let approver2 = session.approver();
+    let (done2_tx, done2_rx) = mpsc::channel();
+    let t2 = std::thread::spawn(move || {
+        let decision = approver2.ask(cmd1, "run a second time");
+        let _ = done2_tx.send(decision);
+    });
+
+    let req2_entries = wait_for_entries(&session, 3);
+    let id2 = match &req2_entries[2].body {
+        EntryBody::ApprovalRequested {
+            id,
+            command,
+            reason,
+        } => {
+            assert_ne!(id, &id1);
+            assert_eq!(command, cmd1);
+            assert_eq!(reason, "run a second time");
+            id.clone()
+        }
+        other => panic!("expected second ApprovalRequested, got {other:?}"),
+    };
+
+    assert!(done2_rx.recv_timeout(Duration::from_millis(120)).is_err());
+
+    let ans2_seq = session.answer_approval(&id2, ApprovalAnswer::No).unwrap();
+    assert_eq!(ans2_seq, 4);
+    let outcome2 = done2_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(outcome2, Approval::Denied);
+    t2.join().unwrap();
+
+    let all = wait_for_entries(&session, 4);
+    assert_eq!(
+        all[3].body,
+        EntryBody::ApprovalAnswered {
+            id: id2,
+            command: cmd1.to_string(),
+            answer: "no".to_string(),
+        }
+    );
+}
+
+#[test]
+fn approval_stop_run_and_shutdown_give_denied() {
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start(Box::new(runner), "gemini-4-neon".into());
+
+    let approver = session.approver();
+    let (done_tx, done_rx) = mpsc::channel();
+    let t1 = std::thread::spawn(move || {
+        let _ = done_tx.send(approver.ask("rm -rf /tmp/demo", "clean up"));
+    });
+
+    let entries = wait_for_entries(&session, 1);
+    let id = match &entries[0].body {
+        EntryBody::ApprovalRequested { id, .. } => id.clone(),
+        other => panic!("expected ApprovalRequested, got {other:?}"),
+    };
+
+    assert!(done_rx.recv_timeout(Duration::from_millis(80)).is_err());
+
+    session.stop_run();
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Approval::Denied
+    );
+    t1.join().unwrap();
+
+    let after_stop = wait_for_entries(&session, 2);
+    assert_eq!(
+        after_stop[1].body,
+        EntryBody::ApprovalAnswered {
+            id: id.clone(),
+            command: "rm -rf /tmp/demo".to_string(),
+            answer: "no".to_string(),
+        }
+    );
+    assert_eq!(
+        session.answer_approval(&id, ApprovalAnswer::Yes),
+        Err(AnswerError::AlreadyAnswered)
+    );
+
+    let approver_shutdown = session.approver();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let t2 = std::thread::spawn(move || {
+        let _ = shutdown_tx.send(approver_shutdown.ask("curl https://example.com", "fetch"));
+    });
+
+    wait_for_entries(&session, 3);
+    assert!(shutdown_rx.recv_timeout(Duration::from_millis(80)).is_err());
+
+    drop(session);
+    assert_eq!(
+        shutdown_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Approval::Denied
+    );
+    t2.join().unwrap();
+}
+
+#[test]
+fn approval_second_answer_refused_and_first_stands() {
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start(Box::new(runner), "gemini-4-neon".into());
+
+    assert_eq!(
+        session.answer_approval("no-such-id", ApprovalAnswer::Yes),
+        Err(AnswerError::NotFound)
+    );
+
+    let approver = session.approver();
+    let (done_tx, done_rx) = mpsc::channel();
+    let t = std::thread::spawn(move || {
+        let _ = done_tx.send(approver.ask("cargo publish --dry-run", "check package"));
+    });
+
+    let entries = wait_for_entries(&session, 1);
+    let id = match &entries[0].body {
+        EntryBody::ApprovalRequested { id, .. } => id.clone(),
+        other => panic!("expected ApprovalRequested, got {other:?}"),
+    };
+
+    assert_eq!(session.answer_approval(&id, ApprovalAnswer::Yes), Ok(2));
+    assert_eq!(
+        session.answer_approval(&id, ApprovalAnswer::No),
+        Err(AnswerError::AlreadyAnswered)
+    );
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Approval::Approved
+    );
+    t.join().unwrap();
+
+    let all = session.entries_after(0, Duration::ZERO);
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        all[1].body,
+        EntryBody::ApprovalAnswered {
+            id,
+            command: "cargo publish --dry-run".to_string(),
+            answer: "yes".to_string(),
+        }
+    );
+}
+
+#[test]
+fn approval_allow_file_rule_never_creates_pending_approval() {
+    struct EnvAndApprovalGuard {
+        prev_xdg: Option<std::ffi::OsString>,
+        prev_approval: Option<blyte_agent::approval::ApprovalConfig>,
+    }
+
+    impl Drop for EnvAndApprovalGuard {
+        fn drop(&mut self) {
+            blyte_agent::tools::set_approval(self.prev_approval.take());
+            match &self.prev_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let allow_path = xdg.path().join("blyte").join("allow-unsandboxed");
+    std::fs::create_dir_all(allow_path.parent().unwrap()).unwrap();
+    std::fs::write(&allow_path, "echo allowed\n").unwrap();
+
+    let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let prev_approval = blyte_agent::tools::approval();
+    std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+    let _guard = EnvAndApprovalGuard {
+        prev_xdg,
+        prev_approval,
+    };
+
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start(Box::new(runner), "gemini-4-neon".into());
+    let cfg = blyte_cli::repl::ReplConfig {
+        repo_root: root.path().to_path_buf(),
+        sandbox: "on".to_string(),
+        ..Default::default()
+    };
+    let _agent_runner = blyte_cli::session::AgentRunner::new(&cfg, session.approver());
+
+    let shell = blyte_agent::shell::LocalShell::new();
+    let fs = blyte_agent::fs::LocalFs;
+
+    let allowed_out = blyte_agent::tools::execute(
+        root.path(),
+        &shell,
+        &fs,
+        "bash",
+        &serde_json::json!({
+            "command": "echo allowed by file",
+            "unsandboxed": true,
+            "reason": "covered by allow file",
+        }),
+    );
+    assert!(!allowed_out.is_error, "{}", allowed_out.content);
+    assert!(allowed_out.content.contains("allowed by file"));
+    assert!(
+        session.entries_after(0, Duration::ZERO).is_empty(),
+        "allow-file command must not create a pending approval"
+    );
+
+    let session_for_answer = session.clone();
+    let answer_thread = std::thread::spawn(move || {
+        let requested = wait_for_entries(&session_for_answer, 1);
+        let id = match &requested[0].body {
+            EntryBody::ApprovalRequested {
+                id,
+                command,
+                reason,
+            } => {
+                assert_eq!(command, "echo needs_manual_approval");
+                assert_eq!(reason, "not covered by allow file");
+                id.clone()
+            }
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        };
+        session_for_answer
+            .answer_approval(&id, ApprovalAnswer::Yes)
+            .unwrap();
+    });
+
+    let asked_out = blyte_agent::tools::execute(
+        root.path(),
+        &shell,
+        &fs,
+        "bash",
+        &serde_json::json!({
+            "command": "echo needs_manual_approval",
+            "unsandboxed": true,
+            "reason": "not covered by allow file",
+        }),
+    );
+    answer_thread.join().unwrap();
+    assert!(!asked_out.is_error, "{}", asked_out.content);
+    assert!(asked_out.content.contains("needs_manual_approval"));
+
+    let entries = session.entries_after(0, Duration::ZERO);
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(
+        &entries[0].body,
+        EntryBody::ApprovalRequested { command, .. } if command == "echo needs_manual_approval"
+    ));
+    assert!(matches!(
+        &entries[1].body,
+        EntryBody::ApprovalAnswered { command, answer, .. }
+            if command == "echo needs_manual_approval" && answer == "yes"
+    ));
 }

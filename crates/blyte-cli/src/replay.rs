@@ -30,6 +30,7 @@ pub struct Run {
     pub task: String,
     pub plan_file: Option<String>,
     pub plan_task: Option<String>,
+    pub request: Option<String>,
     pub started_at: u64,
     pub finished_at: u64,
     pub outcome: String,
@@ -175,6 +176,19 @@ fn read_checks(path: &Path) -> Result<(bool, Vec<String>), String> {
         };
         flags.push(s.to_string());
     }
+    match crate::queue_actions::parse_stored_model_review(path, &val) {
+        Ok(Some(mr)) => {
+            if let Some(flag) = mr.flag() {
+                if !flags.iter().any(|f| f.starts_with("model review")) {
+                    flags.push(flag);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            flags.push(format!("model review unreadable: {e}"));
+        }
+    }
     Ok((true, flags))
 }
 
@@ -291,6 +305,7 @@ pub(crate) fn classify_jobs(
             task: job.task,
             plan_file: job.plan_file,
             plan_task: job.plan_task,
+            request: job.request,
             started_at,
             finished_at,
             outcome: summary.outcome,
