@@ -1368,14 +1368,19 @@ impl<'a> Runner<'a> {
                             .collect()
                     } else {
                         let clean = |s: &str| s.trim_end().replace('\n', " ↵ ");
-                        let text = call
-                            .arguments
-                            .get("command")
-                            .or_else(|| call.arguments.get("pattern"))
-                            .or_else(|| call.arguments.get("path"))
-                            .and_then(|v| v.as_str())
-                            .map(clean)
-                            .unwrap_or_else(|| clean(&call.arguments.to_string()));
+                        let text = if call.name == "blyte" {
+                            format_blyte_tool_input(&call.arguments)
+                                .map(|s| clean(&s))
+                                .unwrap_or_else(|| clean(&call.arguments.to_string()))
+                        } else {
+                            call.arguments
+                                .get("command")
+                                .or_else(|| call.arguments.get("pattern"))
+                                .or_else(|| call.arguments.get("path"))
+                                .and_then(|v| v.as_str())
+                                .map(clean)
+                                .unwrap_or_else(|| clean(&call.arguments.to_string()))
+                        };
                         if text.chars().count() > 2000 {
                             let mut cut: String = text.chars().take(2000).collect();
                             cut.push('…');
@@ -1783,6 +1788,32 @@ pub fn cut_gate_output(output: &str) -> String {
     pieces.join("\n")
 }
 
+fn format_blyte_arg(arg: &str) -> String {
+    if arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    {
+        serde_json::to_string(arg).unwrap_or_else(|_| format!("\"{arg}\""))
+    } else {
+        arg.to_string()
+    }
+}
+
+pub fn format_blyte_tool_input(args: &serde_json::Value) -> Option<String> {
+    let raw_args = args.get("args")?.as_array()?;
+    let mut parts = Vec::with_capacity(raw_args.len() + 1);
+    parts.push("blyte".to_string());
+    for item in raw_args {
+        parts.push(format_blyte_arg(item.as_str()?));
+    }
+    let mut cmd = parts.join(" ");
+    if args.get("background").and_then(|v| v.as_bool()) == Some(true) {
+        cmd.push_str(" (background)");
+    }
+    Some(cmd)
+}
+
 /// Extracts a concise, human-readable target descriptor from a tool call's arguments.
 ///
 /// Deterministic and zero-latency: formats tool targets without LLM invocation to
@@ -1861,6 +1892,11 @@ pub fn extract_action_target(tool: &str, args: &serde_json::Value) -> String {
                     }
                 }
                 return format!("pattern '{pattern}'");
+            }
+        }
+        "blyte" => {
+            if let Some(cmd) = format_blyte_tool_input(args) {
+                return cmd;
             }
         }
         _ => {}

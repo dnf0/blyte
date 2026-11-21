@@ -637,6 +637,11 @@
       color: var(--color-muted);
     }
 
+    .tool-waiting {
+      background: var(--color-page);
+      color: var(--color-muted);
+    }
+
     .tool-error {
       background: var(--red-soft);
       color: var(--status-red);
@@ -2655,7 +2660,72 @@
         '</div>';
     }
 
-    function formatToolInput(input) {
+    function formatBlyteArg(arg) {
+      if (arg.length === 0 || /[\s"']/.test(arg)) {
+        return JSON.stringify(arg);
+      }
+      return arg;
+    }
+
+    function parseBlyteToolInput(input) {
+      let obj = null;
+      if (isPlainObject(input)) {
+        obj = input;
+      } else if (typeof input === "string") {
+        const trimmed = input.trim();
+        if (trimmed.startsWith("{")) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (isPlainObject(parsed)) obj = parsed;
+          } catch (_) {
+            obj = null;
+          }
+        }
+      }
+      if (!obj || !Array.isArray(obj.args) || !obj.args.every(a => typeof a === "string")) {
+        return null;
+      }
+      return {
+        args: obj.args,
+        background: obj.background === true,
+      };
+    }
+
+    function formatBlyteCommand(parsed) {
+      const parts = ["blyte"].concat(parsed.args.map(formatBlyteArg));
+      const cmd = parts.join(" ");
+      return parsed.background ? cmd + " (background)" : cmd;
+    }
+
+    function isBlyteWaitCall(name, input) {
+      if (name !== "blyte") return false;
+      const parsed = parseBlyteToolInput(input);
+      if (parsed) {
+        return parsed.args.length > 0 && parsed.args[0] === "wait";
+      }
+      if (typeof input === "string") {
+        return /^blyte\s+wait(?:\s|$)/.test(input.trim());
+      }
+      return false;
+    }
+
+    function resolveToolStatus(name, input, finish) {
+      const trimmed = finish.summary.trim();
+      const isWait = isBlyteWaitCall(name, input);
+      if (isWait && ((finish.is_error && /^exit 2(?:\s|$)/.test(trimmed)) || (!finish.is_error && trimmed === "still waiting"))) {
+        return { className: "tool-waiting", label: "still waiting" };
+      }
+      return {
+        className: finish.is_error ? "tool-error" : "tool-done",
+        label: finish.summary,
+      };
+    }
+
+    function formatToolInput(input, name) {
+      if (name === "blyte") {
+        const parsed = parseBlyteToolInput(input);
+        if (parsed) return formatBlyteCommand(parsed);
+      }
       if (typeof input === "string") return input;
       return JSON.stringify(input, null, 2);
     }
@@ -2705,12 +2775,16 @@
           if (!hasOwn(entry, "input")) {
             return renderEntryError(entry.seq, "tool_started entry missing field input");
           }
-          const fullInput = formatToolInput(entry.input);
+          const fullInput = formatToolInput(entry.input, entry.name);
           const firstLine = fullInput.split(/\r?\n/)[0];
           const matched = opts && opts.matchedFinish;
-          const statusHtml = matched
-            ? '<span class="tool-status ' + (matched.is_error ? "tool-error" : "tool-done") + '">' + escapeHtml(matched.summary) + '</span>'
-            : '<span class="tool-status tool-running">running</span>';
+          let statusHtml;
+          if (matched) {
+            const status = resolveToolStatus(entry.name, entry.input, matched);
+            statusHtml = '<span class="tool-status ' + status.className + '">' + escapeHtml(status.label) + '</span>';
+          } else {
+            statusHtml = '<span class="tool-status tool-running">running</span>';
+          }
           return '<div class="entry entry-tool" data-seq="' + seqAttr + '" data-tool-name="' + escapeHtml(entry.name) + '">' +
             '<details class="tool-details">' +
               '<summary class="tool-summary">' +
@@ -2735,7 +2809,8 @@
           if (opts && opts.matched) {
             return '<div class="entry entry-tool-matched" data-seq="' + seqAttr + '" hidden></div>';
           }
-          const cls = entry.is_error ? "tool-error" : "tool-done";
+          const isUnmatchedWaiting = !entry.is_error && entry.name === "blyte" && entry.summary.trim() === "still waiting";
+          const cls = isUnmatchedWaiting ? "tool-waiting" : (entry.is_error ? "tool-error" : "tool-done");
           return '<div class="entry entry-tool entry-tool-finished" data-seq="' + seqAttr + '">' +
             '<div class="tool-summary">' +
               '<span class="tool-name">' + escapeHtml(entry.name) + '</span>' +
@@ -2873,7 +2948,7 @@
 
         if (isPlainObject(entry) && entry.kind === "tool_started" && typeof entry.name === "string" && hasOwn(entry, "input") && hasValidSeq && isTimestamp(entry.ts)) {
           if (!openToolsByName.has(entry.name)) openToolsByName.set(entry.name, []);
-          openToolsByName.get(entry.name).push(entry.seq);
+          openToolsByName.get(entry.name).push({ seq: entry.seq, input: entry.input });
           insertEntryHtml(threadEl, entry.seq, renderEntry(entry));
           continue;
         }
@@ -2881,13 +2956,14 @@
         if (isPlainObject(entry) && entry.kind === "tool_finished" && typeof entry.name === "string" && typeof entry.summary === "string" && typeof entry.is_error === "boolean" && hasValidSeq && isTimestamp(entry.ts)) {
           const queue = openToolsByName.get(entry.name);
           if (queue && queue.length > 0) {
-            const startedSeq = queue.shift();
-            const startedEl = threadEl.querySelector('[data-seq="' + String(startedSeq) + '"]');
+            const started = queue.shift();
+            const startedEl = threadEl.querySelector('[data-seq="' + String(started.seq) + '"]');
             if (startedEl) {
               const statusEl = startedEl.querySelector(".tool-status");
               if (statusEl) {
-                statusEl.className = "tool-status " + (entry.is_error ? "tool-error" : "tool-done");
-                statusEl.textContent = entry.summary;
+                const status = resolveToolStatus(entry.name, started.input, entry);
+                statusEl.className = "tool-status " + status.className;
+                statusEl.textContent = status.label;
               }
             }
             insertEntryHtml(threadEl, entry.seq, renderEntry(entry, { matched: true }));

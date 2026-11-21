@@ -231,3 +231,62 @@ fn nonzero_exit_returns_error_with_stderr_text() {
         out.content
     );
 }
+
+#[test]
+fn wait_exit_2_is_still_waiting_not_error() {
+    let root = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = write_script(
+        scripts.path(),
+        "fake-blyte",
+        "#!/bin/sh\necho 'still running: IS1' >&2\nexit 2\n",
+    );
+    let _g = BlyteToolGuard::acquire(Some(script));
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["wait", "--any", "IS1"]}),
+    );
+    assert!(!out.is_error, "expected non-error, got: {:?}", out.content);
+    assert_eq!(out.content.lines().next(), Some("still waiting"));
+    assert!(
+        out.content.contains("still running: IS1"),
+        "content was: {:?}",
+        out.content
+    );
+}
+
+#[test]
+fn wait_exit_1_and_non_wait_exit_2_remain_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = write_script(
+        scripts.path(),
+        "fake-blyte",
+        "#!/bin/sh\nif [ \"$1\" = \"wait\" ]; then echo 'no dispatch IS1 here' >&2; exit 1; fi\nexit 2\n",
+    );
+    let _g = BlyteToolGuard::acquire(Some(script));
+
+    let wait_err = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["wait", "--any", "IS1"]}),
+    );
+    assert!(wait_err.is_error);
+    assert_eq!(wait_err.content.lines().next(), Some("exit 1"));
+
+    let status_err = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["status", "IS1"]}),
+    );
+    assert!(status_err.is_error);
+    assert_eq!(status_err.content.lines().next(), Some("exit 2"));
+}
