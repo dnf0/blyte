@@ -1,3 +1,9 @@
+## v0.51.1 (2026-11-21)
+
+### Fix
+
+- **provider**: bound every Gemini and Vertex call by an idle limit and a whole-call cap (#376)
+
 ## v0.51.0 (2026-11-21)
 
 ### Feat
