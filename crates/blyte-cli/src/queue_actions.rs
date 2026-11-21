@@ -671,7 +671,7 @@ pub fn decide(
     let outcome = summary
         .get("outcome")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .ok_or_else(|| format!("{} has no outcome", summary_path.display()))?;
     let is_research =
         crate::clean::is_research(root, id) || wt_dir.join(format!("{id}.report.md")).exists();
 
