@@ -95,6 +95,9 @@ max_turns = 300
 | `fold_budget` | integer | approximate token budget for verbatim tail before folding |
 | `network` | string | outbound network mode (`"on"` or `"off"`, default `"on"`) |
 | `[dispatch.env]` | table | environment variables set for every command and the gate; never credentials |
+| `[review] risky` | array of strings | glob patterns for paths that always trigger a fresh model review when touched by a verified run (default `[]`: no path is risky unless the repository says so) |
+
+**Fresh model review on flagged or risky runs.** When a dispatched run finishes `verified`, blyte computes its built-in review checks and saves `.wt/<id>.checks.json`. If those checks flag anything (other than `files not named in the task` when the task names no files), or if any changed file matches `[review] risky`, blyte runs a fresh model review (`model_review::run`) that sees only the task and the diff and stores its result under `model_review` in `.wt/<id>.checks.json`. A clean run starts no model review. If the review raises findings, or if the review run itself fails, the failure or findings are recorded in `.wt/<id>.checks.json` and the run waits in the review queue as an exception until the user accepts it.
 
 **The environment is checked before the model starts.** After `setup`, a dispatch runs the gate once on the untouched worktree. If a step fails (dependencies that cannot be installed, a missing service, a base commit that is already broken), the run ends as `blocked` with zero turns and names the step and the end of its output. The implementer is also told never to copy, link or use a dependency environment from outside the worktree, and `blyte review` flags a run whose log shows it did: its gate may have passed in a borrowed environment, so do not accept it on the gate alone.
 
