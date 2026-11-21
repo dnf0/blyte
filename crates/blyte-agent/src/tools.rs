@@ -472,6 +472,21 @@ pub fn available_binaries(shell: &dyn Shell, root: &Path) -> Vec<String> {
     shell.available_binaries(root, &all)
 }
 
+fn bash_description() -> String {
+    format!(
+        "Run a shell command in the workspace and wait for it to finish. \
+         Commands run to completion (up to {}s). \
+         A background job started with its output redirected keeps running after the command \
+         returns, and nothing reports when it exits. \
+         Output over {} lines is elided in the middle. \
+         To find files or search file contents use the `glob` and `grep` tools, not \
+         `find`, `grep -r` or `rg` in the shell; they respect .gitignore, are capped \
+         and cannot hang.",
+        COMMAND_TIMEOUT.as_secs(),
+        OUTPUT_LINE_BUDGET
+    )
+}
+
 pub fn specs() -> Vec<ToolSpec> {
     let mut tools = vec![
         ToolSpec {
@@ -500,16 +515,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bash".into(),
-            description: format!(
-                "Run a shell command in the workspace and wait for it to finish. \
-                 Commands run to completion (up to {}s) -- there is no background mode and \
-                 nothing to poll. Output over {} lines is elided in the middle. \
-                 To find files or search file contents use the `glob` and `grep` tools, not \
-                 `find`, `grep -r` or `rg` in the shell; they respect .gitignore, are capped \
-                 and cannot hang.",
-                COMMAND_TIMEOUT.as_secs(),
-                OUTPUT_LINE_BUDGET
-            ),
+            description: bash_description(),
             parameters: json!({"type":"object","properties":{
                 "command":{"type":"string"}},"required":["command"]}),
         },
@@ -957,5 +963,30 @@ fn execute_unbounded(
             }
         }
         other => ToolOutcome::err(format!("unknown tool: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bash_description_says_background_jobs_keep_running() {
+        let all = specs();
+        let desc = &all
+            .iter()
+            .find(|t| t.name == "bash")
+            .expect("bash spec missing")
+            .description;
+        assert!(
+            desc.contains(
+                "A background job started with its output redirected keeps running after the command returns, and nothing reports when it exits."
+            ),
+            "got {desc:?}"
+        );
+        assert!(
+            !desc.contains("there is no background mode"),
+            "got {desc:?}"
+        );
     }
 }

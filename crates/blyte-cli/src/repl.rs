@@ -49,6 +49,7 @@ pub struct ReplSession {
     pub orchestrate: bool,
     pub dispatch_cmd: Option<String>,
     pub fold_budget: Option<usize>,
+    pub orchestrator_start_lines: Option<[String; 2]>,
     pub state: blyte_agent::state::State,
     pub session_id: String,
 }
@@ -60,7 +61,7 @@ pub fn new_session_id(now_secs: u64, pid: u32) -> String {
 
 impl ReplSession {
     /// Creates a new `ReplSession` initialized with the given `ReplConfig`.
-    pub fn new(config: &ReplConfig) -> Self {
+    pub fn try_new(config: &ReplConfig) -> Result<Self, String> {
         let session_id = match std::env::var("BLYTE_SESSION") {
             Ok(v) if !v.is_empty() => v,
             _ => {
@@ -80,21 +81,17 @@ impl ReplSession {
         let mut state = blyte_agent::state::State::new(goal, verification_cmd);
         state.runtime.conversation = Some(Vec::new());
 
-        if config.orchestrate {
-            let rules_path = blyte_agent::orchestrator::user_rules_path();
-            let loaded_rules = rules_path
-                .as_deref()
-                .and_then(|p| blyte_agent::orchestrator::load_user_rules(p).map(|text| (p, text)));
-            let rules_ref = loaded_rules.as_ref().map(|(p, t)| (*p, t.as_str()));
-            state.orchestrator.instructions =
-                Some(blyte_agent::orchestrator::prompt_sections_with_dispatch(
-                    crate::skill::SKILL_MD,
-                    rules_ref,
-                    config.dispatch_cmd.is_some(),
-                ));
-        }
+        let orchestrator_start_lines = if config.orchestrate {
+            Some(crate::orchestrator_text::set_state_instructions(
+                &mut state,
+                config.dispatch_cmd.is_some(),
+                &config.repo_root,
+            )?)
+        } else {
+            None
+        };
 
-        Self {
+        Ok(Self {
             repo_root: config.repo_root.clone(),
             gate,
             model: config
@@ -110,9 +107,15 @@ impl ReplSession {
             orchestrate: config.orchestrate,
             dispatch_cmd: config.dispatch_cmd.clone(),
             fold_budget: config.fold_budget,
+            orchestrator_start_lines,
             state,
             session_id,
-        }
+        })
+    }
+
+    /// Creates a new `ReplSession` initialized with the given `ReplConfig`.
+    pub fn new(config: &ReplConfig) -> Self {
+        Self::try_new(config).expect("failed to initialize REPL session")
     }
 }
 
@@ -266,6 +269,16 @@ pub fn render_banner_to<W: Write>(writer: &mut W, session: &ReplSession) -> std:
     writeln!(writer, "  Model      : {}", model)?;
     if session.orchestrate {
         writeln!(writer, "  Mode       : orchestrator")?;
+        if let Some([process_line, repo_line]) = &session.orchestrator_start_lines {
+            let process = process_line
+                .strip_prefix("process: ")
+                .unwrap_or(process_line);
+            let repo_rules = repo_line
+                .strip_prefix("repository rules: ")
+                .unwrap_or(repo_line);
+            writeln!(writer, "  Process    : {}", process)?;
+            writeln!(writer, "  Repo rules : {}", repo_rules)?;
+        }
     } else {
         writeln!(writer, "  Gate       : {}", gate)?;
     }
@@ -704,7 +717,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
 
 /// Initializes a REPL session and runs the interactive terminal loop.
 pub fn run_repl(config: ReplConfig) -> Result<(), String> {
-    let session = ReplSession::new(&config);
+    let session = ReplSession::try_new(&config)?;
     render_banner(&session);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

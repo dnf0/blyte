@@ -216,8 +216,12 @@ pub enum Event<'e> {
 /// Retries allowed for one model call before a transient failure ends the run.
 pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
-/// Tool calls an orchestrator may make before its first dispatch without getting a reminder (2026-10-15 Argon benchmark).
-pub const ORCHESTRATOR_EXPLORE_NUDGE: u32 = 8;
+pub const ORCHESTRATOR_FIXED: &str = "\
+Change nothing outside the repository yourself (blyte's own files under `.wt/` and its records are fine).\n\n\
+## Working efficiently\n\
+Independent reads, searches and commands can be issued as several tool calls in one \
+turn: they run in order and you see every result together. Batch them whenever one \
+does not depend on another's result; every turn you save is a full model call.\n";
 
 /// Turns a fix run may spend without changing a file or running the gate before getting a nudge.
 pub const NO_PROGRESS_TURNS: u32 = 20;
@@ -246,16 +250,6 @@ pub const CLAIM_CHECK_RESERVE_MAX: Duration = Duration::from_secs(180);
 /// a tenth of the time budget, at most `CLAIM_CHECK_RESERVE_MAX`.
 pub fn claim_check_reserve(max_duration: Duration) -> Duration {
     (max_duration / 10).min(CLAIM_CHECK_RESERVE_MAX)
-}
-
-fn is_dispatch_call(call: &blyte_provider::ToolCall) -> bool {
-    call.name == "dispatch"
-        || (call.name == "bash"
-            && call
-                .arguments
-                .get("command")
-                .and_then(|v| v.as_str())
-                .is_some_and(|cmd| cmd.contains("blyte dispatch")))
 }
 
 fn truncated(reason: Option<&str>) -> bool {
@@ -409,25 +403,16 @@ impl<'a> Runner<'a> {
     fn system_prompt(&self, state: &State, goal: &str) -> String {
         let bins = tools::available_binaries(self.shell, &self.root).join(", ");
         let where_ = self.shell.describe();
-        let rules = crate::rules::prompt_section(&self.root);
 
         if let Some(text) = &state.orchestrator.instructions {
             return format!(
                 "{text}## Your user's first request\n{goal}\n\n\
                  ## Environment\n{where_}\nAvailable: {bins}\n\n\
-                 Change nothing outside the repository yourself (blyte's own files under `.wt/` and its records are fine).\n\n\
-                 {rules}\
-                 ## Working efficiently\n\
-                 Independent reads, searches and commands can be issued as several tool calls in one \
-                 turn: they run in order and you see every result together. Batch them whenever one \
-                 does not depend on another's result; every turn you save is a full model call.\n",
-                text = text,
-                goal = goal,
-                where_ = where_,
-                bins = bins,
-                rules = rules,
+                 {ORCHESTRATOR_FIXED}",
             );
         }
+
+        let rules = crate::rules::prompt_section(&self.root);
 
         let steps = gate_steps(&state.orchestrator.verification_cmd);
         // Ungated runs have no check command, so the model must verify the work itself before stopping.
@@ -965,9 +950,6 @@ impl<'a> Runner<'a> {
         } else {
             None
         };
-        let mut pre_dispatch_calls: u32 = 0;
-        let mut has_dispatched = false;
-        let mut explore_nudge_sent = false;
         let mut claim_round_done = false;
         let mut prev_turn_start: Option<usize> = None;
         let mut thrash: u32 = 0;
@@ -1059,19 +1041,6 @@ impl<'a> Runner<'a> {
                     ));
                 }
                 last_report = current_report;
-            }
-
-            // Headless runs only: in the interactive REPL the person may just be asking questions.
-            if state.orchestrator.instructions.is_some()
-                && state.runtime.conversation.is_none()
-                && !has_dispatched
-                && !explore_nudge_sent
-                && pre_dispatch_calls >= ORCHESTRATOR_EXPLORE_NUDGE
-            {
-                explore_nudge_sent = true;
-                history.push(Message::User(format!(
-                    "You have made {pre_dispatch_calls} tool calls without dispatching. Dispatch the work now from what you know; the implementer reads the code it changes. Keep reading only if you cannot yet say which files the task is about."
-                )));
             }
 
             if !self.research
@@ -1356,11 +1325,6 @@ impl<'a> Runner<'a> {
                     }
                     report.tool_calls += 1;
                     *report.tool_counts.entry(call.name.clone()).or_default() += 1;
-                    if is_dispatch_call(call) {
-                        has_dispatched = true;
-                    } else if !has_dispatched {
-                        pre_dispatch_calls += 1;
-                    }
 
                     if wrap_up_tools_closed
                         && self

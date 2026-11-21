@@ -80,6 +80,34 @@ fn main() {
                 };
                 std::process::exit(blyte_cli::comments_cmd::run(&args.base, &dir));
             }
+            blyte_cli::cli::Command::Instructions(args) => {
+                if args.default_process {
+                    print!("{}", blyte_cli::orchestrator_text::DEFAULT_PROCESS);
+                    std::process::exit(0);
+                }
+                let root = match blyte_cli::instructions_cmd::repo_root() {
+                    Ok(root) => root,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let answers = if args.one_shot {
+                    blyte_agent::orchestrator::Answers::Nobody
+                } else {
+                    blyte_agent::orchestrator::Answers::Person
+                };
+                match blyte_cli::instructions_cmd::render(args.dispatch_tool, answers, &root) {
+                    Ok(text) => {
+                        print!("{text}");
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             blyte_cli::cli::Command::Skill(args) => match args.action {
                 blyte_cli::cli::SkillAction::Install {
                     project,

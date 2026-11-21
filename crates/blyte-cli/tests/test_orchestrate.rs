@@ -93,7 +93,8 @@ fn session_gets_instructions() {
     };
     let session = ReplSession::new(&config);
     let instructions = session.state.orchestrator.instructions.as_deref().unwrap();
-    assert!(instructions.contains("## The blyte-implementer skill"));
+    assert!(instructions.contains("## blyte reference"));
+    assert!(instructions.contains(blyte_agent::orchestrator::ANSWERS_PERSON));
     assert!(instructions.contains("blyte wait"));
 
     let config_normal = ReplConfig {

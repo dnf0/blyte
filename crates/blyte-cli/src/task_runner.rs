@@ -220,19 +220,6 @@ pub fn run_task(
     let verification_cmd = config.gate.as_deref().unwrap_or("");
     let mut state = blyte_agent::state::State::new(&config.prompt, verification_cmd);
     state.orchestrator.max_cost_usd = config.max_cost_usd;
-    if config.orchestrate {
-        let rules_path = blyte_agent::orchestrator::user_rules_path();
-        let loaded_rules = rules_path
-            .as_deref()
-            .and_then(|p| blyte_agent::orchestrator::load_user_rules(p).map(|text| (p, text)));
-        let rules_ref = loaded_rules.as_ref().map(|(p, t)| (*p, t.as_str()));
-        state.orchestrator.instructions =
-            Some(blyte_agent::orchestrator::prompt_sections_with_dispatch(
-                crate::skill::SKILL_MD,
-                rules_ref,
-                config.dispatch_cmd.is_some(),
-            ));
-    }
     let mut stdout = std::io::stdout();
     let result =
         run_task_with_state_writer_and_progress(&config, &mut state, &mut stdout, progress);
@@ -292,17 +279,16 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
             std::env::set_var("BLYTE_SESSION", &id);
         }
         if state.orchestrator.instructions.is_none() {
-            let rules_path = blyte_agent::orchestrator::user_rules_path();
-            let loaded_rules = rules_path
-                .as_deref()
-                .and_then(|p| blyte_agent::orchestrator::load_user_rules(p).map(|text| (p, text)));
-            let rules_ref = loaded_rules.as_ref().map(|(p, t)| (*p, t.as_str()));
-            state.orchestrator.instructions =
-                Some(blyte_agent::orchestrator::prompt_sections_with_dispatch(
-                    crate::skill::SKILL_MD,
-                    rules_ref,
-                    config.dispatch_cmd.is_some(),
-                ));
+            let lines = crate::orchestrator_text::set_state_instructions(
+                state,
+                config.dispatch_cmd.is_some(),
+                &config.root,
+            )?;
+            if state.runtime.conversation.is_none() {
+                for line in &lines {
+                    eprintln!("blyte: {line}");
+                }
+            }
         }
     }
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());
@@ -360,8 +346,10 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
         ),
         None => {
             blyte_agent::shell::set_pass_env(config.pass_env.clone());
-            if let Some(r) = blyte_agent::rules::load(&config.root) {
-                eprintln!("blyte: repository rules from {}", r.source.display());
+            if !config.orchestrate {
+                if let Some(r) = blyte_agent::rules::load(&config.root) {
+                    eprintln!("blyte: repository rules from {}", r.source.display());
+                }
             }
             let withheld = blyte_agent::shell::withheld_env();
             if !withheld.is_empty() {
