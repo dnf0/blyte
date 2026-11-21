@@ -678,3 +678,29 @@ does), and call `route` directly:
     port it reports the stale file and starts.
 
 **Commit message:** `feat(surface): bare blyte starts the live surface and serves its interface`
+
+### Task S8: a test for runs whose worktree has been cleaned up
+
+**Depends on:** S6 (on this branch). **Siblings:** none.
+
+**Goal.** `GET /api/runs` once failed with a 500 for the whole list when one finished run's
+worktree (`.wt/<id>`) had been removed by `blyte clean`. `handle_runs` in
+`crates/blyte-cli/src/serve.rs` now computes review checks only for a finished run that has
+none recorded and still has its worktree. Pin that with tests.
+
+**Files.** `crates/blyte-cli/tests/test_serve.rs` only. Change no other file; if a test below
+fails on the current code, stop and report it instead of changing `serve.rs`.
+
+**Tests** (`cargo test -p blyte --test test_serve`), built the way `runs_carry_hold_and_checks`
+builds its repository and run summary:
+
+1. `run_without_a_worktree_is_still_listed`: a finished run summary `.wt/T2.json` with no
+   `.wt/T2` directory and no recorded checks: `GET /api/runs` is 200, lists `T2` with
+   `checks_recorded == false`, and wrote no checks file for it.
+2. `run_with_a_worktree_gets_its_checks`: a finished run with its worktree present and no
+   recorded checks: after `GET /api/runs` the run has `checks_recorded == true`.
+3. `one_cleaned_run_does_not_hide_the_others`: both runs above in one repository: both listed.
+
+No fallbacks. Add no comments to code. Nothing here needs to be resumable.
+
+**Commit message:** `test(surface): runs whose worktree has been cleaned up are still listed`
