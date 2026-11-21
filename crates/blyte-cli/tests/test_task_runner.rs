@@ -1,6 +1,10 @@
 use blyte_cli::cli::Cli;
-use blyte_cli::task_runner::{run_task, run_task_with_state_and_writer, TaskConfig};
+use blyte_cli::task_runner::{
+    run_task, run_task_with_state_and_events, run_task_with_state_and_writer, TaskConfig,
+};
 use clap::Parser;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::Mutex;
 
 /// Global lock synchronizing tests that mutate environment variables.
@@ -250,4 +254,123 @@ fn test_repl_stream_prompt_dispatch() {
     let output = String::from_utf8(writer).unwrap();
     assert!(output.contains("Dispatching turn for prompt: Implement feature X"));
     assert!(output.contains("GEMINI_API_KEY"));
+}
+
+struct EnvRestore {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvRestore {
+    fn capture(keys: &[&'static str]) -> Self {
+        Self {
+            saved: keys.iter().map(|&k| (k, std::env::var(k).ok())).collect(),
+        }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (k, v) in &self.saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
+fn mock_openai_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Some(mut stream) = listener.incoming().flatten().next() {
+            let mut buf = vec![0u8; 65536];
+            let mut got = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&got);
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text[..i]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if got.len() >= i + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let body = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    port
+}
+
+#[test]
+fn test_run_task_with_state_and_events_emits_turn() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _restore = EnvRestore::capture(&["OPENAI_BASE_URL", "OPENAI_API_KEY", "BLYTE_USAGE_LOG"]);
+
+    let port = mock_openai_server();
+    std::env::set_var("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"));
+    std::env::set_var("OPENAI_API_KEY", "test-key");
+    std::env::set_var("BLYTE_USAGE_LOG", "off");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = TaskConfig {
+        prompt: "say done".to_string(),
+        gate: None,
+        context_strategy: "conversational".to_string(),
+        model: Some("openai/gpt-test".to_string()),
+        container: None,
+        max_turns: 3,
+        max_gates: 1,
+        rollback: false,
+        root: dir.path().to_path_buf(),
+        container_workdir: "/workspace".into(),
+        max_seconds: None,
+        max_cost_usd: None,
+        report: None,
+        fold_budget: None,
+        sandbox: "off".into(),
+        network: "on".into(),
+        allow_read: Vec::new(),
+        pass_env: Vec::new(),
+        research: false,
+        claim_check: false,
+        base_check: false,
+        orchestrate: false,
+        dispatch_cmd: None,
+    };
+
+    let mut state = blyte_agent::state::State::new("say done", "");
+    let turns = Mutex::new(Vec::new());
+    let result = run_task_with_state_and_events(&config, &mut state, &|event| {
+        if let blyte_agent::run::Event::Turn { n, text, .. } = event {
+            turns.lock().unwrap().push((*n, (*text).to_string()));
+        }
+    });
+
+    let (outcome, _report) = result.expect("run_task_with_state_and_events should succeed");
+    assert_eq!(outcome, blyte_agent::run::Outcome::Verified);
+    let seen_turns = turns.into_inner().unwrap();
+    assert!(
+        !seen_turns.is_empty(),
+        "expected at least one Turn event to be passed to callback"
+    );
+    assert_eq!(seen_turns[0].0, 1);
+    assert_eq!(seen_turns[0].1, "done");
 }

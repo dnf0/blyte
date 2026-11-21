@@ -195,6 +195,9 @@ pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
         blyte_agent::run::Event::RolledBack { to } => {
             format!("↺ Rolled back working tree to {}", to)
         }
+        blyte_agent::run::Event::ToolStart { .. } | blyte_agent::run::Event::Retry { .. } => {
+            String::new()
+        }
     }
 }
 
