@@ -541,3 +541,140 @@ unknown kind) on hand-written entries and check each returns a string containing
 Say in the final message what you ran and what it printed.
 
 **Commit message:** `feat(surface): the page of the live surface, on the session server's interface`
+
+### Task S6: the surface server, and bare `blyte` opens it
+
+**Depends on:** S1, S2, S3, S4, S5 and S7 (all on this branch). **Siblings:** none running.
+
+**Goal.** Running `blyte` with nothing else, in a terminal inside a repository, starts the live
+surface: one process that holds one conversation with the orchestrator, serves the page of S7,
+and answers the interface in the section "The interface between the server (S6) and the page
+(S7)" of this plan. That section is part of this task: every request, response shape and entry
+kind in it is the contract.
+
+**Files.** `crates/blyte-cli/src/serve.rs` (exists, empty), `crates/blyte-cli/src/cli.rs`,
+`crates/blyte-cli/src/main.rs`, a new `crates/blyte-cli/tests/test_serve.rs`, and, only where a
+function you need is private, the smallest `pub` or `pub(crate)` change in `dispatch.rs`,
+`mock.rs` or `session.rs` (no behaviour change there). Do not change
+`assets/surface/index.html`, `http.rs`, `queue_actions.rs` or `live_runs.rs`.
+
+**What to build.**
+
+1. `serve.rs`:
+   ```rust
+   pub struct Surface { pub root: PathBuf, pub repo: String, pub session: crate::session::Session,
+                        pub session_id: String, pub started_at: u64, pub days: u64 }
+   pub fn route(surface: &Surface, req: &crate::http::Request, now: u64) -> crate::http::Response
+   pub fn run(args: &SurfaceArgs, config: crate::repl::ReplConfig) -> i32
+   ```
+   `route` is a pure function of its arguments and the files under `root`, so tests call it
+   without a socket. `repo` is the root directory's name. Routes:
+   - `GET /` and `/index.html`: `include_str!("../assets/surface/index.html")`. Shared assets as
+     `mock::route` serves them (`crate::dashboard::shared_asset`).
+   - `GET /api/session`: `session.info()` plus `session_id`, `repo`, `started_at`.
+   - `GET /api/session/events`: `after` is required and must parse as `u64` (else 400);
+     `wait_ms` is optional, must parse as `u64`, and a value above 25000 is a 400, not clamped.
+     Calls `session.entries_after`. `last_seq` is `session.info().last_seq` read after the wait.
+   - `POST /api/session/messages`: body `{"text","reports"}`; `reports` may be absent (no
+     attachments). For each run id, the attachment text is the file `<root>/.wt/<id>.report.md`;
+     a run id that is not `[A-Za-z0-9._-]+`, or whose report file is missing or unreadable, is a
+     400 that names the id and the path, and nothing is submitted. Then `session.submit`.
+   - `GET /api/models`: `blyte_provider::discover_all_models()`; each model that was listed
+     becomes `{"id","effort_supported"}` (the same rule `session.rs` uses for
+     `effort_supported`); providers whose listing failed are returned beside it as
+     `"unavailable":[{"provider","error"}]`, never dropped silently. No model listed at all is a
+     502 with the providers' errors.
+   - `POST /api/session/model`: first `blyte_provider::resolve_provider(Some(model))`; an `Err`
+     is a 400 with the provider's message (this is where a missing key is reported) and the
+     model is not changed. Then `session.set_model`. Responds as `GET /api/session`.
+   - `POST /api/session/effort`: `session.set_effort`; its `Err` is a 400.
+   - `GET /api/runs`: `crate::live_runs::collect(root, now, days)`. Before answering, for every
+     finished run call `crate::queue_actions::ensure_checks(root, id)` and, if any returned
+     `Ok(true)`, collect again. Each finished run gets `hold` from
+     `crate::queue_actions::read_hold` (`{"note","ts"}` or `null`). Any `Err` from these is a 500
+     with its text.
+   - `GET /api/runs/<id>/diff`: the same diff `blyte review <id> --diff` prints for the run
+     (reuse that code; do not shell out to `blyte`), as `text/plain`. An unknown run is a 404.
+   - `POST /api/runs/<id>/decision`: body `{"action","note"}` with `action` one of `accept`,
+     `send_back`, `redo`, `hold`, `mark_read` (anything else is a 400 listing them); `note` may
+     be absent or null. Calls `crate::queue_actions::decide(root, id, action, note, now)`, whose
+     `Err` is a 400 with its text, then `session.record_decision(run, action, note,
+     orchestrator_message)` and answers `{"decision":{...},"seq"}` with `action` spelt as in
+     the request.
+   - `GET /api/map`: `crate::map::build(root, repo)`; its `Err` is a 422 as in the mock. No
+     `repo` query parameter.
+   - A known path with the wrong method is a 405; an unknown path a 404; a body that is not the
+     JSON object the route needs is a 400 saying which field is missing or wrong. Every failure
+     body is `{"error":"<text>"}`.
+2. `run`: `root` is the top of the current git repository (`git rev-parse --show-toplevel`); not
+   in a repository is an error that says so. The session is
+   `Session::start(Box::new(AgentRunner::new(&config)), <model>)` with `orchestrate` forced on
+   and the orchestrate defaults applied as `apply_orchestrate_defaults` does; the model is the
+   one the terminal session would use for the same flags and environment. It binds
+   `127.0.0.1:<port>` (`--port`, default 0, meaning the system picks), writes
+   `<root>/.wt/surface.json` (`{"pid","port","session_id","started_at"}`) once listening,
+   prints `blyte: surface at http://127.0.0.1:<port>/`, opens that address in the browser the
+   way `blyte dashboard --open` does unless `--no-open` was given, and serves with
+   `crate::http::serve`, passing each request to `route` with the current time. It removes
+   `surface.json` when it stops on Ctrl-C (use the signal handling the crate already has; if it
+   has none, leave the file and rely on the next rule).
+   **A second `blyte` attaches.** Before starting, if `surface.json` exists: when
+   `GET http://127.0.0.1:<port>/api/session` answers 200 with the same `session_id`, print
+   `blyte: surface already running at <address>`, open the browser (unless `--no-open`) and exit
+   0 without starting anything. When nothing answers on that port, or the answer has another
+   `session_id`, the file is stale: say so on stderr, replace it and start. A `surface.json`
+   that cannot be parsed is an error naming the file.
+3. `cli.rs` and `main.rs`: `SurfaceArgs { port: u16, no_open: bool, days: u64 (default 14, must
+   be 1 to 31) }` as top-level flags `--port`, `--no-open`, `--days`, and a top-level flag
+   `--terminal`. With no subcommand and no prompt: when `--terminal` is given, or standard input
+   is not a terminal, the terminal session runs exactly as today; otherwise `serve::run`.
+   `--port`, `--no-open` or `--days` together with `--terminal`, a prompt or a subcommand is a
+   usage error. `blyte --help` says in one line each what bare `blyte` and `--terminal` do.
+
+No fallbacks: nothing is substituted for a failure, a missing file or an unknown value; every
+failure is an error response or a non-zero exit that names what failed. Add no comments to
+code. Nothing here needs to be resumable (the conversation is in memory in this version).
+
+**Tests** (`cargo test -p blyte --test test_serve`). They build a `Surface` over a temporary
+git repository and a `Session` started with a scripted `PromptRunner` (as `test_session.rs`
+does), and call `route` directly:
+
+1. `index_is_the_surface_page`: `GET /` is 200 HTML containing `id="model-select"`.
+2. `session_info_shape`: exactly the nine keys of the interface.
+3. `message_then_events`: `POST /api/session/messages` answers `{"seq":1}`; `GET
+   /api/session/events?after=0&wait_ms=2000` returns the `user_message`, the runner's entries
+   and `idle`, with `last_seq` equal to the last entry's `seq`.
+4. `events_parameter_errors`: missing `after`, `after=x`, `wait_ms=25001`: each 400 with an
+   `error` text naming the parameter.
+5. `events_wait_returns_empty`: `after=<last_seq>&wait_ms=300` answers `{"entries":[]}` after
+   at least 300 ms.
+6. `report_attachment_is_read_from_the_run`: with `.wt/R1.report.md` holding `finding`, a
+   message with `"reports":["R1"]` reaches the runner ending in `Research report R1:\nfinding`.
+7. `missing_report_is_refused`: `"reports":["R9"]` is a 400 naming `R9` and the path, and no
+   entry was added; `"reports":["../x"]` is a 400.
+8. `runs_carry_hold_and_checks`: a finished run summary `.wt/T1.json` (shape as the tests of
+   `live_runs` build it): `GET /api/runs` lists it with `"hold":null`; after
+   `POST /api/runs/T1/decision {"action":"hold","note":"later"}` it has
+   `hold.note == "later"`, and the response carried `decision.action == "hold"` and a `seq`
+   whose entry is a `decision`.
+9. `decision_errors`: an unknown action (400 listing the five), an unknown run (400 with the
+   text of `decide`), `send_back` with no note if `decide` refuses that (assert what `decide`
+   returns).
+10. `send_back_reaches_the_orchestrator`: after `send_back` with a note, the runner received
+    the `orchestrator_message` the response carried.
+11. `effort_and_model_errors`: `POST /api/session/effort {"effort":"max"}` is a 400 with
+    `effort must be low, medium or high`; `POST /api/session/model {"model":""}` is a 400.
+12. `wrong_method_and_unknown_path`: `POST /api/session` is 405, `GET /api/nope` is 404, both
+    with an `error` body.
+13. `map_is_served`: `GET /api/map` on a repository with one Rust crate is 200 with a `parts`
+    (or the map's own top-level) array that is not empty.
+14. In `crates/blyte-cli/tests` beside the existing command-line tests:
+    `terminal_flag_conflicts`: `blyte --terminal --port 1` exits non-zero with a usage error;
+    `piped_stdin_still_runs_the_terminal_session`: the existing piped-input tests pass
+    unmodified.
+15. `second_start_attaches`: start `run` on a thread with `--no-open` in a temporary
+    repository, read the port from `surface.json`, call `run` again with `--no-open`: it
+    returns 0 and prints `surface already running`; with a `surface.json` pointing at a closed
+    port it reports the stale file and starts.
+
+**Commit message:** `feat(surface): bare blyte starts the live surface and serves its interface`
