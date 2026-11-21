@@ -191,11 +191,17 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+const TEST_TOKEN: &str = "test-surface-token";
+
 fn post_json(path: &str, body: serde_json::Value) -> Request {
     Request {
         method: "POST".to_string(),
         path: path.to_string(),
         query: Vec::new(),
+        headers: vec![(
+            blyte_cli::serve::TOKEN_HEADER.to_string(),
+            TEST_TOKEN.to_string(),
+        )],
         body: serde_json::to_vec(&body).unwrap(),
     }
 }
@@ -205,6 +211,7 @@ fn get(path: &str) -> Request {
         method: "GET".to_string(),
         path: path.to_string(),
         query: Vec::new(),
+        headers: Vec::new(),
         body: Vec::new(),
     }
 }
@@ -258,6 +265,7 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
         session_id: "sess-req-test".to_string(),
         started_at: now,
         days: 14,
+        token: TEST_TOKEN.to_string(),
     };
 
     let r1 = route(
