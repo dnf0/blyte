@@ -1243,11 +1243,20 @@ fn run_command_bounded(
         }
     };
 
-    let stdout = t_out.join().unwrap_or_default();
-    let stderr = t_err.join().unwrap_or_default();
+    let stdout = t_out
+        .join()
+        .map_err(|_| "blyte: reading the command's output failed".to_string())?;
+    let stderr = t_err
+        .join()
+        .map_err(|_| "blyte: reading the command's errors failed".to_string())?;
 
     match status {
-        Some(s) => Ok((s.code().unwrap_or(1), stdout, stderr)),
+        Some(s) => match s.code() {
+            Some(code) => Ok((code, stdout, stderr)),
+            None => Err(format!(
+                "blyte ended without an exit code ({s}); its output so far:\n{stdout}{stderr}"
+            )),
+        },
         None => Ok((
             124,
             stdout,
