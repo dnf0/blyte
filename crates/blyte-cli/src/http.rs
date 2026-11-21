@@ -12,6 +12,7 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub query: Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -27,6 +28,13 @@ impl Request {
         self.query
             .iter()
             .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.headers
+            .iter()
+            .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
 }
@@ -120,6 +128,7 @@ fn read_request(stream: &mut TcpStream, port: u16) -> Result<Option<Request>, Re
     let (method, target) = parse_request_line(request_line)?;
     let (path, query) = parse_target(target)?;
 
+    let mut headers: Vec<(String, String)> = Vec::new();
     let mut host_values: Vec<&str> = Vec::new();
     let mut origin_values: Vec<&str> = Vec::new();
     let mut content_length_values: Vec<&str> = Vec::new();
@@ -135,6 +144,7 @@ fn read_request(stream: &mut TcpStream, port: u16) -> Result<Option<Request>, Re
             return Err(Response::text(400, "malformed header name"));
         }
         let value = value.trim_matches(|c| c == ' ' || c == '\t');
+        headers.push((name.to_string(), value.to_string()));
         if name.eq_ignore_ascii_case("host") {
             host_values.push(value);
         } else if name.eq_ignore_ascii_case("origin") {
@@ -183,6 +193,7 @@ fn read_request(stream: &mut TcpStream, port: u16) -> Result<Option<Request>, Re
         method: method.to_string(),
         path,
         query,
+        headers,
         body,
     }))
 }
