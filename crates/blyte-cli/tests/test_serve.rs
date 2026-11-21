@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
-use blyte_cli::serve::{route, run_with_io, Surface};
+use blyte_cli::serve::{
+    constant_time_eq, generate_token, route, run_with_io, Surface, TOKEN_HEADER,
+};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
 
 struct RecordedCall {
@@ -204,6 +206,7 @@ fn make_surface(
         session_id: "sess-test-1".to_string(),
         started_at: 1_700_000_000,
         days: 14,
+        token: generate_token().unwrap(),
     };
     (surface, calls)
 }
@@ -216,15 +219,24 @@ fn get(path: &str, query: Vec<(&str, &str)>) -> Request {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        headers: Vec::new(),
         body: Vec::new(),
     }
 }
 
-fn post_json(path: &str, body: &serde_json::Value) -> Request {
+fn post_json(surface: &Surface, path: &str, body: &serde_json::Value) -> Request {
+    post_json_headers(path, body, vec![(TOKEN_HEADER, &surface.token)])
+}
+
+fn post_json_headers(path: &str, body: &serde_json::Value, headers: Vec<(&str, &str)>) -> Request {
     Request {
         method: "POST".to_string(),
         path: path.to_string(),
         query: Vec::new(),
+        headers: headers
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         body: serde_json::to_vec(body).unwrap(),
     }
 }
@@ -340,6 +352,7 @@ fn message_then_events() {
     let post_resp = route(
         &surface,
         &post_json(
+            &surface,
             "/api/session/messages",
             &serde_json::json!({ "text": "hello surface" }),
         ),
@@ -484,6 +497,7 @@ fn report_attachment_is_read_from_the_run() {
     let resp = route(
         &surface,
         &post_json(
+            &surface,
             "/api/session/messages",
             &serde_json::json!({ "text": "summarise", "reports": ["R1"] }),
         ),
@@ -522,6 +536,7 @@ fn missing_report_is_refused() {
     let missing_resp = route(
         &surface,
         &post_json(
+            &surface,
             "/api/session/messages",
             &serde_json::json!({ "text": "look", "reports": ["R9"] }),
         ),
@@ -544,6 +559,7 @@ fn missing_report_is_refused() {
     let traversal_resp = route(
         &surface,
         &post_json(
+            &surface,
             "/api/session/messages",
             &serde_json::json!({ "text": "look", "reports": ["../x"] }),
         ),
@@ -654,6 +670,7 @@ fn runs_carry_hold_and_checks() {
     let dec_resp = route(
         &surface,
         &post_json(
+            &surface,
             "/api/runs/T1/decision",
             &serde_json::json!({ "action": "hold", "note": "later" }),
         ),
@@ -807,6 +824,7 @@ fn decision_errors() {
     let bad_action = route(
         &surface,
         &post_json(
+            &surface,
             "/api/runs/T1/decision",
             &serde_json::json!({ "action": "ship_it" }),
         ),
@@ -835,6 +853,7 @@ fn decision_errors() {
     let missing_run = route(
         &surface,
         &post_json(
+            &surface,
             "/api/runs/NOPE/decision",
             &serde_json::json!({ "action": "hold", "note": "n" }),
         ),
@@ -854,6 +873,7 @@ fn decision_errors() {
     let no_note = route(
         &surface,
         &post_json(
+            &surface,
             "/api/runs/T1/decision",
             &serde_json::json!({ "action": "send_back" }),
         ),
@@ -878,6 +898,7 @@ fn send_back_reaches_the_orchestrator() {
     let resp = route(
         &surface,
         &post_json(
+            &surface,
             "/api/runs/T1/decision",
             &serde_json::json!({ "action": "send_back", "note": "fix edge case" }),
         ),
@@ -918,6 +939,7 @@ fn effort_and_model_errors() {
     let bad_effort = route(
         &surface,
         &post_json(
+            &surface,
             "/api/session/effort",
             &serde_json::json!({ "effort": "max" }),
         ),
@@ -935,7 +957,11 @@ fn effort_and_model_errors() {
 
     let empty_model = route(
         &surface,
-        &post_json("/api/session/model", &serde_json::json!({ "model": "" })),
+        &post_json(
+            &surface,
+            "/api/session/model",
+            &serde_json::json!({ "model": "" }),
+        ),
         1_700_000_100,
     );
     assert_eq!(empty_model.status, 400);
@@ -952,7 +978,7 @@ fn wrong_method_and_unknown_path() {
 
     let wrong = route(
         &surface,
-        &post_json("/api/session", &serde_json::json!({})),
+        &post_json(&surface, "/api/session", &serde_json::json!({})),
         1_700_000_100,
     );
     assert_eq!(wrong.status, 405);
@@ -1170,4 +1196,308 @@ fn second_start_attaches() {
     stream.read_to_string(&mut raw_resp).unwrap();
     assert!(raw_resp.starts_with("HTTP/1.1 200"));
     assert!(raw_resp.contains(new_sid));
+}
+
+fn flip_last_hex_char(token: &str) -> String {
+    let mut chars: Vec<char> = token.chars().collect();
+    let last = chars.last_mut().unwrap();
+    *last = if *last == '0' { '1' } else { '0' };
+    chars.into_iter().collect()
+}
+
+fn start_surface_and_read_url(repo: &Path) -> (u16, String) {
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let repo_bg = repo.to_path_buf();
+    let out_bg = Arc::clone(&out_buf);
+    let err_bg = Arc::clone(&err_buf);
+    std::thread::spawn(move || {
+        let args = SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+        };
+        let mut out = SharedBuf(out_bg);
+        let mut err = SharedBuf(err_bg);
+        let _ = run_with_io(&args, default_repl_config(repo_bg), &mut out, &mut err);
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let line = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stderr={}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
+        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        if let Some(found) = stdout.lines().find(|l| l.contains("blyte: surface at ")) {
+            break found.to_string();
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let url = line
+        .split("blyte: surface at ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
+    let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+    let (port_str, fragment) = rest.split_once("/#token=").unwrap();
+    let port: u16 = port_str.parse().unwrap();
+    (port, fragment.to_string())
+}
+
+fn send_http(port: u16, raw_req: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.write_all(raw_req.as_bytes()).unwrap();
+    let mut raw_resp = String::new();
+    stream.read_to_string(&mut raw_resp).unwrap();
+    raw_resp
+}
+
+#[test]
+fn post_endpoints_reject_missing_and_wrong_token() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo-repo");
+    init_git_repo(&repo);
+    let t = now_secs();
+    write_file(
+        &repo.join(".wt/T1.json"),
+        r#"{"outcome":"verified","seconds":10}"#,
+    );
+    let (surface, calls) = make_surface(repo.clone(), vec![Ok(Vec::new())]);
+    let wrong = flip_last_hex_char(&surface.token);
+
+    let msg_body = serde_json::json!({ "text": "hello" });
+    for headers in [
+        vec![],
+        vec![(TOKEN_HEADER, "")],
+        vec![(TOKEN_HEADER, wrong.as_str())],
+        vec![(TOKEN_HEADER, &surface.token[..16])],
+        vec![
+            (TOKEN_HEADER, surface.token.as_str()),
+            (TOKEN_HEADER, surface.token.as_str()),
+        ],
+    ] {
+        let resp = route(
+            &surface,
+            &post_json_headers("/api/session/messages", &msg_body, headers),
+            t,
+        );
+        assert_eq!(resp.status, 403);
+        assert!(parse_json(&resp)["error"].is_string());
+    }
+    assert_eq!(surface.session.info().last_seq, 0);
+    assert!(calls.lock().unwrap().is_empty());
+
+    let effort_body = serde_json::json!({ "effort": "high" });
+    for headers in [vec![], vec![(TOKEN_HEADER, wrong.as_str())]] {
+        let resp = route(
+            &surface,
+            &post_json_headers("/api/session/effort", &effort_body, headers),
+            t,
+        );
+        assert_eq!(resp.status, 403);
+        assert!(parse_json(&resp)["error"].is_string());
+    }
+    assert_eq!(surface.session.info().effort, None);
+    assert_eq!(surface.session.info().last_seq, 0);
+
+    let model_body = serde_json::json!({ "model": "ollama/llama3" });
+    for headers in [vec![], vec![(TOKEN_HEADER, wrong.as_str())]] {
+        let resp = route(
+            &surface,
+            &post_json_headers("/api/session/model", &model_body, headers),
+            t,
+        );
+        assert_eq!(resp.status, 403);
+        assert!(parse_json(&resp)["error"].is_string());
+    }
+    assert_eq!(surface.session.info().model, "gemini-4-neon");
+    assert_eq!(surface.session.info().last_seq, 0);
+
+    let decision_body = serde_json::json!({ "action": "hold", "note": "wait" });
+    for headers in [vec![], vec![(TOKEN_HEADER, wrong.as_str())]] {
+        let resp = route(
+            &surface,
+            &post_json_headers("/api/runs/T1/decision", &decision_body, headers),
+            t,
+        );
+        assert_eq!(resp.status, 403);
+        assert!(parse_json(&resp)["error"].is_string());
+    }
+    assert!(!repo.join(".wt/T1.hold.json").exists());
+    assert_eq!(surface.session.info().last_seq, 0);
+
+    let ok_effort = route(
+        &surface,
+        &post_json_headers(
+            "/api/session/effort",
+            &effort_body,
+            vec![("x-blyte-token", surface.token.as_str())],
+        ),
+        t,
+    );
+    assert_eq!(ok_effort.status, 200);
+    assert_eq!(surface.session.info().effort.as_deref(), Some("high"));
+
+    let ok_model_empty = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/session/model",
+            &serde_json::json!({ "model": "" }),
+        ),
+        t,
+    );
+    assert_eq!(ok_model_empty.status, 400);
+    assert_eq!(
+        parse_json(&ok_model_empty)["error"].as_str(),
+        Some("field model must not be empty")
+    );
+
+    let ok_decision = route(
+        &surface,
+        &post_json(&surface, "/api/runs/T1/decision", &decision_body),
+        t,
+    );
+    assert_eq!(ok_decision.status, 200);
+    assert!(repo.join(".wt/T1.hold.json").exists());
+
+    let ok_msg = route(
+        &surface,
+        &post_json(&surface, "/api/session/messages", &msg_body),
+        t,
+    );
+    assert_eq!(ok_msg.status, 200);
+    assert!(parse_json(&ok_msg)["seq"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn secret_never_leaks_and_origin_check_stays() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("leak-check-repo");
+    init_git_repo(&repo);
+    let (port, token) = start_surface_and_read_url(&repo);
+    assert_eq!(token.len(), 64);
+    assert!(token
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+
+    for path in [
+        "/",
+        "/api/session",
+        "/api/session/events?after=0",
+        "/api/runs",
+    ] {
+        let resp = send_http(
+            port,
+            &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "GET {path} failed: {resp}"
+        );
+        assert!(!resp.contains(&token), "secret leaked in GET {path}");
+    }
+
+    let body = r#"{"effort":"high"}"#;
+    let missing_resp = send_http(
+        port,
+        &format!(
+            "POST /api/session/effort HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(
+        missing_resp.starts_with("HTTP/1.1 403"),
+        "expected 403 without token, got: {missing_resp}"
+    );
+
+    let wrong = flip_last_hex_char(&token);
+    let wrong_resp = send_http(
+        port,
+        &format!(
+            "POST /api/session/effort HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n{TOKEN_HEADER}: {wrong}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(
+        wrong_resp.starts_with("HTTP/1.1 403"),
+        "expected 403 with wrong token, got: {wrong_resp}"
+    );
+
+    let bad_origin_resp = send_http(
+        port,
+        &format!(
+            "POST /api/session/effort HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://evil.example\r\n{TOKEN_HEADER}: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(
+        bad_origin_resp.starts_with("HTTP/1.1 403"),
+        "expected 403 for bad Origin even with valid token, got: {bad_origin_resp}"
+    );
+
+    let ok_resp = send_http(
+        port,
+        &format!(
+            "POST /api/session/effort HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(
+        ok_resp.starts_with("HTTP/1.1 200"),
+        "expected 200 with valid token and origin, got: {ok_resp}"
+    );
+
+    for path in ["/api/session", "/api/session/events?after=0"] {
+        let resp = send_http(
+            port,
+            &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        assert!(
+            !resp.contains(&token),
+            "secret leaked after POST in GET {path}"
+        );
+    }
+
+    let wt_dir = repo.join(".wt");
+    assert!(wt_dir.join("surface.json").exists());
+    for entry in std::fs::read_dir(&wt_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !content.contains(&token),
+                "secret leaked in file {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn two_starts_give_different_secrets() {
+    let d1 = tempfile::tempdir().unwrap();
+    let repo1 = d1.path().join("start-one");
+    init_git_repo(&repo1);
+    let (_port1, token1) = start_surface_and_read_url(&repo1);
+
+    let d2 = tempfile::tempdir().unwrap();
+    let repo2 = d2.path().join("start-two");
+    init_git_repo(&repo2);
+    let (_port2, token2) = start_surface_and_read_url(&repo2);
+
+    assert_eq!(token1.len(), 64);
+    assert_eq!(token2.len(), 64);
+    assert_ne!(token1, token2);
+
+    assert!(constant_time_eq(token1.as_bytes(), token1.as_bytes()));
+    assert!(!constant_time_eq(token1.as_bytes(), token2.as_bytes()));
+    assert!(!constant_time_eq(b"short", b"longer"));
+    assert!(!constant_time_eq(b"longer", b"short"));
+    assert!(constant_time_eq(b"", b""));
 }
