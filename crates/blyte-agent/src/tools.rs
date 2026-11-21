@@ -23,10 +23,23 @@ static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec:
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
+thread_local! {
+    static BLYTE_REQUEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
 
 pub const BLYTE_TOOL_COMMANDS: [&str; 7] = [
     "dispatch", "wait", "status", "review", "plan", "init", "clean",
 ];
+
+pub fn set_blyte_request(request: Option<String>) {
+    BLYTE_REQUEST.with(|slot| {
+        *slot.borrow_mut() = request;
+    });
+}
+
+pub fn blyte_request() -> Option<String> {
+    BLYTE_REQUEST.with(|slot| slot.borrow().clone())
+}
 
 pub fn set_blyte_tool(exe: Option<std::path::PathBuf>) {
     match BLYTE_TOOL.write() {
@@ -1113,10 +1126,30 @@ fn execute_unbounded(
                 return ToolOutcome::err("only dispatch can run in the background");
             }
 
+            let mut exec_args = cmd_args.clone();
+            if first == "dispatch" {
+                if cmd_args
+                    .iter()
+                    .skip(1)
+                    .any(|a| a == "--request" || a.starts_with("--request="))
+                {
+                    return ToolOutcome::err("do not pass --request; blyte sets it automatically");
+                }
+                if let Some(req_id) = blyte_request() {
+                    if let Some(pos) = exec_args.iter().position(|a| a == "--") {
+                        exec_args.insert(pos, req_id);
+                        exec_args.insert(pos, "--request".to_string());
+                    } else {
+                        exec_args.push("--request".to_string());
+                        exec_args.push(req_id);
+                    }
+                }
+            }
+
             let parent_session = dispatch_parent_session();
             let mut cmd_builder = std::process::Command::new(&exe);
             cmd_builder
-                .args(&cmd_args)
+                .args(&exec_args)
                 .env("BLYTE_DISPATCH_PARENT", &parent_session)
                 .stdin(std::process::Stdio::null());
             if root.is_dir() {

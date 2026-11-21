@@ -1,7 +1,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Entry {
@@ -269,9 +272,16 @@ struct ApprovalRecord {
     answer: Option<ApprovalAnswer>,
 }
 
+struct QueuedMessage {
+    request_id: String,
+    prompt: String,
+}
+
 struct SessionState {
     entries: Vec<Entry>,
-    queue: VecDeque<String>,
+    queue: VecDeque<QueuedMessage>,
+    session_prefix: String,
+    request_seq: u64,
     model: String,
     effort: Option<String>,
     busy: bool,
@@ -286,6 +296,11 @@ impl SessionState {
         let ts = now_secs();
         self.entries.push(Entry { seq, ts, body });
         seq
+    }
+
+    fn next_request_id(&mut self) -> String {
+        self.request_seq += 1;
+        format!("{}-{}", self.session_prefix, self.request_seq)
     }
 
     fn effective_model(&self) -> String {
@@ -374,6 +389,8 @@ impl Session {
             state: Mutex::new(SessionState {
                 entries: Vec::new(),
                 queue: VecDeque::new(),
+                session_prefix: new_session_prefix(),
+                request_seq: 0,
                 model: base_model,
                 effort,
                 busy: false,
@@ -443,7 +460,11 @@ impl Session {
             reports,
             queued,
         });
-        state.queue.push_back(full_prompt);
+        let request_id = state.next_request_id();
+        state.queue.push_back(QueuedMessage {
+            request_id,
+            prompt: full_prompt,
+        });
         self.guard.shared.work_cv.notify_one();
         self.guard.shared.log_cv.notify_all();
         Ok(seq)
@@ -563,7 +584,11 @@ impl Session {
                 reports: Vec::new(),
                 queued,
             });
-            state.queue.push_back(msg.to_string());
+            let request_id = state.next_request_id();
+            state.queue.push_back(QueuedMessage {
+                request_id,
+                prompt: msg.to_string(),
+            });
             self.guard.shared.work_cv.notify_one();
         }
         self.guard.shared.log_cv.notify_all();
@@ -571,18 +596,33 @@ impl Session {
     }
 }
 
+struct RequestGuard;
+
+impl RequestGuard {
+    fn enter(request_id: String) -> Self {
+        blyte_agent::tools::set_blyte_request(Some(request_id));
+        Self
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        blyte_agent::tools::set_blyte_request(None);
+    }
+}
+
 fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
     loop {
-        let (prompt, effective_model) = {
+        let (msg, effective_model) = {
             let mut state = shared.lock_state();
             loop {
                 if state.closed {
                     return;
                 }
-                if let Some(prompt) = state.queue.pop_front() {
+                if let Some(msg) = state.queue.pop_front() {
                     state.busy = true;
                     let model = state.effective_model();
-                    break (prompt, model);
+                    break (msg, model);
                 }
                 state = shared
                     .work_cv
@@ -611,7 +651,8 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
         };
 
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            runner.run(&prompt, &effective_model, &emit)
+            let _req_guard = RequestGuard::enter(msg.request_id);
+            runner.run(&msg.prompt, &effective_model, &emit)
         }));
 
         let (turns, cost_usd) = {
@@ -675,4 +716,16 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn new_session_prefix() -> String {
+    let seq = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("r{}-{}-{}", now_millis(), std::process::id(), seq)
 }
