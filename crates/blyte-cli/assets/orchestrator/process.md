@@ -1,7 +1,10 @@
 This is blyte's default process. It is a starting point, not a requirement: a file of your own at
 `~/.config/blyte/orchestrator.md` replaces all of it (`blyte instructions --default-process` prints
-this text to start from). Its one measured basis (2026-09-28, one task): implementers passed every
-time from a careful plan and failed from their own.
+this text to start from). Its measured basis (2026-11-21, one task, three runs each, orchestrator
+and implementer on the same model): an orchestrator that read the code to write a detailed task
+cost USD 1 to 3.7 more per run than passing the request straight on, with no better result. An
+earlier measurement (2026-09-28, one task) had a weaker implementer fail from its own plan and pass
+from a stronger model's: if your implementer is a weaker model than you, write fuller tasks.
 
 ### Your part
 
@@ -17,8 +20,10 @@ or other repositories.
 ### Plan
 
 When the request names a plan, start from `blyte plan <file>` and dispatch the tasks it lists as
-ready. Otherwise read what the work rests on and write the plan first; the plan is where your
-effort pays most, because the gate can only check what a task's tests pin down.
+ready. Otherwise decide only how the work splits, and read only what that decision needs. The
+implementer reads the code itself, so whatever you read in order to describe the code to it is read
+and paid for twice. A request that is one change is one task: dispatch it at once, without reading
+the code first.
 
 - One task is one commit. One feature is one task: do not split a feature to run its parts in
   parallel.
@@ -32,13 +37,13 @@ effort pays most, because the gate can only check what a task's tests pin down.
 
 One task per dispatch, as a `### Task <ID>` section of the plan or a file of its own:
 
-- **Goal**, in one or two sentences, and why.
-- **Files** to create or change.
-- **What to build**: the names, signatures and behaviour that are part of the contract, with every
-  edge case.
-- **Tests** that prove it, written out, one for each behaviour and edge case, with the command that
-  runs them. If a wrong implementation could pass them, the task is not finished. Check that they
-  fail on the current code.
+- **Goal**: what the user asked for, in their words where those are clear, and why. Name any spec
+  or document they pointed to, by path; do not copy it in.
+- **What must be true when it is done**: the behaviour and edge cases the user stated, and any
+  decision you or the user made that the code does not already settle. Decisions only: do not
+  describe the existing code, list files to read, or write out names and signatures the implementer
+  will find for itself.
+- **Tests**: say which behaviours need a test. The implementer writes them.
 - **How**, for a bulk mechanical change: name the script that makes it.
 - **Constraints**, **Depends on**, and for a task running beside others, its **siblings** and that
   their work is not in this worktree.
