@@ -250,3 +250,55 @@ AI endpoint improved them, so none of those were kept.
 detailed, which favours delegation. Claude's cost is the notional list price that Claude Code reports under a subscription.
 Results: blyte-eval `results/offload-v2-sonnet-20260928-1028/` and `results/offload-v3-blyte-20260928-1754/`.
 
+
+## The orchestrator: default process, corrections, and no orchestrator
+
+2026-11-21. One request, given three ways, three runs each, all on `gemini-4-neon` in a fresh clone:
+add the `blyte instructions` command and the test that the reference names only real commands.
+The build was the one that splits the orchestrator's instructions into a reference and a default
+process (#379).
+
+- **A**: `blyte --orchestrate` with the default process.
+- **B**: the same, plus four corrections in the repository's `.blyte/orchestrator.md`: do not read
+  blyte's source or `.wt/` files; do not run `--help` or look for API keys; keep tool output small
+  (the review summary before any `--diff`, long output trimmed); start at once.
+- **C**: no orchestrator. The request went straight to one implementer with `blyte dispatch`.
+
+| | A | B | C |
+|---|---|---|---|
+| Verified work | 3 of 3, merged to `main` | 3 of 3, merged to `main` | 2 of 3, on a `wip/` branch |
+| Full check on the result, re-run afterwards | 3 pass | 3 pass | 2 pass |
+| Total cost per run (USD) | 3.85, 4.51, 4.31 | 2.27, 3.93, 4.35 | 1.77, 1.54 |
+| Of which the orchestrator (USD) | 2.99, 3.68, 3.18 | 1.14, 2.86, 3.31 | none |
+| Wall time (minutes) | 25, 50, 34 | 39, 45, 34 | 18, 17 |
+| Implementer turns | 16, 14, 21 | 20, 19, 15 | 34, 35 |
+| Orchestrator tool calls before dispatching | 50, 49, 45 | 35, 34, 35 | |
+| File reads before dispatching | 32, 32, 31 | 25, 24, 27 | |
+| Reads of files in the implementer's worktree | 1, 1, 2 | 0, 0, 0 | |
+| `--diff` before the review summary | 3 of 3 | 0 of 3 | |
+| Check output left untrimmed | 3 of 3 | 0 of 3 | |
+| Ran `--help` | 1 of 3 | 0 of 3 | |
+| Looked for API keys | 0 of 3 | 0 of 3 | |
+
+**What it shows.**
+
+- The default process alone is enough to get the work done: every orchestrator run wrote one task,
+  dispatched it, reviewed it, recorded a verdict and merged it.
+- Two corrections changed behaviour in every run and are kept in the default process: keep tool
+  output small, and do not read the implementer's worktree files. The rule was set beforehand: a
+  correction is kept if its mistake shows in at least two of three A runs and in no B run.
+- The `--help` and API-key corrections did not meet that rule and are left out.
+- "Start at once" changed little: both arms read 24 to 32 files before dispatching. Most of the
+  orchestrator's cost is that reading.
+- For a request this well specified, the orchestrator added USD 1 to 3.7 and 10 to 30 minutes per run and no
+  difference that the check or a comparison of the diffs could find. What it added is the review, the
+  verdict and the merge; the implementer alone took about twice as many turns and left its work on a
+  branch.
+- The one run that did not finish (C) was stopped before it began: a timing test failed on the
+  untouched tree while the machine was busy with the other runs.
+
+**Limits.** One task, one model and three runs per arm: a direction, not a rate. The request named
+a spec that already existed, which favours going straight to an implementer; a request that needs
+splitting into tasks or a decision was not tested. The results were compared by the check and by
+what each diff contains, not read line by line. Arm B's corrections came through the repository
+file, not the default process itself.
