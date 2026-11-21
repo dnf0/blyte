@@ -1,6 +1,7 @@
 pub mod approval_file;
 pub mod clean;
 pub mod cli;
+pub mod combine;
 pub mod comment_lint;
 pub mod comments_cmd;
 pub mod config;

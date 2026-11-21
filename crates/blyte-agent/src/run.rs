@@ -481,122 +481,17 @@ impl<'a> Runner<'a> {
         deadline: &mut Option<std::time::Instant>,
         now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> (bool, String, u64, Vec<String>) {
-        let (_guard, wait_ms) = if gate_slots::enabled() && !gate_slots::nested() {
-            let max_slots = gate_slots::slots();
-            let slot_dir = gate_slots::slot_dir();
-            match gate_slots::acquire(max_slots, &slot_dir, Duration::from_millis(500)) {
-                Ok((guard, waited)) => {
-                    let wait_ms = waited.as_millis() as u64;
-                    if let Some(d) = deadline.as_mut() {
-                        *d += waited;
-                    }
-                    if wait_ms > 0 {
-                        eprintln!(
-                            "gate: waited {}s for a gate slot ({max_slots} in use)",
-                            waited.as_secs()
-                        );
-                        self.emit(Event::GateSlotWait { ms: wait_ms });
-                    }
-                    (Some(guard), wait_ms)
-                }
-                Err(e) => {
-                    eprintln!("gate: slot acquisition failed: {e}");
-                    (None, 0)
-                }
-            }
-        } else {
-            (None, 0)
-        };
-
-        let steps = gate_steps(&state.orchestrator.verification_cmd);
-        if steps.len() <= 1 {
-            let (passed, output) =
-                self.run_step(&state.orchestrator.verification_cmd, *deadline, now);
-            let failed = if passed {
-                Vec::new()
-            } else {
-                vec![state.orchestrator.verification_cmd.clone()]
-            };
-            return (passed, output, wait_ms, failed);
-        }
-        let (first_group, second_group) = {
-            let (f, s) = retry_order(&steps, last_failed);
-            if f.is_empty() {
-                (steps.clone(), Vec::new())
-            } else {
-                (f, s)
-            }
-        };
-        let mut failures = Vec::new();
-        let mut failed_steps = Vec::new();
-        for &step in &first_group {
-            let (passed, output) = self.run_step(step, *deadline, now);
-            if !passed {
-                failed_steps.push(step.to_string());
-                failures.push(format!("$ {step}\n{output}"));
-                if deadline.is_some_and(|d| now() >= d) {
-                    break;
-                }
-            }
-        }
-        if !failures.is_empty() {
-            let body = tools::bound_output(&failures.join("\n\n"));
-            let not_rerun = if !second_group.is_empty() {
-                format!(
-                    "\nNot re-run this attempt: {} step(s) that passed last time ({}).",
-                    second_group.len(),
-                    second_group.join(", ")
-                )
-            } else {
-                String::new()
-            };
-            return (
-                false,
-                format!(
-                    "{} of {} steps failed: {}{not_rerun}\n\n{body}",
-                    failures.len(),
-                    steps.len(),
-                    failed_steps.join(", ")
-                ),
-                wait_ms,
-                failed_steps,
-            );
-        }
-        for &step in &second_group {
-            let (passed, output) = self.run_step(step, *deadline, now);
-            if !passed {
-                failed_steps.push(step.to_string());
-                failures.push(format!("$ {step}\n{output}"));
-                if deadline.is_some_and(|d| now() >= d) {
-                    break;
-                }
-            }
-        }
-        if failures.is_empty() {
-            return (true, "exit 0".into(), wait_ms, Vec::new());
-        }
-        let body = tools::bound_output(&failures.join("\n\n"));
-        (
-            false,
-            format!(
-                "{} of {} steps failed: {}\n\n{body}",
-                failures.len(),
-                steps.len(),
-                failed_steps.join(", ")
-            ),
-            wait_ms,
-            failed_steps,
-        )
-    }
-
-    /// Run one gate command: exit status and its bounded output.
-    fn run_step(
-        &self,
-        cmd: &str,
-        deadline: Option<std::time::Instant>,
-        now: &(dyn Fn() -> std::time::Instant + Sync),
-    ) -> (bool, String) {
-        self.run_step_in(cmd, &self.root, deadline, now)
+        let result = run_gate_steps(
+            self.shell,
+            &state.orchestrator.verification_cmd,
+            &self.root,
+            last_failed,
+            deadline,
+            |ms| self.emit(Event::GateSlotWait { ms }),
+            now,
+        );
+        let failed = result.failures.into_iter().map(|f| f.step).collect();
+        (result.passed, result.output, result.wait_ms, failed)
     }
 
     fn run_step_in(
@@ -606,40 +501,7 @@ impl<'a> Runner<'a> {
         deadline: Option<std::time::Instant>,
         now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> (bool, String) {
-        let timeout = match deadline {
-            Some(d) => {
-                let left = d.saturating_duration_since(now());
-                if left.is_zero() {
-                    return (false, "exit 124\ngate ran out of time".into());
-                }
-                Duration::from_secs(1800).min(left)
-            }
-            None => Duration::from_secs(1800),
-        };
-        let wrapped = format!("(export {}=1\n{cmd}\n)", gate_slots::IN_GATE_ENV);
-        match self.shell.exec(&wrapped, dir, timeout) {
-            Ok(o) => {
-                let body = tools::bound_output(o.merged().trim_end());
-                if o.exit_code != 0 && deadline.is_some_and(|d| now() >= d) {
-                    if body.is_empty() {
-                        return (false, format!("exit {}\ngate ran out of time", o.exit_code));
-                    }
-                    return (
-                        false,
-                        format!("exit {}\ngate ran out of time\n{body}", o.exit_code),
-                    );
-                }
-                (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
-            }
-            // A gate that cannot execute has not passed. Treating an error as success is how
-            // an ungated run gets mistaken for a verified one.
-            Err(e) => {
-                if deadline.is_some_and(|d| now() >= d) {
-                    return (false, format!("gate ran out of time: {e}"));
-                }
-                (false, format!("verification command could not run: {e}"))
-            }
-        }
+        run_gate_step(self.shell, cmd, dir, deadline, now)
     }
 
     fn fingerprint(&self) -> Option<String> {
@@ -1660,8 +1522,205 @@ impl<'a> Runner<'a> {
     }
 }
 
+/// A single failing gate step and its bounded output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateStepFailure {
+    pub step: String,
+    pub output: String,
+}
+
+/// Result of running a verification gate across all of its steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateRunResult {
+    pub passed: bool,
+    pub output: String,
+    pub wait_ms: u64,
+    pub failures: Vec<GateStepFailure>,
+}
+
+/// Run one gate step in `dir` through `shell`, returning `(passed, bounded_output)`.
+pub fn run_gate_step(
+    shell: &dyn Shell,
+    cmd: &str,
+    dir: &Path,
+    deadline: Option<std::time::Instant>,
+    now: &(dyn Fn() -> std::time::Instant + Sync),
+) -> (bool, String) {
+    let timeout = match deadline {
+        Some(d) => {
+            let left = d.saturating_duration_since(now());
+            if left.is_zero() {
+                return (false, "exit 124\ngate ran out of time".into());
+            }
+            Duration::from_secs(1800).min(left)
+        }
+        None => Duration::from_secs(1800),
+    };
+    let wrapped = format!("(export {}=1\n{cmd}\n)", gate_slots::IN_GATE_ENV);
+    match shell.exec(&wrapped, dir, timeout) {
+        Ok(o) => {
+            let body = tools::bound_output(o.merged().trim_end());
+            if o.exit_code != 0 && deadline.is_some_and(|d| now() >= d) {
+                if body.is_empty() {
+                    return (false, format!("exit {}\ngate ran out of time", o.exit_code));
+                }
+                return (
+                    false,
+                    format!("exit {}\ngate ran out of time\n{body}", o.exit_code),
+                );
+            }
+            (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
+        }
+        Err(e) => {
+            if deadline.is_some_and(|d| now() >= d) {
+                return (false, format!("gate ran out of time: {e}"));
+            }
+            (false, format!("verification command could not run: {e}"))
+        }
+    }
+}
+
+/// Run a multi-line verification gate in `dir` through `shell`, acquiring a gate slot if enabled.
+pub fn run_gate_steps(
+    shell: &dyn Shell,
+    gate: &str,
+    dir: &Path,
+    last_failed: &[String],
+    deadline: &mut Option<std::time::Instant>,
+    on_slot_wait: impl FnOnce(u64),
+    now: &(dyn Fn() -> std::time::Instant + Sync),
+) -> GateRunResult {
+    let (_guard, wait_ms) = if gate_slots::enabled() && !gate_slots::nested() {
+        let max_slots = gate_slots::slots();
+        let slot_dir = gate_slots::slot_dir();
+        match gate_slots::acquire(max_slots, &slot_dir, Duration::from_millis(500)) {
+            Ok((guard, waited)) => {
+                let wait_ms = waited.as_millis() as u64;
+                if let Some(d) = deadline.as_mut() {
+                    *d += waited;
+                }
+                if wait_ms > 0 {
+                    eprintln!(
+                        "gate: waited {}s for a gate slot ({max_slots} in use)",
+                        waited.as_secs()
+                    );
+                    on_slot_wait(wait_ms);
+                }
+                (Some(guard), wait_ms)
+            }
+            Err(e) => {
+                eprintln!("gate: slot acquisition failed: {e}");
+                (None, 0)
+            }
+        }
+    } else {
+        (None, 0)
+    };
+
+    let steps = gate_steps(gate);
+    if steps.len() <= 1 {
+        let step_cmd = steps.first().copied().unwrap_or(gate);
+        let (passed, output) = run_gate_step(shell, step_cmd, dir, *deadline, now);
+        let failures = if passed {
+            Vec::new()
+        } else {
+            vec![GateStepFailure {
+                step: step_cmd.to_string(),
+                output: output.clone(),
+            }]
+        };
+        return GateRunResult {
+            passed,
+            output,
+            wait_ms,
+            failures,
+        };
+    }
+    let (first_group, second_group) = {
+        let (f, s) = retry_order(&steps, last_failed);
+        if f.is_empty() {
+            (steps.clone(), Vec::new())
+        } else {
+            (f, s)
+        }
+    };
+    let mut formatted_failures = Vec::new();
+    let mut failures = Vec::new();
+    for &step in &first_group {
+        let (passed, output) = run_gate_step(shell, step, dir, *deadline, now);
+        if !passed {
+            formatted_failures.push(format!("$ {step}\n{output}"));
+            failures.push(GateStepFailure {
+                step: step.to_string(),
+                output,
+            });
+            if deadline.is_some_and(|d| now() >= d) {
+                break;
+            }
+        }
+    }
+    if !failures.is_empty() {
+        let body = tools::bound_output(&formatted_failures.join("\n\n"));
+        let failed_names: Vec<&str> = failures.iter().map(|f| f.step.as_str()).collect();
+        let not_rerun = if !second_group.is_empty() {
+            format!(
+                "\nNot re-run this attempt: {} step(s) that passed last time ({}).",
+                second_group.len(),
+                second_group.join(", ")
+            )
+        } else {
+            String::new()
+        };
+        return GateRunResult {
+            passed: false,
+            output: format!(
+                "{} of {} steps failed: {}{not_rerun}\n\n{body}",
+                failures.len(),
+                steps.len(),
+                failed_names.join(", ")
+            ),
+            wait_ms,
+            failures,
+        };
+    }
+    for &step in &second_group {
+        let (passed, output) = run_gate_step(shell, step, dir, *deadline, now);
+        if !passed {
+            formatted_failures.push(format!("$ {step}\n{output}"));
+            failures.push(GateStepFailure {
+                step: step.to_string(),
+                output,
+            });
+            if deadline.is_some_and(|d| now() >= d) {
+                break;
+            }
+        }
+    }
+    if failures.is_empty() {
+        return GateRunResult {
+            passed: true,
+            output: "exit 0".into(),
+            wait_ms,
+            failures: Vec::new(),
+        };
+    }
+    let body = tools::bound_output(&formatted_failures.join("\n\n"));
+    let failed_names: Vec<&str> = failures.iter().map(|f| f.step.as_str()).collect();
+    GateRunResult {
+        passed: false,
+        output: format!(
+            "{} of {} steps failed: {}\n\n{body}",
+            failures.len(),
+            steps.len(),
+            failed_names.join(", ")
+        ),
+        wait_ms,
+        failures,
+    }
+}
+
 /// The steps of a gate: its non-blank lines, trimmed.
-fn gate_steps(gate: &str) -> Vec<&str> {
+pub fn gate_steps(gate: &str) -> Vec<&str> {
     gate.lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
