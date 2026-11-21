@@ -1434,7 +1434,13 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     let stored_model_review = if args.model_review {
         None
     } else {
-        crate::queue_actions::read_stored_model_review(&root, &args.id)
+        match crate::queue_actions::read_stored_model_review(&root, &args.id) {
+            Ok(mr) => mr,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
     };
     if let Some(ref mr) = stored_model_review {
         if let Some(flag) = mr.flag() {

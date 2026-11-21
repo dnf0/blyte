@@ -600,18 +600,40 @@ fn compute_review_inner(
     })
 }
 
-pub(crate) fn read_stored_model_review(
+pub fn read_stored_model_review(
     root: &Path,
     id: &str,
-) -> Option<crate::model_review::ModelReviewResult> {
+) -> Result<Option<crate::model_review::ModelReviewResult>, String> {
     let checks_path = root.join(".wt").join(format!("{id}.checks.json"));
-    let raw = std::fs::read_to_string(&checks_path).ok()?;
-    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let mr = val.get("model_review")?;
+    let raw = match std::fs::read_to_string(&checks_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", checks_path.display())),
+    };
+    let val: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("cannot parse {}: {e}", checks_path.display()))?;
+    parse_stored_model_review(&checks_path, &val)
+}
+
+pub(crate) fn parse_stored_model_review(
+    checks_path: &Path,
+    val: &serde_json::Value,
+) -> Result<Option<crate::model_review::ModelReviewResult>, String> {
+    let Some(obj) = val.as_object() else {
+        return Err(format!(
+            "cannot parse {}: expected a JSON object",
+            checks_path.display()
+        ));
+    };
+    let Some(mr) = obj.get("model_review") else {
+        return Ok(None);
+    };
     if mr.is_null() {
-        return None;
+        return Ok(None);
     }
-    serde_json::from_value(mr.clone()).ok()
+    serde_json::from_value(mr.clone())
+        .map(Some)
+        .map_err(|e| format!("invalid model_review in {}: {e}", checks_path.display()))
 }
 
 pub(crate) fn write_checks_file(
