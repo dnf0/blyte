@@ -332,6 +332,7 @@ fn serialized_run_has_exact_contract_keys() {
         "task",
         "plan_file",
         "plan_task",
+        "request",
         "started_at",
         "finished_at",
         "outcome",

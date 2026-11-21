@@ -142,6 +142,7 @@ pub struct Job {
     pub root: Option<PathBuf>,
     pub plan_file: Option<String>,
     pub plan_task: Option<String>,
+    pub request: Option<String>,
     pub task_file: Option<String>,
     #[serde(skip)]
     pub research: bool,
@@ -658,6 +659,7 @@ struct RawJob {
     research: bool,
     start_plan: Option<String>,
     start_plan_task: Option<String>,
+    request: Option<String>,
     file_tags: Vec<String>,
     log_path: PathBuf,
     report_path: PathBuf,
@@ -791,6 +793,11 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         .and_then(|v| v["plan_task"].as_str())
                         .map(|s| s.to_string())
                         .filter(|s| !s.is_empty());
+                    let request = start_val
+                        .as_ref()
+                        .and_then(|v| v["request"].as_str())
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty());
                     let task_file = start_val
                         .as_ref()
                         .and_then(|v| v["task_file"].as_str())
@@ -864,6 +871,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         research,
                         start_plan,
                         start_plan_task,
+                        request,
                         file_tags,
                         log_path,
                         report_path,
@@ -1026,6 +1034,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     research: false,
                                     start_plan: None,
                                     start_plan_task: None,
+                                    request: None,
                                     file_tags: Vec::new(),
                                     log_path,
                                     report_path,
@@ -1372,6 +1381,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             root: raw.root,
             plan_file,
             plan_task,
+            request: raw.request,
             task_file: raw.task_file,
             start_plan: raw.start_plan,
             file_tags,
