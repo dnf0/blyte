@@ -31,7 +31,10 @@ pub struct Decision {
 pub(crate) struct ReviewComputation {
     pub(crate) wt: PathBuf,
     pub(crate) wt_exists: bool,
+    pub(crate) is_research: bool,
     pub(crate) base: String,
+    pub(crate) task_text: Option<String>,
+    pub(crate) changed_files: Vec<String>,
     pub(crate) commits_out: String,
     pub(crate) files_out: String,
     pub(crate) tree_out: String,
@@ -74,6 +77,15 @@ pub(crate) fn compute_review(
     root: &Path,
     id: &str,
     include_diff_for_research: bool,
+) -> Result<ReviewComputation, String> {
+    compute_review_inner(root, id, include_diff_for_research, None)
+}
+
+fn compute_review_inner(
+    root: &Path,
+    id: &str,
+    include_diff_for_research: bool,
+    summary_worktree_fallback: Option<&Path>,
 ) -> Result<ReviewComputation, String> {
     let wt = root.join(".wt").join(id);
     let wt_exists = wt.exists();
@@ -473,6 +485,20 @@ pub(crate) fn compute_review(
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && log_content_opt.is_none() => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && summary_worktree_fallback.is_some() =>
+            {
+                if let (Some(summary_wt), Some(ref log_content)) =
+                    (summary_worktree_fallback, &log_content_opt)
+                {
+                    let borrowed =
+                        crate::outside_env::borrowed_env_commands(log_content, summary_wt);
+                    if let Some(flag) = crate::outside_env::flag(&borrowed) {
+                        checks.flags.push(flag);
+                    }
+                }
+            }
             Err(e) => {
                 checks.flags.push(format!(
                     "outside-env check not run: cannot read {}: {e}",
@@ -555,7 +581,10 @@ pub(crate) fn compute_review(
     Ok(ReviewComputation {
         wt,
         wt_exists,
+        is_research,
         base,
+        task_text,
+        changed_files,
         commits_out,
         files_out,
         tree_out,
@@ -571,26 +600,106 @@ pub(crate) fn compute_review(
     })
 }
 
+pub(crate) fn read_stored_model_review(
+    root: &Path,
+    id: &str,
+) -> Option<crate::model_review::ModelReviewResult> {
+    let checks_path = root.join(".wt").join(format!("{id}.checks.json"));
+    let raw = std::fs::read_to_string(&checks_path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let mr = val.get("model_review")?;
+    if mr.is_null() {
+        return None;
+    }
+    serde_json::from_value(mr.clone()).ok()
+}
+
 pub(crate) fn write_checks_file(
     root: &Path,
     id: &str,
     flags: &[String],
     fallbacks: &[crate::fallback_check::Finding],
+    model_review: Option<&crate::model_review::ModelReviewResult>,
 ) -> Result<(), String> {
     let checks_path = root.join(".wt").join(format!("{id}.checks.json"));
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("error: the system clock is before 1970: {e}"))?
         .as_secs();
-    let checks_obj = serde_json::json!({
+    let mut checks_obj = serde_json::json!({
         "ts": ts,
         "flags": flags,
         "fallbacks": fallbacks,
     });
+    if let Some(mr) = model_review {
+        checks_obj["model_review"] = serde_json::to_value(mr).map_err(|e| {
+            format!(
+                "error serializing model review for {}: {e}",
+                checks_path.display()
+            )
+        })?;
+    }
     let checks_json = serde_json::to_string_pretty(&checks_obj)
         .map_err(|e| format!("error writing {}: {e}", checks_path.display()))?;
     std::fs::write(&checks_path, checks_json + "\n")
         .map_err(|e| format!("error writing {}: {e}", checks_path.display()))
+}
+
+pub fn evaluate_verified_run(
+    root: &Path,
+    id: &str,
+) -> Result<Option<crate::model_review::ModelReviewResult>, String> {
+    evaluate_verified_run_with(root, id, crate::model_review::run)
+}
+
+pub fn evaluate_verified_run_with<F>(
+    root: &Path,
+    id: &str,
+    run_model_review: F,
+) -> Result<Option<crate::model_review::ModelReviewResult>, String>
+where
+    F: FnOnce(&Path, &str, &str, &Path) -> crate::model_review::ModelReviewResult,
+{
+    let wt_fallback = root.join(".wt").join(id);
+    let data = compute_review_inner(root, id, false, Some(&wt_fallback))?;
+    let mut flags = data.checks.flags;
+    if data.is_research || !data.wt_exists {
+        write_checks_file(root, id, &flags, &data.fallbacks, None)?;
+        return Ok(None);
+    }
+
+    let risky_matches = match crate::config::load_with_fallback(root) {
+        Ok(Some((cfg, _))) => {
+            match crate::config::match_risky_paths(&cfg.review.risky, &data.changed_files) {
+                Ok(matches) => matches,
+                Err(e) => {
+                    flags.push(format!("risky path check not run: {e}"));
+                    Vec::new()
+                }
+            }
+        }
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            flags.push(format!("risky path check not run: {e}"));
+            Vec::new()
+        }
+    };
+
+    if crate::review_checks::should_run_model_review(
+        &flags,
+        data.task_text.as_deref(),
+        &risky_matches,
+    ) {
+        let result = run_model_review(root, id, &data.base, &data.wt);
+        if let Some(flag) = result.flag() {
+            flags.push(flag);
+        }
+        write_checks_file(root, id, &flags, &data.fallbacks, Some(&result))?;
+        Ok(Some(result))
+    } else {
+        write_checks_file(root, id, &flags, &data.fallbacks, None)?;
+        Ok(None)
+    }
 }
 
 pub fn ensure_checks(root: &Path, id: &str) -> Result<bool, String> {
@@ -604,7 +713,7 @@ pub fn ensure_checks(root: &Path, id: &str) -> Result<bool, String> {
         return Ok(false);
     }
     let data = compute_review(root, id, false)?;
-    write_checks_file(root, id, &data.checks.flags, &data.fallbacks)?;
+    write_checks_file(root, id, &data.checks.flags, &data.fallbacks, None)?;
     Ok(true)
 }
 
