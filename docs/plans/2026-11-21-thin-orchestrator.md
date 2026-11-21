@@ -155,24 +155,57 @@ the run in the queue; a failed review is recorded and the run waits.
 
 **Commit message:** `feat(review): review a flagged run with a fresh model run, and only then`
 
-### Task T6: tests that fail when the machine is busy
+### Task T6: tests that fail when the machine is busy (split)
 
-**Goal.** These tests failed on untouched code while other builds were running, and blocked three
-dispatches on 2026-11-21: `test_model_timeouts` (blyte-provider), `test_watchdog_progress`,
-`test_deadline_stop`, `test_deadline_watchdog`, and `an_edited_skill_is_not_touched`
-(`test_update.rs`). Make each independent of how fast the machine is.
+The first attempt (one task for five tests in three crates, each to be repeated 20 times under a
+concurrent build) ran out of budget with no changes. It is split by crate below. Two more tests
+failed the same way later that day and are included: `test_gcloud_timeout` and
+`test_gate_slot_deadline`.
 
-**What must be true when it is done.**
-- For each test, the cause is found and stated in the commit body. Where a test waits on real time
-  with a margin, it is changed to wait on the event it means (a signal, a file, a channel, an
-  injected clock), or its margin is tied to something that scales with load.
+The same rules hold for T6a, T6b and T6c:
+- The cause is found and stated in the commit body. Where a test waits on real time with a margin,
+  it is changed to wait on the event it means (a signal, a file, a channel, an injected clock), or
+  its margin is tied to something that scales with load.
 - No test is ignored, retried, deleted or loosened so that it no longer checks its behaviour.
-- Each changed test passes 20 times in a row while `cargo build --workspace --all-targets` runs in
-  another directory.
+- Run each changed test three times. Do not start a concurrent build or a long repeat loop: the
+  reviewer repeats the tests under load afterwards.
+- Change only the files of the tests named and the code they exercise.
 
-**Depends on:** none. **Siblings:** T1, T3, T5 are not in this worktree.
+### Task T6a: the provider's timeout tests
 
-**Commit message:** `test: make the timing tests independent of machine load`
+**Goal.** `test_model_timeouts` and `test_gcloud_timeout` (test
+`output_with_timeout_times_out_and_kills_child`) in `crates/blyte-provider` failed on untouched
+code while other builds were running. Make them independent of how fast the machine is, under the
+rules above.
+
+**Depends on:** none. **Siblings:** T6b (blyte-agent and blyte-cli deadline tests) and T6c
+(`test_update.rs`) are not in this worktree; do not touch those tests.
+
+**Commit message:** `test(provider): make the timeout tests independent of machine load`
+
+### Task T6b: the deadline and watchdog tests
+
+**Goal.** `test_watchdog_progress`, `test_deadline_stop`, `test_deadline_watchdog` and
+`test_gate_slot_deadline` (test
+`a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies`), in `crates/blyte-agent` and
+`crates/blyte-cli`, failed on untouched code while other builds were running. Make them independent
+of how fast the machine is, under the rules above.
+
+**Depends on:** none. **Siblings:** T6a (blyte-provider) and T6c (`test_update.rs`) are not in this
+worktree; do not touch those tests.
+
+**Commit message:** `test: make the deadline and watchdog tests independent of machine load`
+
+### Task T6c: the update test
+
+**Goal.** `an_edited_skill_is_not_touched` in `crates/blyte-cli/tests/test_update.rs` failed on
+untouched code while other builds were running. Make it independent of how fast the machine is,
+under the rules above.
+
+**Depends on:** none. **Siblings:** T6a (blyte-provider) and T6b (deadline and watchdog tests) are
+not in this worktree; do not touch those tests.
+
+**Commit message:** `test(update): make the edited-skill test independent of machine load`
 
 ### Done directly (text only)
 
