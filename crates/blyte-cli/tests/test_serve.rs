@@ -101,6 +101,91 @@ fn init_git_repo(root: &Path) {
         .status();
 }
 
+fn init_repo_with_commit(root: &Path) -> String {
+    init_git_repo(root);
+    write_file(&root.join("README.md"), "hello\n");
+    assert!(Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string()
+}
+
+fn write_finished_run_summary(
+    repo: &Path,
+    task_file: &Path,
+    id: &str,
+    base_sha: &str,
+    started_at: u64,
+) {
+    let wt = repo.join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    write_file(task_file, &format!("# Implement {id}\n\nDetails.\n"));
+    write_file(
+        &wt.join(format!("{id}.start.json")),
+        &format!(
+            r#"{{"id":"{id}","pid":999999,"started_at":{started_at},"base_sha":"{base_sha}","task_file":"{}","research":false}}"#,
+            task_file.display()
+        ),
+    );
+    write_file(
+        &wt.join(format!("{id}.log")),
+        "[Turn 3] \n✓ Gate passed (attempt 1)\n",
+    );
+    write_file(
+        &wt.join(format!("{id}.report.json")),
+        r#"{"outcome":"verified","cost_usd":0.10,"turns":3,"gate_attempts":1,"model_id":"m","gate_failures":[]}"#,
+    );
+    write_file(
+        &wt.join(format!("{id}.json")),
+        r#"{"outcome":"verified","seconds":120,"final_message":"done","commits":[],"changed_files":["README.md"]}"#,
+    );
+}
+
+fn add_run_worktree(repo: &Path, id: &str) {
+    let wt = repo.join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let wt_run = wt.join(id);
+    assert!(Command::new("git")
+        .args(["worktree", "add", "-q", "-b", &format!("wt/{id}")])
+        .arg(&wt_run)
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success());
+    write_file(&wt_run.join("README.md"), &format!("hello\n{id}\n"));
+    assert!(Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&wt_run)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-q", "-m", &format!("feat: add {id}")])
+        .current_dir(&wt_run)
+        .status()
+        .unwrap()
+        .success());
+}
+
 fn make_surface(
     root: PathBuf,
     responses: Vec<Result<Vec<EntryBody>, String>>,
@@ -595,6 +680,112 @@ fn runs_carry_hold_and_checks() {
     let runs_after_val = parse_json(&runs_after);
     assert_eq!(runs_after_val["runs"][0]["hold"]["note"], "later");
     assert_eq!(runs_after_val["runs"][0]["hold"]["ts"], t);
+}
+
+#[test]
+fn run_without_a_worktree_is_still_listed() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    let t = now_secs();
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/t2.md"),
+        "T2",
+        &base_sha,
+        t - 600,
+    );
+    assert!(!repo.join(".wt/T2").exists());
+
+    let (surface, _) = make_surface(repo.clone(), Vec::new());
+    let resp = route(&surface, &get("/api/runs", vec![]), t);
+    assert_eq!(
+        resp.status,
+        200,
+        "body={}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    let val = parse_json(&resp);
+    let runs = val["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "T2");
+    assert_eq!(runs[0]["checks_recorded"], false);
+    assert!(!repo.join(".wt/T2.checks.json").exists());
+}
+
+#[test]
+fn run_with_a_worktree_gets_its_checks() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    add_run_worktree(&repo, "T1");
+    let t = now_secs();
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/t1.md"),
+        "T1",
+        &base_sha,
+        t - 600,
+    );
+    assert!(!repo.join(".wt/T1.checks.json").exists());
+
+    let (surface, _) = make_surface(repo.clone(), Vec::new());
+    let resp = route(&surface, &get("/api/runs", vec![]), t);
+    assert_eq!(
+        resp.status,
+        200,
+        "body={}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    let val = parse_json(&resp);
+    let runs = val["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "T1");
+    assert_eq!(runs[0]["checks_recorded"], true);
+    assert!(repo.join(".wt/T1.checks.json").exists());
+}
+
+#[test]
+fn one_cleaned_run_does_not_hide_the_others() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    add_run_worktree(&repo, "T1");
+    let t = now_secs();
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/t1.md"),
+        "T1",
+        &base_sha,
+        t - 600,
+    );
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/t2.md"),
+        "T2",
+        &base_sha,
+        t - 300,
+    );
+    assert!(!repo.join(".wt/T2").exists());
+
+    let (surface, _) = make_surface(repo.clone(), Vec::new());
+    let resp = route(&surface, &get("/api/runs", vec![]), t);
+    assert_eq!(
+        resp.status,
+        200,
+        "body={}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    let val = parse_json(&resp);
+    let runs = val["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+
+    let t1 = runs.iter().find(|r| r["id"] == "T1").unwrap();
+    let t2 = runs.iter().find(|r| r["id"] == "T2").unwrap();
+    assert_eq!(t1["checks_recorded"], true);
+    assert_eq!(t2["checks_recorded"], false);
+    assert!(repo.join(".wt/T1.checks.json").exists());
+    assert!(!repo.join(".wt/T2.checks.json").exists());
 }
 
 #[test]
