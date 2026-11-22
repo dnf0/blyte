@@ -71,6 +71,20 @@ impl SlotGuard {
 /// Returns the acquired slot guard and the total duration spent waiting.
 #[cfg(unix)]
 pub fn acquire(max: usize, dir: &Path, poll: Duration) -> std::io::Result<(SlotGuard, Duration)> {
+    match acquire_cancellable(max, dir, poll, None)? {
+        Some(res) => Ok(res),
+        None => unreachable!(),
+    }
+}
+
+/// Acquire one of `max` gate slots in `dir`, returning `Ok(None)` if `cancel` becomes true.
+#[cfg(unix)]
+pub fn acquire_cancellable(
+    max: usize,
+    dir: &Path,
+    poll: Duration,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<Option<(SlotGuard, Duration)>> {
     use std::os::unix::io::AsRawFd;
 
     std::fs::create_dir_all(dir)?;
@@ -79,6 +93,9 @@ pub fn acquire(max: usize, dir: &Path, poll: Duration) -> std::io::Result<(SlotG
     let mut had_to_wait = false;
 
     loop {
+        if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+            return Ok(None);
+        }
         for index in 0..max {
             let path = dir.join(format!("slot-{index}.lock"));
             let file = std::fs::OpenOptions::new()
@@ -94,7 +111,7 @@ pub fn acquire(max: usize, dir: &Path, poll: Duration) -> std::io::Result<(SlotG
                 } else {
                     Duration::ZERO
                 };
-                return Ok((SlotGuard { index, _file: file }, waited));
+                return Ok(Some((SlotGuard { index, _file: file }, waited)));
             }
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EWOULDBLOCK)
@@ -105,7 +122,20 @@ pub fn acquire(max: usize, dir: &Path, poll: Duration) -> std::io::Result<(SlotG
             return Err(err);
         }
         had_to_wait = true;
-        std::thread::sleep(poll);
+        if cancel.is_some() {
+            let step = Duration::from_millis(25);
+            let mut slept = Duration::ZERO;
+            while slept < poll {
+                if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+                    return Ok(None);
+                }
+                let d = step.min(poll - slept);
+                std::thread::sleep(d);
+                slept += d;
+            }
+        } else {
+            std::thread::sleep(poll);
+        }
     }
 }
 
@@ -117,4 +147,18 @@ pub fn acquire(
     _poll: Duration,
 ) -> std::io::Result<(SlotGuard, Duration)> {
     Ok((SlotGuard { index: 0 }, Duration::ZERO))
+}
+
+/// On non-unix targets, returns `Ok(None)` when cancelled or a guard at once with zero wait.
+#[cfg(not(unix))]
+pub fn acquire_cancellable(
+    _max: usize,
+    _dir: &Path,
+    _poll: Duration,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<Option<(SlotGuard, Duration)>> {
+    if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+        return Ok(None);
+    }
+    Ok(Some((SlotGuard { index: 0 }, Duration::ZERO)))
 }

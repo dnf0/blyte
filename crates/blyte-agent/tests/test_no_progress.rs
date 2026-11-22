@@ -98,7 +98,7 @@ fn fix_run_without_progress_nudges_at_21_last_calls_at_31_and_stops_at_32() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("fix the bug", "true");
@@ -205,7 +205,7 @@ fn replying_without_tools_after_last_call_stops_normally_without_stalling() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("fix the bug", "");
@@ -280,7 +280,7 @@ fn successful_write_disables_no_progress_nudge_and_stop() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("fix the bug", "true");
@@ -321,7 +321,7 @@ fn research_run_never_receives_no_progress_nudge_or_stops() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("investigate the repo", "");
@@ -362,7 +362,7 @@ fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("fix the bug", "true");

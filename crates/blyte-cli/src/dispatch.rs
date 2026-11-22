@@ -197,7 +197,7 @@ pub fn record_passed_after_run(
     base_tree: Option<&str>,
     key: Option<&str>,
     outcome: &str,
-    turns: u32,
+    base_check_passed: Option<bool>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     if research {
@@ -206,7 +206,7 @@ pub fn record_passed_after_run(
     let Some(key) = key else {
         return warnings;
     };
-    if base_check_decision == BaseCheckDecision::Run && turns >= 1 {
+    if base_check_decision == BaseCheckDecision::Run && base_check_passed == Some(true) {
         if let Some(tree) = base_tree {
             if let Err(err) = crate::passed_trees::record_passed(root, tree, key) {
                 warnings.push(format!("could not record passed base tree: {err}"));
@@ -256,8 +256,75 @@ pub struct DispatchSummary {
     pub report: String,
     pub gate_source: &'static str,
     pub research_report: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_check_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+struct BaseWorktreeGuard {
+    root: PathBuf,
+    dir: PathBuf,
+}
+
+impl BaseWorktreeGuard {
+    fn create(root: &Path, dir: PathBuf, base_sha: &str) -> Result<Self, String> {
+        if dir.exists() {
+            let _ = Command::new("git")
+                .args([
+                    "-C",
+                    root.to_str().unwrap_or("."),
+                    "worktree",
+                    "remove",
+                    "--force",
+                ])
+                .arg(&dir)
+                .output();
+            if dir.exists() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            let _ = Command::new("git")
+                .args(["-C", root.to_str().unwrap_or("."), "worktree", "prune"])
+                .output();
+        }
+        let out = Command::new("git")
+            .args([
+                "-C",
+                root.to_str().unwrap_or("."),
+                "worktree",
+                "add",
+                "--detach",
+            ])
+            .arg(&dir)
+            .arg(base_sha)
+            .output()
+            .map_err(|e| format!("failed to run git worktree add --detach: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git worktree add --detach failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(Self {
+            root: root.to_path_buf(),
+            dir,
+        })
+    }
+}
+
+impl Drop for BaseWorktreeGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                self.root.to_str().unwrap_or("."),
+                "worktree",
+                "remove",
+                "--force",
+            ])
+            .arg(&self.dir)
+            .output();
+    }
 }
 
 fn finish_summary(summary: &DispatchSummary, wt_parent: &Path) -> i32 {
@@ -1039,6 +1106,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     report: "".to_string(),
                     gate_source,
                     research_report: None,
+                    base_check_seconds: None,
                     warnings: Vec::new(),
                 };
                 return finish_summary(&summary, &wt_parent);
@@ -1164,6 +1232,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     for r in config_allow_read.iter().chain(&args.allow_read) {
         cmd.arg("--read-root").arg(r);
     }
+    let mut base_wt_guard: Option<BaseWorktreeGuard> = None;
     if args.research {
         cmd.arg("--read-root").arg(&root);
         cmd.arg("--no-gate-slot");
@@ -1172,7 +1241,18 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             cmd.arg("--claim-check");
         }
     } else if base_check_decision == BaseCheckDecision::Run {
-        cmd.arg("--base-check");
+        let base_wt_dir = wt_parent.join(format!("{}.base", args.id));
+        match BaseWorktreeGuard::create(&root, base_wt_dir.clone(), &base_sha) {
+            Ok(guard) => {
+                base_wt_guard = Some(guard);
+                cmd.arg("--base-check");
+                cmd.arg("--base-check-dir").arg(&base_wt_dir);
+            }
+            Err(e) => {
+                eprintln!("error creating base check worktree: {e}");
+                return 2;
+            }
+        }
     }
 
     cmd.arg("--");
@@ -1255,6 +1335,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     let _ = child.wait();
+    drop(base_wt_guard);
 
     if !left_out.is_empty() {
         if let Ok(report_str) = std::fs::read_to_string(&report_path) {
@@ -1363,6 +1444,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         model,
         seconds,
         sandbox,
+        base_check_passed,
+        base_check_seconds,
     ) = match record {
         Ok(rec) => {
             let gate_failures = rec
@@ -1411,6 +1494,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&args.sandbox)
                     .to_string(),
+                rec.get("base_check_passed").and_then(|v| v.as_bool()),
+                rec.get("base_check_seconds").and_then(|v| v.as_f64()),
             )
         }
         Err(err_msg) => (
@@ -1425,6 +1510,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             None,
             0,
             args.sandbox.clone(),
+            None,
+            None,
         ),
     };
 
@@ -1480,7 +1567,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         base_tree.as_deref(),
         passed_key.as_deref(),
         outcome,
-        turns,
+        base_check_passed,
     );
     for warning in &warnings {
         eprintln!("warning: {warning}");
@@ -1508,6 +1595,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         report: report_path.display().to_string(),
         gate_source,
         research_report,
+        base_check_seconds,
         warnings,
     };
 

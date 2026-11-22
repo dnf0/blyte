@@ -72,7 +72,7 @@ fn the_library_takes_no_slot_and_gate_commands_are_marked() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     // The gate records whether it saw the marker.
     let mut st = State::new(

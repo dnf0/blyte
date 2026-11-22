@@ -58,7 +58,7 @@ fn run_bash(cmd: &str) -> String {
         on_event: Some(&on_event),
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     runner.run(&mut State::new("bash", "true"));
     inputs.into_inner().unwrap().remove(0)
@@ -167,7 +167,7 @@ fn blyte_tool_event_formats_command_and_background() {
         on_event: Some(&on_event),
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     runner.run(&mut State::new("blyte", "true"));
     let expected = vec![

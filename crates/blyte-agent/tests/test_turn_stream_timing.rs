@@ -80,7 +80,7 @@ fn run_with(provider: &dyn Provider) -> (Outcome, Vec<TurnUsage>) {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("g", "true");
     let (outcome, report) = runner.run(&mut state);

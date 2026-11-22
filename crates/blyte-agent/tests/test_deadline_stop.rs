@@ -81,7 +81,7 @@ fn model_call_blocks_until_req_timeout_then_returns_budget_exhausted() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("finish the task", "true");
@@ -241,7 +241,7 @@ fn bash_timeout_is_clamped_to_deadline_or_command_timeout_without_deadline() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("run echo", "true");
     let (outcome, _) = runner.run_with_clock(&mut state, &|| clock.now());
@@ -271,7 +271,7 @@ fn bash_timeout_is_clamped_to_deadline_or_command_timeout_without_deadline() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state2 = State::new("run echo", "true");
     let (outcome2, _) = runner_no_deadline.run_with_clock(&mut state2, &|| clock.now());
@@ -312,7 +312,7 @@ fn gate_clamps_timeout_and_ends_budget_exhausted_when_deadline_passes() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("say done", "sleep 120");
     let (outcome, report) = runner.run_with_clock(&mut state, &|| clock.now());
@@ -408,7 +408,7 @@ fn research_run_whose_deadline_passes_before_claim_check_sets_skipped_and_runs_q
         on_event: None,
         research: true,
         claim_check: true,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("investigate alpha", "");
@@ -485,7 +485,7 @@ fn research_loop_stops_a_reserve_before_the_budget() {
         on_event: None,
         research: true,
         claim_check: true,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("investigate", "");
@@ -526,7 +526,7 @@ fn non_research_loop_keeps_the_whole_budget() {
             on_event: None,
             research,
             claim_check,
-            base_check: false,
+            base_check: blyte_agent::run::BaseCheck::None,
         };
         let mut state = State::new("work", "");
         let _ = runner.run_with_clock(&mut state, &|| clock.now());
@@ -572,7 +572,7 @@ fn claim_check_runs_in_the_reserve_after_the_loop_runs_out() {
         on_event: None,
         research: true,
         claim_check: true,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("investigate alpha", "");

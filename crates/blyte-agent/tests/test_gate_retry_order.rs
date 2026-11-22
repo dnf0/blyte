@@ -60,7 +60,7 @@ fn run(d: &tempfile::TempDir, gate: &str, attempts: u32) -> (Outcome, String) {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut st = State::new("g", gate);
     let (outcome, _) = r.run(&mut st);

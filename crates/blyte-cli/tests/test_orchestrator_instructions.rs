@@ -190,7 +190,7 @@ fn repository_rules_for_implementers_are_not_given() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     runner.run(&mut state);
 

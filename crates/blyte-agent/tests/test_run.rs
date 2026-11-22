@@ -105,7 +105,7 @@ fn runner<'a>(
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     }
 }
 
@@ -291,7 +291,7 @@ fn a_provider_error_is_reported_as_an_error_not_as_failed_work() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let (outcome, _) = r.run(&mut st);
     assert!(

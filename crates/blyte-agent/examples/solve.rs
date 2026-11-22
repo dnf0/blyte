@@ -99,7 +99,7 @@ fn main() {
         on_event: Some(&log),
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let started = std::time::Instant::now();

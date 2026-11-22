@@ -100,6 +100,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         research: false,
         claim_check: false,
         base_check: false,
+        base_check_dir: None,
         orchestrate: false,
         dispatch_cmd: None,
     };
@@ -143,6 +144,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         research: false,
         claim_check: false,
         base_check: false,
+        base_check_dir: None,
         orchestrate: false,
         dispatch_cmd: None,
     };
@@ -175,6 +177,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         research: false,
         claim_check: false,
         base_check: false,
+        base_check_dir: None,
         orchestrate: false,
         dispatch_cmd: None,
     };
@@ -218,6 +221,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         research: false,
         claim_check: false,
         base_check: false,
+        base_check_dir: None,
         orchestrate: false,
         dispatch_cmd: None,
     };
@@ -352,6 +356,7 @@ fn test_run_task_with_state_and_events_emits_turn() {
         research: false,
         claim_check: false,
         base_check: false,
+        base_check_dir: None,
         orchestrate: false,
         dispatch_cmd: None,
     };

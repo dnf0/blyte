@@ -453,26 +453,94 @@ fn dispatch_skips_base_check_when_base_tree_already_passed() {
 
 #[test]
 fn dispatch_runs_base_check_when_base_tree_not_recorded() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
     let repo = init_repo();
     let root = repo.path();
     let counter_dir = tempfile::tempdir().unwrap();
     let counter = counter_dir.path().join("base.log");
-    let gate = format!("echo base >> {} && false", counter.display());
+    let done_fifo = counter_dir.path().join("done.fifo");
+    assert!(Command::new("mkfifo")
+        .arg(&done_fifo)
+        .status()
+        .unwrap()
+        .success());
+    let gate = format!(
+        "if [ \"$(basename \"$PWD\")\" = \"D2.base\" ]; then echo base >> '{}'; echo done > '{}'; exit 1; fi; exit 0",
+        counter.display(),
+        done_fifo.display()
+    );
     write_blyte_toml(root, &gate, None, None);
     std::fs::write(root.join("task.md"), "Do work.\n").unwrap();
 
-    let out = blyte_dispatch(
-        root,
-        &[
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let fifo_for_server = done_fifo.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut s in listener.incoming().flatten() {
+            let mut buf = vec![0u8; 65536];
+            let mut got = Vec::new();
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&got);
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text[..i]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if got.len() >= i + 4 + len {
+                        break;
+                    }
+                }
+            }
+            if first {
+                first = false;
+                let _ = std::fs::read_to_string(&fifo_for_server);
+            }
+            let body = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"true\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args([
             "dispatch",
             "D2",
             "task.md",
             "--max-turns",
-            "0",
+            "10",
             "--sandbox",
             "off",
-        ],
-    );
+        ])
+        .current_dir(root)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_USAGE_LOG", "off")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_HOST")
+        .env_remove("OLLAMA_API_KEY")
+        .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"))
+        .env("OPENAI_API_KEY", "test")
+        .env("BLYTE_MODEL", "openai/gemini-3.8-flash")
+        .output()
+        .unwrap();
     assert_eq!(
         out.status.code(),
         Some(5),
@@ -649,7 +717,20 @@ fn dispatch_decision_and_post_run_recording_rules() {
         Some(&base_tree),
         Some(&key),
         "blocked",
-        0,
+        Some(false),
+    );
+    assert!(warnings.is_empty());
+    assert!(!has_passed(root, &base_tree, &key, now).unwrap());
+
+    let warnings = record_passed_after_run(
+        root,
+        &wt,
+        false,
+        BaseCheckDecision::Run,
+        Some(&base_tree),
+        Some(&key),
+        "budget_exhausted",
+        None,
     );
     assert!(warnings.is_empty());
     assert!(!has_passed(root, &base_tree, &key, now).unwrap());
@@ -665,7 +746,7 @@ fn dispatch_decision_and_post_run_recording_rules() {
         None,
         Some(&key),
         "verified",
-        2,
+        None,
     );
     assert!(warnings.is_empty());
     assert!(!has_passed(root, &tip_tree, &key, now).unwrap());
@@ -679,7 +760,7 @@ fn dispatch_decision_and_post_run_recording_rules() {
         None,
         Some(&key),
         "verified",
-        2,
+        None,
     );
     assert!(warnings.is_empty());
     assert!(!has_passed(root, &tip_tree, &key, now).unwrap());
@@ -694,7 +775,7 @@ fn dispatch_decision_and_post_run_recording_rules() {
         Some(&base_tree),
         Some(&key),
         "verified",
-        2,
+        Some(true),
     );
     assert!(warnings.is_empty());
     assert!(has_passed(root, &base_tree, &key, now).unwrap());
@@ -736,7 +817,7 @@ fn dispatch_decision_and_post_run_recording_rules() {
         Some(&base_tree),
         Some(&key),
         "verified",
-        1,
+        Some(true),
     );
     assert!(!warn.is_empty());
 }

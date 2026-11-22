@@ -88,7 +88,7 @@ fn run_with(provider: &ScriptedAgent, research: bool) -> tempfile::TempDir {
         on_event: None,
         research,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut st = State::new("research task", "true");
     let _ = runner.run(&mut st);

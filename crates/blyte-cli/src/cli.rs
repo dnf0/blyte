@@ -587,6 +587,10 @@ pub struct Cli {
     #[arg(long = "base-check")]
     pub base_check: bool,
 
+    /// Directory containing an untouched checkout of the base commit for running the base check beside the model's first turns
+    #[arg(long = "base-check-dir", value_name = "DIR")]
+    pub base_check_dir: Option<PathBuf>,
+
     #[arg(
         long,
         help = "Run the interactive terminal session instead of starting the live surface"
