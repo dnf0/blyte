@@ -71,7 +71,7 @@ cargo test --workspace --all-targets
 # model = "gemini-3.8-flash-high"
 max_seconds = 3600
 max_turns = 300
-# max_cost = 2.0
+# max_cost = 8.0
 # network = "on"
 # fold_budget = 60000
 # setup = "uv sync"   # prepares each new worktree before the implementer starts

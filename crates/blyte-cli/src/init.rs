@@ -1486,7 +1486,7 @@ pub fn render_verified(
     out.push_str("# model = \"gemini-3.8-flash-high\"\n");
     out.push_str("max_seconds = 3600\n");
     out.push_str("max_turns = 300\n");
-    out.push_str("# max_cost = 2.0\n");
+    out.push_str("# max_cost = 8.0\n");
     out.push_str("# network = \"on\"\n");
     out.push_str("# fold_budget = 60000\n\n");
 
