@@ -142,3 +142,140 @@ the existing combine tests' file under `crates/blyte-cli/tests/` or the unit tes
 not in this worktree.
 
 **Commit message.** `test(combine): a follow-up run based on another request's branch combines onto it`
+
+## Fewer runs of the check
+
+Measured on two trials of the three-task request (2026-11-22): the full check ran three times per
+request and took about 16 of 41 minutes: once on the untouched code before the model starts
+(`base_check`, `crates/blyte-agent/src/run.rs`), once on the finished work (the gate), and once
+on the combined branch (`combine.rs`). With one run on an unchanged base, the third tests the
+same content as the second. The gate on the finished work stays as it is.
+
+### Task H1: remember which content has passed the check, and do not check the same content again
+
+**Goal.** Keep a record, per repository, of the git trees that have passed the check. Use it in
+two places: `blyte combine` does not run the check when the combined branch's tree has already
+passed, and `blyte dispatch` does not ask for the check on the untouched code when the base
+commit's tree has already passed. Why: each avoided check is five to six minutes.
+
+**Files.**
+- New `crates/blyte-cli/src/passed_trees.rs`, registered in `lib.rs`.
+- `crates/blyte-cli/src/combine.rs`, `crates/blyte-cli/src/dispatch.rs`.
+- New `crates/blyte-cli/tests/test_passed_trees.rs`; existing combine and dispatch tests where
+  they need a new assertion.
+
+**What to build.**
+1. `passed_trees.rs`:
+   - `check_key(gate: &str, env: &BTreeMap<String, String>) -> String`: a hex SHA-256 of the gate
+     text as configured in `blyte.toml` (without the comment step dispatch adds) and the
+     `[dispatch.env]` pairs in sorted order. Two different gates or environments give two keys.
+   - `record_passed(root, tree, key) -> Result<(), String>` writes
+     `<main checkout>/.wt/passed/<tree>.<key>.json` with `tree`, `key` and `ts` (seconds), written
+     to a temporary file and renamed. `root` may be a linked worktree: use
+     `crate::config::main_checkout`.
+   - `has_passed(root, tree, key, now) -> Result<bool, String>`: true only when that file exists,
+     parses, names the same tree and key, and its `ts` is at most 7 days before `now`. A missing
+     file is `false`. A file that exists and cannot be read or parsed is an `Err` naming it.
+   - `tree_of(dir, rev) -> Result<String, String>`: `git rev-parse <rev>^{tree}`.
+   - `worktree_is_clean(dir) -> Result<bool, String>`: `git status --porcelain` is empty.
+2. `combine.rs`, in `run_combine_inner` where the gate runs today: after the cherry-picks, take
+   the tree of the worktree's `HEAD`. If the worktree is clean and `has_passed` is true for that
+   tree and the key of the gate and environment combine uses, do not run the gate; the record is
+   `combined` as on a pass. Otherwise run the gate as today, and on a pass with a clean worktree
+   call `record_passed`. Add to `CombineRecord` a field `check` with values `ran` and
+   `already_passed` (serde default `ran`, so existing record files still parse), and make
+   `blyte combine`'s printed line and `--json` output say which. `GET /api/requests` already
+   passes the record through `requests.rs`: add `check` to what it returns only if that needs no
+   change outside `requests.rs`; otherwise leave it and say so in the report.
+3. `dispatch.rs`:
+   - Where `base_check` is decided: when it would be true, take the tree of `base_sha`; if
+     `has_passed` is true for it with the key of the configured gate and environment, do not pass
+     `--base-check` to the child, write `"base_check": "already_passed"` where the start record
+     has `"base_check"` today (keep `true`/`false` for the other two cases), and print one line
+     to stderr: `base check: this commit's content already passed`.
+   - After the child ends: if `--base-check` was passed and the summary's `turns` is at least 1
+     (the base check runs before turn 1 and a failure ends the run as `blocked` with no turns),
+     `record_passed` for the base commit's tree.
+   - After the child ends with outcome `verified`: if the run's worktree is clean, `record_passed`
+     for the tree of the worktree's `HEAD`. If it is not clean, record nothing.
+   - A failure to write a record is reported on stderr and in the summary's `error`-free path as
+     a warning line; it does not change the run's outcome. A failure to read one (`has_passed`
+     returning `Err`) stops the dispatch with that error before the child starts.
+4. Research runs never read or write these records.
+
+**Tests** (real temporary git repositories, as the existing combine and dispatch tests use).
+- `passed_trees`: a recorded tree is found; another tree is not; another key is not; a record 8
+  days old is not; an unparseable record file is an `Err` naming the file; a linked worktree
+  writes to the main checkout's `.wt/passed/`.
+- combine: with a gate that appends a line to a file outside the repository each time it runs
+  (so runs can be counted): a run's tip tree already recorded, one run, unchanged base → the gate
+  does not run, state `combined`, `check` is `already_passed`; nothing recorded → the gate runs
+  once, `check` is `ran`, and the combined tree is then recorded; two runs with nothing recorded
+  for the combined tree → the gate runs; a recorded tree but a different gate text → the gate
+  runs; an untracked file in the combine worktree → the gate runs.
+- dispatch (use the existing way dispatch tests stand in for the child process; if there is
+  none, test the decision as a function taking the start facts and returning whether to pass
+  `--base-check`): base tree recorded → no `--base-check`, start record says `already_passed`;
+  not recorded → `--base-check` as today; `--no-base-check` and `base_check = false` still mean
+  no check and are written as `false`; after a verified run with a clean worktree the tip's tree
+  is recorded; with an uncommitted change it is not; after a `blocked` run nothing is recorded.
+
+Run: `cargo test -p blyte --test test_passed_trees` and the combine and dispatch test targets
+you touched.
+
+**Constraints.** No fallbacks: an unreadable record is an error, never treated as "not passed"
+silently and never as "passed". Resumable: everything is in files under `.wt/passed/`. Existing
+tests pass unmodified except where a new field needs an assertion. Do not change
+`crates/blyte-agent`. Depends on: none. Siblings: H2 (running the base check beside the model)
+is later and not in this worktree.
+
+**Commit message.** `feat(check): do not check content that has already passed`
+
+### Task H2: when the base commit has not passed before, check it beside the model's first turns
+
+**Goal.** When H1 finds no record for the base commit, the check on the untouched code still
+runs, but in its own worktree at the same time as the model's first turns, so the run does not
+wait for it. If it fails, the run stops as `blocked`, as today.
+
+**Files.** `crates/blyte-agent/src/run.rs`, `crates/blyte-cli/src/task_runner.rs`,
+`crates/blyte-cli/src/dispatch.rs`, `crates/blyte-cli/src/cli.rs`; tests beside the existing
+`base_check` tests in both crates.
+
+**What to build.**
+1. `dispatch.rs`: when it would pass `--base-check`, create a detached worktree
+   `.wt/<id>.base` at `base_sha` and pass `--base-check-dir <path>` as well. After the child
+   ends, remove that worktree (`git worktree remove --force`), whatever the outcome.
+2. `task_runner.rs`: with `--base-check-dir`, start the gate steps in that directory on a thread
+   (`blyte_agent::run::run_gate_steps`, same shell, sandbox and environment as the run's gate,
+   same machine-wide gate slot rule) before the first model call, and give the `Runner` a way to
+   ask for its state.
+3. `run.rs`: `base_check` becomes a choice of three: none, before the first model call (today's
+   behaviour, kept for callers that pass no directory), or polled. Polled: at the start of every
+   turn, and once more just before the run would return `Verified`, ask for the state:
+   `Pending`, `Passed`, or `Failed { steps, tail }`. On `Failed`, return `Outcome::Blocked` with
+   the same message as today. `Pending` never delays a turn. Just before returning `Verified`
+   with the state still `Pending`, wait for it to finish (the run's own gate has passed on the
+   changed tree; the base result is needed only to record it) and treat `Failed` there as
+   `Passed` for the outcome but report it in the final message as
+   `the check failed on the untouched code but passes with this change`.
+4. When the run ends for any other reason while the base check is `Pending`, stop its process
+   group and wait for it; leave no process behind.
+5. The summary gains `base_check_seconds` when the check finished. H1's rule for recording the
+   base tree changes to: record when the base check's state was `Passed`.
+
+**Tests.**
+- `run.rs` with a scripted provider and an injected state function: `Passed` from turn 1 → runs
+  as if no check; `Failed` at turn 3 → `Blocked` at the start of turn 3 with the steps and tail
+  in the message, and no model call for turn 3; `Pending` throughout, then `Passed` at the final
+  ask → `Verified`; `Pending` then `Failed` at the final ask → `Verified` with the sentence above
+  in the final message.
+- `task_runner`/dispatch with real temporary repositories and a gate that sleeps for a bounded,
+  injected time or waits on a file: the first model call happens before the base check ends; a
+  failing base gate gives outcome `blocked`; `.wt/<id>.base` is gone after the run in every
+  outcome; no gate process is left after a run that ends while the check is pending.
+
+**Constraints.** No fallbacks. Resumable: nothing new is kept between runs except H1's records.
+No sleeps on wall-clock time in tests: use the injected clock and files to order events. Depends
+on: H1. Siblings: none.
+
+**Commit message.** `feat(dispatch): check the base commit beside the model's first turns`
