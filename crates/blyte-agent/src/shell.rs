@@ -267,6 +267,9 @@ impl CancelHandle {
 }
 
 fn kill_child_group(child: &mut Child) {
+    // On Unix, kill the entire process group with a negative PGID.
+    // This ensures all child and grandchild processes are terminated simultaneously,
+    // releasing standard stream pipe handles so reader threads unblock promptly.
     #[cfg(unix)]
     {
         let pgid = child.id() as i32;
@@ -312,10 +315,17 @@ fn exec_command_cancellable(
         return Err("command cancelled".into());
     }
 
+    // The deadline is ENFORCED, not advisory.
+    // stdin is null so commands that read input (e.g. bare python, git commit, prompts)
+    // do not block forever on an unattended terminal.
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Place the spawned command in its own process group on Unix.
+    // Without this, background grandchildren (e.g., `(sleep 30) & wait`) stay alive
+    // when the immediate child is killed, keeping pipe handles open and causing
+    // the reader threads to hang indefinitely.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -333,6 +343,8 @@ fn exec_command_cancellable(
         }
     }
 
+    // Drained on background threads: a command that fills the pipe buffer deadlocks against
+    // a parent that only reads after waiting, which turns a noisy command into a hang.
     let mut so = child.stdout.take().ok_or("no stdout")?;
     let mut se = child.stderr.take().ok_or("no stderr")?;
     let t_out = std::thread::spawn(move || {
@@ -381,10 +393,12 @@ fn exec_command_cancellable(
             stderr,
             exit_code: s.code().unwrap_or(-1),
         }),
+        // Reported as a failure the model can act on, with the output captured so far --
+        // a killed command that returns nothing tells it only that something went wrong.
         None => Ok(Output {
             stdout,
             stderr: format!("{stderr}\n[killed by blyte after {}s]", timeout.as_secs()),
-            exit_code: 124,
+            exit_code: 124, // conventional timeout code, as GNU timeout(1) uses
         }),
     }
 }
