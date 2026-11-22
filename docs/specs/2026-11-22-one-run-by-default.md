@@ -1,8 +1,11 @@
 # One run by default
 
 Proposed on 2026-11-22, after the measurements in `docs/evidence.md` ("The orchestrator: default
-process, corrections, and no orchestrator" and "A request with several tasks"). **Not yet agreed:**
-the four decisions below are the user's.
+process, corrections, and no orchestrator" and "A request with several tasks"). The user agreed
+decision 1 the same day ("keep handing work to one run as the default"). Decisions 2 and 3 are
+built as recommended and are the user's to change. Decision 4 (the name) is not acted on yet.
+Editing inside the conversation for small changes is the next experiment, once this exists to
+compare against.
 
 ## What the evidence said
 
