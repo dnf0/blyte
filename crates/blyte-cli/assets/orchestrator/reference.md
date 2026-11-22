@@ -66,10 +66,10 @@ One JSON object, also saved to `.wt/<id>.json`: `outcome`, `exit` (0 only for `v
 
 ### Reviewing a run
 
-`blyte review <id>` prints a summary. It starts with `== checks`: files the task does not name,
-commit messages not in the task, a run that did not pass, added lines that look like a fallback,
-added comments, host commands and reads outside the repository. `nothing flagged` means none of
-these. `--diff` adds the full diff.
+`blyte review <id>` prints a summary. It starts with `== checks`: files the task does not name
+(when the task has a files section), commit messages not in the task, a run that did not pass,
+added lines that look like a fallback, added comments, host commands and reads outside the
+repository. `nothing flagged` means none of these. `--diff` adds the full diff.
 
 - `== host commands` lists logged commands that may have changed things outside the worktree.
 - "the gate may have run in an environment from outside the worktree" means the implementer copied

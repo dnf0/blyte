@@ -335,9 +335,15 @@ fn should_run_model_review_policy() {
         &[],
     ));
 
-    assert!(blyte_cli::review_checks::should_run_model_review(
+    assert!(!blyte_cli::review_checks::should_run_model_review(
         &["files not named in the task: src/other.rs".to_string()],
         Some("Update `src/app.rs`."),
+        &[],
+    ));
+
+    assert!(blyte_cli::review_checks::should_run_model_review(
+        &["files not named in the task: src/other.rs".to_string()],
+        Some("## Files\n- `src/app.rs`\n\nUpdate `src/app.rs`."),
         &[],
     ));
 
@@ -420,7 +426,11 @@ fn flagged_run_triggers_fresh_review_and_findings_wait_in_queue() {
     let head_before = git_head(&repo);
 
     let task = d.path().join("task.md");
-    std::fs::write(&task, "Update `src/app.rs` so greet returns hello.\n").unwrap();
+    std::fs::write(
+        &task,
+        "## Files\n- `src/app.rs`\n\nUpdate `src/app.rs` so greet returns hello.\n",
+    )
+    .unwrap();
 
     let review_json = serde_json::json!([{
         "file": "src/other.rs",

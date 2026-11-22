@@ -1,8 +1,8 @@
 //! Scope checks for `blyte review`.
 //!
-//! Flags files changed that the task text never mentions, commit subjects
-//! not matching what the task specified, host commands, outside reads, and
-//! non-verified outcomes.
+//! Flags files changed that the task text never mentions when the task has a
+//! files section, commit subjects not matching what the task specified, host
+//! commands, outside reads, and non-verified outcomes.
 
 const IGNORED_LOCKFILES: &[&str] = &[
     "Cargo.lock",
@@ -101,209 +101,22 @@ fn sanitize_flag(flag: String) -> String {
     }
 }
 
-const KNOWN_FILE_EXTENSIONS: &[&str] = &[
-    "rs",
-    "py",
-    "pyi",
-    "ts",
-    "tsx",
-    "js",
-    "jsx",
-    "mjs",
-    "cjs",
-    "go",
-    "c",
-    "h",
-    "cc",
-    "cpp",
-    "cxx",
-    "hpp",
-    "hh",
-    "java",
-    "kt",
-    "kts",
-    "scala",
-    "cs",
-    "fs",
-    "rb",
-    "php",
-    "swift",
-    "m",
-    "mm",
-    "zig",
-    "nim",
-    "lua",
-    "pl",
-    "pm",
-    "r",
-    "jl",
-    "ex",
-    "exs",
-    "erl",
-    "hrl",
-    "hs",
-    "ml",
-    "mli",
-    "clj",
-    "cljs",
-    "el",
-    "vim",
-    "sh",
-    "bash",
-    "zsh",
-    "fish",
-    "ps1",
-    "bat",
-    "cmd",
-    "sql",
-    "toml",
-    "yaml",
-    "yml",
-    "json",
-    "jsonc",
-    "json5",
-    "xml",
-    "html",
-    "htm",
-    "css",
-    "scss",
-    "sass",
-    "less",
-    "vue",
-    "svelte",
-    "astro",
-    "md",
-    "mdx",
-    "rst",
-    "txt",
-    "adoc",
-    "tex",
-    "csv",
-    "tsv",
-    "ini",
-    "cfg",
-    "conf",
-    "env",
-    "properties",
-    "lock",
-    "mod",
-    "sum",
-    "proto",
-    "thrift",
-    "avsc",
-    "graphql",
-    "gql",
-    "prisma",
-    "tf",
-    "tfvars",
-    "hcl",
-    "nix",
-    "dhall",
-    "star",
-    "bzl",
-    "cmake",
-    "mk",
-    "gradle",
-    "sbt",
-    "cabal",
-    "gemspec",
-    "podspec",
-    "csproj",
-    "fsproj",
-    "sln",
-    "plist",
-    "svg",
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "ico",
-    "webp",
-    "woff",
-    "woff2",
-    "ttf",
-    "eot",
-    "wasm",
-    "wat",
-    "dockerfile",
-];
-
-const KNOWN_EXTENSIONLESS_FILES: &[&str] = &[
-    "Makefile",
-    "Dockerfile",
-    "Containerfile",
-    "Justfile",
-    "Procfile",
-    "Gemfile",
-    "Rakefile",
-    "Brewfile",
-    "Vagrantfile",
-    "LICENSE",
-    "CHANGELOG",
-    "README",
-    "OWNERS",
-    "CODEOWNERS",
-    "BUILD",
-    "WORKSPACE",
-];
-
-fn looks_like_file_reference(raw: &str) -> bool {
-    let token = raw
-        .trim_start_matches(|c: char| {
-            matches!(
-                c,
-                '`' | '\'' | '"' | '(' | '[' | '{' | '<' | '*' | ',' | ';' | ':'
-            )
-        })
-        .trim_end_matches(|c: char| {
-            matches!(
-                c,
-                '`' | '\'' | '"' | ')' | ']' | '}' | '>' | '*' | ',' | ';' | ':' | '.' | '!' | '?'
-            )
-        });
-    if token.is_empty()
-        || token.starts_with("http://")
-        || token.starts_with("https://")
-        || token.contains("://")
-    {
-        return false;
-    }
-
-    let last_segment = token.rsplit('/').next().unwrap_or(token);
-    if last_segment.is_empty() {
-        return false;
-    }
-    if KNOWN_EXTENSIONLESS_FILES.contains(&last_segment) {
-        return true;
-    }
-
-    if let Some((stem, ext)) = last_segment.rsplit_once('.') {
-        let valid_stem = !stem.is_empty()
-            && stem
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-        if !valid_stem || ext.is_empty() {
+/// Returns whether the task has a files section listing the files it may change.
+pub fn task_lists_files(task: &str) -> bool {
+    task.lines().any(|line| {
+        let stripped = line
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '#' | '*' | '-' | '_'));
+        let Some(prefix) = stripped.as_bytes().get(..5) else {
+            return false;
+        };
+        if !prefix.eq_ignore_ascii_case(b"files") {
             return false;
         }
-        let lower_ext = ext.to_ascii_lowercase();
-        if KNOWN_FILE_EXTENSIONS.contains(&lower_ext.as_str()) {
-            return true;
-        }
-        if token.contains('/')
-            && ext.len() <= 6
-            && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-            && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Returns whether the task text names any file or file path.
-pub fn task_names_files(task: &str) -> bool {
-    task.split_whitespace().any(looks_like_file_reference)
+        matches!(
+            stripped[5..].chars().next(),
+            None | Some(':' | '*' | '_' | '.' | ' ')
+        )
+    })
 }
 
 fn is_unnamed_files_flag(flag: &str) -> bool {
@@ -319,10 +132,10 @@ pub fn should_run_model_review(
     if !risky_matches.is_empty() {
         return true;
     }
-    let names_files = task_text.is_some_and(task_names_files);
+    let lists_files = task_text.is_some_and(task_lists_files);
     flags
         .iter()
-        .any(|f| names_files || !is_unnamed_files_flag(f))
+        .any(|f| lists_files || !is_unnamed_files_flag(f))
 }
 
 /// Build the flags list. Each flag is one line of at most 200 characters.
@@ -351,19 +164,21 @@ pub fn build(
     }
 
     if let Some(t) = task {
-        let unmentioned = unmentioned_files(t, changed);
-        if !unmentioned.is_empty() {
-            let msg = if unmentioned.len() <= 10 {
-                format!("files not named in the task: {}", unmentioned.join(", "))
-            } else {
-                let first_10 = &unmentioned[..10];
-                let more = unmentioned.len() - 10;
-                format!(
-                    "files not named in the task: {}, … (+{more} more)",
-                    first_10.join(", ")
-                )
-            };
-            flags.push(msg);
+        if task_lists_files(t) {
+            let unmentioned = unmentioned_files(t, changed);
+            if !unmentioned.is_empty() {
+                let msg = if unmentioned.len() <= 10 {
+                    format!("files not named in the task: {}", unmentioned.join(", "))
+                } else {
+                    let first_10 = &unmentioned[..10];
+                    let more = unmentioned.len() - 10;
+                    format!(
+                        "files not named in the task: {}, … (+{more} more)",
+                        first_10.join(", ")
+                    )
+                };
+                flags.push(msg);
+            }
         }
 
         let unexpected = unexpected_subjects(t, subjects);
@@ -443,7 +258,7 @@ mod tests {
     #[test]
     fn test_build_12_unmentioned_files() {
         let changed: Vec<String> = (0..12).map(|i| format!("f{i}.rs")).collect();
-        let checks = build(Some("mentions none of them"), &changed, &[], 0, 0, None);
+        let checks = build(Some("Files: other.rs"), &changed, &[], 0, 0, None);
         assert_eq!(checks.flags.len(), 1);
         let flag = &checks.flags[0];
         for i in 0..10 {
@@ -491,5 +306,70 @@ mod tests {
         assert!(checks.flags.contains(
             &"3 read(s) outside the repository: see == reads outside the repository".to_string()
         ));
+    }
+
+    #[test]
+    fn test_task_lists_files_examples() {
+        for case in [
+            "## Files",
+            "**Files.** a.rs",
+            "- **Files**: a.rs",
+            "Files to change:",
+            "files:",
+            "  __Files__\n- src/a.rs",
+        ] {
+            assert!(task_lists_files(case), "expected true for {case:?}");
+        }
+
+        for case in [
+            "Filesystem notes",
+            "The files are…",
+            "Update src/a.rs to handle empty input.",
+            "",
+        ] {
+            assert!(!task_lists_files(case), "expected false for {case:?}");
+        }
+    }
+
+    #[test]
+    fn test_no_files_section_skips_unmentioned_files_check() {
+        let task = "Update `src/a.rs` to handle empty input.";
+        let changed = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let checks = build(Some(task), &changed, &[], 0, 0, Some("verified"));
+        assert!(
+            checks
+                .flags
+                .iter()
+                .all(|f| !f.starts_with("files not named in the task")),
+            "{:?}",
+            checks.flags
+        );
+        assert!(checks.flags.is_empty(), "{:?}", checks.flags);
+        assert!(!should_run_model_review(&checks.flags, Some(task), &[]));
+    }
+
+    #[test]
+    fn test_files_section_flags_only_unmentioned_files() {
+        let task = "## Files\n- `src/a.rs`\n\nUpdate `src/a.rs` to handle empty input.";
+        let changed = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let checks = build(Some(task), &changed, &[], 0, 0, Some("verified"));
+        assert_eq!(
+            checks.flags,
+            vec!["files not named in the task: src/b.rs".to_string()]
+        );
+        assert!(should_run_model_review(&checks.flags, Some(task), &[]));
+    }
+
+    #[test]
+    fn test_no_files_section_still_flags_and_reviews_fallbacks() {
+        let task = "Update `src/a.rs` to handle empty input.";
+        let changed = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let mut checks = build(Some(task), &changed, &[], 0, 0, Some("verified"));
+        checks
+            .flags
+            .push("possible fallbacks added (1): src/b.rs:10 unwrap_or".to_string());
+        assert_eq!(checks.flags.len(), 1);
+        assert!(checks.flags[0].starts_with("possible fallbacks added (1)"));
+        assert!(should_run_model_review(&checks.flags, Some(task), &[]));
     }
 }
