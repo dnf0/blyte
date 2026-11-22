@@ -1,3 +1,9 @@
+## v0.58.0 (2026-11-22)
+
+### Feat
+
+- **surface**: a request for work is one run by default, and no model waits for it (#402)
+
 ## v0.57.0 (2026-11-22)
 
 ### Feat
