@@ -634,9 +634,8 @@ pub fn run_edit_finish_in(
 
 fn collect_commits(worktree_dir: &Path, base_sha: &str) -> Result<Vec<CommitRecord>, String> {
     let out = Command::new("git")
+        .current_dir(worktree_dir)
         .args([
-            "-C",
-            worktree_dir.to_str().unwrap_or("."),
             "log",
             "--reverse",
             "--format=%h%x09%s",
@@ -669,13 +668,8 @@ fn collect_commits(worktree_dir: &Path, base_sha: &str) -> Result<Vec<CommitReco
 
 fn collect_changed_files(worktree_dir: &Path, base_sha: &str) -> Result<Vec<String>, String> {
     let out = Command::new("git")
-        .args([
-            "-C",
-            worktree_dir.to_str().unwrap_or("."),
-            "diff",
-            "--name-only",
-            &format!("{base_sha}..HEAD"),
-        ])
+        .current_dir(worktree_dir)
+        .args(["diff", "--name-only", &format!("{base_sha}..HEAD")])
         .output()
         .map_err(|e| format!("failed to run git diff: {e}"))?;
     if !out.status.success() {
