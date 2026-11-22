@@ -322,3 +322,46 @@ The orchestrator's own cost fell to about a fifth. The implementer's rose, becau
 reading, and the total fell by about USD 1 to 2.3 a run. It is still USD 0.5 to 1.4 more than no
 orchestrator at all (C) on this one-task request. Two of the three N results first stopped at a
 timing test while the machine was busy; re-run alone, all three pass the full check.
+
+## A request with several tasks: the thin orchestrator against one agent
+
+2026-11-21 and 22, `gemini-4-neon` for every model call, one trial at a time on one machine. The
+request asked for three things: `blyte wait --json`, `blyte clean --json`, and a note about both in
+the orchestrator's reference, each with tests. Two are independent; the third depends on both.
+
+- **Thin orchestrator** (T): the request typed into the surface. The orchestrator dispatched the
+  runs; blyte combined them and ran the full check on the result. A script stood in for the user:
+  it accepted each run the review queue held and pressed nothing else. It did not push.
+- **One agent directly** (D): the same text given to a single `blyte dispatch`.
+
+| | Thin orchestrator (T1, T2, T3) | One agent directly (D1, D2, D3) |
+|---|---|---|
+| Result | combined, full check passed, 3 of 3 | verified, 3 of 3 |
+| Wall time (minutes) | 36, 50, 49 | 40, 35, 33 |
+| Total cost (USD) | 5.15, 6.49, 5.31 | 5.39, 4.81, 5.04 |
+| Of which the orchestrator (USD) | 0.61, 0.87, 0.96 | none |
+| Of which the implementers (USD) | 3.98, 4.94, 3.58 | 4.85, 4.26, 4.60 |
+| Of which the fresh reviews (USD) | 0.56, 0.68, 0.77 | 0.54, 0.55, 0.44 |
+| Runs dispatched | 2, 3, 3 | 1 |
+| Implementer turns | 42+34, 60+13+29, 41+9+20 | 78, 77, 86 |
+| Runs the stand-in had to accept | 2, 3, 3 | not applicable |
+
+On this request the thin orchestrator was not cheaper and not faster: a mean of about USD 5.65 and
+45 minutes against USD 5.08 and 36 minutes. Both gave a passing result every time. Three trials a
+side on one request is a small sample; the two ranges overlap on cost and nearly on time.
+
+What the trials showed about the thin orchestrator itself:
+
+- **Every run was held for review**, so no trial went through without the stand-in. A request
+  passed on as it is names no files, and the check "files not named in the task" then flags every
+  file the run touched. Each held run also started a fresh review. The check should not apply to a
+  task that names no files.
+- **blyte combined too early in T2 and T3.** It combines as soon as every run dispatched so far has
+  passed, which was before the orchestrator had dispatched the third, dependent run. The full check
+  therefore ran twice. In T1 the orchestrator put the note into the two tasks and dispatched two
+  runs.
+- The fresh reviews' cost is not in `blyte cost`; it was read from each review's own file.
+- The surface starts only with a terminal on its input, so the script had to give it one.
+
+Not measured: a request whose tasks are large enough that running them at the same time saves
+more than the handoff costs; a cheaper model for the orchestrator; a person at the surface.
