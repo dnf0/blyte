@@ -593,6 +593,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     for ext in [
                         "json",
                         "report.json",
+                        "reported.json",
                         "start.json",
                         "verdict.json",
                         "checks.json",
@@ -974,6 +975,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let research_report_path = wt_parent.join(format!("{}.report.md", args.id));
     if research_report_path.exists() {
         let _ = std::fs::remove_file(&research_report_path);
+    }
+    let reported_marker_path = wt_parent.join(format!("{}.reported.json", args.id));
+    if reported_marker_path.exists() {
+        let _ = std::fs::remove_file(&reported_marker_path);
     }
 
     let log_file = match std::fs::File::create(&log_path) {
