@@ -242,3 +242,86 @@ not in this worktree; do not touch those tests.
 ### Measurement
 
 After T4 and D2: the trial in the spec's "Measurement" section.
+
+## After the first measurement (2026-11-22)
+
+Two things the measurement in `docs/evidence.md` ("A request with several tasks") showed.
+
+### Task F1: the scope check applies only to a task that lists its files
+
+**Goal.** `blyte review`'s check "files not named in the task" exists for a task that lists the
+files it may change. A request passed on as it is has no such list; it mentions a file or two in
+passing, and the check then flags every other file the run touched. In the measurement this held
+every run in the review queue and started a fresh review for each. Apply the check only when the
+task has a files section.
+
+**Files.** `crates/blyte-cli/src/review_checks.rs` (the check and its unit tests); any test under
+`crates/blyte-cli/tests/` that asserts the old behaviour; `docs/` or
+`crates/blyte-cli/assets/orchestrator/reference.md` only where the check is described.
+
+**What to build.**
+- `pub fn task_lists_files(task: &str) -> bool`: true when some line of the task, after removing
+  leading whitespace and any leading `#`, `*`, `-`, `_` and spaces, starts with `Files`
+  (case-insensitive) and the next character is the end of the line, `:`, `*`, `_` or a space.
+  So `## Files`, `**Files.** a.rs`, `- **Files**: a.rs`, `Files to change:` and `files:` count;
+  `Filesystem notes`, `The files are…` and a file name in a sentence do not.
+- In `build`: add the "files not named in the task" flag only when `task_lists_files(task)`.
+  Everything else in `build` is unchanged (commit subjects, possible fallbacks, outcome, host
+  commands, the "task file not found" flag).
+- `should_run_model_review`: replace its use of `task_names_files` with `task_lists_files`. Remove
+  `task_names_files` if nothing else uses it.
+- Where the check is described for users or the orchestrator, say that it applies to a task with a
+  files section.
+
+**Tests** (unit tests in `review_checks.rs`):
+- `task_lists_files` for each example above, true and false;
+- a task with no files section that mentions `src/a.rs` in a sentence, with `src/a.rs` and
+  `src/b.rs` changed: no "files not named" flag, and `should_run_model_review` is false when there
+  are no other flags and no risky matches;
+- the same task with a `## Files` section listing `src/a.rs`: the flag names `src/b.rs` only, and
+  `should_run_model_review` is true;
+- a task with no files section and a "possible fallbacks added" flag: still flagged, still reviewed.
+Run: `cargo test -p blyte review_checks`, then the gate.
+
+**Constraints.** No fallbacks: this narrows when one check applies; it does not default or hide any
+other flag. Existing tests pass unmodified except those asserting the old rule, which are updated
+to the new one. Depends on: none. Siblings: F2 changes `requests.rs` separately and is not in this
+worktree.
+
+**Commit message.** `fix(review): check a run's files against the task only when the task lists its files`
+
+### Task F2: combine a request only when the orchestrator is idle
+
+**Goal.** blyte combines a request as soon as every run dispatched so far has passed. When the
+orchestrator is still in its turn, about to dispatch a run that depends on those, the combine and
+its full check run once too early and again later. Wait until the orchestrator has finished.
+
+**Files.** `crates/blyte-cli/src/requests.rs`; `crates/blyte-cli/tests/test_requests.rs`;
+`crates/blyte-cli/src/session.rs` only if a test needs a way to put the session into the busy or
+queued state; `crates/blyte-cli/assets/orchestrator/reference.md` ("Combining results").
+
+**What to build.**
+- In `maybe_combine`, before anything else that starts a combine or queues a failure message: read
+  `surface.session.info()`; when `busy` is true or `queued` is greater than 0, return `Ok(false)`.
+  The existing callers (the `/api/runs` poll and `Accept`) call it again later, so the combine
+  starts on the first call after the orchestrator is idle. Add nothing that polls or sleeps.
+- `GET /api/requests`: for a request that is ready but held back for this reason, `state` stays
+  `waiting` and `waiting_reasons` is exactly `["the orchestrator is still working"]`.
+- `reference.md`, "Combining results": one sentence saying blyte combines once every run has
+  passed and the orchestrator's turn has ended, so a run that depends on others should be
+  dispatched in the same turn.
+
+**Tests** (`tests/test_requests.rs`, as the existing ones are built):
+- a ready request while the session is busy: `maybe_combine` returns `Ok(false)`, no combine
+  record or branch is written, and `GET /api/requests` shows `waiting` with that reason;
+- the same with a queued message and not busy;
+- once the session is idle again, `maybe_combine` combines it (record state `combined`);
+- a conflict's failure message is not queued while busy, and is queued exactly once after.
+Run: `cargo test -p blyte --test test_requests`, then the gate.
+
+**Constraints.** No fallbacks. Resumable: nothing new is kept in memory; after a restart the
+session is idle and the next poll combines. Do not change `combine.rs`, `publish.rs` or
+`assets/surface/index.html`. Depends on: none. Siblings: F1 changes `review_checks.rs` separately
+and is not in this worktree.
+
+**Commit message.** `fix(surface): combine a request only when the orchestrator's turn has ended`
