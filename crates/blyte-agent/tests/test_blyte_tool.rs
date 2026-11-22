@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use blyte_agent::fs::LocalFs;
 use blyte_agent::shell::LocalShell;
-use blyte_agent::tools::{execute, set_blyte_request, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS};
+use blyte_agent::tools::{
+    blyte_command_timeout, execute, set_blyte_request, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS,
+    COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT,
+};
 use serde_json::json;
 
 static BLYTE_TOOL_LOCK: Mutex<()> = Mutex::new(());
@@ -58,7 +61,17 @@ fn specs_offers_blyte_tool_only_when_set() {
         assert_eq!(spec.parameters["required"], json!(["args"]));
         assert_eq!(
             BLYTE_TOOL_COMMANDS,
-            ["dispatch", "wait", "status", "review", "plan", "init", "clean"]
+            [
+                "dispatch",
+                "wait",
+                "status",
+                "review",
+                "plan",
+                "init",
+                "clean",
+                "edit-start",
+                "edit-finish",
+            ]
         );
     }
 }
@@ -120,7 +133,7 @@ fn rejects_empty_or_disallowed_commands_without_running_executable() {
     let _g = BlyteToolGuard::acquire(Some(script));
 
     let expected_err =
-        "the blyte tool runs only: dispatch, wait, status, review, plan, init, clean";
+        "the blyte tool runs only: dispatch, wait, status, review, plan, init, clean, edit-start, edit-finish";
     for bad in [
         json!([]),
         json!(["comments"]),
@@ -440,4 +453,92 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
     assert!(!no_req.is_error, "{}", no_req.content);
     let no_req_lines: Vec<&str> = no_req.content.lines().collect();
     assert_eq!(no_req_lines, vec!["dispatch", "T5", "t.md"]);
+}
+
+#[test]
+fn edit_start_and_edit_finish_are_accepted_and_request_injected_on_finish() {
+    let root = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = write_script(
+        scripts.path(),
+        "fake-blyte",
+        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+    );
+    let _g = BlyteToolGuard::acquire(Some(script));
+    let _reset = RequestReset;
+
+    set_blyte_request(Some("r1700000000-42".to_string()));
+
+    let start_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-start", "E1", "--task", "fix typo"]}),
+    );
+    assert!(!start_out.is_error, "{}", start_out.content);
+    let start_lines: Vec<&str> = start_out.content.lines().collect();
+    assert_eq!(start_lines, vec!["edit-start", "E1", "--task", "fix typo"]);
+
+    let finish_with_req = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "E1"]}),
+    );
+    assert!(!finish_with_req.is_error, "{}", finish_with_req.content);
+    let finish_lines: Vec<&str> = finish_with_req.content.lines().collect();
+    assert_eq!(
+        finish_lines,
+        vec!["edit-finish", "E1", "--request", "r1700000000-42"]
+    );
+
+    let spoofed = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "E1", "--request", "spoofed"]}),
+    );
+    assert!(spoofed.is_error);
+    assert!(spoofed.content.contains("--request"));
+
+    let refused = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["combine", "r1700000000-42"]}),
+    );
+    assert!(refused.is_error);
+    assert!(refused.content.contains("the blyte tool runs only:"));
+
+    set_blyte_request(None);
+    let finish_no_req = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "E1"]}),
+    );
+    assert!(!finish_no_req.is_error, "{}", finish_no_req.content);
+    let finish_no_req_lines: Vec<&str> = finish_no_req.content.lines().collect();
+    assert_eq!(finish_no_req_lines, vec!["edit-finish", "E1"]);
+}
+
+#[test]
+fn blyte_command_timeout_gives_edit_finish_3600s_and_others_300s() {
+    assert_eq!(EDIT_FINISH_TIMEOUT, Duration::from_secs(3600));
+    assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(300));
+    assert_eq!(
+        blyte_command_timeout("edit-finish"),
+        Duration::from_secs(3600)
+    );
+    assert_eq!(blyte_command_timeout("dispatch"), Duration::from_secs(300));
+    assert_eq!(
+        blyte_command_timeout("edit-start"),
+        Duration::from_secs(300)
+    );
+    assert_eq!(blyte_command_timeout("status"), Duration::from_secs(300));
 }

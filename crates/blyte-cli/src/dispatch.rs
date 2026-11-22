@@ -938,6 +938,44 @@ fn append_source_state(path: &Path, block: &str) {
     }
 }
 
+pub fn validate_run_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("invalid run id: must not be empty".to_string());
+    }
+    if id.len() > 128 {
+        return Err(format!(
+            "invalid run id {:?}: must be at most 128 characters",
+            id
+        ));
+    }
+    if id.starts_with('.')
+        || id.starts_with('-')
+        || id.ends_with('.')
+        || id.contains("..")
+        || id.ends_with(".lock")
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err(format!(
+            "invalid run id {:?}: only ASCII letters, digits, '.', '-' and '_' are allowed (no leading '.' or '-', no '..')",
+            id
+        ));
+    }
+    Ok(())
+}
+
+pub fn resolve_base_commit(start_dir: &Path, base: &str) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{base}^{{commit}}")])
+        .current_dir(start_dir)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        _ => Err(format!("base {base} is not a commit")),
+    }
+}
+
 pub fn validate_request_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("invalid --request value: must not be empty".to_string());
@@ -961,6 +999,10 @@ pub fn validate_request_id(id: &str) -> Result<(), String> {
 }
 
 pub fn run_dispatch(args: &DispatchArgs) -> i32 {
+    if let Err(e) = validate_run_id(&args.id) {
+        eprintln!("error: {e}");
+        return 2;
+    }
     if let Some(ref req) = args.request {
         if let Err(e) = validate_request_id(req) {
             eprintln!("error: {e}");
@@ -1648,18 +1690,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             eprintln!("{}", branch_exists_message(&root, &branch, &args.id));
             return 2;
         }
-        let base_commit = Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                &format!("{}^{{commit}}", args.base),
-            ])
-            .current_dir(&start_dir)
-            .output();
-        let base_commit = match base_commit {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => {
-                eprintln!("error: base {} is not a commit", args.base);
+        let base_commit = match resolve_base_commit(&start_dir, &args.base) {
+            Ok(sha) => sha,
+            Err(e) => {
+                eprintln!("error: {e}");
                 return 2;
             }
         };

@@ -34,8 +34,16 @@ pub struct WriteScope {
     pub allowed: Vec<PathBuf>,
 }
 
-pub const BLYTE_TOOL_COMMANDS: [&str; 7] = [
-    "dispatch", "wait", "status", "review", "plan", "init", "clean",
+pub const BLYTE_TOOL_COMMANDS: [&str; 9] = [
+    "dispatch",
+    "wait",
+    "status",
+    "review",
+    "plan",
+    "init",
+    "clean",
+    "edit-start",
+    "edit-finish",
 ];
 
 pub fn set_blyte_request(request: Option<String>) {
@@ -362,6 +370,32 @@ fn split_grep_prefix(line: &str) -> (&str, &str) {
 /// 300s still accommodates a genuine `npm install` or `cargo build`. Past that the command is
 /// killed, the model is told so, and it can re-issue something narrower.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Ceiling on `blyte edit-finish`, which runs the repository's verification gate in the foreground
+/// and therefore needs a gate-sized budget rather than the 300s exploration command limit.
+pub const EDIT_FINISH_TIMEOUT: Duration = Duration::from_secs(3600);
+
+pub fn blyte_command_timeout(subcommand: &str) -> Duration {
+    if subcommand == "edit-finish" {
+        EDIT_FINISH_TIMEOUT
+    } else {
+        COMMAND_TIMEOUT
+    }
+}
+
+fn command_ceiling(name: &str, args: &Value) -> Duration {
+    if name == "blyte" {
+        if let Some(first) = args
+            .get("args")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+        {
+            return blyte_command_timeout(first);
+        }
+    }
+    COMMAND_TIMEOUT
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutcome {
@@ -729,7 +763,7 @@ pub fn specs() -> Vec<ToolSpec> {
     if blyte_tool().is_some() {
         tools.push(ToolSpec {
             name: "blyte".into(),
-            description: "Run one of blyte's own commands on the host: dispatch, wait, status, review, plan, init, clean.".into(),
+            description: "Run one of blyte's own commands on the host: dispatch, wait, status, review, plan, init, clean, edit-start, edit-finish.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -814,9 +848,10 @@ pub fn execute_with_deadline(
     args: &Value,
     deadline: Option<std::time::Instant>,
 ) -> ToolOutcome {
+    let ceiling = command_ceiling(name, args);
     let command_timeout = match deadline {
-        Some(d) => COMMAND_TIMEOUT.min(d.saturating_duration_since(std::time::Instant::now())),
-        None => COMMAND_TIMEOUT,
+        Some(d) => ceiling.min(d.saturating_duration_since(std::time::Instant::now())),
+        None => ceiling,
     };
     execute_with_timeout(root, shell, fs, name, args, command_timeout)
 }
@@ -829,7 +864,8 @@ pub fn execute_with_timeout(
     args: &Value,
     timeout: Duration,
 ) -> ToolOutcome {
-    let mut outcome = execute_unbounded(root, shell, fs, name, args, COMMAND_TIMEOUT.min(timeout));
+    let ceiling = command_ceiling(name, args);
+    let mut outcome = execute_unbounded(root, shell, fs, name, args, ceiling.min(timeout));
     outcome.content = if name == "read" {
         bound_output_with(&outcome.content, READ_LINE_BUDGET, READ_LINE_CHARS)
     } else if name == "grep" {
@@ -1236,7 +1272,7 @@ fn execute_unbounded(
             }
 
             let mut exec_args = cmd_args.clone();
-            if first == "dispatch" {
+            if matches!(first, "dispatch" | "edit-finish") {
                 if cmd_args
                     .iter()
                     .skip(1)

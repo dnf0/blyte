@@ -7,6 +7,7 @@ pub mod comments_cmd;
 pub mod config;
 pub mod cost;
 pub mod dashboard;
+pub mod direct_edit;
 pub mod dispatch;
 pub mod env_file;
 pub mod fallback_check;

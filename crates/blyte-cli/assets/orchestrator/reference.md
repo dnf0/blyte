@@ -3,8 +3,8 @@ These are facts about blyte's commands. They say what each command does, not how
 ### Dispatching a task
 
 The `blyte` tool runs blyte's own commands (`dispatch`, `wait`, `status`, `review`, `plan`, `init`,
-`clean`) on the host in the repository's main checkout. Commands below are written as command lines;
-the words after `blyte` are passed as `args`.
+`clean`, `edit-start`, `edit-finish`) on the host in the repository's main checkout. Commands below
+are written as command lines; the words after `blyte` are passed as `args`.
 
 `blyte dispatch <id> <task.md>` starts one implementer on one task, in its own git worktree at
 `.wt/<id>` on a branch `wip/<id>`. The implementer sees only the task text and the repository. A
@@ -31,6 +31,21 @@ the user's approval.
 
 `blyte plan <plan.md>` lists a plan's tasks with their state (merged, review, running, dead, ready,
 waiting) and prints, for each ready task, the exact `blyte dispatch` command.
+
+### Direct edits
+
+`blyte edit-start <id> --task "<text>" [--base <ref>]` creates a worktree at `.wt/<id>` on a new
+branch `wip/<id>` at `--base` (default `HEAD`), runs `[dispatch].setup`, writes `.wt/<id>.task.md`
+and `.wt/<id>.edit.json`, and prints `{ "id", "path", "base_sha" }`. Make edits in the worktree
+`path` it prints and commit them there.
+
+`blyte edit-finish <id>` checks that the worktree is clean and has at least one commit beyond
+`base_sha`, then runs the repository's gate (including the comment check) in that worktree unless
+the tip's tree has already passed it. If the gate fails, it prints
+`{ "id", "outcome": "gate_failed", "failing_step", "output_tail" }` and exits 1; fix, commit in the
+worktree, and run `edit-finish` again. When the gate passes, it writes `.wt/<id>.start.json` and
+`.wt/<id>.json`, evaluates the post-run checks, and prints the summary JSON. `edit-finish` has a
+3600 s tool time limit (other foreground `blyte` calls have 300 s).
 
 ### While runs are going
 
