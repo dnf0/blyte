@@ -848,6 +848,11 @@ where
         write_checks_file(root, id, &flags, &data.fallbacks, Some(&result))?;
         Ok(Some(result))
     } else {
+        let review_path = root.join(".wt").join(format!("{id}.model-review.json"));
+        if review_path.exists() {
+            std::fs::remove_file(&review_path)
+                .map_err(|e| format!("cannot remove {}: {e}", review_path.display()))?;
+        }
         flags.extend(crate::fallback_check::flags_for_review(
             &data.fallbacks,
             None,

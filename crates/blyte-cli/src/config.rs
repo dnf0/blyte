@@ -4,13 +4,21 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
+/// Default value for `[dispatch] fix_round`: enabled (`true`) is the intended default.
+fn default_fix_round() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchConfig {
     pub gate: Option<String>,
     pub setup: Option<String>,
     pub base_check: Option<bool>,
     pub comments: Option<String>,
+    /// Whether to run one fix round when the fresh review confirms fallbacks. Defaults to `true`.
+    #[serde(default = "default_fix_round")]
+    pub fix_round: bool,
     pub model: Option<String>,
     pub max_seconds: Option<u64>,
     pub max_turns: Option<u32>,
@@ -21,6 +29,26 @@ pub struct DispatchConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub allow_read: Vec<String>,
+}
+
+impl Default for DispatchConfig {
+    fn default() -> Self {
+        Self {
+            gate: None,
+            setup: None,
+            base_check: None,
+            comments: None,
+            fix_round: default_fix_round(),
+            model: None,
+            max_seconds: None,
+            max_turns: None,
+            max_cost: None,
+            fold_budget: None,
+            network: None,
+            env: BTreeMap::new(),
+            allow_read: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +315,7 @@ max_turns = 300
 # max_cost = 8.0
 # network = "on"
 # fold_budget = 60000
+# fix_round = true
 # setup = "uv sync"   # prepares each new worktree before the implementer starts
 # allow_read = ["~/.cache/some-tool"]   # extra paths the sandbox may read
 

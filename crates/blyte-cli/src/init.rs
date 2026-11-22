@@ -1488,7 +1488,8 @@ pub fn render_verified(
     out.push_str("max_turns = 300\n");
     out.push_str("# max_cost = 8.0\n");
     out.push_str("# network = \"on\"\n");
-    out.push_str("# fold_budget = 60000\n\n");
+    out.push_str("# fold_budget = 60000\n");
+    out.push_str("# fix_round = true\n\n");
 
     if !env.is_empty() {
         out.push_str("[dispatch.env]\n");
