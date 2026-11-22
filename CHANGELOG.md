@@ -1,3 +1,9 @@
+## v0.57.0 (2026-11-22)
+
+### Feat
+
+- **surface**: thin orchestrator: blyte combines a request's runs; the user pushes and opens the pull request (#400)
+
 ## v0.56.0 (2026-11-21)
 
 ### Feat
