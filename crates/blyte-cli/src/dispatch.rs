@@ -147,6 +147,93 @@ pub struct CommitRecord {
     pub subject: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseCheckDecision {
+    Run,
+    Disabled,
+    AlreadyPassed,
+}
+
+impl BaseCheckDecision {
+    pub fn as_json(self) -> serde_json::Value {
+        match self {
+            Self::Run => serde_json::json!(true),
+            Self::Disabled => serde_json::json!(false),
+            Self::AlreadyPassed => serde_json::json!("already_passed"),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decide_base_check(
+    root: &Path,
+    worktree_dir: &Path,
+    base_sha: &str,
+    configured_gate: &str,
+    env: &std::collections::BTreeMap<String, String>,
+    research: bool,
+    no_base_check: bool,
+    config_base_check: Option<bool>,
+    now: u64,
+) -> Result<(BaseCheckDecision, Option<String>), String> {
+    if research || no_base_check || config_base_check == Some(false) {
+        return Ok((BaseCheckDecision::Disabled, None));
+    }
+    let tree = crate::passed_trees::tree_of(worktree_dir, base_sha)?;
+    let key = crate::passed_trees::check_key(configured_gate, env);
+    if crate::passed_trees::has_passed(root, &tree, &key, now)? {
+        Ok((BaseCheckDecision::AlreadyPassed, Some(tree)))
+    } else {
+        Ok((BaseCheckDecision::Run, Some(tree)))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn record_passed_after_run(
+    root: &Path,
+    worktree_dir: &Path,
+    research: bool,
+    base_check_decision: BaseCheckDecision,
+    base_tree: Option<&str>,
+    key: Option<&str>,
+    outcome: &str,
+    turns: u32,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if research {
+        return warnings;
+    }
+    let Some(key) = key else {
+        return warnings;
+    };
+    if base_check_decision == BaseCheckDecision::Run && turns >= 1 {
+        if let Some(tree) = base_tree {
+            if let Err(err) = crate::passed_trees::record_passed(root, tree, key) {
+                warnings.push(format!("could not record passed base tree: {err}"));
+            }
+        }
+    }
+    if outcome == "verified" {
+        match crate::passed_trees::worktree_is_clean(worktree_dir) {
+            Ok(true) => match crate::passed_trees::tree_of(worktree_dir, "HEAD") {
+                Ok(head_tree) => {
+                    if let Err(err) = crate::passed_trees::record_passed(root, &head_tree, key) {
+                        warnings.push(format!("could not record passed tree: {err}"));
+                    }
+                }
+                Err(err) => {
+                    warnings.push(format!("could not resolve HEAD tree to record pass: {err}"));
+                }
+            },
+            Ok(false) => {}
+            Err(err) => {
+                warnings.push(format!("could not check worktree cleanliness: {err}"));
+            }
+        }
+    }
+    warnings
+}
+
 #[derive(Debug, Serialize)]
 pub struct DispatchSummary {
     pub id: String,
@@ -169,6 +256,8 @@ pub struct DispatchSummary {
     pub report: String,
     pub gate_source: &'static str,
     pub research_report: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 fn finish_summary(summary: &DispatchSummary, wt_parent: &Path) -> i32 {
@@ -950,6 +1039,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     report: "".to_string(),
                     gate_source,
                     research_report: None,
+                    warnings: Vec::new(),
                 };
                 return finish_summary(&summary, &wt_parent);
             }
@@ -981,6 +1071,30 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         let _ = std::fs::remove_file(&reported_marker_path);
     }
 
+    let configured_gate = gate;
+    let passed_key = (!args.research)
+        .then(|| crate::passed_trees::check_key(&configured_gate, &dispatch_cfg.env));
+    let (base_check_decision, base_tree) = match decide_base_check(
+        &root,
+        &worktree_dir,
+        &base_sha,
+        &configured_gate,
+        &dispatch_cfg.env,
+        args.research,
+        args.no_base_check,
+        dispatch_cfg.base_check,
+        crate::passed_trees::now_secs(),
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    if base_check_decision == BaseCheckDecision::AlreadyPassed {
+        eprintln!("base check: this commit's content already passed");
+    }
+
     let log_file = match std::fs::File::create(&log_path) {
         Ok(f) => f,
         Err(e) => {
@@ -1005,9 +1119,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     let gate = if !args.research && comments == crate::config::CommentMode::Gate {
-        gate_with_comment_step(&gate, &comment_step(&current_exe, &base_sha))
+        gate_with_comment_step(&configured_gate, &comment_step(&current_exe, &base_sha))
     } else {
-        gate
+        configured_gate
     };
 
     let mut cmd = Command::new(current_exe);
@@ -1050,8 +1164,6 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     for r in config_allow_read.iter().chain(&args.allow_read) {
         cmd.arg("--read-root").arg(r);
     }
-    let base_check =
-        !args.research && !args.no_base_check && dispatch_cfg.base_check != Some(false);
     if args.research {
         cmd.arg("--read-root").arg(&root);
         cmd.arg("--no-gate-slot");
@@ -1059,7 +1171,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         if !args.no_claim_check {
             cmd.arg("--claim-check");
         }
-    } else if base_check {
+    } else if base_check_decision == BaseCheckDecision::Run {
         cmd.arg("--base-check");
     }
 
@@ -1116,7 +1228,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "request": args.request,
         "base": args.base,
         "base_sha": base_commit,
-        "base_check": base_check,
+        "base_check": base_check_decision.as_json(),
         "comments": comments_str,
     });
     if let Some(session) = session {
@@ -1360,6 +1472,20 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         None
     };
 
+    let warnings = record_passed_after_run(
+        &root,
+        &worktree_dir,
+        args.research,
+        base_check_decision,
+        base_tree.as_deref(),
+        passed_key.as_deref(),
+        outcome,
+        turns,
+    );
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+
     // 6. Print JSON summary
     let summary = DispatchSummary {
         id: args.id.clone(),
@@ -1382,6 +1508,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         report: report_path.display().to_string(),
         gate_source,
         research_report,
+        warnings,
     };
 
     if outcome == "verified" && !args.research {

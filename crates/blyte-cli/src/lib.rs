@@ -23,6 +23,7 @@ pub mod mock;
 pub mod model_review;
 pub mod orchestrator_text;
 pub mod outside_env;
+pub mod passed_trees;
 pub mod plan_cmd;
 pub mod plan_section;
 pub mod plans;

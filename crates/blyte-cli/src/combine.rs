@@ -62,6 +62,15 @@ pub struct CombinedRun {
     pub tip: String,
 }
 
+/// Whether the combine check actually ran or was skipped because the tree had already passed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CombineCheck {
+    #[default]
+    Ran,
+    AlreadyPassed,
+}
+
 /// Persistent combine record stored at `.wt/combined/<request>.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CombineRecord {
@@ -71,6 +80,8 @@ pub struct CombineRecord {
     pub base: String,
     pub runs: Vec<CombinedRun>,
     pub commits: Vec<String>,
+    #[serde(default)]
+    pub check: CombineCheck,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflicting_run: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -150,7 +161,14 @@ pub fn combine_in(root: &Path, request: &str, out: &mut impl Write, err: &mut im
             };
             let _ = writeln!(out, "{json}");
             match record.state {
-                CombineState::Combined => 0,
+                CombineState::Combined => {
+                    let check_label = match record.check {
+                        CombineCheck::Ran => "ran",
+                        CombineCheck::AlreadyPassed => "already_passed",
+                    };
+                    let _ = writeln!(err, "combine check: {check_label}");
+                    0
+                }
                 CombineState::Conflict => {
                     let Some(run_id) = record.conflicting_run.as_deref() else {
                         let _ = writeln!(err, "error: combine record is missing conflicting_run");
@@ -278,6 +296,7 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
                         base: group_base,
                         runs: combined_runs,
                         commits: applied_commits,
+                        check: CombineCheck::Ran,
                         conflicting_run: Some(run.id.clone()),
                         conflicting_files: conflict_files,
                         failing_step: None,
@@ -317,6 +336,7 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
                 base: group_base,
                 runs: combined_runs,
                 commits: combined_commits,
+                check: CombineCheck::Ran,
                 conflicting_run: None,
                 conflicting_files: Vec::new(),
                 failing_step: Some("setup".to_string()),
@@ -327,22 +347,18 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
         }
     }
 
-    let shell = EnvShell {
-        inner: LocalShell::new(),
-        env: dispatch_cfg.env.clone(),
-    };
-    let mut deadline = None;
-    let gate_result = run_gate_steps(
-        &shell,
-        &gate,
-        &worktree_dir,
-        &[],
-        &mut deadline,
-        |_| {},
-        &std::time::Instant::now,
-    );
+    let head_tree = crate::passed_trees::tree_of(&worktree_dir, "HEAD")?;
+    let key = crate::passed_trees::check_key(&gate, &dispatch_cfg.env);
+    let clean_before = crate::passed_trees::worktree_is_clean(&worktree_dir)?;
+    let already_passed = clean_before
+        && crate::passed_trees::has_passed(
+            root,
+            &head_tree,
+            &key,
+            crate::passed_trees::now_secs(),
+        )?;
 
-    let record = if gate_result.passed {
+    let record = if already_passed {
         CombineRecord {
             request: request.to_string(),
             state: CombineState::Combined,
@@ -350,27 +366,63 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
             base: group_base,
             runs: combined_runs,
             commits: combined_commits,
+            check: CombineCheck::AlreadyPassed,
             conflicting_run: None,
             conflicting_files: Vec::new(),
             failing_step: None,
             output_tail: None,
         }
     } else {
-        let (failing_step, raw_output) = match gate_result.failures.first() {
-            Some(f) => (f.step.clone(), f.output.as_str()),
-            None => (gate.clone(), gate_result.output.as_str()),
+        let shell = EnvShell {
+            inner: LocalShell::new(),
+            env: dispatch_cfg.env.clone(),
         };
-        CombineRecord {
-            request: request.to_string(),
-            state: CombineState::CheckFailed,
-            branch,
-            base: group_base,
-            runs: combined_runs,
-            commits: combined_commits,
-            conflicting_run: None,
-            conflicting_files: Vec::new(),
-            failing_step: Some(failing_step),
-            output_tail: Some(tail_output(raw_output, 50, 4000)),
+        let mut deadline = None;
+        let gate_result = run_gate_steps(
+            &shell,
+            &gate,
+            &worktree_dir,
+            &[],
+            &mut deadline,
+            |_| {},
+            &std::time::Instant::now,
+        );
+
+        if gate_result.passed {
+            if crate::passed_trees::worktree_is_clean(&worktree_dir)? {
+                crate::passed_trees::record_passed(root, &head_tree, &key)?;
+            }
+            CombineRecord {
+                request: request.to_string(),
+                state: CombineState::Combined,
+                branch,
+                base: group_base,
+                runs: combined_runs,
+                commits: combined_commits,
+                check: CombineCheck::Ran,
+                conflicting_run: None,
+                conflicting_files: Vec::new(),
+                failing_step: None,
+                output_tail: None,
+            }
+        } else {
+            let (failing_step, raw_output) = match gate_result.failures.first() {
+                Some(f) => (f.step.clone(), f.output.as_str()),
+                None => (gate.clone(), gate_result.output.as_str()),
+            };
+            CombineRecord {
+                request: request.to_string(),
+                state: CombineState::CheckFailed,
+                branch,
+                base: group_base,
+                runs: combined_runs,
+                commits: combined_commits,
+                check: CombineCheck::Ran,
+                conflicting_run: None,
+                conflicting_files: Vec::new(),
+                failing_step: Some(failing_step),
+                output_tail: Some(tail_output(raw_output, 50, 4000)),
+            }
         }
     };
 
