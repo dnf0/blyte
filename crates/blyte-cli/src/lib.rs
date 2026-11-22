@@ -1,6 +1,7 @@
 pub mod approval_file;
 pub mod clean;
 pub mod cli;
+pub mod combine;
 pub mod comment_lint;
 pub mod comments_cmd;
 pub mod config;
@@ -32,6 +33,7 @@ pub mod registry;
 pub mod repl;
 pub mod replay;
 pub mod report;
+pub mod requests;
 pub mod research_breadth;
 pub mod research_brief;
 pub mod review_checks;

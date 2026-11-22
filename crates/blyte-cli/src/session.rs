@@ -345,6 +345,26 @@ struct Shared {
 }
 
 impl Shared {
+    fn new(model: String, effort: Option<String>) -> Self {
+        Self {
+            state: Mutex::new(SessionState {
+                entries: Vec::new(),
+                queue: VecDeque::new(),
+                session_prefix: new_session_prefix(),
+                request_seq: 0,
+                model,
+                effort,
+                busy: false,
+                closed: false,
+                approvals: HashMap::new(),
+                next_approval_id: 0,
+            }),
+            log_cv: Condvar::new(),
+            work_cv: Condvar::new(),
+            approval_cv: Condvar::new(),
+        }
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, SessionState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -385,23 +405,7 @@ impl Session {
         F: FnOnce(Arc<SurfaceApprover>) -> Box<dyn PromptRunner>,
     {
         let (base_model, effort) = parse_model_and_effort(&model);
-        let shared = Arc::new(Shared {
-            state: Mutex::new(SessionState {
-                entries: Vec::new(),
-                queue: VecDeque::new(),
-                session_prefix: new_session_prefix(),
-                request_seq: 0,
-                model: base_model,
-                effort,
-                busy: false,
-                closed: false,
-                approvals: HashMap::new(),
-                next_approval_id: 0,
-            }),
-            log_cv: Condvar::new(),
-            work_cv: Condvar::new(),
-            approval_cv: Condvar::new(),
-        });
+        let shared = Arc::new(Shared::new(base_model, effort));
         let approver = Arc::new(SurfaceApprover {
             shared: Arc::clone(&shared),
         });
@@ -411,6 +415,28 @@ impl Session {
         Session {
             guard: Arc::new(SessionGuard { shared }),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn start_paused(
+        runner: Box<dyn PromptRunner>,
+        model: String,
+    ) -> (Session, std::sync::mpsc::Sender<()>) {
+        let (base_model, effort) = parse_model_and_effort(&model);
+        let shared = Arc::new(Shared::new(base_model, effort));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_shared = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            if rx.recv().is_ok() {
+                worker_loop(runner, worker_shared);
+            }
+        });
+        (
+            Session {
+                guard: Arc::new(SessionGuard { shared }),
+            },
+            tx,
+        )
     }
 
     pub fn approver(&self) -> Arc<SurfaceApprover> {
@@ -593,6 +619,35 @@ impl Session {
         }
         self.guard.shared.log_cv.notify_all();
         Ok(seq)
+    }
+
+    pub fn queue_for_request(&self, request_id: &str, text: &str) -> Result<u64, String> {
+        if text.trim().is_empty() {
+            return Err("a message needs text".to_string());
+        }
+        let mut state = self.guard.shared.lock_state();
+        let queued = state.busy || !state.queue.is_empty();
+        let seq = state.push_entry(EntryBody::UserMessage {
+            text: text.to_string(),
+            reports: Vec::new(),
+            queued,
+        });
+        state.queue.push_back(QueuedMessage {
+            request_id: request_id.to_string(),
+            prompt: text.to_string(),
+        });
+        self.guard.shared.work_cv.notify_one();
+        self.guard.shared.log_cv.notify_all();
+        Ok(seq)
+    }
+
+    pub fn record_error(&self, message: &str) -> u64 {
+        let mut state = self.guard.shared.lock_state();
+        let seq = state.push_entry(EntryBody::Error {
+            message: message.to_string(),
+        });
+        self.guard.shared.log_cv.notify_all();
+        seq
     }
 }
 

@@ -11,6 +11,8 @@ pub enum Command {
     Dashboard(DashboardArgs),
     /// Serve a local replay of recent runs
     Mock(MockArgs),
+    /// Combine a request's passed runs on a work branch and run the repository's check
+    Combine(CombineArgs),
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
     Dispatch(DispatchArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
@@ -159,6 +161,12 @@ pub struct MockArgs {
     /// Directory holding repositories or worktrees (repeatable)
     #[arg(long = "root", value_name = "DIR")]
     pub roots: Vec<PathBuf>,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct CombineArgs {
+    /// Request identifier whose passed runs should be combined
+    pub request: String,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]

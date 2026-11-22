@@ -305,5 +305,94 @@ file, not the default process itself.
 
 **What changed.** The default process no longer asks the orchestrator to write out names,
 signatures and tests, which is what made it read the code before dispatching. It now passes on the
-request and its decisions, and leaves reading the code to the implementer. This change has not yet
-been measured.
+request and its decisions, and leaves reading the code to the implementer (#390).
+
+**The changed process, measured** (2026-11-21, the same request, model and method; arm **N**):
+
+| | A (before) | N (after) |
+|---|---|---|
+| Verified work | 3 of 3 | 3 of 3 |
+| Full check on the result, re-run afterwards | 3 pass | 3 pass |
+| Total cost per run (USD) | 3.85, 4.51, 4.31 | 2.24, 2.21, 2.90 |
+| Of which the orchestrator (USD) | 2.99, 3.68, 3.18 | 0.64, 0.71, 0.77 |
+| Of which the implementer (USD) | 0.86, 0.83, 1.13 | 1.61, 1.51, 2.13 |
+| Wall time (minutes) | 25, 50, 34 | 33, 32, 28 |
+
+The orchestrator's own cost fell to about a fifth. The implementer's rose, because it now does the
+reading, and the total fell by about USD 1 to 2.3 a run. It is still USD 0.5 to 1.4 more than no
+orchestrator at all (C) on this one-task request. Two of the three N results first stopped at a
+timing test while the machine was busy; re-run alone, all three pass the full check.
+
+## A request with several tasks: the thin orchestrator against one agent
+
+2026-11-21 and 22, `gemini-4-neon` for every model call, one trial at a time on one machine. The
+request asked for three things: `blyte wait --json`, `blyte clean --json`, and a note about both in
+the orchestrator's reference, each with tests. Two are independent; the third depends on both.
+
+- **Thin orchestrator** (T): the request typed into the surface. The orchestrator dispatched the
+  runs; blyte combined them and ran the full check on the result. A script stood in for the user:
+  it accepted each run the review queue held and pressed nothing else. It did not push.
+- **One agent directly** (D): the same text given to a single `blyte dispatch`.
+
+| | Thin orchestrator (T1, T2, T3) | One agent directly (D1, D2, D3) |
+|---|---|---|
+| Result | combined, full check passed, 3 of 3 | verified, 3 of 3 |
+| Wall time (minutes) | 36, 50, 49 | 40, 35, 33 |
+| Total cost (USD) | 5.15, 6.49, 5.31 | 5.39, 4.81, 5.04 |
+| Of which the orchestrator (USD) | 0.61, 0.87, 0.96 | none |
+| Of which the implementers (USD) | 3.98, 4.94, 3.58 | 4.85, 4.26, 4.60 |
+| Of which the fresh reviews (USD) | 0.56, 0.68, 0.77 | 0.54, 0.55, 0.44 |
+| Runs dispatched | 2, 3, 3 | 1 |
+| Implementer turns | 42+34, 60+13+29, 41+9+20 | 78, 77, 86 |
+| Runs the stand-in had to accept | 2, 3, 3 | not applicable |
+
+On this request the thin orchestrator was not cheaper and not faster: a mean of about USD 5.65 and
+45 minutes against USD 5.08 and 36 minutes. Both gave a passing result every time. Three trials a
+side on one request is a small sample; the two ranges overlap on cost and nearly on time.
+
+What the trials showed about the thin orchestrator itself:
+
+- **Every run was held for review**, so no trial went through without the stand-in. A request
+  passed on as it is has no list of files; it mentions one or two in passing, and the check "files
+  not named in the task" then flagged every other file the run touched. Each held run also started
+  a fresh review.
+- **blyte combined too early in T2 and T3.** It combines as soon as every run dispatched so far has
+  passed, which was before the orchestrator had dispatched the third, dependent run. The full check
+  therefore ran twice. In T1 the orchestrator put the note into the two tasks and dispatched two
+  runs.
+- The fresh reviews' cost is not in `blyte cost`; it was read from each review's own file.
+- The surface starts only with a terminal on its input, so the script had to give it one.
+
+Not measured: a request whose tasks are large enough that running them at the same time saves
+more than the handoff costs; a cheaper model for the orchestrator; a person at the surface.
+
+**After two fixes** (2026-11-22, three more thin-orchestrator trials, T4 to T6, same request, model
+and method). The scope check now applies only to a task with a files section, and blyte combines
+only once the orchestrator's turn has ended.
+
+| | Before (T1, T2, T3) | After (T4, T5, T6) | One agent directly (D1, D2, D3) |
+|---|---|---|---|
+| Result | combined, check passed, 3 of 3 | combined, check passed, 3 of 3 | verified, 3 of 3 |
+| Runs the stand-in had to accept | 2, 3, 3 | 1, 1, 0 | not applicable |
+| Combines per trial | 1, 2, 2 | 1, 1, 1 | not applicable |
+| Fresh reviews per trial | 2, 3, 3 | 1, 1, 1 | 1, 1, 1 |
+| Runs dispatched | 2, 3, 3 | 3, 2, 4 | 1 |
+| Wall time (minutes) | 36, 50, 49 | 51, 40, 75 | 40, 35, 33 |
+| Total cost (USD) | 5.15, 6.49, 5.31 | 5.76, 5.83, 9.16 | 5.39, 4.81, 5.04 |
+| Of which the orchestrator (USD) | 0.61, 0.87, 0.96 | 0.87, 0.65, 1.74 | none |
+| Of which the implementers (USD) | 3.98, 4.94, 3.58 | 4.51, 4.63, 6.91 | 4.85, 4.26, 4.60 |
+| Of which the fresh reviews (USD) | 0.56, 0.68, 0.77 | 0.38, 0.55, 0.51 | 0.54, 0.55, 0.44 |
+
+Both fixes did what they were for: one combine per trial, and a run is held only for a flag about
+its content (here "possible fallbacks added", on the `clean --json` run each time). The total did
+not fall. Two things outweighed the saving:
+
+- The `clean --json` run alone cost USD 2.5 to 2.9 in T4 to T6 against USD 2.0 to 2.8 before; the
+  spread between runs of the same task is larger than what the fixes save.
+- In T6 the orchestrator recorded the `clean --json` run as redone, with the note that it "died
+  without writing" its summary, and dispatched it again. The run had in fact ended verified. That
+  one decision added a fourth run (USD 2.05) and about 25 minutes.
+
+Across all six trials the thin orchestrator has not beaten one agent on this request: USD 5.15 to
+9.16 against 4.81 to 5.39, and 36 to 75 minutes against 33 to 40. The one-agent trials were not
+re-run with the scope fix, which would probably remove their fresh review too (USD 0.44 to 0.55).

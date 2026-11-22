@@ -73,39 +73,268 @@ pub fn record_verdict(
     Ok(())
 }
 
-pub(crate) fn compute_review(
-    root: &Path,
-    id: &str,
-    include_diff_for_research: bool,
-) -> Result<ReviewComputation, String> {
-    compute_review_inner(root, id, include_diff_for_research, None)
-}
-
-fn compute_review_inner(
-    root: &Path,
-    id: &str,
-    include_diff_for_research: bool,
-    summary_worktree_fallback: Option<&Path>,
-) -> Result<ReviewComputation, String> {
-    let wt = root.join(".wt").join(id);
-    let wt_exists = wt.exists();
-    let is_research = crate::clean::is_research(root, id)
-        || root.join(".wt").join(format!("{id}.report.md")).exists();
-    let report_file = root.join(".wt").join(format!("{id}.report.json"));
-    if !wt_exists {
-        if !is_research {
-            return Err(format!("worktree {} does not exist", wt.display()));
+pub fn read_verdict(root: &Path, id: &str) -> Result<Option<ReviewVerdict>, String> {
+    let verdict_path = root.join(".wt").join(format!("{id}.verdict.json"));
+    let raw = match std::fs::read_to_string(&verdict_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!("error reading {}: {e}", verdict_path.display()));
         }
-        if !report_file.exists() {
+    };
+    let val: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("could not parse {}: {e}", verdict_path.display()))?;
+    let verdict_str = val
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{} is missing string verdict", verdict_path.display()))?;
+    let parsed = match verdict_str {
+        "accepted" => ReviewVerdict::Accepted,
+        "fixed" => ReviewVerdict::Fixed,
+        "redone" => ReviewVerdict::Redone,
+        other => {
             return Err(format!(
-                "worktree {} does not exist and {} is missing: nothing to review",
-                wt.display(),
-                report_file.display()
+                "{} has unknown verdict '{other}'",
+                verdict_path.display()
             ));
         }
+    };
+    Ok(Some(parsed))
+}
+
+enum ReviewError {
+    WorktreeGone(String),
+    Other(String),
+}
+
+impl ReviewError {
+    fn into_message(self) -> String {
+        match self {
+            Self::WorktreeGone(msg) | Self::Other(msg) => msg,
+        }
+    }
+}
+
+enum WtGit {
+    Output(std::process::Output),
+    WorktreeGone,
+    IoErr(std::io::Error),
+}
+
+fn wt_present(wt: &Path) -> bool {
+    wt.is_dir() && wt.join(".git").exists()
+}
+
+fn run_git_in_wt(wt: &Path, args: &[&str]) -> WtGit {
+    match Command::new("git").args(args).current_dir(wt).output() {
+        Ok(o) => {
+            if !o.status.success() && !wt_present(wt) {
+                WtGit::WorktreeGone
+            } else {
+                WtGit::Output(o)
+            }
+        }
+        Err(e) => {
+            if !wt_present(wt) {
+                WtGit::WorktreeGone
+            } else {
+                WtGit::IoErr(e)
+            }
+        }
+    }
+}
+
+struct WorktreeGitData {
+    base: String,
+    start_comments: Option<String>,
+    commits_out: String,
+    files_out: String,
+    tree_out: String,
+    diff_res: Option<Result<String, String>>,
+    diff_out: String,
+    task_text: Option<String>,
+    changed_files: Vec<String>,
+    subjects: Vec<String>,
+}
+
+impl WorktreeGitData {
+    fn empty() -> Self {
+        Self {
+            base: String::new(),
+            start_comments: None,
+            commits_out: String::new(),
+            files_out: String::new(),
+            tree_out: String::new(),
+            diff_res: None,
+            diff_out: String::new(),
+            task_text: None,
+            changed_files: Vec::new(),
+            subjects: Vec::new(),
+        }
+    }
+}
+
+fn read_worktree_git_data(
+    root: &Path,
+    id: &str,
+    wt: &Path,
+    is_research: bool,
+    include_diff_for_research: bool,
+    before_git: Option<&dyn Fn()>,
+) -> Result<Option<WorktreeGitData>, String> {
+    let start_path = root.join(".wt").join(format!("{id}.start.json"));
+    let (start_base_sha, start_comments): (Option<String>, Option<String>) =
+        match std::fs::read_to_string(&start_path) {
+            Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
+                Ok(v) => (
+                    v.get("base_sha")
+                        .and_then(|s| s.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
+                    v.get("comments")
+                        .and_then(|s| s.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
+                ),
+                Err(e) => {
+                    return Err(format!("cannot parse {}: {e}", start_path.display()));
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
+            Err(e) => {
+                return Err(format!("cannot read {}: {e}", start_path.display()));
+            }
+        };
+
+    if let Some(hook) = before_git {
+        hook();
     }
 
-    let (
+    let base = if let Some(sha) = start_base_sha {
+        let out = Command::new("git")
+            .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("cannot run git cat-file in {}: {e}", root.display()))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(format!(
+                "run {id} started from {sha}, which is not in this repository (git cat-file in {}: {stderr})",
+                root.display()
+            ));
+        }
+        sha
+    } else {
+        let root_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output();
+        let root_head_sha = match root_head {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => {
+                return Err("could not resolve root HEAD".to_string());
+            }
+        };
+
+        match run_git_in_wt(wt, &["merge-base", "HEAD", &root_head_sha]) {
+            WtGit::WorktreeGone => return Ok(None),
+            WtGit::Output(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            }
+            _ => {
+                return Err(format!(
+                    "cannot find where run {id} started; its start record has no base_sha and the worktree shares no history with {root_head_sha}"
+                ));
+            }
+        }
+    };
+
+    let range = format!("{base}..HEAD");
+
+    let commits_out = match run_git_in_wt(wt, &["log", "--oneline", &range]) {
+        WtGit::WorktreeGone => return Ok(None),
+        WtGit::Output(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        WtGit::IoErr(_) => String::new(),
+    };
+
+    let files_out = match run_git_in_wt(wt, &["diff", "--stat", &range]) {
+        WtGit::WorktreeGone => return Ok(None),
+        WtGit::Output(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        WtGit::IoErr(_) => String::new(),
+    };
+
+    let tree_out = match run_git_in_wt(wt, &["status", "--short"]) {
+        WtGit::WorktreeGone => return Ok(None),
+        WtGit::Output(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        WtGit::IoErr(_) => String::new(),
+    };
+
+    let diff_res: Option<Result<String, String>> = if !is_research {
+        match run_git_in_wt(wt, &["diff", &range]) {
+            WtGit::WorktreeGone => return Ok(None),
+            WtGit::IoErr(e) => Some(Err(e.to_string())),
+            WtGit::Output(o) => Some(if o.status.success() {
+                Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+            } else {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    Err(format!("exit {}", o.status))
+                } else {
+                    Err(stderr)
+                }
+            }),
+        }
+    } else if include_diff_for_research {
+        match run_git_in_wt(wt, &["diff", &range]) {
+            WtGit::WorktreeGone => return Ok(None),
+            WtGit::IoErr(e) => Some(Err(e.to_string())),
+            WtGit::Output(o) => Some(Ok(String::from_utf8_lossy(&o.stdout).into_owned())),
+        }
+    } else {
+        None
+    };
+
+    let diff_out = diff_res
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let task_text: Option<String> = (|| {
+        let start_file = root.join(".wt").join(format!("{id}.start.json"));
+        let content = std::fs::read_to_string(&start_file).ok()?;
+        let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let task_file = val.get("task_file")?.as_str()?;
+        let p = Path::new(task_file);
+        if let Ok(s) = std::fs::read_to_string(p) {
+            return Some(s);
+        }
+        std::fs::read_to_string(root.join(p)).ok()
+    })();
+
+    let changed_files: Vec<String> = match run_git_in_wt(wt, &["diff", "--name-only", &range]) {
+        WtGit::WorktreeGone => return Ok(None),
+        WtGit::Output(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    let subjects: Vec<String> = match run_git_in_wt(wt, &["log", "--format=%s", &range]) {
+        WtGit::WorktreeGone => return Ok(None),
+        WtGit::Output(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    Ok(Some(WorktreeGitData {
         base,
         start_comments,
         commits_out,
@@ -116,205 +345,87 @@ fn compute_review_inner(
         task_text,
         changed_files,
         subjects,
-    ) = if wt_exists {
-        let start_path = root.join(".wt").join(format!("{id}.start.json"));
-        let (start_base_sha, start_comments): (Option<String>, Option<String>) =
-            match std::fs::read_to_string(&start_path) {
-                Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
-                    Ok(v) => (
-                        v.get("base_sha")
-                            .and_then(|s| s.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from),
-                        v.get("comments")
-                            .and_then(|s| s.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from),
-                    ),
-                    Err(e) => {
-                        return Err(format!("cannot parse {}: {e}", start_path.display()));
-                    }
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
-                Err(e) => {
-                    return Err(format!("cannot read {}: {e}", start_path.display()));
-                }
-            };
+    }))
+}
 
-        let base = if let Some(sha) = start_base_sha {
-            let out = Command::new("git")
-                .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
-                .current_dir(&wt)
-                .output()
-                .map_err(|e| format!("cannot run git cat-file in {}: {e}", wt.display()))?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                return Err(format!(
-                    "run {id} started from {sha}, which is not in this repository (git cat-file in {}: {stderr})",
-                    wt.display()
-                ));
-            }
-            sha
-        } else {
-            let root_head = Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(root)
-                .output();
-            let root_head_sha = match root_head {
-                Ok(o) if o.status.success() => {
-                    String::from_utf8_lossy(&o.stdout).trim().to_string()
-                }
-                _ => {
-                    return Err("could not resolve root HEAD".to_string());
-                }
-            };
+pub(crate) fn compute_review(
+    root: &Path,
+    id: &str,
+    include_diff_for_research: bool,
+) -> Result<ReviewComputation, String> {
+    compute_review_res(root, id, include_diff_for_research, None, None)
+        .map_err(ReviewError::into_message)
+}
 
-            let mb_out = Command::new("git")
-                .args(["merge-base", "HEAD", &root_head_sha])
-                .current_dir(&wt)
-                .output();
-            match mb_out {
-                Ok(o) if o.status.success() => {
-                    String::from_utf8_lossy(&o.stdout).trim().to_string()
-                }
-                _ => {
-                    return Err(format!(
-                        "cannot find where run {id} started; its start record has no base_sha and the worktree shares no history with {root_head_sha}"
-                    ));
-                }
-            }
-        };
-
-        let commits_out = Command::new("git")
-            .args(["log", "--oneline", &format!("{base}..HEAD")])
-            .current_dir(&wt)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-        let files_out = Command::new("git")
-            .args(["diff", "--stat", &format!("{base}..HEAD")])
-            .current_dir(&wt)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-        let tree_out = Command::new("git")
-            .args(["status", "--short"])
-            .current_dir(&wt)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-        let diff_res: Option<Result<String, String>> = if !is_research {
-            Some(
-                Command::new("git")
-                    .args(["diff", &format!("{base}..HEAD")])
-                    .current_dir(&wt)
-                    .output()
-                    .map_err(|e| e.to_string())
-                    .and_then(|o| {
-                        if o.status.success() {
-                            Ok(String::from_utf8_lossy(&o.stdout).into_owned())
-                        } else {
-                            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                            if stderr.is_empty() {
-                                Err(format!("exit {}", o.status))
-                            } else {
-                                Err(stderr)
-                            }
-                        }
-                    }),
-            )
-        } else if include_diff_for_research {
-            Some(
-                Command::new("git")
-                    .args(["diff", &format!("{base}..HEAD")])
-                    .current_dir(&wt)
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                    .map_err(|e| e.to_string()),
-            )
-        } else {
-            None
-        };
-
-        let diff_out = diff_res
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-
-        let task_text: Option<String> = (|| {
-            let start_file = root.join(".wt").join(format!("{id}.start.json"));
-            let content = std::fs::read_to_string(&start_file).ok()?;
-            let val: serde_json::Value = serde_json::from_str(&content).ok()?;
-            let task_file = val.get("task_file")?.as_str()?;
-            let p = Path::new(task_file);
-            if let Ok(s) = std::fs::read_to_string(p) {
-                return Some(s);
-            }
-            std::fs::read_to_string(root.join(p)).ok()
-        })();
-
-        let changed_files: Vec<String> = Command::new("git")
-            .args(["diff", "--name-only", &format!("{base}..HEAD")])
-            .current_dir(&wt)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let subjects: Vec<String> = Command::new("git")
-            .args(["log", "--format=%s", &format!("{base}..HEAD")])
-            .current_dir(&wt)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        (
-            base,
-            start_comments,
-            commits_out,
-            files_out,
-            tree_out,
-            diff_res,
-            diff_out,
-            task_text,
-            changed_files,
-            subjects,
-        )
-    } else {
-        (
-            String::new(),
-            None,
-            String::new(),
-            String::new(),
-            String::new(),
-            None,
-            String::new(),
-            None,
-            Vec::new(),
-            Vec::new(),
-        )
+fn compute_review_res(
+    root: &Path,
+    id: &str,
+    include_diff_for_research: bool,
+    summary_worktree_fallback: Option<&Path>,
+    before_git: Option<&dyn Fn()>,
+) -> Result<ReviewComputation, ReviewError> {
+    let wt = root.join(".wt").join(id);
+    let mut wt_exists = wt_present(&wt);
+    let is_research = crate::clean::is_research(root, id)
+        || root.join(".wt").join(format!("{id}.report.md")).exists();
+    let report_file = root.join(".wt").join(format!("{id}.report.json"));
+    let missing_wt_err = |wt: &Path| -> Option<ReviewError> {
+        if !is_research {
+            return Some(ReviewError::WorktreeGone(format!(
+                "worktree {} does not exist",
+                wt.display()
+            )));
+        }
+        if !report_file.exists() {
+            return Some(ReviewError::WorktreeGone(format!(
+                "worktree {} does not exist and {} is missing: nothing to review",
+                wt.display(),
+                report_file.display()
+            )));
+        }
+        None
     };
+    if !wt_exists {
+        if let Some(err) = missing_wt_err(&wt) {
+            return Err(err);
+        }
+    }
+
+    let git_data = if wt_exists {
+        match read_worktree_git_data(
+            root,
+            id,
+            &wt,
+            is_research,
+            include_diff_for_research,
+            before_git,
+        ) {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                wt_exists = false;
+                if let Some(err) = missing_wt_err(&wt) {
+                    return Err(err);
+                }
+                WorktreeGitData::empty()
+            }
+            Err(e) => return Err(ReviewError::Other(e)),
+        }
+    } else {
+        WorktreeGitData::empty()
+    };
+
+    let WorktreeGitData {
+        base,
+        start_comments,
+        commits_out,
+        files_out,
+        tree_out,
+        diff_res,
+        diff_out,
+        task_text,
+        changed_files,
+        subjects,
+    } = git_data;
 
     let log_file = root.join(".wt").join(format!("{id}.log"));
     let log_content_opt = std::fs::read_to_string(&log_file).ok();
@@ -419,13 +530,16 @@ fn compute_review_inner(
                     }
                     fallbacks = findings;
                     if start_comments.as_deref() != Some("off") {
-                        match crate::comment_lint::added_comments(diff, &|path| {
-                            Command::new("git")
-                                .args(["show", &format!("HEAD:{path}")])
-                                .current_dir(&wt)
-                                .output()
-                                .map_err(|e| e.to_string())
-                                .and_then(|o| {
+                        let wt_gone = std::cell::Cell::new(false);
+                        match crate::comment_lint::added_comments(
+                            diff,
+                            &|path| match run_git_in_wt(&wt, &["show", &format!("HEAD:{path}")]) {
+                                WtGit::WorktreeGone => {
+                                    wt_gone.set(true);
+                                    Err(format!("worktree {} does not exist", wt.display()))
+                                }
+                                WtGit::IoErr(e) => Err(e.to_string()),
+                                WtGit::Output(o) => {
                                     if o.status.success() {
                                         Ok(String::from_utf8_lossy(&o.stdout).into_owned())
                                     } else {
@@ -437,14 +551,21 @@ fn compute_review_inner(
                                             Err(stderr)
                                         }
                                     }
-                                })
-                        }) {
+                                }
+                            },
+                        ) {
                             Ok(comments) => {
                                 if let Some(flag) = crate::comment_lint::flag(&comments) {
                                     checks.flags.push(flag);
                                 }
                             }
                             Err(reason) => {
+                                if wt_gone.get() {
+                                    return Err(ReviewError::WorktreeGone(format!(
+                                        "worktree {} does not exist",
+                                        wt.display()
+                                    )));
+                                }
                                 let first_line = reason.lines().next().unwrap_or(reason.as_str());
                                 let msg = format!("comment check not run: {first_line}");
                                 let cut: String = msg.chars().take(200).collect();
@@ -684,7 +805,8 @@ where
     F: FnOnce(&Path, &str, &str, &Path) -> crate::model_review::ModelReviewResult,
 {
     let wt_fallback = root.join(".wt").join(id);
-    let data = compute_review_inner(root, id, false, Some(&wt_fallback))?;
+    let data = compute_review_res(root, id, false, Some(&wt_fallback), None)
+        .map_err(ReviewError::into_message)?;
     let mut flags = data.checks.flags;
     if data.is_research || !data.wt_exists {
         write_checks_file(root, id, &flags, &data.fallbacks, None)?;
@@ -726,6 +848,14 @@ where
 }
 
 pub fn ensure_checks(root: &Path, id: &str) -> Result<bool, String> {
+    ensure_checks_with_hook(root, id, None)
+}
+
+fn ensure_checks_with_hook(
+    root: &Path,
+    id: &str,
+    before_git: Option<&dyn Fn()>,
+) -> Result<bool, String> {
     let wt_dir = root.join(".wt");
     let summary_path = wt_dir.join(format!("{id}.json"));
     if !summary_path.is_file() {
@@ -735,7 +865,14 @@ pub fn ensure_checks(root: &Path, id: &str) -> Result<bool, String> {
     if checks_path.exists() {
         return Ok(false);
     }
-    let data = compute_review(root, id, false)?;
+    let data = match compute_review_res(root, id, false, None, before_git) {
+        Ok(data) => data,
+        Err(ReviewError::WorktreeGone(_)) => return Ok(false),
+        Err(ReviewError::Other(e)) => return Err(e),
+    };
+    if !data.wt_exists {
+        return Ok(false);
+    }
     write_checks_file(root, id, &data.checks.flags, &data.fallbacks, None)?;
     Ok(true)
 }
@@ -830,9 +967,7 @@ pub fn decide(
                 now,
             )?;
             clear_hold(root, id)?;
-            Some(format!(
-                "Accepted run {id}. Combine it onto the working branch and run the gate."
-            ))
+            None
         }
         Action::SendBack => {
             let Some(ref text) = trimmed_note else {
@@ -881,4 +1016,179 @@ pub fn decide(
         note: trimmed_note,
         orchestrator_message,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn init_repo() -> (tempfile::TempDir, String) {
+        let d = tempfile::tempdir().unwrap();
+        git(d.path(), &["init", "-q"]);
+        std::fs::write(d.path().join("f.txt"), "hello\n").unwrap();
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-qm", "init", "--no-gpg-sign"]);
+        std::fs::create_dir_all(d.path().join(".wt")).unwrap();
+        let head = git(d.path(), &["rev-parse", "HEAD"]);
+        (d, head)
+    }
+
+    fn setup_finished_code_run(root: &Path, id: &str, base_sha: Option<&str>) {
+        let wt_path = root.join(".wt").join(id);
+        git(
+            root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &format!("wip/{id}"),
+                wt_path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let mut start = serde_json::json!({
+            "id": id,
+            "pid": 999999,
+            "started_at": 1000,
+            "research": false,
+        });
+        if let Some(sha) = base_sha {
+            start["base_sha"] = serde_json::json!(sha);
+        }
+        std::fs::write(
+            root.join(".wt").join(format!("{id}.start.json")),
+            start.to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".wt").join(format!("{id}.report.json")),
+            serde_json::json!({ "outcome": "error", "turns": 0 }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".wt").join(format!("{id}.json")),
+            serde_json::json!({
+                "outcome": "error",
+                "seconds": 1,
+                "final_message": "",
+                "commits": [],
+                "changed_files": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ensure_checks_skips_when_worktree_vanishes_before_git_commands() {
+        let (d, head) = init_repo();
+        setup_finished_code_run(d.path(), "M2", Some(&head));
+        let root = d.path().to_path_buf();
+        let remove_wt = move || {
+            let wt = root.join(".wt/M2");
+            let status = Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&wt)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+
+        let wrote = ensure_checks_with_hook(d.path(), "M2", Some(&remove_wt)).unwrap();
+        assert!(!wrote);
+        assert!(!d.path().join(".wt/M2").exists());
+        assert!(!d.path().join(".wt/M2.checks.json").exists());
+    }
+
+    #[test]
+    fn ensure_checks_skips_when_worktree_vanishes_without_base_sha() {
+        let (d, _head) = init_repo();
+        setup_finished_code_run(d.path(), "M3", None);
+        let root = d.path().to_path_buf();
+        let remove_wt = move || {
+            let wt = root.join(".wt/M3");
+            let status = Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&wt)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+
+        let wrote = ensure_checks_with_hook(d.path(), "M3", Some(&remove_wt)).unwrap();
+        assert!(!wrote);
+        assert!(!d.path().join(".wt/M3.checks.json").exists());
+    }
+
+    #[test]
+    fn ensure_checks_still_errors_when_base_sha_is_not_in_repository() {
+        let (d, _head) = init_repo();
+        let missing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        setup_finished_code_run(d.path(), "BAD1", Some(missing));
+
+        let err = ensure_checks(d.path(), "BAD1").unwrap_err();
+        assert!(
+            err.contains(&format!(
+                "run BAD1 started from {missing}, which is not in this repository"
+            )),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn research_review_uses_no_worktree_path_when_worktree_vanishes_mid_read() {
+        let (d, _head) = init_repo();
+        let wt = d.path().join(".wt/R1");
+        std::fs::create_dir_all(&wt).unwrap();
+        git(&wt, &["init", "-q"]);
+        git(
+            &wt,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "research",
+                "--no-gpg-sign",
+            ],
+        );
+        std::fs::write(
+            d.path().join(".wt/R1.start.json"),
+            serde_json::json!({ "id": "R1", "research": true }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join(".wt/R1.report.json"),
+            serde_json::json!({ "outcome": "verified", "turns": 1 }).to_string(),
+        )
+        .unwrap();
+
+        let wt_to_remove = wt.clone();
+        let remove_wt = move || {
+            std::fs::remove_dir_all(&wt_to_remove).unwrap();
+        };
+        let data = compute_review_res(d.path(), "R1", false, None, Some(&remove_wt))
+            .map_err(ReviewError::into_message)
+            .unwrap();
+        assert!(!data.wt_exists);
+        assert!(data.is_research);
+    }
 }

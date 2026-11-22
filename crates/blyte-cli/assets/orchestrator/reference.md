@@ -66,10 +66,10 @@ One JSON object, also saved to `.wt/<id>.json`: `outcome`, `exit` (0 only for `v
 
 ### Reviewing a run
 
-`blyte review <id>` prints a summary. It starts with `== checks`: files the task does not name,
-commit messages not in the task, a run that did not pass, added lines that look like a fallback,
-added comments, host commands and reads outside the repository. `nothing flagged` means none of
-these. `--diff` adds the full diff.
+`blyte review <id>` prints a summary. It starts with `== checks`: files the task does not name
+(when the task has a files section), commit messages not in the task, a run that did not pass,
+added lines that look like a fallback, added comments, host commands and reads outside the
+repository. `nothing flagged` means none of these. `--diff` adds the full diff.
 
 - `== host commands` lists logged commands that may have changed things outside the worktree.
 - "the gate may have run in an environment from outside the worktree" means the implementer copied
@@ -83,8 +83,17 @@ run: `accepted` (used as it was), `fixed` (used after a change), `redone` (not u
 ### Combining results
 
 - An implementer never pushes or merges; its commits stay on `wip/<id>`.
-- `git cherry-pick -x wip/<id>` records the source commit, and that line survives a squash merge, so
-  blyte can tell the run was merged.
+- The runs dispatched for one request of the user's are a group. Once every run in it has passed
+  (and any the checks flagged has been accepted in the review queue), blyte builds the branch
+  `blyte/<request>` from the group's start commit with `git cherry-pick -x` of each run, in
+  dependency order, and runs the full check on it. blyte combines once every run has passed and
+  your turn has ended, so a run that depends on others should be dispatched in the same turn. A
+  run recorded as `redone` is left out. `blyte combine <request>` does the same by hand and prints
+  the result.
+- The result is `combined`, `conflict` (which run, which files) or `check_failed` (which step, the
+  end of its output). You are sent a message only for the last two and for an error.
+- Pushing the branch and opening a pull request are the user's, from the surface. You have no
+  command for either.
 - A run's worktree and branch are removed by the next `blyte dispatch` or by `blyte clean` once its
   work is merged into the default branch or the branch it was dispatched from, once it is recorded
   as redone, or after 14 days.
