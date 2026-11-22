@@ -353,9 +353,9 @@ side on one request is a small sample; the two ranges overlap on cost and nearly
 What the trials showed about the thin orchestrator itself:
 
 - **Every run was held for review**, so no trial went through without the stand-in. A request
-  passed on as it is names no files, and the check "files not named in the task" then flags every
-  file the run touched. Each held run also started a fresh review. The check should not apply to a
-  task that names no files.
+  passed on as it is has no list of files; it mentions one or two in passing, and the check "files
+  not named in the task" then flagged every other file the run touched. Each held run also started
+  a fresh review.
 - **blyte combined too early in T2 and T3.** It combines as soon as every run dispatched so far has
   passed, which was before the orchestrator had dispatched the third, dependent run. The full check
   therefore ran twice. In T1 the orchestrator put the note into the two tasks and dispatched two
@@ -365,3 +365,34 @@ What the trials showed about the thin orchestrator itself:
 
 Not measured: a request whose tasks are large enough that running them at the same time saves
 more than the handoff costs; a cheaper model for the orchestrator; a person at the surface.
+
+**After two fixes** (2026-11-22, three more thin-orchestrator trials, T4 to T6, same request, model
+and method). The scope check now applies only to a task with a files section, and blyte combines
+only once the orchestrator's turn has ended.
+
+| | Before (T1, T2, T3) | After (T4, T5, T6) | One agent directly (D1, D2, D3) |
+|---|---|---|---|
+| Result | combined, check passed, 3 of 3 | combined, check passed, 3 of 3 | verified, 3 of 3 |
+| Runs the stand-in had to accept | 2, 3, 3 | 1, 1, 0 | not applicable |
+| Combines per trial | 1, 2, 2 | 1, 1, 1 | not applicable |
+| Fresh reviews per trial | 2, 3, 3 | 1, 1, 1 | 1, 1, 1 |
+| Runs dispatched | 2, 3, 3 | 3, 2, 4 | 1 |
+| Wall time (minutes) | 36, 50, 49 | 51, 40, 75 | 40, 35, 33 |
+| Total cost (USD) | 5.15, 6.49, 5.31 | 5.76, 5.83, 9.16 | 5.39, 4.81, 5.04 |
+| Of which the orchestrator (USD) | 0.61, 0.87, 0.96 | 0.87, 0.65, 1.74 | none |
+| Of which the implementers (USD) | 3.98, 4.94, 3.58 | 4.51, 4.63, 6.91 | 4.85, 4.26, 4.60 |
+| Of which the fresh reviews (USD) | 0.56, 0.68, 0.77 | 0.38, 0.55, 0.51 | 0.54, 0.55, 0.44 |
+
+Both fixes did what they were for: one combine per trial, and a run is held only for a flag about
+its content (here "possible fallbacks added", on the `clean --json` run each time). The total did
+not fall. Two things outweighed the saving:
+
+- The `clean --json` run alone cost USD 2.5 to 2.9 in T4 to T6 against about USD 2.0 to 2.6 before;
+  the spread between runs of the same task is larger than what the fixes save.
+- In T6 the orchestrator recorded the `clean --json` run as redone, with the note that it "died
+  without writing" its summary, and dispatched it again. The run had in fact ended verified. That
+  one decision added a fourth run (USD 2.05) and about 25 minutes.
+
+Across all six trials the thin orchestrator has not beaten one agent on this request: USD 5.15 to
+9.16 against 4.81 to 5.39, and 36 to 75 minutes against 33 to 40. The one-agent trials were not
+re-run with the scope fix, which would probably remove their fresh review too (USD 0.44 to 0.55).
