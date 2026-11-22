@@ -363,7 +363,7 @@ fn the_flag_lists_three_and_counts_the_rest() {
 }
 
 #[test]
-fn moved_lines_are_cancelled_one_for_one() {
+fn moved_lines_are_still_candidates() {
     let moved_across_files = "\
 diff --git a/src/old.rs b/src/old.rs
 --- a/src/old.rs
@@ -378,28 +378,11 @@ diff --git a/src/new.rs b/src/new.rs
  let keep = 1;
 +let x = a.unwrap_or(b);
 ";
-    assert!(added_fallbacks(moved_across_files).is_empty());
-
-    let added_twice_removed_once = "\
-diff --git a/src/old.rs b/src/old.rs
---- a/src/old.rs
-+++ b/src/old.rs
-@@ -1,2 +1,1 @@
--let x = a.unwrap_or(b);
- let keep = 1;
-diff --git a/src/new.rs b/src/new.rs
---- a/src/new.rs
-+++ b/src/new.rs
-@@ -1,1 +1,3 @@
- let keep = 1;
-+let x = a.unwrap_or(b);
-+    let x = a.unwrap_or(b);
-";
     assert_eq!(
-        added_fallbacks(added_twice_removed_once),
+        added_fallbacks(moved_across_files),
         vec![Finding {
             file: "src/new.rs".to_string(),
-            line: 3,
+            line: 2,
             pattern: "unwrap_or",
             text: "let x = a.unwrap_or(b);".to_string(),
         }]

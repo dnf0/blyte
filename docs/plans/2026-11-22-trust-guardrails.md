@@ -214,3 +214,10 @@ Run the test files you add to, then the repository's check.
 
 **Commit message.**
 `fix(sandbox): the conversation model writes only in .wt/tasks; any other write needs the user's approval`
+
+## After the check against the trial changes (2026-11-22)
+
+Decision 1 of Task F1 ("moved lines are not candidates") was withdrawn. The three fallbacks the
+read-through called real were all one existing line, re-indented inside changed code, so the rule
+dropped exactly the candidates that mattered. Moved lines are candidates again and the fresh
+review judges them.

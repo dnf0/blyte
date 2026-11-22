@@ -1,7 +1,6 @@
 //! Flags added lines in a unified diff that match common fallback patterns.
 
 use serde::Serialize;
-use std::collections::HashMap;
 use std::path::{Component, Path};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -25,33 +24,10 @@ pub struct FallbackRecord {
 }
 
 /// Added lines of a unified diff (`git diff` output) that match a fallback pattern.
+/// A line that was moved or re-indented is a candidate too: the code around it may have
+/// changed, and the fresh review judges it with the rest.
 pub fn added_fallbacks(diff: &str) -> Vec<Finding> {
     let lines: Vec<&str> = diff.lines().collect();
-    let mut removed_counts: HashMap<&str, usize> = HashMap::new();
-    let mut scan_in_hunk = false;
-    for (idx, &raw_line) in lines.iter().enumerate() {
-        if raw_line.starts_with("diff --git ") || raw_line.starts_with("+++ ") {
-            scan_in_hunk = false;
-            continue;
-        }
-        if raw_line.starts_with("--- ")
-            && lines
-                .get(idx + 1)
-                .is_some_and(|next| next.starts_with("+++ "))
-        {
-            scan_in_hunk = false;
-            continue;
-        }
-        if raw_line.starts_with("@@ ") {
-            scan_in_hunk = true;
-            continue;
-        }
-        if scan_in_hunk {
-            if let Some(content) = raw_line.strip_prefix('-') {
-                *removed_counts.entry(content.trim()).or_insert(0) += 1;
-            }
-        }
-    }
 
     let mut findings = Vec::new();
 
@@ -138,12 +114,6 @@ pub fn added_fallbacks(diff: &str) -> Vec<Finding> {
             let patterns = match_line(content, ext, &lines, idx);
             if !patterns.is_empty() {
                 let trimmed = content.trim();
-                if let Some(count) = removed_counts.get_mut(trimmed) {
-                    if *count > 0 {
-                        *count -= 1;
-                        continue;
-                    }
-                }
                 let text: String = trimmed.chars().take(200).collect();
                 for pattern in patterns {
                     findings.push(Finding {
