@@ -374,7 +374,7 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
     };
     let mut any_written = false;
     for run in &live.runs {
-        if run.checks_recorded || !surface.root.join(".wt").join(&run.id).is_dir() {
+        if run.checks_recorded {
             continue;
         }
         match crate::queue_actions::ensure_checks(&surface.root, &run.id) {
@@ -452,7 +452,7 @@ fn handle_run_diff(surface: &Surface, id: &str) -> Response {
             Response::text(200, &body)
         }
         Err(e) => {
-            if !wt.exists() {
+            if !wt.is_dir() || !wt.join(".git").exists() {
                 json_error(404, e)
             } else {
                 json_error(500, e)

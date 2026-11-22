@@ -382,3 +382,261 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
     assert_eq!(m2["request"], req2);
     assert!(noreq["request"].is_null(), "{noreq}");
 }
+
+struct NoopRunner;
+
+impl PromptRunner for NoopRunner {
+    fn run(
+        &mut self,
+        _prompt: &str,
+        _model: &str,
+        _emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn make_test_surface(repo: &Path, now: u64) -> Surface {
+    let session = Session::start(Box::new(NoopRunner), "gemini-4-neon".to_string());
+    Surface {
+        root: repo.to_path_buf(),
+        repo: "repo".to_string(),
+        session,
+        session_id: "sess-test".to_string(),
+        started_at: now,
+        days: 14,
+        token: TEST_TOKEN.to_string(),
+        requests: Arc::new(blyte_cli::requests::RequestsState::new()),
+        publisher: Arc::new(blyte_cli::requests::RealPublisher),
+    }
+}
+
+#[test]
+fn api_runs_lists_finished_run_after_worktree_removed_and_ensure_checks_skips_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    init_repo(&repo);
+    let base_sha = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let wt_m2 = repo.join(".wt/M2");
+    assert!(Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "wip/M2"])
+        .arg(&wt_m2)
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let now = now_secs();
+    let start = json!({
+        "id": "M2",
+        "pid": 999999,
+        "started_at": now - 60,
+        "base_sha": base_sha,
+        "research": false,
+        "task_file": repo.join("task.md").display().to_string(),
+        "branch": "wip/M2",
+    });
+    std::fs::write(
+        repo.join(".wt/M2.start.json"),
+        serde_json::to_string(&start).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".wt/M2.report.json"),
+        json!({ "outcome": "error", "turns": 0 }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".wt/M2.json"),
+        json!({
+            "outcome": "error",
+            "seconds": 2,
+            "final_message": "",
+            "commits": [],
+            "changed_files": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    assert!(Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&wt_m2)
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    assert!(!wt_m2.exists());
+
+    assert!(!blyte_cli::queue_actions::ensure_checks(&repo, "M2").unwrap());
+    assert!(!repo.join(".wt/M2.checks.json").exists());
+
+    let surface = make_test_surface(&repo, now);
+    let runs_resp = route(&surface, &get("/api/runs"), now);
+    assert_eq!(
+        runs_resp.status,
+        200,
+        "body={}",
+        String::from_utf8_lossy(&runs_resp.body)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&runs_resp.body).unwrap();
+    let runs = payload["runs"].as_array().unwrap();
+    let m2 = runs
+        .iter()
+        .find(|r| r["id"] == "M2")
+        .expect("M2 should appear in /api/runs");
+    assert_eq!(m2["checks_recorded"], false);
+    assert!(!repo.join(".wt/M2.checks.json").exists());
+}
+
+#[test]
+fn api_runs_lists_run_with_partially_removed_worktree_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    init_repo(&repo);
+    let base_sha = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let wt_m3 = repo.join(".wt/M3");
+    assert!(Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "wip/M3"])
+        .arg(&wt_m3)
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let now = now_secs();
+    std::fs::write(
+        repo.join(".wt/M3.start.json"),
+        json!({
+            "id": "M3",
+            "pid": 999999,
+            "started_at": now - 60,
+            "base_sha": base_sha,
+            "research": false,
+            "task_file": repo.join("task.md").display().to_string(),
+            "branch": "wip/M3",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".wt/M3.report.json"),
+        json!({ "outcome": "error", "turns": 0 }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".wt/M3.json"),
+        json!({
+            "outcome": "error",
+            "seconds": 2,
+            "final_message": "",
+            "commits": [],
+            "changed_files": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    std::fs::remove_file(wt_m3.join(".git")).unwrap();
+    assert!(wt_m3.is_dir());
+
+    let surface = make_test_surface(&repo, now);
+    let runs_resp = route(&surface, &get("/api/runs"), now);
+    assert_eq!(
+        runs_resp.status,
+        200,
+        "body={}",
+        String::from_utf8_lossy(&runs_resp.body)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&runs_resp.body).unwrap();
+    let runs = payload["runs"].as_array().unwrap();
+    let m3 = runs
+        .iter()
+        .find(|r| r["id"] == "M3")
+        .expect("M3 should appear in /api/runs");
+    assert_eq!(m3["checks_recorded"], false);
+    assert!(!repo.join(".wt/M3.checks.json").exists());
+}
+
+#[test]
+fn api_runs_still_returns_500_when_start_base_sha_is_not_in_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    init_repo(&repo);
+    let missing_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    let wt_bad = repo.join(".wt/BADSHA");
+    assert!(Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "wip/BADSHA"])
+        .arg(&wt_bad)
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let now = now_secs();
+    std::fs::write(
+        repo.join(".wt/BADSHA.start.json"),
+        json!({
+            "id": "BADSHA",
+            "pid": 999999,
+            "started_at": now - 60,
+            "base_sha": missing_sha,
+            "research": false,
+            "task_file": repo.join("task.md").display().to_string(),
+            "branch": "wip/BADSHA",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".wt/BADSHA.report.json"),
+        json!({ "outcome": "error", "turns": 0 }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".wt/BADSHA.json"),
+        json!({
+            "outcome": "error",
+            "seconds": 2,
+            "final_message": "",
+            "commits": [],
+            "changed_files": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let surface = make_test_surface(&repo, now);
+    let runs_resp = route(&surface, &get("/api/runs"), now);
+    assert_eq!(runs_resp.status, 500);
+    let body = String::from_utf8_lossy(&runs_resp.body);
+    assert!(
+        body.contains(&format!(
+            "run BADSHA started from {missing_sha}, which is not in this repository"
+        )),
+        "body={body}"
+    );
+}
