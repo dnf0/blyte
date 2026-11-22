@@ -24,7 +24,9 @@ pub struct FixRoundSummary {
     pub cost_usd: Option<f64>,
     pub seconds: u64,
     pub commits: Vec<String>,
-    pub fallbacks_left: usize,
+    /// Confirmed fallbacks in the review that stands; `None` (null) when that review did not
+    /// run or failed, so the count is not known.
+    pub fallbacks_left: Option<usize>,
     pub kept: bool,
 }
 
@@ -86,11 +88,11 @@ pub fn confirmed_count(review: &ModelReviewResult) -> usize {
         .count()
 }
 
-/// Count confirmed fallbacks in the standing review, or 0 when no review ran.
-pub fn fallbacks_left(review: Option<&ModelReviewResult>) -> usize {
+/// Count confirmed fallbacks in the standing review; `None` when no review ran or it failed.
+pub fn fallbacks_left(review: Option<&ModelReviewResult>) -> Option<usize> {
     match review {
-        Some(mr) => confirmed_count(mr),
-        None => 0,
+        Some(mr) if !mr.is_failed() => Some(confirmed_count(mr)),
+        _ => None,
     }
 }
 

@@ -793,7 +793,7 @@ fn execute_fix_round(
             git_reset_hard(impl_cfg.worktree_dir, &pre_round_sha)?;
             let flag = crate::fix_round::failure_flag(&round_outcome);
             crate::fix_round::append_check_flag(root, impl_cfg.id, &flag)?;
-            (false, round_outcome, Vec::new(), fallbacks_sent.len())
+            (false, round_outcome, Vec::new(), Some(fallbacks_sent.len()))
         };
 
     let fix_summary = crate::fix_round::FixRoundSummary {
