@@ -1,9 +1,9 @@
 //! On Linux blyte's shell refuses writes outside the allow-list via Landlock: the macOS sandbox
 //! (#91) left Linux runs able to write anywhere the user can (2026-09-27).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use blyte_agent::sandbox::{default_profile, Profile};
+use blyte_agent::sandbox::{default_profile, orchestrator_profile, Profile};
 
 #[test]
 fn a_string_profile_is_a_seatbelt_profile() {
@@ -36,11 +36,78 @@ fn the_default_profile_matches_the_platform() {
     }
 }
 
+#[test]
+fn orchestrator_profile_allows_only_wt_tasks_for_writes() {
+    let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(tmp_base).unwrap();
+    let d = tempfile::tempdir_in(tmp_base).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(d.path())
+        .status()
+        .unwrap()
+        .success());
+    let tasks = d.path().join(".wt/tasks");
+    std::fs::create_dir_all(&tasks).unwrap();
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let root = canon(d.path());
+    let tasks_canon = canon(&tasks);
+    let git_canon = canon(&d.path().join(".git"));
+    let wt_canon = canon(&d.path().join(".wt"));
+
+    let p = orchestrator_profile(d.path(), &[]);
+    if cfg!(target_os = "macos") {
+        let Profile::Seatbelt(s) = p else {
+            panic!("expected Seatbelt");
+        };
+        assert!(
+            s.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                tasks_canon.display()
+            )),
+            "{s}"
+        );
+        assert!(
+            !s.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                root.display()
+            )),
+            "{s}"
+        );
+        assert!(
+            !s.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                git_canon.display()
+            )),
+            "{s}"
+        );
+        assert!(
+            !s.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                wt_canon.display()
+            )),
+            "{s}"
+        );
+    } else {
+        match p {
+            Profile::LandlockConfined { write, read, .. } => {
+                assert!(write.iter().any(|p| canon(p) == tasks_canon), "{write:?}");
+                assert!(!write.iter().any(|p| canon(p) == root), "{write:?}");
+                assert!(!write.iter().any(|p| canon(p) == git_canon), "{write:?}");
+                assert!(!write.iter().any(|p| canon(p) == wt_canon), "{write:?}");
+                assert!(read.iter().any(|p| canon(p) == root), "{read:?}");
+            }
+            other => panic!("expected LandlockConfined, got {other:?}"),
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::path::Path;
     use std::time::Duration;
 
-    use blyte_agent::sandbox::{available, Profile};
+    use blyte_agent::sandbox::{available, orchestrator_profile, Profile};
     use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
 
     fn landlock_or_skip() -> bool {
@@ -115,5 +182,62 @@ mod linux {
             .unwrap();
         assert_ne!(denied.exit_code, 0, "{}", denied.merged());
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn orchestrator_profile_writes_only_in_wt_tasks_not_root_git_or_wt_passed() {
+        if !landlock_or_skip() {
+            return;
+        }
+        let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::create_dir_all(tmp_base).unwrap();
+        let repo = tempfile::tempdir_in(tmp_base).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let tasks = repo.path().join(".wt/tasks");
+        let passed = repo.path().join(".wt/passed");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::create_dir_all(&passed).unwrap();
+
+        let sh = LocalShell::sandboxed(orchestrator_profile(repo.path(), &[]));
+        let ok_file = tasks.join("task.md");
+        let ok = sh
+            .exec(
+                &format!("echo ok > '{}'", ok_file.display()),
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_eq!(ok.exit_code, 0, "{}", ok.merged());
+        assert!(ok_file.exists());
+
+        for denied_path in [
+            repo.path().join("root.txt"),
+            repo.path().join(".git/forged"),
+            passed.join("forged.json"),
+        ] {
+            let r = sh
+                .exec(
+                    &format!("echo no > '{}'", denied_path.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_ne!(
+                r.exit_code,
+                0,
+                "write to {} must fail",
+                denied_path.display()
+            );
+            assert!(
+                !denied_path.exists(),
+                "{} must not be created",
+                denied_path.display()
+            );
+        }
     }
 }

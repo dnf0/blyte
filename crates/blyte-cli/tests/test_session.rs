@@ -976,15 +976,20 @@ fn approval_second_answer_refused_and_first_stands() {
     );
 }
 
+static GLOBAL_POLICY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn approval_allow_file_rule_never_creates_pending_approval() {
     struct EnvAndApprovalGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
         prev_xdg: Option<std::ffi::OsString>,
         prev_approval: Option<blyte_agent::approval::ApprovalConfig>,
+        prev_scope: Option<blyte_agent::tools::WriteScope>,
     }
 
     impl Drop for EnvAndApprovalGuard {
         fn drop(&mut self) {
+            blyte_agent::tools::set_write_scope(self.prev_scope.take());
             blyte_agent::tools::set_approval(self.prev_approval.take());
             match &self.prev_xdg {
                 Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
@@ -993,6 +998,7 @@ fn approval_allow_file_rule_never_creates_pending_approval() {
         }
     }
 
+    let lock = GLOBAL_POLICY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let root = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     let allow_path = xdg.path().join("blyte").join("allow-unsandboxed");
@@ -1001,10 +1007,13 @@ fn approval_allow_file_rule_never_creates_pending_approval() {
 
     let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
     let prev_approval = blyte_agent::tools::approval();
+    let prev_scope = blyte_agent::tools::write_scope();
     std::env::set_var("XDG_CONFIG_HOME", xdg.path());
     let _guard = EnvAndApprovalGuard {
+        _lock: lock,
         prev_xdg,
         prev_approval,
+        prev_scope,
     };
 
     let (runner, _) = ScriptedRunner::new(Vec::new());
@@ -1083,4 +1092,129 @@ fn approval_allow_file_rule_never_creates_pending_approval() {
         EntryBody::ApprovalAnswered { command, answer, .. }
             if command == "echo needs_manual_approval" && answer == "yes"
     ));
+}
+
+#[test]
+fn agent_runner_run_keeps_surface_approver_instead_of_tty() {
+    struct PolicyGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev_xdg: Option<std::ffi::OsString>,
+        prev_approval: Option<blyte_agent::approval::ApprovalConfig>,
+        prev_scope: Option<blyte_agent::tools::WriteScope>,
+    }
+
+    impl Drop for PolicyGuard {
+        fn drop(&mut self) {
+            blyte_agent::tools::set_write_scope(self.prev_scope.take());
+            blyte_agent::tools::set_approval(self.prev_approval.take());
+            match &self.prev_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    let lock = GLOBAL_POLICY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp_base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(tmp_base).unwrap();
+    let root = tempfile::tempdir_in(tmp_base).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root.path())
+        .status()
+        .unwrap()
+        .success());
+
+    let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let prev_approval = blyte_agent::tools::approval();
+    let prev_scope = blyte_agent::tools::write_scope();
+    std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+    let _guard = PolicyGuard {
+        _lock: lock,
+        prev_xdg,
+        prev_approval,
+        prev_scope,
+    };
+
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start(Box::new(runner), "gemini-4-neon".into());
+    let cfg = blyte_cli::repl::ReplConfig {
+        repo_root: root.path().to_path_buf(),
+        sandbox: "on".to_string(),
+        ..Default::default()
+    };
+    let mut agent_runner = blyte_cli::session::AgentRunner::new(&cfg, session.approver());
+    let _ = agent_runner.run("hello", "unknown-model-for-test", &|_| {});
+
+    let shell = blyte_agent::shell::LocalShell::new();
+    let fs = blyte_agent::fs::LocalFs;
+
+    let session_yes = session.clone();
+    let answer_yes = std::thread::spawn(move || {
+        let requested = wait_for_entries(&session_yes, 1);
+        let id = match &requested[0].body {
+            EntryBody::ApprovalRequested {
+                id,
+                command,
+                reason,
+            } => {
+                assert!(command.starts_with("write "), "{command}");
+                assert!(command.ends_with("src/outside.rs"), "{command}");
+                assert!(
+                    reason.contains("outside the directories this conversation may write"),
+                    "{reason}"
+                );
+                id.clone()
+            }
+            other => panic!("expected ApprovalRequested on surface, got {other:?}"),
+        };
+        session_yes
+            .answer_approval(&id, ApprovalAnswer::Yes)
+            .unwrap();
+    });
+
+    let approved_out = blyte_agent::tools::execute(
+        root.path(),
+        &shell,
+        &fs,
+        "write",
+        &serde_json::json!({
+            "path": "src/outside.rs",
+            "content": "approved\n",
+        }),
+    );
+    answer_yes.join().unwrap();
+    assert!(!approved_out.is_error, "{}", approved_out.content);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("src/outside.rs")).unwrap(),
+        "approved\n"
+    );
+
+    let session_no = session.clone();
+    let answer_no = std::thread::spawn(move || {
+        let requested = wait_for_entries(&session_no, 3);
+        let id = match &requested[2].body {
+            EntryBody::ApprovalRequested { id, command, .. } => {
+                assert!(command.ends_with("src/denied.rs"), "{command}");
+                id.clone()
+            }
+            other => panic!("expected ApprovalRequested on surface, got {other:?}"),
+        };
+        session_no.answer_approval(&id, ApprovalAnswer::No).unwrap();
+    });
+
+    let denied_out = blyte_agent::tools::execute(
+        root.path(),
+        &shell,
+        &fs,
+        "write",
+        &serde_json::json!({
+            "path": "src/denied.rs",
+            "content": "denied\n",
+        }),
+    );
+    answer_no.join().unwrap();
+    assert!(denied_out.is_error, "{}", denied_out.content);
+    assert!(!root.path().join("src/denied.rs").exists());
 }

@@ -75,6 +75,14 @@ pub fn new_session_id(now_secs: u64, pid: u32) -> String {
 impl ReplSession {
     /// Creates a new `ReplSession` initialized with the given `ReplConfig`.
     pub fn try_new(config: &ReplConfig) -> Result<Self, String> {
+        Self::try_new_with_approver(config, None)
+    }
+
+    /// Creates a new `ReplSession` initialized with the given `ReplConfig` and optional approver.
+    pub fn try_new_with_approver(
+        config: &ReplConfig,
+        approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
+    ) -> Result<Self, String> {
         let session_id = match std::env::var("BLYTE_SESSION") {
             Ok(v) if !v.is_empty() => v,
             _ => {
@@ -102,20 +110,15 @@ impl ReplSession {
             None => "on".to_string(),
         };
 
+        let sandbox_on = config.sandbox == "on";
+        let allowed_count = crate::task_runner::configure_orchestrate_policy(
+            config.orchestrate,
+            sandbox_on,
+            &config.repo_root,
+            approver,
+            true,
+        )?;
         let orchestrator_start_lines = if config.orchestrate {
-            let sandbox_on = config.sandbox == "on";
-            let allowed_count = if sandbox_on {
-                let rules = crate::approval_file::load()?;
-                let count = rules.len();
-                blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
-                    rules,
-                    approver: Arc::new(crate::tty_approver::TtyApprover),
-                }));
-                count
-            } else {
-                blyte_agent::tools::set_approval(None);
-                0
-            };
             Some(crate::orchestrator_text::set_state_instructions(
                 &mut state,
                 config.dispatch_cmd.is_some(),
@@ -803,6 +806,7 @@ mod tests {
         let log_path = tmp.path().join("usage.jsonl");
 
         let config = ReplConfig {
+            repo_root: tmp.path().to_path_buf(),
             orchestrate: true,
             ..Default::default()
         };

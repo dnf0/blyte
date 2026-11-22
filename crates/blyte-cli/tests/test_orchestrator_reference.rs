@@ -216,7 +216,14 @@ fn the_check_catches_an_unknown_flag() {
 #[test]
 fn reference_describes_unsandboxed_and_no_dev_null_redirect() {
     assert!(blyte_cli::orchestrator_text::SANDBOX_ON_PARAGRAPH.contains("unsandboxed"));
+    assert!(blyte_cli::orchestrator_text::SANDBOX_ON_PARAGRAPH.contains(
+        "the shell and the write tools can write only in `.wt/tasks` and temporary directories"
+    ));
     assert!(!REFERENCE.contains("> /dev/null"));
+    assert!(DEFAULT_PROCESS.contains(".wt/tasks/<name>.md"));
+    assert!(DEFAULT_PROCESS.contains("approval"));
+    assert!(REFERENCE.contains(".wt/tasks/<name>.md"));
+    assert!(REFERENCE.contains("approval"));
 }
 
 #[test]

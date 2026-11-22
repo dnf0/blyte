@@ -23,8 +23,15 @@ static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec:
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
+static WRITE_SCOPE: std::sync::RwLock<Option<WriteScope>> = std::sync::RwLock::new(None);
 thread_local! {
     static BLYTE_REQUEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Absolute, canonical directories where `write` and `edit` may write without user approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteScope {
+    pub allowed: Vec<PathBuf>,
 }
 
 pub const BLYTE_TOOL_COMMANDS: [&str; 7] = [
@@ -64,6 +71,20 @@ pub fn set_approval(config: Option<ApprovalConfig>) {
 
 pub fn approval() -> Option<ApprovalConfig> {
     APPROVAL
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_write_scope(scope: Option<WriteScope>) {
+    match WRITE_SCOPE.write() {
+        Ok(mut lock) => *lock = scope,
+        Err(poisoned) => *poisoned.into_inner() = scope,
+    }
+}
+
+pub fn write_scope() -> Option<WriteScope> {
+    WRITE_SCOPE
         .read()
         .map(|r| r.clone())
         .unwrap_or_else(|e| e.into_inner().clone())
@@ -451,6 +472,77 @@ fn resolve_in_workspace(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, 
     Ok(joined)
 }
 
+fn resolve_real_target(fs: &dyn Fs, path: &Path) -> Result<PathBuf, String> {
+    let mut probe = path;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match fs.canonicalize(probe) {
+            Ok(mut resolved) => {
+                for part in tail.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(e) => {
+                let exists_or_unreadable = if fs.is_local() {
+                    match std::fs::symlink_metadata(probe) {
+                        Ok(_) => true,
+                        Err(meta_err) => meta_err.kind() != std::io::ErrorKind::NotFound,
+                    }
+                } else {
+                    false
+                };
+                if exists_or_unreadable {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                }
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                tail.push(name.to_os_string());
+                let Some(parent) = probe.parent() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                probe = parent;
+            }
+        }
+    }
+}
+
+fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
+    let Some(scope) = write_scope() else {
+        return Ok(());
+    };
+    let real_target = resolve_real_target(fs, path)?;
+    if scope.allowed.iter().any(|dir| real_target.starts_with(dir)) {
+        return Ok(());
+    }
+    let allowed_list = scope
+        .allowed
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cmd = format!("{tool} {}", real_target.display());
+    let reason = format!("outside the directories this conversation may write ({allowed_list})");
+    let Some(cfg) = approval() else {
+        return Err(format!(
+            "write was not made: {} is outside the directories this conversation may write ({allowed_list}); no approver is configured (the user can approve writes outside these directories).",
+            real_target.display()
+        ));
+    };
+    match cfg.approver.ask(&cmd, &reason) {
+        Approval::Approved => Ok(()),
+        Approval::Denied => Err(format!(
+            "write was not made: {} is outside the directories this conversation may write ({allowed_list}); the user refused (the user can approve writes outside these directories).",
+            real_target.display()
+        )),
+        Approval::Unavailable => Err(format!(
+            "write was not made: {} is outside the directories this conversation may write ({allowed_list}); nobody can approve it in this run (the user can approve writes outside these directories).",
+            real_target.display()
+        )),
+    }
+}
+
 /// Reject a path that escapes the workspace, unless an absolute path is inside a read root.
 pub(crate) fn resolve_for_read(fs: &dyn Fs, root: &Path, raw: &str) -> Result<PathBuf, String> {
     if let Ok(p) = resolve_in_workspace(fs, root, raw) {
@@ -819,6 +911,9 @@ fn execute_unbounded(
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
+            if let Err(e) = check_write_scope(fs, "write", &path) {
+                return ToolOutcome::err(e);
+            }
             match fs.write(&path, &s("content")) {
                 Ok(_) => ToolOutcome::ok(format!("wrote {}", s("path"))),
                 Err(e) => ToolOutcome::err(e),
@@ -829,6 +924,9 @@ fn execute_unbounded(
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
+            if let Err(e) = check_write_scope(fs, "edit", &path) {
+                return ToolOutcome::err(e);
+            }
             let body = match fs.read(&path) {
                 Ok(b) => b,
                 Err(e) => return ToolOutcome::err(e),

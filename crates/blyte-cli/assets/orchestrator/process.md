@@ -21,7 +21,8 @@ credentials, deployment or other repositories.
 
 ### Hand the request on
 
-Write the task file as the user's request in their words:
+Write the task file in `.wt/tasks/<name>.md` as the user's request in their words (task and
+question files go in `.wt/tasks/<name>.md`; writes elsewhere need the user's approval):
 
 - What they asked for and why, with any spec or document they named by path (do not copy it in).
 - Any decision made in the conversation that the code does not settle — decisions only, not a
