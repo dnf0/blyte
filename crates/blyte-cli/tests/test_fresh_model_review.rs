@@ -318,39 +318,42 @@ fn should_run_model_review_policy() {
         &[],
         Some("Update src/app.rs"),
         &[],
+        0,
     ));
 
     assert!(!blyte_cli::review_checks::should_run_model_review(
         &["files not named in the task: src/app.rs".to_string()],
         Some("Improve the greeting text."),
         &[],
+        0,
     ));
 
     assert!(blyte_cli::review_checks::should_run_model_review(
-        &[
-            "files not named in the task: src/app.rs".to_string(),
-            "possible fallbacks added (1): src/app.rs:1".to_string(),
-        ],
+        &["files not named in the task: src/app.rs".to_string()],
         Some("Improve the greeting text."),
         &[],
+        1,
     ));
 
     assert!(!blyte_cli::review_checks::should_run_model_review(
         &["files not named in the task: src/other.rs".to_string()],
         Some("Update `src/app.rs`."),
         &[],
+        0,
     ));
 
     assert!(blyte_cli::review_checks::should_run_model_review(
         &["files not named in the task: src/other.rs".to_string()],
         Some("## Files\n- `src/app.rs`\n\nUpdate `src/app.rs`."),
         &[],
+        0,
     ));
 
     assert!(blyte_cli::review_checks::should_run_model_review(
         &[],
         Some("Update migrations/001.sql."),
         &["migrations/001.sql".to_string()],
+        0,
     ));
 }
 
@@ -432,12 +435,15 @@ fn flagged_run_triggers_fresh_review_and_findings_wait_in_queue() {
     )
     .unwrap();
 
-    let review_json = serde_json::json!([{
-        "file": "src/other.rs",
-        "line": 1,
-        "severity": "high",
-        "text": "modified src/other.rs instead of src/app.rs"
-    }])
+    let review_json = serde_json::json!({
+        "concerns": [{
+            "file": "src/other.rs",
+            "line": 1,
+            "severity": "high",
+            "text": "modified src/other.rs instead of src/app.rs"
+        }],
+        "fallbacks": []
+    })
     .to_string();
 
     let server = MockServer::start(
@@ -525,12 +531,15 @@ fn risky_path_triggers_review_and_findings_put_run_in_queue() {
     let task = d.path().join("task.md");
     std::fs::write(&task, "Add `migrations/001.sql` to create users table.\n").unwrap();
 
-    let review_json = serde_json::json!([{
-        "file": "migrations/001.sql",
-        "line": 1,
-        "severity": "high",
-        "text": "missing NOT NULL constraint on id"
-    }])
+    let review_json = serde_json::json!({
+        "concerns": [{
+            "file": "migrations/001.sql",
+            "line": 1,
+            "severity": "high",
+            "text": "missing NOT NULL constraint on id"
+        }],
+        "fallbacks": []
+    })
     .to_string();
 
     let server = MockServer::start(
@@ -653,4 +662,473 @@ fn failed_review_is_recorded_and_run_waits_in_queue() {
     let run = replay.runs.iter().find(|r| r.id == "revfail1").unwrap();
     assert_eq!(run.card, "exception");
     assert!(run.verdict.is_none());
+}
+
+struct SequenceProvider {
+    model: String,
+    responses: Mutex<Vec<Result<blyte_provider::Response, blyte_provider::ProviderError>>>,
+    seen: Mutex<Vec<blyte_provider::Request>>,
+}
+
+impl SequenceProvider {
+    fn new(
+        model: &str,
+        responses: Vec<Result<blyte_provider::Response, blyte_provider::ProviderError>>,
+    ) -> Self {
+        Self {
+            model: model.to_string(),
+            responses: Mutex::new(responses),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+}
+
+impl blyte_provider::Provider for SequenceProvider {
+    fn complete(
+        &self,
+        req: &blyte_provider::Request,
+    ) -> Result<blyte_provider::Response, blyte_provider::ProviderError> {
+        self.seen.lock().unwrap().push(req.clone());
+        let mut q = self.responses.lock().unwrap();
+        if q.is_empty() {
+            return Err(blyte_provider::ProviderError::Parse(
+                "unexpected extra call".to_string(),
+            ));
+        }
+        q.remove(0)
+    }
+
+    fn model_id(&self) -> String {
+        self.model.clone()
+    }
+}
+
+fn make_response(
+    text: &str,
+    finish_reason: Option<&str>,
+    input: u64,
+    output: u64,
+) -> blyte_provider::Response {
+    blyte_provider::Response {
+        text: text.to_string(),
+        tool_calls: Vec::new(),
+        usage: blyte_provider::Usage {
+            input,
+            cached: 0,
+            output,
+            thinking: 0,
+        },
+        finish_reason: finish_reason.map(|s| s.to_string()),
+    }
+}
+
+fn setup_worktree_run(
+    root: &Path,
+    id: &str,
+    task: &str,
+    files: &[(&str, &str)],
+) -> (String, std::path::PathBuf) {
+    let base = git_head(root);
+    let wt_rel = format!(".wt/{id}");
+    git(
+        root,
+        &["worktree", "add", "-q", "-b", &format!("wip/{id}"), &wt_rel],
+    );
+    std::fs::write(root.join("task.md"), task).unwrap();
+    std::fs::write(
+        root.join(format!(".wt/{id}.start.json")),
+        serde_json::json!({
+            "id": id,
+            "base_sha": base,
+            "task_file": "task.md",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let wt = root.join(&wt_rel);
+    for (rel, body) in files {
+        let p = wt.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, body).unwrap();
+        git(&wt, &["add", rel]);
+    }
+    git(
+        &wt,
+        &["commit", "-q", "-m", "feat: change", "--no-gpg-sign"],
+    );
+    (base, wt)
+}
+
+#[test]
+fn build_request_lists_candidates_only_when_present() {
+    let without =
+        blyte_cli::model_review::build_request("Update app", "stat", "+let x = 1;\n", &[]);
+    let blyte_provider::Message::User(ref user_without) = without.messages[0] else {
+        panic!("expected user message");
+    };
+    assert!(
+        !user_without.contains("## Fallback candidates"),
+        "{user_without}"
+    );
+    assert_eq!(without.max_output_tokens, Some(32_000));
+
+    let candidates = vec![blyte_cli::fallback_check::Finding {
+        file: "src/app.rs".to_string(),
+        line: 12,
+        pattern: "unwrap_or",
+        text: "let region = cfg.region.unwrap_or(\"us\");".to_string(),
+    }];
+    let with = blyte_cli::model_review::build_request(
+        "Update app",
+        "stat",
+        "+let region = cfg.region.unwrap_or(\"us\");\n",
+        &candidates,
+    );
+    let blyte_provider::Message::User(ref user_with) = with.messages[0] else {
+        panic!("expected user message");
+    };
+    assert!(user_with.contains("## Fallback candidates"), "{user_with}");
+    assert!(user_with.contains("src/app.rs:12"), "{user_with}");
+    assert!(user_with.contains("unwrap_or"), "{user_with}");
+    assert!(
+        user_with.contains("let region = cfg.region.unwrap_or(\"us\");"),
+        "{user_with}"
+    );
+}
+
+#[test]
+fn parse_validates_object_format_fallbacks_key_and_verdict() {
+    let ok = blyte_cli::model_review::parse(
+        r#"{"concerns": [{"file": "src/a.rs", "line": 3, "severity": "high", "text": "bug"}], "fallbacks": [{"file": "src/a.rs", "line": 5, "verdict": "fallback", "reason": "hides missing config"}]}"#,
+        true,
+    )
+    .unwrap();
+    assert_eq!(ok.concerns.len(), 1);
+    assert_eq!(ok.fallbacks.len(), 1);
+    assert_eq!(ok.fallbacks[0].verdict, "fallback");
+
+    let bare_err = blyte_cli::model_review::parse("[]", false).unwrap_err();
+    assert!(bare_err.contains("JSON object"), "{bare_err}");
+
+    let missing_fb = blyte_cli::model_review::parse(r#"{"concerns": []}"#, true).unwrap_err();
+    assert!(missing_fb.contains("fallbacks"), "{missing_fb}");
+
+    let bad_verdict = blyte_cli::model_review::parse(
+        r#"{"concerns": [], "fallbacks": [{"file": "src/a.rs", "line": 1, "verdict": "maybe", "reason": "unsure"}]}"#,
+        true,
+    )
+    .unwrap_err();
+    assert!(bad_verdict.contains("verdict"), "{bad_verdict}");
+}
+
+#[test]
+fn fallback_flags_reflect_review_verdicts_and_errors() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    init_repo(&repo, None);
+
+    let (_base1, _wt1) = setup_worktree_run(
+        &repo,
+        "FB_OK",
+        "Update `src/app.rs`.\n",
+        &[(
+            "src/app.rs",
+            "pub fn f(s: &str) -> &str { s.strip_prefix(\"a\").unwrap_or(s) }\n",
+        )],
+    );
+    let ok_reply = serde_json::json!({
+        "concerns": [],
+        "fallbacks": [{
+            "file": "src/app.rs",
+            "line": 1,
+            "verdict": "not_fallback",
+            "reason": "String prefix stripping keeps the original string when no prefix matches."
+        }]
+    })
+    .to_string();
+    blyte_cli::queue_actions::evaluate_verified_run_with(&repo, "FB_OK", |root, id, base, wt| {
+        let prov = SequenceProvider::new(
+            "gemini/gemini-3.8-flash",
+            vec![Ok(make_response(&ok_reply, Some("STOP"), 100, 50))],
+        );
+        blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
+    })
+    .unwrap();
+    let checks1: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(repo.join(".wt/FB_OK.checks.json")).unwrap())
+            .unwrap();
+    assert!(checks1["flags"].as_array().unwrap().is_empty(), "{checks1}");
+    assert_eq!(
+        checks1["fallbacks"][0]["verdict"].as_str(),
+        Some("not_fallback")
+    );
+    assert_eq!(
+        checks1["fallbacks"][0]["reason"].as_str(),
+        Some("String prefix stripping keeps the original string when no prefix matches.")
+    );
+    assert_eq!(
+        checks1["fallbacks"][0]["text"].as_str(),
+        Some("pub fn f(s: &str) -> &str { s.strip_prefix(\"a\").unwrap_or(s) }")
+    );
+
+    let (_base2, _wt2) = setup_worktree_run(
+        &repo,
+        "FB_CONFIRMED",
+        "Update `src/app.rs`.\n",
+        &[(
+            "src/app.rs",
+            "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
+        )],
+    );
+    let confirmed_reply = serde_json::json!({
+        "concerns": [],
+        "fallbacks": [{
+            "file": "src/app.rs",
+            "line": 1,
+            "verdict": "fallback",
+            "reason": "Substitutes a hardcoded region when missing."
+        }]
+    })
+    .to_string();
+    blyte_cli::queue_actions::evaluate_verified_run_with(
+        &repo,
+        "FB_CONFIRMED",
+        |root, id, base, wt| {
+            let prov = SequenceProvider::new(
+                "gemini/gemini-3.8-flash",
+                vec![Ok(make_response(&confirmed_reply, Some("STOP"), 100, 50))],
+            );
+            blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
+        },
+    )
+    .unwrap();
+    let checks2: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join(".wt/FB_CONFIRMED.checks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        checks2["flags"],
+        serde_json::json!(["fallbacks added: 1 (src/app.rs:1)"])
+    );
+
+    let (_base3, _wt3) = setup_worktree_run(
+        &repo,
+        "FB_MISSING",
+        "Update `src/app.rs`.\n",
+        &[(
+            "src/app.rs",
+            "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
+        )],
+    );
+    let missing_reply = serde_json::json!({
+        "concerns": [],
+        "fallbacks": []
+    })
+    .to_string();
+    blyte_cli::queue_actions::evaluate_verified_run_with(
+        &repo,
+        "FB_MISSING",
+        |root, id, base, wt| {
+            let prov = SequenceProvider::new(
+                "gemini/gemini-3.8-flash",
+                vec![Ok(make_response(&missing_reply, Some("STOP"), 100, 50))],
+            );
+            blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
+        },
+    )
+    .unwrap();
+    let checks3: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join(".wt/FB_MISSING.checks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        checks3["flags"],
+        serde_json::json!(["fallback candidates not judged: 1 (src/app.rs:1)"])
+    );
+
+    let (_base4, _wt4) = setup_worktree_run(
+        &repo,
+        "FB_FAIL",
+        "Update `src/app.rs`.\n",
+        &[(
+            "src/app.rs",
+            "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
+        )],
+    );
+    blyte_cli::queue_actions::evaluate_verified_run_with(&repo, "FB_FAIL", |root, id, base, wt| {
+        let prov = SequenceProvider::new(
+            "gemini/gemini-3.8-flash",
+            vec![Err(blyte_provider::ProviderError::Api {
+                status: 500,
+                body: "boom".to_string(),
+            })],
+        );
+        blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
+    })
+    .unwrap();
+    let checks4: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join(".wt/FB_FAIL.checks.json")).unwrap(),
+    )
+    .unwrap();
+    let flags4: Vec<&str> = checks4["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        flags4
+            .iter()
+            .any(|f| f.starts_with("possible fallbacks added: 1 (not judged: ")),
+        "{flags4:?}"
+    );
+
+    let mut long_findings = Vec::new();
+    let mut long_verdicts = Vec::new();
+    for i in 1..=20 {
+        let file = format!("crates/very-long-package-name/src/module_{i:02}.rs");
+        long_findings.push(blyte_cli::fallback_check::Finding {
+            file: file.clone(),
+            line: i,
+            pattern: "unwrap_or",
+            text: "x.unwrap_or(0)".to_string(),
+        });
+        long_verdicts.push(blyte_cli::model_review::FallbackVerdict {
+            file,
+            line: i,
+            verdict: "fallback".to_string(),
+            reason: "hides missing value".to_string(),
+        });
+    }
+    let long_review = blyte_cli::model_review::ModelReviewResult::ok(
+        "gemini/gemini-3.8-flash".to_string(),
+        Some(0.0),
+        Vec::new(),
+    )
+    .with_fallbacks(long_verdicts);
+    let long_flags =
+        blyte_cli::fallback_check::flags_for_review(&long_findings, Some(&long_review));
+    assert_eq!(long_flags.len(), 1);
+    assert!(long_flags[0].chars().count() <= 200, "{}", long_flags[0]);
+    assert!(
+        long_flags[0].starts_with("fallbacks added: 20 ("),
+        "{}",
+        long_flags[0]
+    );
+    assert!(long_flags[0].contains(", … and "), "{}", long_flags[0]);
+    assert!(long_flags[0].ends_with(" more)"), "{}", long_flags[0]);
+}
+
+#[test]
+fn cutoff_review_retries_once_and_sums_cost() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    init_repo(&repo, None);
+
+    let (base1, wt1) = setup_worktree_run(
+        &repo,
+        "CUT1",
+        "Update `src/app.rs`.\n",
+        &[("src/app.rs", "pub fn greet() -> &'static str { \"hi2\" }\n")],
+    );
+    let valid_reply = serde_json::json!({
+        "concerns": [{
+            "file": "src/app.rs",
+            "line": 1,
+            "severity": "medium",
+            "text": "check greeting"
+        }],
+        "fallbacks": []
+    })
+    .to_string();
+    let prov1 = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![
+            Ok(make_response("", Some("MAX_TOKENS"), 100_000, 100_000)),
+            Ok(make_response(&valid_reply, Some("STOP"), 100_000, 50_000)),
+        ],
+    );
+    let res1 = blyte_cli::model_review::run_with_provider(&repo, "CUT1", &base1, &wt1, &prov1);
+    assert_eq!(prov1.calls(), 2);
+    {
+        let seen = prov1.seen.lock().unwrap();
+        assert_eq!(seen[0].max_output_tokens, Some(32_000));
+        assert_eq!(seen[1].max_output_tokens, Some(64_000));
+    }
+    assert_eq!(res1.status, "ok");
+    assert_eq!(res1.concerns.len(), 1);
+    let pricing = blyte_provider::pricing("gemini/gemini-3.8-flash").unwrap();
+    let expected_cost = pricing.cost(&blyte_provider::Usage {
+        input: 100_000,
+        cached: 0,
+        output: 100_000,
+        thinking: 0,
+    }) + pricing.cost(&blyte_provider::Usage {
+        input: 100_000,
+        cached: 0,
+        output: 50_000,
+        thinking: 0,
+    });
+    assert!((res1.cost_usd.unwrap() - expected_cost).abs() < 1e-9);
+
+    std::fs::copy(
+        repo.join(".wt/CUT1.start.json"),
+        repo.join(".wt/CUT2.start.json"),
+    )
+    .unwrap();
+    let prov2 = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![
+            Ok(make_response("", Some("MAX_TOKENS"), 1000, 1000)),
+            Ok(make_response("", Some("MAX_TOKENS"), 1000, 1000)),
+        ],
+    );
+    let res2 = blyte_cli::model_review::run_with_provider(&repo, "CUT2", &base1, &wt1, &prov2);
+    assert_eq!(prov2.calls(), 2);
+    assert_eq!(res2.status, "failed");
+    let err2 = res2.error.as_deref().unwrap_or("");
+    assert!(err2.contains("(after one retry)"), "{err2}");
+
+    std::fs::copy(
+        repo.join(".wt/CUT1.start.json"),
+        repo.join(".wt/CUT3.start.json"),
+    )
+    .unwrap();
+    let prov3 = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![Ok(make_response(&valid_reply, Some("STOP"), 1000, 500))],
+    );
+    let res3 = blyte_cli::model_review::run_with_provider(&repo, "CUT3", &base1, &wt1, &prov3);
+    assert_eq!(prov3.calls(), 1);
+    assert_eq!(res3.status, "ok");
+}
+
+#[test]
+fn old_model_review_json_without_fallbacks_still_loads() {
+    let d = tempfile::tempdir().unwrap();
+    let wt_dir = d.path().join(".wt");
+    std::fs::create_dir_all(&wt_dir).unwrap();
+    let old_path = wt_dir.join("OLD1.model-review.json");
+    std::fs::write(
+        &old_path,
+        serde_json::json!({
+            "model": "gemini/gemini-3.8-flash",
+            "ts": 1700000000u64,
+            "cost_usd": 0.01,
+            "concerns": [{"file": "src/a.rs", "line": 2, "severity": "low", "text": "note"}],
+            "error": null
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = blyte_cli::model_review::load_saved_review(&old_path).unwrap();
+    assert_eq!(loaded.model.as_deref(), Some("gemini/gemini-3.8-flash"));
+    assert_eq!(loaded.concerns.len(), 1);
+    assert!(loaded.fallbacks.is_empty());
 }

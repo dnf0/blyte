@@ -32,6 +32,7 @@ fn an_added_unwrap_or_default_is_found() {
             file: "src/a.rs".to_string(),
             line: 11,
             pattern: "unwrap_or_default",
+            text: "let region = cfg.region.clone().unwrap_or_default();".to_string(),
         }]
     );
 }
@@ -66,11 +67,13 @@ fn rust_unwrap_or_and_unwrap_or_else_are_found() {
                 file: "src/a.rs".to_string(),
                 line: 1,
                 pattern: "unwrap_or",
+                text: "let a = x.unwrap_or(0);".to_string(),
             },
             Finding {
                 file: "src/a.rs".to_string(),
                 line: 2,
                 pattern: "unwrap_or_else",
+                text: "let b = y.unwrap_or_else(|| 1);".to_string(),
             },
         ]
     );
@@ -113,6 +116,7 @@ fn a_rust_test_module_is_ignored() {
             file: "src/a.rs".to_string(),
             line: 1,
             pattern: "unwrap_or",
+            text: "let x = a.unwrap_or(0);".to_string(),
         }]
     );
 }
@@ -132,6 +136,7 @@ fn python_except_pass_is_found() {
             file: "src/a.py".to_string(),
             line: 5,
             pattern: "except-pass",
+            text: "except Exception:".to_string(),
         }]
     );
 
@@ -149,6 +154,7 @@ fn python_except_pass_is_found() {
             file: "src/a.py".to_string(),
             line: 5,
             pattern: "except-pass",
+            text: "except: pass".to_string(),
         }]
     );
 }
@@ -162,6 +168,7 @@ fn python_get_with_a_default_is_found() {
             file: "src/a.py".to_string(),
             line: 1,
             pattern: "get-default",
+            text: "region = cfg.get(\"region\", \"EUR\")".to_string(),
         }]
     );
 
@@ -178,6 +185,7 @@ fn python_get_with_a_default_is_found() {
             file: "src/a.py".to_string(),
             line: 1,
             pattern: "get-default",
+            text: "home = os.getenv(\"HOME\", \"/tmp\")".to_string(),
         }]
     );
 }
@@ -191,6 +199,7 @@ fn python_or_literal_is_found() {
             file: "src/a.py".to_string(),
             line: 1,
             pattern: "or-literal",
+            text: "name = name or \"unknown\"".to_string(),
         }]
     );
 
@@ -217,16 +226,19 @@ fn typescript_patterns_are_found() {
                 file: "web/a.ts".to_string(),
                 line: 1,
                 pattern: "nullish",
+                text: "const r = cfg.region ?? \"EUR\";".to_string(),
             },
             Finding {
                 file: "web/a.ts".to_string(),
                 line: 2,
                 pattern: "or-literal",
+                text: "const n = count || 0;".to_string(),
             },
             Finding {
                 file: "web/a.ts".to_string(),
                 line: 4,
                 pattern: "empty-catch",
+                text: "} catch (e) {}".to_string(),
             },
         ]
     );
@@ -246,11 +258,13 @@ fn shell_patterns_are_found() {
                 file: "scripts/run.sh".to_string(),
                 line: 1,
                 pattern: "or-true",
+                text: "rm -f x || true".to_string(),
             },
             Finding {
                 file: "scripts/run.sh".to_string(),
                 line: 2,
                 pattern: "param-default",
+                text: "REGION=\"${REGION:-eu-west-1}\"".to_string(),
             },
         ]
     );
@@ -296,11 +310,13 @@ diff --git a/src/a.rs b/src/a.rs
                 file: "src/a.rs".to_string(),
                 line: 2,
                 pattern: "unwrap_or",
+                text: "let b = x.unwrap_or(0);".to_string(),
             },
             Finding {
                 file: "src/a.rs".to_string(),
                 line: 42,
                 pattern: "unwrap_or_default",
+                text: "let e = y.unwrap_or_default();".to_string(),
             },
         ]
     );
@@ -315,36 +331,87 @@ fn the_flag_lists_three_and_counts_the_rest() {
             file: "src/a.rs".to_string(),
             line: 1,
             pattern: "unwrap_or",
+            text: "let a = x.unwrap_or(0);".to_string(),
         },
         Finding {
             file: "src/b.rs".to_string(),
             line: 2,
             pattern: "unwrap_or_default",
+            text: "let b = x.unwrap_or_default();".to_string(),
         },
         Finding {
             file: "src/c.py".to_string(),
             line: 3,
             pattern: "get-default",
+            text: "c = d.get('k', 0)".to_string(),
         },
         Finding {
             file: "src/d.ts".to_string(),
             line: 4,
             pattern: "nullish",
+            text: "const d = a ?? b;".to_string(),
         },
         Finding {
             file: "src/e.sh".to_string(),
             line: 5,
             pattern: "or-true",
+            text: "cmd || true".to_string(),
         },
     ];
     let f = flag(&findings).expect("expected Some flag");
-    assert!(f.starts_with("possible fallbacks added (5): "), "{f}");
-    assert!(
-        f.contains("src/a.rs:1 unwrap_or, src/b.rs:2 unwrap_or_default, src/c.py:3 get-default"),
-        "{f}"
+    assert_eq!(f, "possible fallbacks added: 5 (not judged: no review)");
+}
+
+#[test]
+fn moved_lines_are_cancelled_one_for_one() {
+    let moved_across_files = "\
+diff --git a/src/old.rs b/src/old.rs
+--- a/src/old.rs
++++ b/src/old.rs
+@@ -1,2 +1,1 @@
+-    let x = a.unwrap_or(b);
+ let keep = 1;
+diff --git a/src/new.rs b/src/new.rs
+--- a/src/new.rs
++++ b/src/new.rs
+@@ -1,1 +1,2 @@
+ let keep = 1;
++let x = a.unwrap_or(b);
+";
+    assert!(added_fallbacks(moved_across_files).is_empty());
+
+    let added_twice_removed_once = "\
+diff --git a/src/old.rs b/src/old.rs
+--- a/src/old.rs
++++ b/src/old.rs
+@@ -1,2 +1,1 @@
+-let x = a.unwrap_or(b);
+ let keep = 1;
+diff --git a/src/new.rs b/src/new.rs
+--- a/src/new.rs
++++ b/src/new.rs
+@@ -1,1 +1,3 @@
+ let keep = 1;
++let x = a.unwrap_or(b);
++    let x = a.unwrap_or(b);
+";
+    assert_eq!(
+        added_fallbacks(added_twice_removed_once),
+        vec![Finding {
+            file: "src/new.rs".to_string(),
+            line: 3,
+            pattern: "unwrap_or",
+            text: "let x = a.unwrap_or(b);".to_string(),
+        }]
     );
-    assert!(f.contains(" and 2 more"), "{f}");
-    assert!(f.ends_with(": check each against the task"), "{f}");
+
+    let long_val = "x".repeat(250);
+    let long_line = format!("+    let v = opt.unwrap_or(\"{long_val}\");");
+    let d = diff("src/long.rs", 1, &[&long_line]);
+    let found = added_fallbacks(&d);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text.chars().count(), 200);
+    assert!(found[0].text.starts_with("let v = opt.unwrap_or(\""));
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -443,7 +510,7 @@ fn review_flags_a_fallback_the_run_added() {
     assert!(
         checks_section.lines().any(|l| {
             let stripped = l.strip_prefix("! ").unwrap_or(l);
-            stripped.starts_with("possible fallbacks added (1): src/a.rs:")
+            stripped == "possible fallbacks added: 1 (not judged: no review)"
         }),
         "{text}"
     );

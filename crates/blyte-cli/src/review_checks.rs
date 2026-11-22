@@ -128,8 +128,9 @@ pub fn should_run_model_review(
     flags: &[String],
     task_text: Option<&str>,
     risky_matches: &[String],
+    fallback_candidates: usize,
 ) -> bool {
-    if !risky_matches.is_empty() {
+    if fallback_candidates > 0 || !risky_matches.is_empty() {
         return true;
     }
     let lists_files = task_text.is_some_and(task_lists_files);
@@ -345,7 +346,7 @@ mod tests {
             checks.flags
         );
         assert!(checks.flags.is_empty(), "{:?}", checks.flags);
-        assert!(!should_run_model_review(&checks.flags, Some(task), &[]));
+        assert!(!should_run_model_review(&checks.flags, Some(task), &[], 0));
     }
 
     #[test]
@@ -357,19 +358,15 @@ mod tests {
             checks.flags,
             vec!["files not named in the task: src/b.rs".to_string()]
         );
-        assert!(should_run_model_review(&checks.flags, Some(task), &[]));
+        assert!(should_run_model_review(&checks.flags, Some(task), &[], 0));
     }
 
     #[test]
-    fn test_no_files_section_still_flags_and_reviews_fallbacks() {
+    fn test_no_files_section_still_reviews_fallback_candidates() {
         let task = "Update `src/a.rs` to handle empty input.";
         let changed = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-        let mut checks = build(Some(task), &changed, &[], 0, 0, Some("verified"));
-        checks
-            .flags
-            .push("possible fallbacks added (1): src/b.rs:10 unwrap_or".to_string());
-        assert_eq!(checks.flags.len(), 1);
-        assert!(checks.flags[0].starts_with("possible fallbacks added (1)"));
-        assert!(should_run_model_review(&checks.flags, Some(task), &[]));
+        let checks = build(Some(task), &changed, &[], 0, 0, Some("verified"));
+        assert!(checks.flags.is_empty());
+        assert!(should_run_model_review(&checks.flags, Some(task), &[], 1));
     }
 }

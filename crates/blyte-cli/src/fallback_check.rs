@@ -1,6 +1,7 @@
 //! Flags added lines in a unified diff that match common fallback patterns.
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Component, Path};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -8,11 +9,50 @@ pub struct Finding {
     pub file: String,
     pub line: usize,
     pub pattern: &'static str,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FallbackRecord {
+    pub file: String,
+    pub line: usize,
+    pub pattern: &'static str,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Added lines of a unified diff (`git diff` output) that match a fallback pattern.
 pub fn added_fallbacks(diff: &str) -> Vec<Finding> {
     let lines: Vec<&str> = diff.lines().collect();
+    let mut removed_counts: HashMap<&str, usize> = HashMap::new();
+    let mut scan_in_hunk = false;
+    for (idx, &raw_line) in lines.iter().enumerate() {
+        if raw_line.starts_with("diff --git ") || raw_line.starts_with("+++ ") {
+            scan_in_hunk = false;
+            continue;
+        }
+        if raw_line.starts_with("--- ")
+            && lines
+                .get(idx + 1)
+                .is_some_and(|next| next.starts_with("+++ "))
+        {
+            scan_in_hunk = false;
+            continue;
+        }
+        if raw_line.starts_with("@@ ") {
+            scan_in_hunk = true;
+            continue;
+        }
+        if scan_in_hunk {
+            if let Some(content) = raw_line.strip_prefix('-') {
+                *removed_counts.entry(content.trim()).or_insert(0) += 1;
+            }
+        }
+    }
+
     let mut findings = Vec::new();
 
     let mut current_file: Option<(&str, &str)> = None; // (path, ext)
@@ -95,12 +135,24 @@ pub fn added_fallbacks(diff: &str) -> Vec<Finding> {
                 continue;
             }
 
-            for pattern in match_line(content, ext, &lines, idx) {
-                findings.push(Finding {
-                    file: file_path.to_string(),
-                    line: line_no,
-                    pattern,
-                });
+            let patterns = match_line(content, ext, &lines, idx);
+            if !patterns.is_empty() {
+                let trimmed = content.trim();
+                if let Some(count) = removed_counts.get_mut(trimmed) {
+                    if *count > 0 {
+                        *count -= 1;
+                        continue;
+                    }
+                }
+                let text: String = trimmed.chars().take(200).collect();
+                for pattern in patterns {
+                    findings.push(Finding {
+                        file: file_path.to_string(),
+                        line: line_no,
+                        pattern,
+                        text: text.clone(),
+                    });
+                }
             }
         }
     }
@@ -108,27 +160,128 @@ pub fn added_fallbacks(diff: &str) -> Vec<Finding> {
     findings
 }
 
-/// One `== checks` flag for the findings, or `None` when there are none.
+/// One `== checks` flag for unjudged findings, or `None` when there are none.
 pub fn flag(findings: &[Finding]) -> Option<String> {
-    if findings.is_empty() {
-        return None;
+    flags_for_review(findings, None).into_iter().next()
+}
+
+/// Flags for fallback candidates given an optional fresh model review result.
+pub fn flags_for_review(
+    candidates: &[Finding],
+    model_review: Option<&crate::model_review::ModelReviewResult>,
+) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
     }
-    let n = findings.len();
-    let listed: Vec<String> = findings
-        .iter()
-        .take(3)
-        .map(|f| format!("{}:{} {}", f.file, f.line, f.pattern))
-        .collect();
-    let more = if n > 3 {
-        format!(" and {} more", n - 3)
-    } else {
-        String::new()
+    let Some(mr) = model_review else {
+        return vec![format_not_judged_why(candidates.len(), "no review")];
     };
-    let raw = format!(
-        "possible fallbacks added ({n}): {}{more}: check each against the task",
-        listed.join(", ")
-    );
-    Some(sanitize_flag(raw))
+    if mr.is_failed() {
+        let why = mr.error.as_deref().unwrap_or("unknown error");
+        return vec![format_not_judged_why(candidates.len(), why)];
+    }
+
+    let mut confirmed = Vec::new();
+    let mut not_judged = Vec::new();
+    for c in candidates {
+        match mr
+            .fallbacks
+            .iter()
+            .find(|v| v.file == c.file && v.line == c.line)
+        {
+            Some(v) if v.verdict == "fallback" => {
+                confirmed.push(format!("{}:{}", c.file, c.line));
+            }
+            Some(v) if v.verdict == "not_fallback" => {}
+            _ => {
+                not_judged.push(format!("{}:{}", c.file, c.line));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    if !confirmed.is_empty() {
+        out.push(format_fallback_list("fallbacks added", &confirmed));
+    }
+    if !not_judged.is_empty() {
+        out.push(format_fallback_list(
+            "fallback candidates not judged",
+            &not_judged,
+        ));
+    }
+    out
+}
+
+/// Annotate each fallback candidate with its verdict and reason when judged by a succeeded review.
+pub fn annotate_fallbacks(
+    candidates: &[Finding],
+    model_review: Option<&crate::model_review::ModelReviewResult>,
+) -> Vec<FallbackRecord> {
+    let ok_review = model_review.filter(|mr| !mr.is_failed());
+    candidates
+        .iter()
+        .map(|c| {
+            let matched = ok_review.and_then(|mr| {
+                mr.fallbacks
+                    .iter()
+                    .find(|v| v.file == c.file && v.line == c.line)
+            });
+            FallbackRecord {
+                file: c.file.clone(),
+                line: c.line,
+                pattern: c.pattern,
+                text: c.text.clone(),
+                verdict: matched.map(|v| v.verdict.clone()),
+                reason: matched.map(|v| v.reason.clone()),
+            }
+        })
+        .collect()
+}
+
+fn format_not_judged_why(n: usize, why: &str) -> String {
+    let why_one_line: String = why
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let prefix = format!("possible fallbacks added: {n} (not judged: ");
+    let full = format!("{prefix}{why_one_line})");
+    if full.chars().count() <= 200 {
+        return full;
+    }
+    let avail = 200usize.saturating_sub(prefix.chars().count() + 2);
+    let truncated: String = why_one_line.chars().take(avail).collect();
+    format!("{prefix}{truncated}…)")
+}
+
+fn format_fallback_list(prefix: &str, items: &[String]) -> String {
+    let clean: Vec<String> = items.iter().map(|s| s.replace(['\r', '\n'], " ")).collect();
+    let n = clean.len();
+    let head = format!("{prefix}: {n} (");
+    let full = format!("{head}{})", clean.join(", "));
+    if full.chars().count() <= 200 {
+        return full;
+    }
+    for m in (1..n).rev() {
+        let k = n - m;
+        let cand = format!("{head}{}, … and {k} more)", clean[..m].join(", "));
+        if cand.chars().count() <= 200 {
+            return cand;
+        }
+    }
+    if n > 1 {
+        let suffix = format!(", … and {} more)", n - 1);
+        let avail = 200usize.saturating_sub(head.chars().count() + suffix.chars().count());
+        if avail > 0 {
+            let first: String = clean[0].chars().take(avail).collect();
+            return format!("{head}{first}{suffix}");
+        }
+        return sanitize_flag(format!("{head}… and {n} more)"));
+    }
+    let avail = 200usize.saturating_sub(head.chars().count() + 1);
+    let first: String = clean[0].chars().take(avail).collect();
+    format!("{head}{first})")
 }
 
 fn sanitize_flag(flag: String) -> String {

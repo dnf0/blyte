@@ -1663,15 +1663,23 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             }
         }
     };
-    if let Some(ref mr) = stored_model_review {
-        if let Some(flag) = mr.flag() {
-            if !data
-                .checks
-                .flags
-                .iter()
-                .any(|f| f.starts_with("model review"))
-            {
-                data.checks.flags.push(flag);
+    if !args.model_review {
+        data.checks
+            .flags
+            .extend(crate::fallback_check::flags_for_review(
+                &data.fallbacks,
+                stored_model_review.as_ref(),
+            ));
+        if let Some(ref mr) = stored_model_review {
+            if let Some(flag) = mr.flag() {
+                if !data
+                    .checks
+                    .flags
+                    .iter()
+                    .any(|f| f.starts_with("model review"))
+                {
+                    data.checks.flags.push(flag);
+                }
             }
         }
     }
@@ -1823,6 +1831,10 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     if args.model_review && wt_exists {
         let mr = crate::model_review::run(&root, &args.id, &base, &wt);
         crate::model_review::print_result(&mr);
+        checks.flags.extend(crate::fallback_check::flags_for_review(
+            &fallbacks,
+            Some(&mr),
+        ));
         if let Some(flag) = mr.flag() {
             checks.flags.push(flag);
         }
@@ -1837,6 +1849,9 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             return 2;
         }
     } else if args.model_review {
+        checks
+            .flags
+            .extend(crate::fallback_check::flags_for_review(&fallbacks, None));
         if let Err(e) = crate::queue_actions::write_checks_file(
             &root,
             &args.id,

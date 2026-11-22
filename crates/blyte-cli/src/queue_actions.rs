@@ -524,11 +524,7 @@ fn compute_review_res(
         if let Some(ref res) = diff_res {
             match res {
                 Ok(diff) => {
-                    let findings = crate::fallback_check::added_fallbacks(diff);
-                    if let Some(flag) = crate::fallback_check::flag(&findings) {
-                        checks.flags.push(flag);
-                    }
-                    fallbacks = findings;
+                    fallbacks = crate::fallback_check::added_fallbacks(diff);
                     if start_comments.as_deref() != Some("off") {
                         let wt_gone = std::cell::Cell::new(false);
                         match crate::comment_lint::added_comments(
@@ -770,10 +766,11 @@ pub(crate) fn write_checks_file(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("error: the system clock is before 1970: {e}"))?
         .as_secs();
+    let annotated_fallbacks = crate::fallback_check::annotate_fallbacks(fallbacks, model_review);
     let mut checks_obj = serde_json::json!({
         "ts": ts,
         "flags": flags,
-        "fallbacks": fallbacks,
+        "fallbacks": annotated_fallbacks,
     });
     if let Some(mr) = model_review {
         checks_obj["model_review"] = serde_json::to_value(mr).map_err(|e| {
@@ -809,6 +806,10 @@ where
         .map_err(ReviewError::into_message)?;
     let mut flags = data.checks.flags;
     if data.is_research || !data.wt_exists {
+        flags.extend(crate::fallback_check::flags_for_review(
+            &data.fallbacks,
+            None,
+        ));
         write_checks_file(root, id, &flags, &data.fallbacks, None)?;
         return Ok(None);
     }
@@ -834,14 +835,23 @@ where
         &flags,
         data.task_text.as_deref(),
         &risky_matches,
+        data.fallbacks.len(),
     ) {
         let result = run_model_review(root, id, &data.base, &data.wt);
+        flags.extend(crate::fallback_check::flags_for_review(
+            &data.fallbacks,
+            Some(&result),
+        ));
         if let Some(flag) = result.flag() {
             flags.push(flag);
         }
         write_checks_file(root, id, &flags, &data.fallbacks, Some(&result))?;
         Ok(Some(result))
     } else {
+        flags.extend(crate::fallback_check::flags_for_review(
+            &data.fallbacks,
+            None,
+        ));
         write_checks_file(root, id, &flags, &data.fallbacks, None)?;
         Ok(None)
     }
@@ -873,7 +883,12 @@ fn ensure_checks_with_hook(
     if !data.wt_exists {
         return Ok(false);
     }
-    write_checks_file(root, id, &data.checks.flags, &data.fallbacks, None)?;
+    let mut flags = data.checks.flags;
+    flags.extend(crate::fallback_check::flags_for_review(
+        &data.fallbacks,
+        None,
+    ));
+    write_checks_file(root, id, &flags, &data.fallbacks, None)?;
     Ok(true)
 }
 
