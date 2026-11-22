@@ -221,3 +221,124 @@ Decision 1 of Task F1 ("moved lines are not candidates") was withdrawn. The thre
 read-through called real were all one existing line, re-indented inside changed code, so the rule
 dropped exactly the candidates that mattered. Moved lines are candidates again and the fresh
 review judges them.
+
+## A fix round for confirmed fallbacks (2026-11-22)
+
+Judged over five trial changes, every run had passed the check with 4 to 9 confirmed fallbacks.
+A flag only asks the user to read. So a run whose fresh review confirms fallbacks is sent back
+once to remove them before its summary is written, which is the point where the run counts as
+passed for the review queue, the surface and combine.
+
+Decisions:
+1. Only confirmed fallbacks trigger a round, not the review's other concerns.
+2. One round at most. What the second review still confirms stays flagged for the user.
+3. A round can never make a run worse: if it does not end with a passing check, its commits are
+   discarded and the run stands as it was, flagged.
+4. On by default; `[dispatch] fix_round = false` in `blyte.toml` turns it off.
+
+### Task R1
+
+**Goal.** In `blyte dispatch`, when a run has passed its check and the fresh review confirms at
+least one fallback, run the implementer once more in the same worktree to remove them, then
+review again, all before the summary `.wt/<id>.json` is written.
+
+**Files.**
+- `crates/blyte-cli/src/dispatch.rs` (the round; summary fields).
+- New `crates/blyte-cli/src/fix_round.rs`, registered in `lib.rs` (the task text, the round's
+  record, the decision whether to run one). Keep `dispatch.rs` changes to the wiring.
+- `crates/blyte-cli/src/config.rs` and `crates/blyte-cli/src/init.rs` (`fix_round` key and its
+  commented line in the generated file), `docs/usage.md` (one short paragraph).
+- `crates/blyte-cli/src/queue_actions.rs` only if `evaluate_verified_run` needs a small change
+  to be called twice.
+- New `crates/blyte-cli/tests/test_fix_round.rs`.
+- Do **not** change `fallback_check.rs`, `model_review.rs`'s request or parsing, `combine.rs`,
+  `requests.rs`, `serve.rs`, `crates/blyte-agent`, or the orchestrator assets.
+
+**What to build.**
+
+1. `[dispatch] fix_round` in `blyte.toml`: a boolean, default `true` (the intended value, stated
+   in the doc comment). Any other type is the config error other keys give.
+2. In `run_dispatch`, today the implementer child process runs once, its report is read, and for
+   a `verified` non-research run `queue_actions::evaluate_verified_run` runs the fresh review.
+   Move the evaluation so its result is available before the summary is built, then:
+   - A round runs only when all hold: the run is not research; its outcome is `verified`;
+     `fix_round` is true; the review ran, did not fail, and has at least one verdict `fallback`.
+     Otherwise nothing changes from today, including what is printed.
+   - Before the round, write `.wt/<id>.fixround.json`: `state` `"started"`, `pre_round_sha` (the
+     branch tip), `fallbacks_sent` (the confirmed ones: file, line, text, reason), `started_at`.
+   - The round runs the implementer exactly as the first pass does (same binary, model, sandbox,
+     gate with the comment step against the same base, env, and the same `max_turns`,
+     `max_cost`, `max_seconds` limits, applied to the round on its own), in the same worktree on
+     the same branch, with the task text from `fix_round::task_text` (below). Its log is appended
+     to `.wt/<id>.log` after a line `== fix round`; its report goes to
+     `.wt/<id>.fix.report.json`. Reuse the first pass's code by extracting it into a function
+     called twice; do not copy it.
+   - **Round ends `verified` with at least one new commit:** run `evaluate_verified_run` again
+     on the new tip. Its checks file and review replace the first. Record the tree as passed as
+     the first pass does.
+   - **Round ends any other way** (gate failed, budget exhausted, error, or verified with no new
+     commit): `git reset --hard <pre_round_sha>` in the worktree, and if that fails the dispatch
+     ends with outcome `error` naming it. The first review's flags stand, plus one flag
+     `fix round did not pass: <round outcome>` (for no new commit: `fix round made no change`),
+     appended to the checks file.
+   - Update `.wt/<id>.fixround.json` to `state` `"done"` with `outcome` (the round's own
+     outcome, or `no_change`), `turns`, `cost_usd`, `seconds`, `commits` (short hashes added),
+     `fallbacks_left` (count of verdict `fallback` in the review that stands), `kept` (whether
+     the round's commits were kept).
+   - The summary `.wt/<id>.json` is written last, as today. It gains an optional `fix_round`
+     object with the same fields as the `"done"` record, left out when no round ran. Its
+     `turns`, `cost_usd` and `seconds` are the totals of both passes; `commits` and
+     `changed_files` are computed after the round; `outcome` stays `verified`; `final_message`
+     is the first pass's, followed by a line `Fix round:` and the round's final message when the
+     round was kept.
+   - **Resumable:** when `blyte dispatch <id>` is run again for a run whose
+     `.wt/<id>.fixround.json` says `"started"` and which has no summary, it resets the worktree
+     to `pre_round_sha` and runs the round again from the saved `fallbacks_sent`, without
+     repeating the first pass. If that file exists but cannot be read or parsed, that is an
+     error naming it. A run with state `"done"` never gets a second round.
+3. `fix_round::task_text(original_task: &str, fallbacks: &[..]) -> String`. It says, in plain
+   imperative sentences: this work passed its check, and a review found the fallbacks listed;
+   for each one, change the code so that the missing, unknown or unreadable case fails with an
+   error that names what is missing, and update or add a test for that case; if a listed line is
+   not a fallback, leave it and say why in the final message; change nothing else; commit with
+   the message `fix: fail loudly where review found a fallback`. Then the list, one per line
+   (`<file>:<line> <line text>` and the review's reason under it), then the original task under
+   a heading `## Original task (for context; already done)`.
+
+**Tests** (`tests/test_fix_round.rs`). Use the way the existing dispatch tests drive a whole
+dispatch without a real model (see `tests/test_dispatch_*.rs` and the `mock` subcommand); the
+fresh review needs to be scripted too: if no existing seam does that from a spawned `blyte`,
+add the smallest one in the style of the existing mock, and say so in the final message.
+- unit: `task_text` contains every fallback's file, line, text and reason, the commit message,
+  and the original task under its heading; the decision function for each condition in 2.
+- no confirmed fallback: one pass, no `.fixround.json`, summary has no `fix_round`.
+- `fix_round = false` with a confirmed fallback: no round; the fallback flag is in the checks file.
+- round kept: first review confirms one fallback, the round commits a change, the gate passes,
+  the second review confirms none: summary `verified`, `fix_round.kept` true, `fallbacks_left`
+  0, totals are sums, two commits on the branch, checks file has no fallback flag, the log has
+  `== fix round`.
+- round kept, one still confirmed: `fallbacks_left` 1 and the fallback flag is in the checks
+  file; no third pass.
+- round fails its gate: branch tip equals `pre_round_sha`, summary `verified`, `kept` false,
+  checks file has the first review's fallback flag and `fix round did not pass: gate_failed`.
+- round makes no commit: `kept` false, flag `fix round made no change`.
+- the summary file does not exist while the round is running (assert from inside the round's
+  gate, with a gate script that fails if `.wt/<id>.json` exists).
+- resume: a `"started"` record and no summary, then `blyte dispatch <id>` again: the first pass
+  is not run again (count implementer starts), the round runs, the summary is written.
+- an unreadable `.fixround.json` is an error that names the file.
+
+Run: `cargo test -p blyte --test test_fix_round`, and the existing dispatch tests
+(`cargo test -p blyte --test test_dispatch_reuse` and any other `test_dispatch_*` file you touch).
+
+**Constraints.**
+- **No fallbacks**: a missing or unreadable input is an error that names it; never a default, an
+  empty result or a skipped step.
+- **Resumable**: as in 2.
+- Existing tests pass unmodified, except struct literals that need the new optional field.
+- Keep existing comments; do not delete comments from code you do not change.
+- The round never pushes, merges or touches any branch but the run's own.
+- Depends on: none (base `fix/trust-guardrails`). Siblings: none.
+
+**Commit message.**
+`feat(dispatch): a run whose review confirms fallbacks gets one fix round before it counts as passed`
