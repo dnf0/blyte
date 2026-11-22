@@ -2025,4 +2025,262 @@ mod tests {
         assert!(combine_wt.join("a.txt").exists());
         assert!(!combine_wt.join("b.txt").exists());
     }
+
+    #[test]
+    fn followup_request_based_on_combined_branch_combines_onto_it() {
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let marker_path = marker.path().to_path_buf();
+        let gate = format!(
+            "test -f a.txt && (if test -f b.txt; then echo ab; else echo a; fi) >> '{}'",
+            marker_path.display()
+        );
+        let (dir, base_sha) = init_repo(&gate);
+        let root = dir.path();
+
+        create_run_branch(
+            root,
+            "A1",
+            "req-a",
+            "main",
+            100,
+            &[("a.txt", "from a\n", "add a")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code_a = combine_in(root, "req-a", &mut out, &mut err);
+        assert_eq!(code_a, 0, "stderr: {}", String::from_utf8_lossy(&err));
+        let a_tip = git(root, &["rev-parse", "blyte/req-a"]);
+        let a_record_before =
+            std::fs::read_to_string(root.join(".wt/combined/req-a.json")).unwrap();
+
+        let tip_b1 = create_run_branch(
+            root,
+            "B1",
+            "req-b",
+            "blyte/req-a",
+            200,
+            &[("b.txt", "from b\n", "add b")],
+            Some("verified"),
+        );
+
+        out.clear();
+        err.clear();
+        let code_b = combine_in(root, "req-b", &mut out, &mut err);
+        assert_eq!(code_b, 0, "stderr: {}", String::from_utf8_lossy(&err));
+
+        let record_b: CombineRecord = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".wt/combined/req-b.json")).unwrap(),
+        )
+        .unwrap();
+        let b_tip = git(root, &["rev-parse", "blyte/req-b"]);
+        assert_eq!(record_b.state, CombineState::Combined);
+        assert_eq!(record_b.branch, "blyte/req-b");
+        assert_eq!(record_b.base, a_tip);
+        assert_eq!(
+            record_b.runs,
+            vec![CombinedRun {
+                id: "B1".to_string(),
+                tip: tip_b1.clone(),
+            }]
+        );
+        assert_eq!(record_b.commits, vec![b_tip.clone()]);
+
+        let history: Vec<String> = git(root, &["rev-list", "--reverse", "blyte/req-b"])
+            .lines()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(history, vec![base_sha, a_tip.clone(), b_tip.clone()]);
+
+        let subjects = git(root, &["log", "--reverse", "--format=%s", "blyte/req-b"]);
+        assert_eq!(subjects, "initial\nadd a\nadd b");
+
+        let b_commit_body = git(root, &["log", "-n", "1", "--format=%B", "blyte/req-b"]);
+        assert!(b_commit_body.contains(&format!("(cherry picked from commit {tip_b1})")));
+
+        assert_eq!(git(root, &["rev-parse", "blyte/req-a"]), a_tip);
+        assert_eq!(
+            std::fs::read_to_string(root.join(".wt/combined/req-a.json")).unwrap(),
+            a_record_before
+        );
+
+        let combine_b_wt = root.join(".wt/combine-req-b");
+        assert!(combine_b_wt.join("a.txt").exists());
+        assert!(combine_b_wt.join("b.txt").exists());
+
+        let gate_runs: Vec<String> = std::fs::read_to_string(&marker_path)
+            .unwrap()
+            .lines()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(gate_runs, vec!["a".to_string(), "ab".to_string()]);
+    }
+
+    #[test]
+    fn followup_request_combining_second_time_changes_nothing() {
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let marker_path = marker.path().to_path_buf();
+        let gate = format!("echo run >> '{}'", marker_path.display());
+        let (dir, _base_sha) = init_repo(&gate);
+        let root = dir.path();
+
+        create_run_branch(
+            root,
+            "A1",
+            "req-a",
+            "main",
+            100,
+            &[("a.txt", "from a\n", "add a")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(combine_in(root, "req-a", &mut out, &mut err), 0);
+
+        create_run_branch(
+            root,
+            "B1",
+            "req-b",
+            "blyte/req-a",
+            200,
+            &[("b.txt", "from b\n", "add b")],
+            Some("verified"),
+        );
+
+        out.clear();
+        err.clear();
+        assert_eq!(combine_in(root, "req-b", &mut out, &mut err), 0);
+        let first_tip = git(root, &["rev-parse", "blyte/req-b"]);
+        let first_record_raw =
+            std::fs::read_to_string(root.join(".wt/combined/req-b.json")).unwrap();
+        let first_record: CombineRecord = serde_json::from_str(&first_record_raw).unwrap();
+        let gate_runs_first = std::fs::read_to_string(&marker_path)
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(gate_runs_first, 2);
+
+        out.clear();
+        err.clear();
+        assert_eq!(combine_in(root, "req-b", &mut out, &mut err), 0);
+        let second_tip = git(root, &["rev-parse", "blyte/req-b"]);
+        let second_record_raw =
+            std::fs::read_to_string(root.join(".wt/combined/req-b.json")).unwrap();
+        let second_record: CombineRecord = serde_json::from_str(&second_record_raw).unwrap();
+        let stdout_record: CombineRecord = serde_json::from_slice(&out).unwrap();
+        let gate_runs_second = std::fs::read_to_string(&marker_path)
+            .unwrap()
+            .lines()
+            .count();
+
+        assert_eq!(second_tip, first_tip);
+        assert_eq!(second_record, first_record);
+        assert_eq!(second_record_raw, first_record_raw);
+        assert_eq!(stdout_record, first_record);
+        assert_eq!(gate_runs_second, 2);
+    }
+
+    #[test]
+    fn followup_request_stays_pinned_after_base_request_gains_new_commit() {
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let marker_path = marker.path().to_path_buf();
+        let gate = format!("test -f a1.txt && echo run >> '{}'", marker_path.display());
+        let (dir, base_sha) = init_repo(&gate);
+        let root = dir.path();
+
+        create_run_branch(
+            root,
+            "A1",
+            "req-a",
+            "main",
+            100,
+            &[("a1.txt", "a1\n", "add a1")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(combine_in(root, "req-a", &mut out, &mut err), 0);
+        let a_tip_v1 = git(root, &["rev-parse", "blyte/req-a"]);
+
+        create_run_branch(
+            root,
+            "B1",
+            "req-b",
+            "blyte/req-a",
+            200,
+            &[("b1.txt", "b1\n", "add b1")],
+            Some("verified"),
+        );
+
+        out.clear();
+        err.clear();
+        assert_eq!(combine_in(root, "req-b", &mut out, &mut err), 0);
+        let b_tip_before = git(root, &["rev-parse", "blyte/req-b"]);
+        let b_record_before: CombineRecord = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".wt/combined/req-b.json")).unwrap(),
+        )
+        .unwrap();
+
+        create_run_branch(
+            root,
+            "A2",
+            "req-a",
+            "main",
+            300,
+            &[("a2.txt", "a2\n", "add a2")],
+            Some("verified"),
+        );
+
+        out.clear();
+        err.clear();
+        assert_eq!(combine_in(root, "req-a", &mut out, &mut err), 0);
+        let a_tip_v2 = git(root, &["rev-parse", "blyte/req-a"]);
+        assert_ne!(a_tip_v2, a_tip_v1);
+        let a_subjects = git(root, &["log", "--reverse", "--format=%s", "blyte/req-a"]);
+        assert_eq!(a_subjects, "initial\nadd a1\nadd a2");
+
+        assert_eq!(git(root, &["rev-parse", "blyte/req-b"]), b_tip_before);
+        let b_history_before: Vec<String> = git(root, &["rev-list", "--reverse", "blyte/req-b"])
+            .lines()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            b_history_before,
+            vec![base_sha.clone(), a_tip_v1.clone(), b_tip_before.clone()]
+        );
+        assert!(!root.join(".wt/combine-req-b/a2.txt").exists());
+
+        let gate_runs_before_recombine = std::fs::read_to_string(&marker_path)
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(gate_runs_before_recombine, 3);
+
+        out.clear();
+        err.clear();
+        assert_eq!(combine_in(root, "req-b", &mut out, &mut err), 0);
+        let b_tip_after = git(root, &["rev-parse", "blyte/req-b"]);
+        let b_record_after: CombineRecord = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".wt/combined/req-b.json")).unwrap(),
+        )
+        .unwrap();
+        let b_history_after: Vec<String> = git(root, &["rev-list", "--reverse", "blyte/req-b"])
+            .lines()
+            .map(ToString::to_string)
+            .collect();
+        let gate_runs_after_recombine = std::fs::read_to_string(&marker_path)
+            .unwrap()
+            .lines()
+            .count();
+
+        assert_eq!(b_tip_after, b_tip_before);
+        assert_eq!(b_record_after, b_record_before);
+        assert_eq!(b_record_after.base, a_tip_v1);
+        assert_eq!(b_history_after, vec![base_sha, a_tip_v1, b_tip_before]);
+        assert_eq!(git(root, &["rev-parse", "blyte/req-a"]), a_tip_v2);
+        assert_eq!(gate_runs_after_recombine, 3);
+    }
 }
