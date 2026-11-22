@@ -709,8 +709,24 @@ fn record_and_report_failure(
     }
 }
 
+fn orchestrator_busy(surface: &Surface) -> bool {
+    let info = surface.session.info();
+    info.busy || info.queued > 0
+}
+
+fn ready_waiting_reason(orchestrator_busy: bool) -> String {
+    if orchestrator_busy {
+        "the orchestrator is still working".to_string()
+    } else {
+        "waiting to combine".to_string()
+    }
+}
+
 pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
     crate::dispatch::validate_request_id(request)?;
+    if orchestrator_busy(surface) {
+        return Ok(false);
+    }
     match request_readiness(&surface.root, request)? {
         Readiness::Waiting { .. } => return Ok(false),
         Readiness::Ready => {}
@@ -925,18 +941,24 @@ pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
             .then_with(|| b.request.cmp(&a.request))
     });
 
+    let busy = orchestrator_busy(surface);
     let mut result = Vec::with_capacity(ordered.len());
     for mut group in ordered {
         group
             .runs
             .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         let run_ids: Vec<String> = group.runs.into_iter().map(|(_, id)| id).collect();
-        result.push(build_request_status(surface, group.request, run_ids));
+        result.push(build_request_status(surface, group.request, run_ids, busy));
     }
     Ok(result)
 }
 
-fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -> RequestStatus {
+fn build_request_status(
+    surface: &Surface,
+    request: String,
+    runs: Vec<String>,
+    orchestrator_busy: bool,
+) -> RequestStatus {
     let is_combining = surface.requests.is_combining(&request);
 
     let record_res = load_combine_record(&surface.root, &request);
@@ -1053,12 +1075,12 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
             }
             let Some(rec) = record else {
                 status.state = "waiting".to_string();
-                status.waiting_reasons = vec!["waiting to combine".to_string()];
+                status.waiting_reasons = vec![ready_waiting_reason(orchestrator_busy)];
                 return status;
             };
             if !record_runs_match_tips(&rec, &current_runs) {
                 status.state = "waiting".to_string();
-                status.waiting_reasons = vec!["waiting to combine".to_string()];
+                status.waiting_reasons = vec![ready_waiting_reason(orchestrator_busy)];
                 populate_record_metadata(&surface.root, &rec, &mut status);
                 return status;
             }
@@ -1089,7 +1111,7 @@ fn build_request_status(surface: &Surface, request: String, runs: Vec<String>) -
                         status.suggested_body = body;
                     } else {
                         status.state = "waiting".to_string();
-                        status.waiting_reasons = vec!["waiting to combine".to_string()];
+                        status.waiting_reasons = vec![ready_waiting_reason(orchestrator_busy)];
                     }
                 }
                 CombineState::Conflict => {

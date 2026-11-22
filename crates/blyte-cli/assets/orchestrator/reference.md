@@ -86,8 +86,10 @@ run: `accepted` (used as it was), `fixed` (used after a change), `redone` (not u
 - The runs dispatched for one request of the user's are a group. Once every run in it has passed
   (and any the checks flagged has been accepted in the review queue), blyte builds the branch
   `blyte/<request>` from the group's start commit with `git cherry-pick -x` of each run, in
-  dependency order, and runs the full check on it. A run recorded as `redone` is left out.
-  `blyte combine <request>` does the same by hand and prints the result.
+  dependency order, and runs the full check on it. blyte combines once every run has passed and
+  your turn has ended, so a run that depends on others should be dispatched in the same turn. A
+  run recorded as `redone` is left out. `blyte combine <request>` does the same by hand and prints
+  the result.
 - The result is `combined`, `conflict` (which run, which files) or `check_failed` (which step, the
   end of its output). You are sent a message only for the last two and for an error.
 - Pushing the branch and opening a pull request are the user's, from the surface. You have no

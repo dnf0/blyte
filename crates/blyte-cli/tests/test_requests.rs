@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -241,18 +242,17 @@ fn write_checks(root: &Path, id: &str, flags: &[&str]) {
     .unwrap();
 }
 
-fn make_surface(
+fn make_surface_with_session(
     root: PathBuf,
+    session: Session,
     publisher: Arc<dyn Publisher>,
-) -> (Surface, Arc<Mutex<Vec<String>>>) {
-    let (runner, prompts) = RecordingRunner::new();
-    let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
+) -> Surface {
     let repo = root
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("repo")
         .to_string();
-    let surface = Surface {
+    Surface {
         root,
         repo,
         session,
@@ -262,8 +262,16 @@ fn make_surface(
         token: generate_token().unwrap(),
         requests: Arc::new(RequestsState::new()),
         publisher,
-    };
-    (surface, prompts)
+    }
+}
+
+fn make_surface(
+    root: PathBuf,
+    publisher: Arc<dyn Publisher>,
+) -> (Surface, Arc<Mutex<Vec<String>>>) {
+    let (runner, prompts) = RecordingRunner::new();
+    let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
+    (make_surface_with_session(root, session, publisher), prompts)
 }
 
 fn get(path: &str) -> Request {
@@ -1476,4 +1484,244 @@ fn unreadable_verdict_file_is_error_in_readiness_and_api() {
     assert_eq!(item["request"], "req-bad-verdict");
     assert_eq!(item["state"], "error");
     assert!(item["error"].as_str().unwrap().contains("BV1.verdict.json"));
+}
+
+struct BlockingFirstHandle {
+    prompts: Arc<Mutex<Vec<String>>>,
+    entered: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+}
+
+struct BlockingFirstRunner {
+    prompts: Arc<Mutex<Vec<String>>>,
+    entered: Option<mpsc::Sender<()>>,
+    release: Option<mpsc::Receiver<()>>,
+}
+
+impl BlockingFirstRunner {
+    fn new() -> (Self, BlockingFirstHandle) {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        (
+            Self {
+                prompts: Arc::clone(&prompts),
+                entered: Some(entered_tx),
+                release: Some(release_rx),
+            },
+            BlockingFirstHandle {
+                prompts,
+                entered: entered_rx,
+                release: release_tx,
+            },
+        )
+    }
+}
+
+impl PromptRunner for BlockingFirstRunner {
+    fn run(
+        &mut self,
+        prompt: &str,
+        _model: &str,
+        _emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        if let Some(tx) = self.entered.take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = self.release.take() {
+            let _ = rx.recv_timeout(Duration::from_secs(10));
+        }
+        Ok(())
+    }
+}
+
+fn branch_exists(root: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+        .current_dir(root)
+        .output()
+        .expect("git rev-parse")
+        .status
+        .success()
+}
+
+#[test]
+fn ready_request_waits_while_session_busy_then_combines_when_idle() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "BS1", &base, "busy.txt", "busy\n", "feat: busy");
+    write_start_file(root, "BS1", Some("req-busy"), &base, now, false);
+    write_summary(root, "BS1", "verified", Some("wip/BS1"));
+    write_checks(root, "BS1", &[]);
+
+    let (runner, handle) = BlockingFirstRunner::new();
+    let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
+    let surface = make_surface_with_session(root.to_path_buf(), session, Arc::new(RealPublisher));
+
+    surface
+        .session
+        .submit("working on next dispatch", Vec::new())
+        .unwrap();
+    handle.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let busy_info = surface.session.info();
+    assert!(busy_info.busy);
+    assert_eq!(busy_info.queued, 0);
+
+    assert!(!maybe_combine(&surface, "req-busy").unwrap());
+    assert!(!root.join(".wt/combined/req-busy.json").exists());
+    assert!(!branch_exists(root, "blyte/req-busy"));
+
+    let reqs_busy = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let item_busy = &reqs_busy.as_array().unwrap()[0];
+    assert_eq!(item_busy["request"], "req-busy");
+    assert_eq!(item_busy["state"], "waiting");
+    assert_eq!(
+        item_busy["waiting_reasons"],
+        json!(["the orchestrator is still working"])
+    );
+
+    handle.release.send(()).unwrap();
+    wait_for_idle_entries(&surface.session, 1);
+
+    let idle_info = surface.session.info();
+    assert!(!idle_info.busy);
+    assert_eq!(idle_info.queued, 0);
+
+    assert!(maybe_combine(&surface, "req-busy").unwrap());
+    surface.requests.wait_for_idle("req-busy");
+
+    let rec: CombineRecord = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".wt/combined/req-busy.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rec.state, CombineState::Combined);
+    assert_eq!(rec.branch, "blyte/req-busy");
+    assert!(branch_exists(root, "blyte/req-busy"));
+}
+
+#[test]
+fn ready_request_waits_while_session_has_queued_message_then_combines_when_idle() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "QS1", &base, "queued.txt", "queued\n", "feat: queued");
+    write_start_file(root, "QS1", Some("req-queued"), &base, now, false);
+    write_summary(root, "QS1", "verified", Some("wip/QS1"));
+    write_checks(root, "QS1", &[]);
+
+    let (runner, _prompts) = RecordingRunner::new();
+    let (session, start_worker) =
+        Session::start_paused(Box::new(runner), "gemini-4-neon".to_string());
+    let surface = make_surface_with_session(root.to_path_buf(), session, Arc::new(RealPublisher));
+
+    surface
+        .session
+        .submit("queued follow-up", Vec::new())
+        .unwrap();
+
+    let queued_info = surface.session.info();
+    assert!(!queued_info.busy);
+    assert_eq!(queued_info.queued, 1);
+
+    assert!(!maybe_combine(&surface, "req-queued").unwrap());
+    assert!(!root.join(".wt/combined/req-queued.json").exists());
+    assert!(!branch_exists(root, "blyte/req-queued"));
+
+    let reqs_queued = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let item_queued = &reqs_queued.as_array().unwrap()[0];
+    assert_eq!(item_queued["request"], "req-queued");
+    assert_eq!(item_queued["state"], "waiting");
+    assert_eq!(
+        item_queued["waiting_reasons"],
+        json!(["the orchestrator is still working"])
+    );
+
+    start_worker.send(()).unwrap();
+    wait_for_idle_entries(&surface.session, 1);
+
+    let idle_info = surface.session.info();
+    assert!(!idle_info.busy);
+    assert_eq!(idle_info.queued, 0);
+
+    assert!(maybe_combine(&surface, "req-queued").unwrap());
+    surface.requests.wait_for_idle("req-queued");
+
+    let rec: CombineRecord = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".wt/combined/req-queued.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rec.state, CombineState::Combined);
+    assert_eq!(rec.branch, "blyte/req-queued");
+    assert!(branch_exists(root, "blyte/req-queued"));
+}
+
+#[test]
+fn conflict_failure_message_is_not_queued_while_busy_and_queued_once_after() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "BC1", &base, "shared.txt", "from bc1\n", "feat: bc1");
+    write_start_file(root, "BC1", Some("req-busy-conflict"), &base, now, false);
+    write_summary(root, "BC1", "verified", Some("wip/BC1"));
+    write_checks(root, "BC1", &[]);
+
+    create_run_branch(root, "BC2", &base, "shared.txt", "from bc2\n", "feat: bc2");
+    write_start_file(
+        root,
+        "BC2",
+        Some("req-busy-conflict"),
+        &base,
+        now + 1,
+        false,
+    );
+    write_summary(root, "BC2", "verified", Some("wip/BC2"));
+    write_checks(root, "BC2", &[]);
+
+    let (runner, handle) = BlockingFirstRunner::new();
+    let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
+    let surface = make_surface_with_session(root.to_path_buf(), session, Arc::new(RealPublisher));
+
+    surface
+        .session
+        .submit("active orchestrator turn", Vec::new())
+        .unwrap();
+    handle.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    assert!(surface.session.info().busy);
+    assert_eq!(surface.session.info().queued, 0);
+
+    assert!(!maybe_combine(&surface, "req-busy-conflict").unwrap());
+    assert!(!root.join(".wt/combined/req-busy-conflict.json").exists());
+    assert_eq!(surface.session.info().queued, 0);
+    assert_eq!(handle.prompts.lock().unwrap().len(), 1);
+
+    handle.release.send(()).unwrap();
+    wait_for_idle_entries(&surface.session, 1);
+
+    assert!(!surface.session.info().busy);
+    assert_eq!(surface.session.info().queued, 0);
+    assert_eq!(handle.prompts.lock().unwrap().len(), 1);
+
+    assert!(maybe_combine(&surface, "req-busy-conflict").unwrap());
+    surface.requests.wait_for_idle("req-busy-conflict");
+    wait_for_idle_entries(&surface.session, 2);
+
+    {
+        let recorded = handle.prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded[1].contains("req-busy-conflict"), "{}", recorded[1]);
+        assert!(recorded[1].contains("conflict"), "{}", recorded[1]);
+        assert!(recorded[1].contains("BC2"), "{}", recorded[1]);
+        assert!(recorded[1].contains("shared.txt"), "{}", recorded[1]);
+    }
+
+    assert!(!maybe_combine(&surface, "req-busy-conflict").unwrap());
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(handle.prompts.lock().unwrap().len(), 2);
 }
