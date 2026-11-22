@@ -189,7 +189,10 @@ pub fn build_request(
         user_msg.push_str("\n## Fallback candidates\n");
         user_msg.push_str(
             "Judge each candidate below as \"fallback\" or \"not_fallback\" and return one entry in \"fallbacks\" for every candidate listed.\n\
-A fallback is code that substitutes a default, a guess, an empty result or a silent skip when something is missing, unknown or unreadable, instead of failing with an error that names it; a documented, intended default is not a fallback; neither is string or path handling that cannot hide a missing input.\n\n",
+A fallback is code that substitutes a default, a guess, an empty result or a silent skip when something is missing, unknown or unreadable, instead of failing with an error that names it.\n\
+Decide each one with this test, and apply it the same way to every candidate: when the operation on the line fails, or the value it reads is absent, does the program carry on with a substitute value? If it does, the verdict is \"fallback\". That includes a wrapper that turns an error into true, false or an empty list, whoever calls it, and a filesystem or command call (such as resolving a path) whose failure is replaced by the unresolved input.\n\
+The verdict is \"not_fallback\" only when one of these holds, and the reason must say which: (1) the value is optional by design and the line only chooses how its absence is shown or defaulted, with no failed operation behind it; (2) the substitute is a default that the task or a comment in the code states is intended; (3) the operation cannot fail or be absent at this point because the code has already checked it.\n\
+Whether the line existed before this change, or was only moved, does not change the verdict.\n\n",
         );
         for c in candidates {
             user_msg.push_str(&format!(
@@ -1051,7 +1054,8 @@ Overall looks okay otherwise.
             "{msg}"
         );
         assert!(
-            msg.contains("a documented, intended default is not a fallback"),
+            msg.contains("does the program carry on with a substitute value?")
+                && msg.contains("Whether the line existed before this change"),
             "{msg}"
         );
     }
