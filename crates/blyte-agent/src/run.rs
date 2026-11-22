@@ -172,6 +172,10 @@ pub struct RunReport {
     pub claim_check: Option<claim_check::ClaimCheck>,
     /// Reason the claim check did not run or stopped early (for example, out of time).
     pub claim_check_skipped: Option<String>,
+    /// Elapsed seconds for the base check when it ran to completion.
+    pub base_check_seconds: Option<f64>,
+    /// Outcome of the base check when it ran to completion (`Some(true)` if passed, `Some(false)` if failed).
+    pub base_check_passed: Option<bool>,
 }
 
 /// What happened on one turn, emitted as it happens.
@@ -366,6 +370,62 @@ pub fn retry_wait(e: &ProviderError, attempt: u32) -> Duration {
     server_retry_hint(e).map_or(backoff, |hint| hint.max(backoff))
 }
 
+/// State of a base check running beside the model's turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseCheckState {
+    Pending,
+    Passed,
+    Failed { steps: Vec<String>, tail: String },
+}
+
+/// Handle to a background base check polled by [`Runner`].
+pub trait BaseCheckHandle: Sync {
+    fn poll(&self) -> BaseCheckState;
+    fn wait(&self) -> BaseCheckState;
+    fn stop(&self) {}
+    fn elapsed_seconds(&self) -> Option<f64> {
+        None
+    }
+}
+
+/// How [`Runner`] checks the untouched base tree against the verification gate.
+#[derive(Default)]
+pub enum BaseCheck<'a> {
+    #[default]
+    None,
+    BeforeFirstTurn,
+    Polled(&'a dyn BaseCheckHandle),
+}
+
+/// Last 20 lines of gate output, formatted for base-check failure reports.
+pub fn base_check_tail(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.len() > 20 {
+        lines[lines.len() - 20..].join("\n")
+    } else {
+        lines.join("\n")
+    }
+}
+
+/// Convert a [`GateRunResult`] into a [`BaseCheckState`].
+pub fn base_check_state_from_gate(result: &GateRunResult) -> BaseCheckState {
+    if result.passed {
+        BaseCheckState::Passed
+    } else {
+        BaseCheckState::Failed {
+            steps: result.failures.iter().map(|f| f.step.clone()).collect(),
+            tail: base_check_tail(&result.output),
+        }
+    }
+}
+
+fn base_check_blocked_message(failing_steps: &[String], tail: &str) -> String {
+    let steps = failing_steps.join("; ");
+    format!(
+        "the check fails before any change ({steps}): {tail}. Fix the environment or the base commit, or pass --no-base-check if this task is meant to fix that check."
+    )
+}
+
 pub struct Runner<'a> {
     pub provider: &'a dyn Provider,
     pub shell: &'a dyn Shell,
@@ -381,8 +441,8 @@ pub struct Runner<'a> {
     pub research: bool,
     /// Research runs: check report.md's claims with the run's model (`claim_check`).
     pub claim_check: bool,
-    /// Run the verification gate once before the first model call and return `Outcome::Blocked` if it fails.
-    pub base_check: bool,
+    /// How to check the verification gate against the untouched base tree.
+    pub base_check: BaseCheck<'a>,
 }
 
 const CLAIM_PHRASES: &[&str] = &[
@@ -790,6 +850,23 @@ impl<'a> Runner<'a> {
             deadline,
             now,
         );
+        if let BaseCheck::Polled(handle) = self.base_check {
+            if outcome != Outcome::Verified && report.base_check_passed.is_none() {
+                match handle.poll() {
+                    BaseCheckState::Pending => {
+                        handle.stop();
+                    }
+                    BaseCheckState::Passed => {
+                        report.base_check_passed = Some(true);
+                        report.base_check_seconds = handle.elapsed_seconds();
+                    }
+                    BaseCheckState::Failed { .. } => {
+                        report.base_check_passed = Some(false);
+                        report.base_check_seconds = handle.elapsed_seconds();
+                    }
+                }
+            }
+        }
         if self.research
             && outcome != Outcome::Verified
             && self
@@ -864,20 +941,18 @@ impl<'a> Runner<'a> {
         let mut wrap_up_tools_closed = false;
         let mut wrap_up_report: Option<String> = None;
 
-        if self.base_check && !gate_steps(&state.orchestrator.verification_cmd).is_empty() {
+        if matches!(self.base_check, BaseCheck::BeforeFirstTurn)
+            && !gate_steps(&state.orchestrator.verification_cmd).is_empty()
+        {
+            let bc_start = now();
             let (passed, output, _wait_ms, failing_steps) =
                 self.run_gate(state, &[], &mut deadline, now);
+            report.base_check_seconds =
+                Some(now().saturating_duration_since(bc_start).as_secs_f64());
+            report.base_check_passed = Some(passed);
             if !passed {
-                let steps = failing_steps.join("; ");
-                let lines: Vec<&str> = output.lines().collect();
-                let tail = if lines.len() > 20 {
-                    lines[lines.len() - 20..].join("\n")
-                } else {
-                    lines.join("\n")
-                };
-                let msg = format!(
-                    "the check fails before any change ({steps}): {tail}. Fix the environment or the base commit, or pass --no-base-check if this task is meant to fix that check."
-                );
+                let tail = base_check_tail(&output);
+                let msg = base_check_blocked_message(&failing_steps, &tail);
                 report.final_message = Some(msg.clone());
                 return (Outcome::Blocked(msg), report);
             }
@@ -895,6 +970,24 @@ impl<'a> Runner<'a> {
                     if price.cost(&report.usage) >= cap {
                         report.cost_capped = true;
                         return (Outcome::BudgetExhausted, report);
+                    }
+                }
+            }
+            if let BaseCheck::Polled(handle) = self.base_check {
+                if report.base_check_passed.is_none() {
+                    match handle.poll() {
+                        BaseCheckState::Pending => {}
+                        BaseCheckState::Passed => {
+                            report.base_check_passed = Some(true);
+                            report.base_check_seconds = handle.elapsed_seconds();
+                        }
+                        BaseCheckState::Failed { steps, tail } => {
+                            report.base_check_passed = Some(false);
+                            report.base_check_seconds = handle.elapsed_seconds();
+                            let msg = base_check_blocked_message(&steps, &tail);
+                            report.final_message = Some(msg.clone());
+                            return (Outcome::Blocked(msg), report);
+                        }
                     }
                 }
             }
@@ -1415,6 +1508,7 @@ impl<'a> Runner<'a> {
                 if state.orchestrator.instructions.is_some() {
                     return (Outcome::Finished, report);
                 }
+                self.finalize_polled_base_check(&mut report);
                 return (Outcome::Verified, report);
             }
 
@@ -1474,6 +1568,7 @@ impl<'a> Runner<'a> {
                 output: output.lines().next().unwrap_or(""),
             });
             if passed {
+                self.finalize_polled_base_check(&mut report);
                 return (Outcome::Verified, report);
             }
             report.gate_failures.push(cut_gate_output(&output));
@@ -1519,6 +1614,37 @@ impl<'a> Runner<'a> {
             )));
         }
         (Outcome::BudgetExhausted, report)
+    }
+
+    fn finalize_polled_base_check(&self, report: &mut RunReport) {
+        let BaseCheck::Polled(handle) = self.base_check else {
+            return;
+        };
+        if report.base_check_passed == Some(true) {
+            if report.base_check_seconds.is_none() {
+                report.base_check_seconds = handle.elapsed_seconds();
+            }
+            return;
+        }
+        let final_state = match handle.poll() {
+            BaseCheckState::Pending => handle.wait(),
+            other => other,
+        };
+        report.base_check_seconds = handle.elapsed_seconds();
+        match final_state {
+            BaseCheckState::Passed => {
+                report.base_check_passed = Some(true);
+            }
+            BaseCheckState::Failed { .. } => {
+                report.base_check_passed = Some(false);
+                let note = "the check failed on the untouched code but passes with this change";
+                report.final_message = Some(match report.final_message.take() {
+                    Some(existing) if !existing.is_empty() => format!("{existing}\n\n{note}"),
+                    _ => note.to_string(),
+                });
+            }
+            BaseCheckState::Pending => {}
+        }
     }
 }
 
@@ -1590,11 +1716,40 @@ pub fn run_gate_steps(
     on_slot_wait: impl FnOnce(u64),
     now: &(dyn Fn() -> std::time::Instant + Sync),
 ) -> GateRunResult {
+    run_gate_steps_cancellable(
+        shell,
+        gate,
+        dir,
+        last_failed,
+        deadline,
+        on_slot_wait,
+        now,
+        None,
+    )
+}
+
+/// Run a multi-line verification gate in `dir` through `shell`, stopping early if `cancel` is triggered.
+#[allow(clippy::too_many_arguments)]
+pub fn run_gate_steps_cancellable(
+    shell: &dyn Shell,
+    gate: &str,
+    dir: &Path,
+    last_failed: &[String],
+    deadline: &mut Option<std::time::Instant>,
+    on_slot_wait: impl FnOnce(u64),
+    now: &(dyn Fn() -> std::time::Instant + Sync),
+    cancel: Option<&crate::shell::CancelHandle>,
+) -> GateRunResult {
     let (_guard, wait_ms) = if gate_slots::enabled() && !gate_slots::nested() {
         let max_slots = gate_slots::slots();
         let slot_dir = gate_slots::slot_dir();
-        match gate_slots::acquire(max_slots, &slot_dir, Duration::from_millis(500)) {
-            Ok((guard, waited)) => {
+        match gate_slots::acquire_cancellable(
+            max_slots,
+            &slot_dir,
+            Duration::from_millis(500),
+            cancel.map(crate::shell::CancelHandle::flag),
+        ) {
+            Ok(Some((guard, waited))) => {
                 let wait_ms = waited.as_millis() as u64;
                 if let Some(d) = deadline.as_mut() {
                     *d += waited;
@@ -1608,6 +1763,14 @@ pub fn run_gate_steps(
                 }
                 (Some(guard), wait_ms)
             }
+            Ok(None) => {
+                return GateRunResult {
+                    passed: false,
+                    output: "cancelled".into(),
+                    wait_ms: 0,
+                    failures: Vec::new(),
+                };
+            }
             Err(e) => {
                 eprintln!("gate: slot acquisition failed: {e}");
                 (None, 0)
@@ -1616,6 +1779,15 @@ pub fn run_gate_steps(
     } else {
         (None, 0)
     };
+
+    if cancel.is_some_and(crate::shell::CancelHandle::is_cancelled) {
+        return GateRunResult {
+            passed: false,
+            output: "cancelled".into(),
+            wait_ms,
+            failures: Vec::new(),
+        };
+    }
 
     let steps = gate_steps(gate);
     if steps.len() <= 1 {
@@ -1647,6 +1819,9 @@ pub fn run_gate_steps(
     let mut formatted_failures = Vec::new();
     let mut failures = Vec::new();
     for &step in &first_group {
+        if cancel.is_some_and(crate::shell::CancelHandle::is_cancelled) {
+            break;
+        }
         let (passed, output) = run_gate_step(shell, step, dir, *deadline, now);
         if !passed {
             formatted_failures.push(format!("$ {step}\n{output}"));
@@ -1654,7 +1829,9 @@ pub fn run_gate_steps(
                 step: step.to_string(),
                 output,
             });
-            if deadline.is_some_and(|d| now() >= d) {
+            if deadline.is_some_and(|d| now() >= d)
+                || cancel.is_some_and(crate::shell::CancelHandle::is_cancelled)
+            {
                 break;
             }
         }
@@ -1684,6 +1861,9 @@ pub fn run_gate_steps(
         };
     }
     for &step in &second_group {
+        if cancel.is_some_and(crate::shell::CancelHandle::is_cancelled) {
+            break;
+        }
         let (passed, output) = run_gate_step(shell, step, dir, *deadline, now);
         if !passed {
             formatted_failures.push(format!("$ {step}\n{output}"));
@@ -1691,7 +1871,9 @@ pub fn run_gate_steps(
                 step: step.to_string(),
                 output,
             });
-            if deadline.is_some_and(|d| now() >= d) {
+            if deadline.is_some_and(|d| now() >= d)
+                || cancel.is_some_and(crate::shell::CancelHandle::is_cancelled)
+            {
                 break;
             }
         }

@@ -57,7 +57,7 @@ fn the_warning_arrives_once_ten_turns_before_the_end() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut st = State::new("g", "true");
     let (outcome, _) = r.run(&mut st);

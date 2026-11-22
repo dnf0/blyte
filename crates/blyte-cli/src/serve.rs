@@ -399,6 +399,12 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
         runs_with_hold.push(RunWithHold { run, hold });
     }
 
+    if let Err(e) = crate::run_results::report_finished_runs(surface) {
+        surface
+            .session
+            .record_error(&format!("run report failed: {e}"));
+    }
+
     let mut triggered = BTreeSet::new();
     for run in &live.runs {
         if run.research {

@@ -113,6 +113,10 @@ pub struct RunRecord {
     pub claim_check: Option<blyte_agent::claim_check::ClaimCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_check_skipped: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_check_passed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_check_seconds: Option<f64>,
 }
 
 impl RunRecord {
@@ -186,6 +190,8 @@ impl RunRecord {
             quote_problems: None,
             claim_check: None,
             claim_check_skipped: None,
+            base_check_passed: None,
+            base_check_seconds: None,
         }
     }
 
@@ -247,6 +253,8 @@ impl RunRecord {
             quote_problems: report.quote_problems.clone(),
             claim_check: report.claim_check.clone(),
             claim_check_skipped: report.claim_check_skipped.clone(),
+            base_check_passed: report.base_check_passed,
+            base_check_seconds: report.base_check_seconds,
             ..Self::base(config, elapsed)
         }
     }

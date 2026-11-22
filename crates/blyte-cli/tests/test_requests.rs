@@ -629,6 +629,7 @@ fn api_requests_shows_waiting_then_combined_with_suggested_pr_fields() {
     let item = &arr2.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-multi");
     assert_eq!(item["state"], "combined");
+    assert_eq!(item["check"], "ran");
     assert_eq!(item["branch"], "blyte/req-multi");
     assert_eq!(item["base"], base);
     let commits = item["commits"].as_array().unwrap();

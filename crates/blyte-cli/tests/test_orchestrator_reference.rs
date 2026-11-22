@@ -218,3 +218,25 @@ fn reference_describes_unsandboxed_and_no_dev_null_redirect() {
     assert!(blyte_cli::orchestrator_text::SANDBOX_ON_PARAGRAPH.contains("unsandboxed"));
     assert!(!REFERENCE.contains("> /dev/null"));
 }
+
+#[test]
+fn default_process_hands_a_request_to_one_run_and_ends_the_turn() {
+    let normalized = DEFAULT_PROCESS
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized.contains("end your turn. Do not call `blyte wait`."),
+        "{DEFAULT_PROCESS}"
+    );
+    assert!(
+        DEFAULT_PROCESS.contains("--base blyte/<request>"),
+        "{DEFAULT_PROCESS}"
+    );
+    assert!(
+        normalized.contains("Split work across several runs only when the user asks for that, or when a run stopped because its budget ran out and the user agrees to a split."),
+        "{DEFAULT_PROCESS}"
+    );
+    assert!(REFERENCE.contains("blyte wait --any <ids>"), "{REFERENCE}");
+    assert!(!REFERENCE.contains(r#"{"args": ["wait""#), "{REFERENCE}");
+}

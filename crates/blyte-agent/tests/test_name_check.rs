@@ -137,7 +137,7 @@ fn runner_flags_unseen_name_and_allows_name_from_tool_result() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut st = State::new("research task", "test -s report.md");

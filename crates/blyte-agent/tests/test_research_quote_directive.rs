@@ -85,7 +85,7 @@ fn directive_expands_on_disk_and_the_report_passes() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut st = State::new(&question, "test -s report.md");
@@ -125,7 +125,7 @@ fn directive_for_missing_file_is_reported_on_stop() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut st = State::new("research task", "test -s report.md");
@@ -172,7 +172,7 @@ fn directive_outside_the_workspace_and_read_roots_is_refused() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut st = State::new("research task", "test -s report.md");

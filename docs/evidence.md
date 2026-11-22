@@ -396,3 +396,50 @@ not fall. Two things outweighed the saving:
 Across all six trials the thin orchestrator has not beaten one agent on this request: USD 5.15 to
 9.16 against 4.81 to 5.39, and 36 to 75 minutes against 33 to 40. The one-agent trials were not
 re-run with the scope fix, which would probably remove their fresh review too (USD 0.44 to 0.55).
+
+### One run by default, and fewer runs of the check
+
+The same request, through the surface, with the default process changed so the model in the
+conversation hands the request to one run and ends its turn (2026-11-22, `gemini-4-neon`, trials
+T7 to T12). T7 to T9 used the build with that change alone. T10 to T12 added two more: content
+that has already passed the check is not checked again, and the check on the untouched code runs
+beside the model's first turns instead of before them.
+
+| | One run, three checks (T7, T8, T9) | One run, one check waited for (T10, T11, T12) | One agent directly (D1, D2, D3) |
+|---|---|---|---|
+| Outcome | combined, combined, stopped at the cost cap | combined, combined, combined | verified |
+| Wall time (minutes) | 41, 37, none | 22, 24, 25 | 40, 35, 33 |
+| Total cost (USD) | 3.76, 4.19, 4.19 with no result | 3.70, 3.82, 4.14 | 5.39, 4.81, 5.04 |
+| Of which the model in the conversation (USD) | 0.04, 0.05, 0.16 | 0.05, 0.05, 0.05 | none |
+| Of which the implementer (USD) | 3.26, 3.59, 4.03 | 3.13, 3.25, 3.58 | 4.85, 4.26, 4.60 |
+| Of which the fresh review (USD) | 0.45, 0.54, none | 0.52, 0.51, 0.50 | 0.54, 0.55, 0.44 |
+| Runs dispatched | 1, 1, 1 | 1, 1, 1 | 1 |
+| Flagged runs the stand-in user accepted | 1, 1, 0 | 1, 1, 1 | not applicable |
+
+Where the time went in T7 (41 minutes), from the per-turn usage ledger: the check on the
+untouched code 5.8 minutes, reading 6.9, writing the edits 10.6, running tests and fixing 2.5, the
+check on the finished work 4.7, the fresh review 3.4, the check on the combined branch 5.8. The
+three checks were 16 minutes. In T10 to T12 the check on the untouched code took 6.1 to 6.2
+minutes beside the model's turns and delayed nothing, and the combined branch was recorded as
+already passed in all three.
+
+What this does and does not show:
+
+- The model in the conversation costs about USD 0.05 a request when it hands the work on and
+  stops, against USD 0.61 to 1.74 when it split, waited and reviewed.
+- Removing two of the three waits for the check took a request from 37 to 41 minutes to 22 to 25.
+  The runs themselves were 6 to 13 minutes shorter; about 6 of that is the check, and the rest is
+  not explained by the change.
+- T9's run was stopped by a cost cap of USD 4 in the trial's `blyte.toml`, with its edits made and
+  nothing committed. The direct trials ran under a cap of USD 8 and cost USD 4.26 to 4.85. T10 to
+  T12 ran under USD 8. A cap sized for one task of several is too low for a run that carries a
+  whole request.
+- The implementer cost less here (USD 3.13 to 3.59) than in the direct trials (4.26 to 4.85). The
+  two differ in how the task reached the run (written by the model in the conversation, or the
+  request as typed) and no trial separates that from the spread between runs.
+- Every finished run was flagged for "possible fallbacks added", and the fresh review raised four
+  to six concerns on each, some marked high. The stand-in user accepts every flag without reading
+  it, so these trials say nothing about whether the results are right beyond passing the check.
+  The concerns were not assessed.
+- In T8 the fresh review cost USD 0.54 and returned nothing (the reply was cut off at the output
+  limit).

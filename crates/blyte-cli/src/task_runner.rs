@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Fold budget for research runs, which quote code read many turns before they write it up.
 /// High enough that folding is only a safety net: unfolded research runs were cheaper, shorter and
@@ -66,6 +66,8 @@ pub struct TaskConfig {
     pub claim_check: bool,
     /// Run the verification gate once before the first model call and stop as blocked if it fails.
     pub base_check: bool,
+    /// Directory containing an untouched checkout of the base commit for background base checks.
+    pub base_check_dir: Option<PathBuf>,
     /// Whether this run is in orchestrate mode (`--orchestrate`).
     pub orchestrate: bool,
     /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool (`--dispatch-cmd`).
@@ -109,6 +111,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             research: cli.research,
             claim_check: cli.claim_check,
             base_check: cli.base_check,
+            base_check_dir: cli.base_check_dir.clone(),
             orchestrate: cli.orchestrate,
             dispatch_cmd: cli.dispatch_cmd.clone(),
         }
@@ -163,32 +166,35 @@ fn orchestrator_extra_writes(root: &Path) -> Vec<PathBuf> {
 }
 
 pub fn build_sandbox_profile(config: &TaskConfig) -> blyte_agent::sandbox::Profile {
+    build_sandbox_profile_for_root(config, &config.root)
+}
+
+fn build_sandbox_profile_for_root(
+    config: &TaskConfig,
+    root: &Path,
+) -> blyte_agent::sandbox::Profile {
     let extra = if config.orchestrate {
-        orchestrator_extra_writes(&config.root)
+        orchestrator_extra_writes(root)
     } else {
         Vec::new()
     };
     if extra.is_empty() {
         return blyte_agent::sandbox::default_profile_net(
-            &config.root,
+            root,
             &config.allow_read,
             config.network == "on",
         );
     }
     #[cfg(target_os = "macos")]
     {
-        let mut allowed = blyte_agent::sandbox::default_allowed(&config.root);
+        let mut allowed = blyte_agent::sandbox::default_allowed(root);
         allowed.extend(extra);
         let deny_read = match std::env::var_os("HOME") {
             Some(home) if !home.is_empty() => blyte_agent::sandbox::read_denied(Path::new(&home)),
             _ => Vec::new(),
         };
-        let base = blyte_agent::sandbox::profile_with(
-            &config.root,
-            &allowed,
-            &deny_read,
-            &config.allow_read,
-        );
+        let base =
+            blyte_agent::sandbox::profile_with(root, &allowed, &deny_read, &config.allow_read);
         if config.network == "on" {
             blyte_agent::sandbox::Profile::Seatbelt(base)
         } else {
@@ -204,7 +210,7 @@ pub fn build_sandbox_profile(config: &TaskConfig) -> blyte_agent::sandbox::Profi
     #[cfg(not(target_os = "macos"))]
     {
         let mut profile = blyte_agent::sandbox::default_profile_net(
-            &config.root,
+            root,
             &config.allow_read,
             config.network == "on",
         );
@@ -217,6 +223,154 @@ pub fn build_sandbox_profile(config: &TaskConfig) -> blyte_agent::sandbox::Profi
             blyte_agent::sandbox::Profile::Seatbelt(_) => {}
         }
         profile
+    }
+}
+
+struct BackgroundBaseCheckData {
+    state: blyte_agent::run::BaseCheckState,
+    elapsed_seconds: Option<f64>,
+}
+
+/// Runs the verification gate on the untouched base checkout on a background thread.
+pub struct BackgroundBaseCheck {
+    shared: Arc<(Mutex<BackgroundBaseCheckData>, Condvar)>,
+    cancel: Arc<blyte_agent::shell::CancelHandle>,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl BackgroundBaseCheck {
+    /// Starts the gate steps in `base_dir` on a thread using the same shell, sandbox, and
+    /// environment rules as the run's gate.
+    pub fn start(
+        config: &TaskConfig,
+        gate: String,
+        base_dir: PathBuf,
+        deadline: Option<std::time::Instant>,
+    ) -> Self {
+        let cancel = Arc::new(blyte_agent::shell::CancelHandle::new());
+        let shell: Box<dyn blyte_agent::shell::Shell + Send> = match &config.container {
+            Some(cid) => Box::new(blyte_agent::shell::CancellableContainerShell {
+                inner: blyte_agent::shell::ContainerShell {
+                    container_id: cid.clone(),
+                    workdir: base_dir.clone(),
+                },
+                cancel: Arc::clone(&cancel),
+            }),
+            None => {
+                let inner = if config.sandbox == "on" && blyte_agent::sandbox::available() {
+                    blyte_agent::shell::LocalShell::sandboxed(build_sandbox_profile_for_root(
+                        config, &base_dir,
+                    ))
+                } else {
+                    blyte_agent::shell::LocalShell::new()
+                };
+                Box::new(blyte_agent::shell::CancellableLocalShell {
+                    inner,
+                    cancel: Arc::clone(&cancel),
+                })
+            }
+        };
+        let shared = Arc::new((
+            Mutex::new(BackgroundBaseCheckData {
+                state: blyte_agent::run::BaseCheckState::Pending,
+                elapsed_seconds: None,
+            }),
+            Condvar::new(),
+        ));
+        let thread_shared = Arc::clone(&shared);
+        let thread_cancel = Arc::clone(&cancel);
+        let join = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut deadline = deadline;
+            let result = blyte_agent::run::run_gate_steps_cancellable(
+                shell.as_ref(),
+                &gate,
+                &base_dir,
+                &[],
+                &mut deadline,
+                |_| {},
+                &std::time::Instant::now,
+                Some(&thread_cancel),
+            );
+            if thread_cancel.is_cancelled() {
+                return;
+            }
+            let elapsed = started.elapsed().as_secs_f64();
+            let next_state = blyte_agent::run::base_check_state_from_gate(&result);
+            let (lock, cvar) = &*thread_shared;
+            let mut guard = match lock.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            guard.state = next_state;
+            guard.elapsed_seconds = Some(elapsed);
+            cvar.notify_all();
+        });
+        Self {
+            shared,
+            cancel,
+            handle: Mutex::new(Some(join)),
+        }
+    }
+}
+
+impl blyte_agent::run::BaseCheckHandle for BackgroundBaseCheck {
+    fn poll(&self) -> blyte_agent::run::BaseCheckState {
+        let (lock, _) = &*self.shared;
+        match lock.lock() {
+            Ok(g) => g.state.clone(),
+            Err(e) => e.into_inner().state.clone(),
+        }
+    }
+
+    fn wait(&self) -> blyte_agent::run::BaseCheckState {
+        let (lock, cvar) = &*self.shared;
+        let mut guard = match lock.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        while matches!(guard.state, blyte_agent::run::BaseCheckState::Pending) {
+            if self.cancel.is_cancelled() {
+                break;
+            }
+            guard = match cvar.wait(guard) {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+        }
+        guard.state.clone()
+    }
+
+    fn stop(&self) {
+        self.cancel.cancel();
+        let (lock, cvar) = &*self.shared;
+        let guard = match lock.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        cvar.notify_all();
+        drop(guard);
+        let join = match self.handle.lock() {
+            Ok(mut g) => g.take(),
+            Err(e) => e.into_inner().take(),
+        };
+        if let Some(h) = join {
+            let _ = h.join();
+        }
+    }
+
+    fn elapsed_seconds(&self) -> Option<f64> {
+        let (lock, _) = &*self.shared;
+        match lock.lock() {
+            Ok(g) => g.elapsed_seconds,
+            Err(e) => e.into_inner().elapsed_seconds,
+        }
+    }
+}
+
+impl Drop for BackgroundBaseCheck {
+    fn drop(&mut self) {
+        blyte_agent::run::BaseCheckHandle::stop(self);
     }
 }
 
@@ -712,6 +866,30 @@ fn run_task_with_event_callback(
         on_event(&event);
     };
 
+    let bg_base_check = match &config.base_check_dir {
+        Some(base_dir)
+            if !blyte_agent::run::gate_steps(&state.orchestrator.verification_cmd).is_empty() =>
+        {
+            let deadline = config
+                .max_seconds
+                .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+            Some(BackgroundBaseCheck::start(
+                config,
+                state.orchestrator.verification_cmd.clone(),
+                base_dir.clone(),
+                deadline,
+            ))
+        }
+        _ => None,
+    };
+    let base_check = if let Some(ref bg) = bg_base_check {
+        blyte_agent::run::BaseCheck::Polled(bg)
+    } else if config.base_check {
+        blyte_agent::run::BaseCheck::BeforeFirstTurn
+    } else {
+        blyte_agent::run::BaseCheck::None
+    };
+
     let runner = blyte_agent::run::Runner {
         provider: provider.as_ref(),
         shell,
@@ -727,10 +905,11 @@ fn run_task_with_event_callback(
         on_event: Some(&runner_on_event),
         research: config.research,
         claim_check: config.claim_check,
-        base_check: config.base_check,
+        base_check,
     };
 
     let (outcome, report) = runner.run(state);
+    drop(bg_base_check);
 
     if let Some(path) = &usage_path {
         let (written_turns, written_usage) = match written.lock() {

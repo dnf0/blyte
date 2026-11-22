@@ -34,16 +34,17 @@ waiting) and prints, for each ready task, the exact `blyte dispatch` command.
 ### While runs are going
 
 Each foreground `blyte` call and shell command times out after 300 s. Calling `blyte` with
-`background: true` starts a `dispatch` and returns at once; nothing reports when it exits:
+`background: true` starts a `dispatch` and returns at once:
 
 ```json
-{"args": ["dispatch", "T1", "--plan", "plan.md", "--plan-task", "Task T1"], "background": true}
-{"args": ["dispatch", "T2", "--plan", "plan.md", "--plan-task", "Task T2"], "background": true}
-{"args": ["wait", "--any", "T1", "T2"]}
+{"args": ["dispatch", "T1", "task.md"], "background": true}
 ```
 
-- `blyte wait --any <ids>` prints `<id> <outcome> <turns> <cost>` for each run that has finished.
-  Exit 2 means none finished within its timeout (280 s).
+When a run ends, blyte shows the user its report and sends you a message only if it did not pass.
+
+- `blyte wait --any <ids>` waits until at least one of those runs finishes and prints
+  `<id> <outcome> <turns> <cost>` for each finished run, for when you are coordinating split runs
+  with dependencies. Exit 2 means none finished within its timeout (280 s).
 - `blyte status <id>` shows whether a run is still going, its turn, its last command and its gate
   attempts, or that it is `dead`.
 - Each run's files: `.wt/<id>.json` (the summary), `.wt/<id>.log`, `.wt/<id>.task.md` (the task text

@@ -76,7 +76,7 @@ fn run(gate: &str) -> (Outcome, blyte_agent::run::RunReport) {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     r.run(&mut State::new("g", gate))
 }

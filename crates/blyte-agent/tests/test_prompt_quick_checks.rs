@@ -45,7 +45,7 @@ fn system_prompt() -> String {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     r.run(&mut State::new("g", "true"));
     let sys = p.seen.lock().unwrap()[0].system.clone();

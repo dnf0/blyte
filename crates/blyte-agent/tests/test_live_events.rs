@@ -110,7 +110,7 @@ fn run_with_events(
         on_event: Some(&on_event),
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("live events test", "");
     let (outcome, report) = runner.run(&mut state);

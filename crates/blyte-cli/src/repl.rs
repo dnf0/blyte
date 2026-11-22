@@ -181,6 +181,7 @@ impl ReplSession {
             research: false,
             claim_check: false,
             base_check: false,
+            base_check_dir: None,
             orchestrate: self.orchestrate,
             dispatch_cmd: self.dispatch_cmd.clone(),
         }

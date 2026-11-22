@@ -22,8 +22,9 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::sandbox::Profile;
@@ -212,6 +213,81 @@ pub trait Shell: Send + Sync {
     }
 }
 
+/// Cooperative cancellation handle that terminates an active command's process group.
+#[derive(Debug, Default)]
+pub struct CancelHandle {
+    cancelled: AtomicBool,
+    active_pgid: Mutex<Option<i32>>,
+}
+
+impl CancelHandle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn flag(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+
+    pub fn cancel(&self) {
+        let pgid = {
+            let guard = self.active_pgid.lock().unwrap_or_else(|e| e.into_inner());
+            self.cancelled.store(true, Ordering::SeqCst);
+            *guard
+        };
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
+            if pgid > 0 {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = pgid;
+    }
+
+    fn register_pgid(&self, pgid: i32) -> bool {
+        let mut guard = self.active_pgid.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancelled.load(Ordering::SeqCst) {
+            return false;
+        }
+        *guard = Some(pgid);
+        true
+    }
+
+    fn clear_pgid(&self) {
+        let mut guard = self.active_pgid.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+}
+
+fn kill_child_group(child: &mut Child) {
+    // On Unix, kill the entire process group with a negative PGID.
+    // This ensures all child and grandchild processes are terminated simultaneously,
+    // releasing standard stream pipe handles so reader threads unblock promptly.
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        if pgid > 0 {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        } else {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
 /// Executes a command with timeout enforcement, pipe draining, and process group isolation.
 ///
 /// # Arguments
@@ -224,8 +300,20 @@ pub trait Shell: Send + Sync {
 /// Returns an [`Output`] containing collected stdout, stderr, and the process exit code,
 /// or an error message if the process cannot be spawned or waited on. On timeout, returns
 /// exit code 124 with a notice appended to stderr.
-fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+fn exec_command(cmd: Command, timeout: Duration) -> Result<Output, String> {
+    exec_command_cancellable(cmd, timeout, None)
+}
+
+fn exec_command_cancellable(
+    mut cmd: Command,
+    timeout: Duration,
+    cancel: Option<&CancelHandle>,
+) -> Result<Output, String> {
     use std::process::Stdio;
+
+    if cancel.is_some_and(CancelHandle::is_cancelled) {
+        return Err("command cancelled".into());
+    }
 
     // The deadline is ENFORCED, not advisory.
     // stdin is null so commands that read input (e.g. bare python, git commit, prompts)
@@ -248,6 +336,13 @@ fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
         .spawn()
         .map_err(|e| format!("cannot run command: {e}"))?;
 
+    if let Some(handle) = cancel {
+        if !handle.register_pgid(child.id() as i32) {
+            kill_child_group(&mut child);
+            return Err("command cancelled".into());
+        }
+    }
+
     // Drained on background threads: a command that fills the pipe buffer deadlocks against
     // a parent that only reads after waiting, which turns a noisy command into a hang.
     let mut so = child.stdout.take().ok_or("no stdout")?;
@@ -264,37 +359,33 @@ fn exec_command(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
     });
 
     let deadline = std::time::Instant::now() + timeout;
+    let mut was_cancelled = false;
     let status = loop {
         match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
             Some(s) => break Some(s),
+            None if cancel.is_some_and(CancelHandle::is_cancelled) => {
+                was_cancelled = true;
+                kill_child_group(&mut child);
+                break None;
+            }
             None if std::time::Instant::now() >= deadline => {
-                // On Unix, kill the entire process group with a negative PGID.
-                // This ensures all child and grandchild processes are terminated simultaneously,
-                // releasing standard stream pipe handles so reader threads unblock promptly.
-                #[cfg(unix)]
-                {
-                    let pgid = child.id() as i32;
-                    if pgid > 0 {
-                        unsafe {
-                            libc::kill(-pgid, libc::SIGKILL);
-                        }
-                    } else {
-                        let _ = child.kill();
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = child.kill();
-                }
-                let _ = child.wait();
+                kill_child_group(&mut child);
                 break None;
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     };
 
+    if let Some(handle) = cancel {
+        handle.clear_pgid();
+    }
+
     let stdout = t_out.join().unwrap_or_default();
     let stderr = t_err.join().unwrap_or_default();
+
+    if was_cancelled {
+        return Err("command cancelled".into());
+    }
 
     match status {
         Some(s) => Ok(Output {
@@ -333,10 +424,8 @@ impl LocalShell {
             profile: Some(profile.into()),
         }
     }
-}
 
-impl Shell for LocalShell {
-    fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+    fn build_command(&self, command: &str, cwd: &Path) -> Result<Command, String> {
         let full_command = inherited_path_prefix() + command;
         let command = full_command.as_str();
         let mut cmd = match &self.profile {
@@ -414,6 +503,13 @@ impl Shell for LocalShell {
         };
         cmd.current_dir(cwd);
         scrub(&mut cmd);
+        Ok(cmd)
+    }
+}
+
+impl Shell for LocalShell {
+    fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let cmd = self.build_command(command, cwd)?;
         exec_command(cmd, timeout)
     }
 
@@ -431,6 +527,24 @@ impl Shell for LocalShell {
     }
 }
 
+/// A [`LocalShell`] whose running command can be stopped via a [`CancelHandle`].
+#[derive(Debug, Clone)]
+pub struct CancellableLocalShell {
+    pub inner: LocalShell,
+    pub cancel: Arc<CancelHandle>,
+}
+
+impl Shell for CancellableLocalShell {
+    fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let cmd = self.inner.build_command(command, cwd)?;
+        exec_command_cancellable(cmd, timeout, Some(&self.cancel))
+    }
+
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+}
+
 /// Commands run inside an already-running container via `docker exec`.
 ///
 /// The case the previous harness handled with a prose instruction. Here the model still calls
@@ -442,16 +556,20 @@ pub struct ContainerShell {
     pub workdir: PathBuf,
 }
 
-impl Shell for ContainerShell {
-    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        // Construct docker exec invocation targeting the running container and its workdir.
+impl ContainerShell {
+    fn build_command(&self, command: &str) -> Command {
         let mut cmd = Command::new("docker");
         cmd.args(["exec", "-i", "-w"])
             .arg(&self.workdir)
             .arg(&self.container_id)
             .args(["bash", "-lc", command]);
-        // Delegate to exec_command to ensure process group isolation and timeout parity.
-        exec_command(cmd, timeout)
+        cmd
+    }
+}
+
+impl Shell for ContainerShell {
+    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        exec_command(self.build_command(command), timeout)
     }
 
     fn describe(&self) -> String {
@@ -460,6 +578,27 @@ impl Shell for ContainerShell {
              installed there, not on the host.",
             self.workdir.display()
         )
+    }
+}
+
+/// A [`ContainerShell`] whose running command can be stopped via a [`CancelHandle`].
+#[derive(Debug, Clone)]
+pub struct CancellableContainerShell {
+    pub inner: ContainerShell,
+    pub cancel: Arc<CancelHandle>,
+}
+
+impl Shell for CancellableContainerShell {
+    fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        exec_command_cancellable(
+            self.inner.build_command(command),
+            timeout,
+            Some(&self.cancel),
+        )
+    }
+
+    fn describe(&self) -> String {
+        self.inner.describe()
     }
 }
 

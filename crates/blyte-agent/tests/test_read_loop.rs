@@ -76,7 +76,7 @@ fn same_read_every_turn_warns_on_third_and_stops_after_31_turns() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("goal", "");
@@ -151,7 +151,7 @@ fn write_every_second_turn_never_warns_or_stops_early() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("goal", "");
@@ -209,7 +209,7 @@ fn two_different_reads_alternating_warn_from_each_ones_third_occurrence() {
         on_event: None,
         research: false,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("goal", "");
@@ -278,7 +278,7 @@ fn turn_8_reminder_sent_when_report_missing_and_not_when_it_has_content() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("goal", "");
     let (outcome, _) = runner_missing.run(&mut state);
@@ -329,7 +329,7 @@ fn turn_8_reminder_sent_when_report_missing_and_not_when_it_has_content() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("goal", "");
     let (outcome, _) = runner_present.run(&mut state);
@@ -376,7 +376,7 @@ fn research_20_repeat_warning_added_once_and_third_use_mentions_report_md() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("goal", "");
@@ -476,7 +476,7 @@ fn research_at_30_repeats_closes_reading_allows_write_and_ends_normally() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("goal", "test -s report.md");
@@ -572,7 +572,7 @@ fn research_at_30_repeats_exhausts_budget_after_3_grace_turns() {
         on_event: None,
         research: true,
         claim_check: false,
-        base_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
     };
 
     let mut state = State::new("goal", "test -s report.md");

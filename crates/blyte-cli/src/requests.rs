@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::ReviewVerdict;
-use crate::combine::{CombineRecord, CombineState, CombinedRun};
+use crate::combine::{CombineCheck, CombineRecord, CombineState, CombinedRun};
 use crate::serve::Surface;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -139,6 +139,8 @@ pub struct RequestStatus {
     pub branch: Option<String>,
     pub base: Option<String>,
     pub commits: Vec<CommitSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<CombineCheck>,
     pub conflicting_run: Option<String>,
     pub conflicting_files: Vec<String>,
     pub failing_step: Option<String>,
@@ -994,6 +996,7 @@ fn build_request_status(
         branch: None,
         base: None,
         commits: Vec::new(),
+        check: None,
         conflicting_run: None,
         conflicting_files: Vec::new(),
         failing_step: None,
@@ -1097,6 +1100,7 @@ fn build_request_status(
             status.branch = Some(rec.branch.clone());
             status.base = Some(rec.base.clone());
             status.commits = commits;
+            status.check = Some(rec.check);
             status.conflicting_run = rec.conflicting_run.clone();
             status.conflicting_files = rec.conflicting_files.clone();
             status.failing_step = rec.failing_step.clone();
@@ -1132,6 +1136,7 @@ fn populate_record_metadata(root: &Path, rec: &CombineRecord, status: &mut Reque
     if let Ok(commits) = resolve_commit_summaries(root, &rec.commits) {
         status.commits = commits;
     }
+    status.check = Some(rec.check);
     status.conflicting_run = rec.conflicting_run.clone();
     status.conflicting_files = rec.conflicting_files.clone();
     status.failing_step = rec.failing_step.clone();
