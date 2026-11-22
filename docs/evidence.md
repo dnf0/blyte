@@ -387,8 +387,8 @@ Both fixes did what they were for: one combine per trial, and a run is held only
 its content (here "possible fallbacks added", on the `clean --json` run each time). The total did
 not fall. Two things outweighed the saving:
 
-- The `clean --json` run alone cost USD 2.5 to 2.9 in T4 to T6 against about USD 2.0 to 2.6 before;
-  the spread between runs of the same task is larger than what the fixes save.
+- The `clean --json` run alone cost USD 2.5 to 2.9 in T4 to T6 against USD 2.0 to 2.8 before; the
+  spread between runs of the same task is larger than what the fixes save.
 - In T6 the orchestrator recorded the `clean --json` run as redone, with the note that it "died
   without writing" its summary, and dispatched it again. The run had in fact ended verified. That
   one decision added a fourth run (USD 2.05) and about 25 minutes.

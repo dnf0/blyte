@@ -325,3 +325,50 @@ session is idle and the next poll combines. Do not change `combine.rs`, `publish
 and is not in this worktree.
 
 **Commit message.** `fix(surface): combine a request only when the orchestrator's turn has ended`
+
+### Task F3: `/api/runs` fails when a run's worktree disappears while it is being read
+
+**Goal.** On CI (macOS, 2026-11-22) the test
+`surface_dispatch_carries_current_request_and_two_messages_get_two_ids` in
+`crates/blyte-cli/tests/test_dispatch_request.rs` failed once at its `GET /api/runs` assertion
+(expected 200, got 500) with the body:
+
+`run M2 started from <sha>, which is not in this repository (git cat-file in <repo>/.wt/M2: fatal: Unable to read current working directory: No such file or directory)`
+
+It passes on most runs. The error comes from `crates/blyte-cli/src/queue_actions.rs` (about line
+184): the code found that the worktree `.wt/M2` existed (`wt_exists`), and by the time it ran
+`git cat-file` there the directory was gone. Find what removes `.wt/M2` during that test and make
+the outcome the same every time.
+
+**Files.** `crates/blyte-cli/src/queue_actions.rs`; `crates/blyte-cli/src/serve.rs` and the module
+that removes finished worktrees (find it: the removal done by `blyte dispatch` and `blyte clean`)
+only as the cause requires; `crates/blyte-cli/tests/test_dispatch_request.rs`; a new test file
+under `crates/blyte-cli/tests/` if needed.
+
+**What to build.**
+- First find the cause and state it in the report with file and line: which code removes the
+  worktree, and why it can still be running (or run) when the test's `GET /api/runs` reads it.
+- If the removal is legitimate (a finished run's worktree may be removed at any time by another
+  `blyte` process), then reading a run must not depend on the worktree still being there between
+  two steps: decide once per run whether its worktree is present, and when it is not, take the
+  existing path for a run with no worktree (the `else` of `if wt_exists`). A worktree that vanishes
+  part-way must lead to that same path, not to a 500 for the whole listing. Commands that only
+  need the object database (`git cat-file -e <sha>^{commit}`) run in the repository root, not in
+  the worktree.
+- If the removal is not legitimate (the test or the code removes a worktree it should keep), fix
+  that instead, and say so.
+- Do not add sleeps, retries or loosened assertions.
+
+**Tests.**
+- A test that fails before the fix every time: build the state the race produces (a run whose
+  start file and summary exist and whose worktree directory is removed, by the test, at the point
+  the cause identifies; if the cause is a vanished worktree, simply remove `.wt/<id>` after the
+  run finishes) and assert `GET /api/runs` returns 200 and lists the run.
+- Run `cargo test -p blyte --test test_dispatch_request` 20 times in a row and report the count.
+Then the gate.
+
+**Constraints.** No fallbacks: a start commit that is truly not in the repository is still the
+error it is today; only "the worktree is gone" changes path. Existing tests pass unmodified.
+Depends on: none. Siblings: none.
+
+**Commit message.** `fix(surface): list runs when a finished run's worktree has been removed`
