@@ -32,10 +32,19 @@ thread_local! {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteScope {
     pub allowed: Vec<PathBuf>,
+    pub edit_worktrees: Option<PathBuf>,
 }
 
-pub const BLYTE_TOOL_COMMANDS: [&str; 7] = [
-    "dispatch", "wait", "status", "review", "plan", "init", "clean",
+pub const BLYTE_TOOL_COMMANDS: [&str; 9] = [
+    "dispatch",
+    "wait",
+    "status",
+    "review",
+    "plan",
+    "init",
+    "clean",
+    "edit-start",
+    "edit-finish",
 ];
 
 pub fn set_blyte_request(request: Option<String>) {
@@ -363,6 +372,32 @@ fn split_grep_prefix(line: &str) -> (&str, &str) {
 /// killed, the model is told so, and it can re-issue something narrower.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Ceiling on `blyte edit-finish`, which runs the repository's verification gate in the foreground
+/// and therefore needs a gate-sized budget rather than the 300s exploration command limit.
+pub const EDIT_FINISH_TIMEOUT: Duration = Duration::from_secs(3600);
+
+pub fn blyte_command_timeout(subcommand: &str) -> Duration {
+    if subcommand == "edit-finish" {
+        EDIT_FINISH_TIMEOUT
+    } else {
+        COMMAND_TIMEOUT
+    }
+}
+
+fn command_ceiling(name: &str, args: &Value) -> Duration {
+    if name == "blyte" {
+        if let Some(first) = args
+            .get("args")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+        {
+            return blyte_command_timeout(first);
+        }
+    }
+    COMMAND_TIMEOUT
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutcome {
     pub content: String,
@@ -508,6 +543,50 @@ fn resolve_real_target(fs: &dyn Fs, path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+fn path_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot check {}: {e}", path.display())),
+    }
+}
+
+/// Reports whether `real_target` lies inside an open direct edit's worktree under
+/// `edit_worktrees`: `<edit_worktrees>/<id>/<rest>` where `<edit_worktrees>/<id>.edit.json`
+/// exists, `<edit_worktrees>/<id>.json` does not, and no path component below `<id>/` is `.git`.
+fn is_in_open_edit_worktree(edit_worktrees: &Path, real_target: &Path) -> Result<bool, String> {
+    use std::path::Component;
+    let Ok(rel) = real_target.strip_prefix(edit_worktrees) else {
+        return Ok(false);
+    };
+    let mut comps = rel.components();
+    let Some(Component::Normal(id)) = comps.next() else {
+        return Ok(false);
+    };
+    let mut has_child = false;
+    for comp in comps {
+        has_child = true;
+        match comp {
+            Component::Normal(name) if name == ".git" => return Ok(false),
+            Component::Normal(_) => {}
+            _ => return Ok(false),
+        }
+    }
+    if !has_child {
+        return Ok(false);
+    }
+    let mut edit_name = id.to_os_string();
+    edit_name.push(".edit.json");
+    let edit_marker = edit_worktrees.join(edit_name);
+    if !path_exists(&edit_marker)? {
+        return Ok(false);
+    }
+    let mut summary_name = id.to_os_string();
+    summary_name.push(".json");
+    let summary_marker = edit_worktrees.join(summary_name);
+    Ok(!path_exists(&summary_marker)?)
+}
+
 fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
     let Some(scope) = write_scope() else {
         return Ok(());
@@ -515,6 +594,11 @@ fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String>
     let real_target = resolve_real_target(fs, path)?;
     if scope.allowed.iter().any(|dir| real_target.starts_with(dir)) {
         return Ok(());
+    }
+    if let Some(edit_worktrees) = &scope.edit_worktrees {
+        if is_in_open_edit_worktree(edit_worktrees, &real_target)? {
+            return Ok(());
+        }
     }
     let allowed_list = scope
         .allowed
@@ -729,7 +813,7 @@ pub fn specs() -> Vec<ToolSpec> {
     if blyte_tool().is_some() {
         tools.push(ToolSpec {
             name: "blyte".into(),
-            description: "Run one of blyte's own commands on the host: dispatch, wait, status, review, plan, init, clean.".into(),
+            description: "Run one of blyte's own commands on the host: dispatch, wait, status, review, plan, init, clean, edit-start, edit-finish.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -814,9 +898,10 @@ pub fn execute_with_deadline(
     args: &Value,
     deadline: Option<std::time::Instant>,
 ) -> ToolOutcome {
+    let ceiling = command_ceiling(name, args);
     let command_timeout = match deadline {
-        Some(d) => COMMAND_TIMEOUT.min(d.saturating_duration_since(std::time::Instant::now())),
-        None => COMMAND_TIMEOUT,
+        Some(d) => ceiling.min(d.saturating_duration_since(std::time::Instant::now())),
+        None => ceiling,
     };
     execute_with_timeout(root, shell, fs, name, args, command_timeout)
 }
@@ -829,7 +914,8 @@ pub fn execute_with_timeout(
     args: &Value,
     timeout: Duration,
 ) -> ToolOutcome {
-    let mut outcome = execute_unbounded(root, shell, fs, name, args, COMMAND_TIMEOUT.min(timeout));
+    let ceiling = command_ceiling(name, args);
+    let mut outcome = execute_unbounded(root, shell, fs, name, args, ceiling.min(timeout));
     outcome.content = if name == "read" {
         bound_output_with(&outcome.content, READ_LINE_BUDGET, READ_LINE_CHARS)
     } else if name == "grep" {
@@ -1236,7 +1322,7 @@ fn execute_unbounded(
             }
 
             let mut exec_args = cmd_args.clone();
-            if first == "dispatch" {
+            if matches!(first, "dispatch" | "edit-finish") {
                 if cmd_args
                     .iter()
                     .skip(1)

@@ -15,6 +15,10 @@ pub enum Command {
     Combine(CombineArgs),
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
     Dispatch(DispatchArgs),
+    /// Start a direct edit in its own git worktree (.wt/<id>, branch wip/<id>)
+    EditStart(EditStartArgs),
+    /// Verify and record a direct edit started with `blyte edit-start`
+    EditFinish(EditFinishArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
     Review(ReviewArgs),
     /// Remove finished worktrees and merged branches
@@ -167,6 +171,34 @@ pub struct MockArgs {
 pub struct CombineArgs {
     /// Request identifier whose passed runs should be combined
     pub request: String,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct EditStartArgs {
+    /// Identifier for this direct edit (used for worktree and branch wip/<id>)
+    pub id: String,
+
+    /// Short description of the requested change
+    #[arg(long, value_name = "TEXT")]
+    pub task: String,
+
+    /// The commit the new worktree starts from
+    #[arg(long, default_value = "HEAD")]
+    pub base: String,
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct EditFinishArgs {
+    /// Identifier given to `blyte edit-start`
+    pub id: String,
+
+    /// Request identifier this edit belongs to
+    #[arg(long, value_name = "ID")]
+    pub request: Option<String>,
+
+    /// Commit message used to commit uncommitted or untracked changes in the worktree
+    #[arg(long, value_name = "TEXT")]
+    pub message: Option<String>,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]

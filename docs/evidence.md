@@ -443,3 +443,40 @@ What this does and does not show:
   The concerns were not assessed.
 - In T8 the fresh review cost USD 0.54 and returned nothing (the reply was cut off at the output
   limit).
+
+## A small change: the conversation model edits directly, against one run
+
+2026-11-23, `gemini-4-neon` for every model call. Two small, fully specified requests typed into
+the surface: (A) end a flag that is cut at 200 characters with `…`, with a test; (B) add one
+sentence to `docs/usage.md`. Three trials each way. A script stood in for the user: it would have
+answered "no" to any approval and accepted any held run; neither happened in any trial.
+
+- **Direct edit** (E): the repository's process addition told the conversation model to make a
+  small, fully specified change itself: `blyte edit-start`, the write tools in the worktree it
+  prints, `blyte edit-finish <id> --message`, which commits, runs the repository's check and
+  records the edit as a run.
+- **One run** (N): the default process, which hands the request to one run.
+
+| | Direct edit, request A | Direct edit, request B | One run, request A | One run, request B |
+|---|---|---|---|---|
+| Result | combined, 3 of 3 | combined, 3 of 3 | combined, 3 of 3 | combined, 3 of 3 |
+| Wall time (seconds) | 478, 697, 1360 | 608, 2072, 1166 | 1485, 876, 888 | 2199, 697, 1617 |
+| Inside `edit-finish` or the run (seconds) | 399, 603, 469 | 503, 669, 619 | 841, 805, 813 | 748, 638, 1106 |
+| Conversation model (USD) | 0.12, 0.16, 0.31 | 0.22, 0.20, 0.14 | 0.18, 0.20, 0.14 | 0.22, 0.17, 0.12 |
+| Implementer (USD) | none | none | 0.17, 0.19, 0.17 | 0.17, 0.18, 0.18 |
+| Implementer turns | none | none | 8, 10, 9 | 8, 8, 10 |
+
+A direct edit cost USD 0.12 to 0.31 (mean about 0.19); one run cost USD 0.31 to 0.40 (mean about
+0.35). The direct edit's model work was over 15 to 25 seconds after the request; a run spent
+about 3 to 5 minutes and 8 to 10 turns before its check. All twelve results were correct by
+reading: the six code changes cut at 199 characters and append `…`, with a test; the six docs
+changes add the one sentence and nothing else.
+
+Wall time does not separate the two. The check (about 7 to 11 minutes from a cold build) is paid
+either way, and all trials but the first ran two at a time and queued for the machine's check
+slots: one `edit-finish` waited 1989 seconds for a 669-second check.
+
+Limits: three trials a cell; both requests were fully specified, and the model chose a direct
+edit in all six E trials, so a borderline request was not tested; a direct edit has no fix round
+and no implementer to send review concerns back to; fresh-review cost is in neither figure. The
+default process is unchanged: direct edits are used only where a process file asks for them.

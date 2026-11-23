@@ -1,0 +1,301 @@
+# Direct edits for small changes: an experiment
+
+## Why
+
+On the surface the conversation model hands every request to one implementer run. For a
+three-task request that takes 22 to 25 minutes (`docs/evidence.md`, "One run by default"). A
+one-line change pays most of that too: writing a task, a worktree, the run's reading turns, the
+check, the fresh review, combining. This experiment lets the conversation model make a small
+change itself and measures whether that is faster and cheaper without losing the check.
+
+## Decisions
+
+1. **The check still decides.** A direct edit is made in its own worktree `.wt/<id>` on `wip/<id>`,
+   never in the user's checkout. It becomes a finished run only when the repository's gate has
+   passed on it, through a `blyte` subcommand that runs the gate itself. From there it goes down
+   the same path as an implementer run: flags, review queue, fresh review, combine, and the two
+   routes that push and open a pull request. The model still cannot push.
+2. **A direct edit is recorded as a run.** It gets the same files as a dispatched run
+   (`.wt/<id>.start.json`, `.wt/<id>.json`, `.wt/<id>.task.md`, `.wt/<id>.checks.json`), with
+   `"kind": "edit"` in the start file, so the surface, the review queue and combine need no change.
+3. **Off unless the process says so.** The default process (`assets/orchestrator/process.md`) is
+   not changed here. The subcommands exist and the `blyte` tool allows them; the trial supplies a
+   process that tells the model when to use them. The default changes only after the measurement.
+4. **Not in this experiment:** stopping the model's `write`/`edit` tools and sandboxed shell from
+   writing to the main checkout, `.git` or `.wt/` directly. That gap exists today, with or without
+   direct edits (the sandbox allows writes anywhere in the repository). It is the next piece of
+   work if direct edits are kept.
+
+## Measurement (done by the planner, not a task)
+
+Two small requests against the same base, three trials each, with the process that allows direct
+edits and with the default process: minutes from message to a combined branch, total USD,
+conversation-model USD, and whether the result is right (read, not only checked).
+
+### Task E1
+
+**Goal.** Add `blyte edit-start` and `blyte edit-finish`, and let the conversation model's `blyte`
+tool call them, so a change the conversation model makes itself is gated and recorded exactly as
+a dispatched run is.
+
+**Files.**
+- New `crates/blyte-cli/src/direct_edit.rs`, registered in `lib.rs`.
+- `crates/blyte-cli/src/cli.rs`, `crates/blyte-cli/src/main.rs` (the two subcommands).
+- `crates/blyte-agent/src/tools.rs` (the `blyte` tool: allow them, inject the request, time limit).
+- `crates/blyte-cli/assets/orchestrator/reference.md` (document both; one short section).
+- New `crates/blyte-cli/tests/test_direct_edit.rs`; a test beside the existing `blyte` tool tests
+  in `crates/blyte-agent/tests/` for the tool changes.
+- Do **not** change `assets/orchestrator/process.md`, `combine.rs`, `requests.rs`, `serve.rs` or
+  `assets/surface/index.html`.
+
+**What to build.**
+
+1. `blyte edit-start <id> --task <text> [--base <ref>]`
+   - `<id>` is validated exactly as `blyte dispatch` validates a run id (reuse that function).
+     Refuse, naming what exists, if `.wt/<id>`, `.wt/<id>.start.json`, `.wt/<id>.edit.json` or
+     the branch `wip/<id>` already exists.
+   - `--task` is required and must not be empty after trimming: the user's request in a sentence
+     or two. Written to `.wt/<id>.task.md`.
+   - The base is resolved exactly as `blyte dispatch` resolves it (same default when `--base` is
+     absent, same error when it does not resolve). Reuse dispatch's code; do not write a second
+     rule.
+   - Creates the worktree `.wt/<id>` on new branch `wip/<id>` at the base commit, and runs
+     `[dispatch].setup` in it the way dispatch does (`setup::run_setup`). A setup failure removes
+     the worktree and branch and is an error.
+   - Writes `.wt/<id>.edit.json`: `id`, `base`, `base_sha`, `started_at`.
+   - Prints one JSON object: `id`, `path` (absolute path of the worktree), `base_sha`. Exit 0.
+2. `blyte edit-finish <id> [--request <request>]`
+   - Requires `.wt/<id>.edit.json` (missing: error naming it). `--request`, when given, is
+     validated with `dispatch::validate_request_id`.
+   - Errors, each naming the cause, and writes nothing: the worktree has uncommitted or untracked
+     changes; `wip/<id>` has no commit beyond `base_sha`.
+   - Runs the same gate a dispatched run gets: the comment step against `base_sha` followed by
+     `[dispatch].gate`, with `[dispatch].env`, in the worktree (`dispatch::gate_with_comment_step`,
+     `run_gate_steps`). If the tip's tree has already passed this gate
+     (`passed_trees::has_passed` with the same key dispatch uses), the gate is not run again.
+   - **Gate fails:** print one JSON object `{ "id", "outcome": "gate_failed", "failing_step",
+     "output_tail" }`, exit 1, and write no start file and no summary. The model can fix, commit
+     and call `edit-finish` again: that is the resume path.
+   - **Gate passes:** record the tree as passed (`passed_trees::record_passed`); write
+     `.wt/<id>.start.json` with `dispatch::write_start_record` (same fields a dispatch writes,
+     with `request` when given, plus `"kind": "edit"`; add that field to the record as an optional
+     one that dispatch leaves out); write the summary `.wt/<id>.json` with the fields a dispatched
+     run's summary has: `outcome` `verified`, `exit` 0, `branch`, `commits`, `changed_files`,
+     `turns` 0, `cost_usd` 0.0, `seconds` (the time the gate took), `final_message` (the task
+     text); then call `queue_actions::evaluate_verified_run` for it, as a finished dispatch does.
+     Print the summary JSON, exit 0.
+   - Calling `edit-finish` again after it has passed is an error naming `.wt/<id>.json`.
+   - The summary is written last: a start file without a summary must never be left behind by a
+     pass (write the summary and start file so that a crash between them leaves a state the next
+     `edit-finish` call completes, and test it).
+3. The `blyte` tool in `crates/blyte-agent/src/tools.rs`:
+   - `BLYTE_TOOL_COMMANDS` gains `edit-start` and `edit-finish`.
+   - `--request <BLYTE_REQUEST>` is injected into `edit-finish` the same way it is injected into
+     `dispatch` (same code path, same behaviour when no request is set).
+   - `edit-finish` runs the gate, which takes longer than the tool's 300-second limit on a
+     foreground `blyte` call. Give `edit-finish` alone a limit of 3600 seconds (a named constant
+     with a comment saying why). Every other command keeps 300.
+4. `reference.md`: a short section, in the file's existing style, that documents both commands,
+   what each prints, and that edits go in the worktree path `edit-start` prints, are committed
+   there, and that `edit-finish` runs the check. It does not say when to edit directly: that
+   belongs to the process.
+
+**Tests** (`tests/test_direct_edit.rs`, real temporary git repositories with a `blyte.toml`
+whose gate is a shell one-liner, as the existing dispatch and combine tests do).
+- `edit-start` creates the worktree, branch, task file and edit file, and prints the JSON;
+  refuses an existing id (each of the four cases); refuses an empty `--task`; errors on a base
+  that does not resolve; a failing setup leaves no worktree and no branch.
+- `edit-finish`: missing edit file; dirty worktree; no commits; each an error that names the
+  cause and leaves no start file or summary.
+- gate fails (`gate = "false"`-style): exit 1, JSON with `gate_failed` and the failing step, no
+  start file, no summary; then, after a fixing commit and a passing gate, a second `edit-finish`
+  succeeds.
+- gate passes: start file has `kind` `edit`, the request when given, `base_sha`; summary has
+  `outcome` `verified`, the commit and the changed file; a checks file exists; the tree is
+  recorded as passed; a second `edit-finish` is an error.
+- the gate is not run when the tree has already passed (use a gate that appends to a counter
+  file outside the worktree).
+- end to end with the existing code: after a passing `edit-finish --request R`,
+  `requests::request_readiness(root, R)` is `Ready` (or waiting only for a flag) and
+  `combine::combine_in(root, R, ..)` produces a `combined` record whose branch contains the
+  commit and whose `check` is `already_passed`.
+- tool tests: `edit-start` and `edit-finish` are accepted; another command is still refused;
+  `edit-finish` gets `--request` injected when a request is set and not otherwise; the time
+  limit chosen for `edit-finish` is 3600 and for `dispatch` 300 (test the function that picks it).
+
+Run: `cargo test -p blyte --test test_direct_edit` and the `blyte-agent` test file you add to.
+
+**Constraints.**
+- **No fallbacks**: a missing or unreadable input is an error that names it; never a default, an
+  empty result or a skipped step.
+- **Resumable**: everything is in `.wt/` files; a failed or interrupted `edit-finish` can be run
+  again.
+- Neither command pushes, opens a pull request, merges, or touches the user's checked-out branch.
+- Existing tests pass unmodified, except where the start record's new optional field needs a
+  struct literal updated.
+- Keep existing comments; do not delete comments from code you do not change.
+- Depends on: none. Siblings: none.
+
+**Commit message.**
+`feat(surface): edit-start and edit-finish, a gated path for a change the conversation model makes itself`
+
+## After the write restriction (2026-11-23)
+
+The conversation model can now write only in `.wt/tasks` and temporary directories; its shell
+cannot write in the repository or in `.git` at all. So, as built in E1, a direct edit cannot be
+made (the write tools ask for approval in `.wt/<id>`) or committed (`git commit` in the worktree
+writes to the main checkout's `.git`). Decisions:
+
+5. **The write tools may write in an open edit's worktree, and nowhere else new.** An edit is
+   open when `.wt/<id>.edit.json` exists and `.wt/<id>.json` does not. The shell's sandbox is
+   not widened.
+6. **`edit-finish` makes the commit.** The model never runs `git commit`; `edit-finish` takes
+   the message, commits what the write tools left in the worktree, then runs the check.
+
+### Task E2
+
+**Goal.** Make a direct edit possible under the write restriction: the `write` and `edit` tools
+may write inside an open edit's worktree without approval, and `blyte edit-finish` commits the
+changes itself.
+
+**Files.**
+- `crates/blyte-agent/src/tools.rs` (`WriteScope`, `check_write_scope`).
+- `crates/blyte-cli/src/task_runner.rs` (`configure_orchestrate_policy` fills the new field).
+- `crates/blyte-cli/src/direct_edit.rs`, `crates/blyte-cli/src/cli.rs` (`--message`).
+- `crates/blyte-cli/assets/orchestrator/reference.md` (the "Direct edits" section),
+  `crates/blyte-cli/src/orchestrator_text.rs` (`SANDBOX_ON_PARAGRAPH`).
+- Tests: `crates/blyte-cli/tests/test_direct_edit.rs`; the existing write-scope tests' file in
+  `crates/blyte-agent/tests/` (find it by searching for `set_write_scope`); any test that builds a
+  `WriteScope` literal or asserts `SANDBOX_ON_PARAGRAPH` text gets the minimal update.
+- Do **not** change `crates/blyte-agent/src/sandbox.rs`, `assets/orchestrator/process.md`,
+  `combine.rs`, `requests.rs`, `serve.rs` or `assets/surface/index.html`.
+
+**What to build.**
+
+1. `WriteScope` gains `pub edit_worktrees: Option<PathBuf>`: the canonical `.wt` directory of the
+   main checkout, or `None` when direct edits are not available. `configure_orchestrate_policy`
+   sets it to the canonical parent of the tasks directory it already canonicalises.
+2. `check_write_scope`: after the existing `allowed` test and before asking for approval, a
+   write is allowed without approval when all of these hold for the resolved real target:
+   - it is under `<edit_worktrees>/<id>/` for a single path component `<id>`;
+   - `<edit_worktrees>/<id>.edit.json` exists and `<edit_worktrees>/<id>.json` does not (read
+     through the `Fs` the function already receives if it offers an existence test, otherwise
+     `std::fs`; an error other than "not found" while testing is returned as the tool's error,
+     naming the path, not treated as "does not exist");
+   - no component of the path below `<id>/` is `.git` (the worktree's `.git` file must not be
+     writable).
+   Otherwise behaviour is unchanged: the approval request, and the same refusal messages. Put the
+   rule in one small function with a doc comment.
+3. `blyte edit-finish <id> [--request <request>] [--message <text>]`:
+   - Worktree has uncommitted or untracked changes and `--message` is given (not empty after
+     trimming; an empty one is an error): run `git add -A` and `git commit --no-gpg-sign -m
+     <message>` in the worktree (use the same way of running git the file already uses, in the
+     worktree, never the current directory). A failing git command is an error naming the
+     command and its stderr; nothing else is written.
+   - Worktree has uncommitted or untracked changes and no `--message`: the existing error, with
+     "pass --message to commit them" added.
+   - Worktree clean: `--message` is ignored only if there is nothing to commit **and** there is
+     at least one commit beyond `base_sha` (the resume case after a failed check where the fix was
+     already committed); a clean worktree with no commit beyond `base_sha` stays the existing
+     error.
+   - Everything after the commit is as it is now.
+4. The `blyte` tool: nothing to change unless `--message` needs passing through; confirm with a
+   test that `edit-finish X --message "fix: y"` reaches the command with the message intact
+   (a message with spaces and a quote character).
+5. `reference.md` "Direct edits": edits are made with the `write` and `edit` tools in the path
+   `edit-start` prints; the shell cannot write there; do not run `git commit`; `edit-finish <id>
+   --message "<conventional commit subject>"` commits and runs the check; after a failed check,
+   edit again and call it again with a message. `SANDBOX_ON_PARAGRAPH`: add that the write tools
+   can also write in the worktree of an edit started with `blyte edit-start`, until it finishes.
+
+**Tests.**
+- Write scope (agent crate, real temporary directories): with `edit_worktrees` set and
+  `X.edit.json` present, a write to `<wt>/X/src/a.rs` succeeds with an approver that would refuse
+  (prove the approver was not asked); with `X.json` also present it is refused; with no
+  `X.edit.json` it is refused; `<wt>/X/.git` and `<wt>/X/sub/.git/config` are refused;
+  `<wt>/X.json`, `<wt>/X.edit.json`, `<wt>/Y/a.rs` (no edit file for Y) and a path reaching
+  `<wt>/X/` through a symlink placed in the tasks directory that points outside are each handled
+  by the resolved real target (the symlink to an open edit's worktree is allowed; one to the main
+  checkout is refused); `edit_worktrees: None` refuses all of them.
+- `edit-finish` (`test_direct_edit.rs`): dirty worktree with `--message` commits with exactly
+  that subject, includes an untracked new file, then passes the gate and writes the summary with
+  that commit; dirty with no `--message` is an error mentioning `--message` and leaves no start
+  file or summary and no commit; empty `--message` is an error; gate fails after the commit, a
+  further edit plus a second `edit-finish --message` adds a second commit and passes; clean
+  worktree with an earlier commit and `--message` given passes without a new commit; a commit
+  that git refuses (use a `pre-commit` hook that exits 1 in the test repository) is an error that
+  includes the hook's stderr and writes no summary.
+
+Run: `cargo test -p blyte --test test_direct_edit`, the agent test file you change, then the
+repository's full check.
+
+**Constraints.**
+- **No fallbacks**: a path whose state cannot be determined is an error naming it, never
+  "allowed" and never silently "refused" without the reason.
+- **Resumable**: `edit-finish` can be called again after any failure.
+- The shell sandbox is not widened. No command pushes, opens a pull request or merges.
+- Existing tests pass unmodified except where named above.
+- Keep existing comments.
+- Depends on: E1 (already on this branch). Siblings: none.
+
+**Commit message.**
+`feat(surface): a direct edit is written with the write tools and committed by edit-finish`
+
+## Found by the pilot trial (2026-11-23)
+
+A direct edit passed its check and was then never combined: the surface lists runs through
+`live_runs::collect` (`dashboard::collect_jobs`), which leaves out a run that has neither
+`.wt/<id>.report.json` nor `.wt/<id>.log` once its process has exited. A direct edit writes
+neither, so `/api/runs` was empty and nothing triggered the combine. E1's claim that the surface
+needs no change was tested only against `request_readiness` and `combine_in`.
+
+### Task E3
+
+**Goal.** A finished direct edit appears on the surface as a finished run and its request is
+combined, exactly as for a dispatched run.
+
+**Files.**
+- `crates/blyte-cli/src/direct_edit.rs`.
+- `crates/blyte-cli/tests/test_direct_edit.rs`.
+- Do **not** change `dashboard.rs`, `live_runs.rs`, `serve.rs`, `requests.rs`, `combine.rs` or
+  `assets/surface/index.html`. If the goal cannot be met without changing one of them, stop and
+  say which and why in the final message instead of changing it.
+
+**What to build.**
+1. `edit-finish`, when the check passes, also writes the two files a dispatched run leaves:
+   - `.wt/<id>.report.json`: the same report type a dispatch writes there (find where
+     `dispatch.rs` writes `report.json` and use the same type and writer), with outcome
+     `verified`, the task text as the final message, zero turns and zero cost, the gate attempt,
+     and every other field set to what is true for a run with no model turns. Do not invent
+     values: a field that has no true value for a direct edit is the type's "absent" form.
+   - `.wt/<id>.log`: the output of the check (each step's command and its output, in the order
+     run), so the surface's log view shows what was checked. If the check was skipped because the
+     tree had already passed, the log says exactly that in one line.
+   Both are written before the start file and the summary; the summary stays last. A failure to
+   write either is an error naming the path, and no summary is written.
+2. When the check fails, `.wt/<id>.log` is still written (replacing any earlier one) so the
+   failure can be read; no report, start file or summary, as now.
+
+**Tests** (`test_direct_edit.rs`).
+- After a passing `edit-finish --request R`: `live_runs::collect(root, now, 14)` lists the run
+  once, as finished (not running, not skipped), with request `R`, outcome verified and
+  `research` false; the report file parses with the dispatch report type; the log contains the
+  gate command and its output.
+- The same with the worktree's creating process long gone: the start file's `pid` is the
+  `edit-finish` process, which has exited by the time the surface looks; simulate by rewriting
+  `pid` in the start file to a pid that is not alive and assert the run is still listed.
+- A `Surface` built over the repository (as the existing serve or requests tests build one, with
+  an idle session): `requests::maybe_combine(&surface, R)` returns `true` and, once its thread
+  finishes, a combine record with result `combined` exists whose branch contains the commit.
+- Gate fails: the log exists and has the failing step's output; no report, start file or summary.
+- Already-passed tree: the log has the one line; the run is listed.
+
+Run: `cargo test -p blyte --test test_direct_edit`, then the repository's full check.
+
+**Constraints.**
+- **No fallbacks**; **resumable** (a second `edit-finish` after any failure completes the files).
+- Existing tests pass unmodified. Keep existing comments.
+- Depends on: E2 (on this branch). Siblings: none.
+
+**Commit message.**
+`fix(surface): a finished direct edit is listed as a run, so its request is combined`

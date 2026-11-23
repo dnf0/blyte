@@ -56,6 +56,12 @@ fn main() {
                 blyte_cli::update_notice::print_notice();
                 std::process::exit(blyte_cli::dispatch::run_dispatch(&args));
             }
+            blyte_cli::cli::Command::EditStart(args) => {
+                std::process::exit(blyte_cli::direct_edit::run_edit_start(&args));
+            }
+            blyte_cli::cli::Command::EditFinish(args) => {
+                std::process::exit(blyte_cli::direct_edit::run_edit_finish(&args));
+            }
             blyte_cli::cli::Command::Review(args) => {
                 blyte_cli::update_notice::print_notice();
                 std::process::exit(blyte_cli::dispatch::run_review(&args));

@@ -7,13 +7,18 @@ use blyte_agent::shell::LocalShell;
 use blyte_agent::tools::{execute, set_approval, set_write_scope, WriteScope};
 use serde_json::json;
 
-struct ScopeGuard;
+static SCOPE_LOCK: Mutex<()> = Mutex::new(());
+
+struct ScopeGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
 
 impl ScopeGuard {
     fn install(scope: Option<WriteScope>, approval: Option<ApprovalConfig>) -> Self {
+        let lock = SCOPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_write_scope(scope);
         set_approval(approval);
-        Self
+        Self { _lock: lock }
     }
 }
 
@@ -83,6 +88,7 @@ fn write_and_edit_enforce_write_scope_and_approval() {
     let _guard = ScopeGuard::install(
         Some(WriteScope {
             allowed: vec![allowed_canon.clone()],
+            edit_worktrees: None,
         }),
         Some(ApprovalConfig {
             rules: Vec::new(),
@@ -342,4 +348,212 @@ fn write_and_edit_enforce_write_scope_and_approval() {
         assert!(root.join(".git/config").exists());
     }
     assert!(approver.take_calls().is_empty());
+}
+
+#[test]
+fn write_and_edit_allow_open_direct_edit_worktrees_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let wt_dir = root.join(".wt");
+    let tasks_dir = wt_dir.join("tasks");
+    let edit_wt = wt_dir.join("X");
+    let other_wt = wt_dir.join("Y");
+    let main_src = root.join("src");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::create_dir_all(&edit_wt).unwrap();
+    std::fs::create_dir_all(&other_wt).unwrap();
+    std::fs::create_dir_all(&main_src).unwrap();
+
+    let tasks_canon = tasks_dir.canonicalize().unwrap();
+    let wt_canon = wt_dir.canonicalize().unwrap();
+
+    std::fs::write(wt_dir.join("X.edit.json"), "{}\n").unwrap();
+
+    let approver = Arc::new(RecordingApprover::new(Approval::Denied));
+    let _guard = ScopeGuard::install(
+        Some(WriteScope {
+            allowed: vec![tasks_canon.clone()],
+            edit_worktrees: Some(wt_canon.clone()),
+        }),
+        Some(ApprovalConfig {
+            rules: Vec::new(),
+            approver: approver.clone(),
+        }),
+    );
+
+    let shell = LocalShell::new();
+    let fs = LocalFs;
+
+    let r = execute(
+        root,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": ".wt/X/src/a.rs", "content": "pub fn a() {}\n" }),
+    );
+    assert!(!r.is_error, "{}", r.content);
+    assert_eq!(
+        std::fs::read_to_string(edit_wt.join("src/a.rs")).unwrap(),
+        "pub fn a() {}\n"
+    );
+    assert!(approver.take_calls().is_empty());
+
+    let r = execute(
+        root,
+        &shell,
+        &fs,
+        "edit",
+        &json!({ "path": ".wt/X/src/a.rs", "old": "fn a()", "new": "fn b()" }),
+    );
+    assert!(!r.is_error, "{}", r.content);
+    assert_eq!(
+        std::fs::read_to_string(edit_wt.join("src/a.rs")).unwrap(),
+        "pub fn b() {}\n"
+    );
+    assert!(approver.take_calls().is_empty());
+
+    for rel in [
+        ".wt/X/.git",
+        ".wt/X/sub/.git/config",
+        ".wt/X.json",
+        ".wt/X.edit.json",
+        ".wt/Y/a.rs",
+    ] {
+        let r = execute(
+            root,
+            &shell,
+            &fs,
+            "write",
+            &json!({ "path": rel, "content": "blocked\n" }),
+        );
+        assert!(r.is_error, "write to {rel} must be refused");
+        assert!(
+            r.content.contains("write was not made"),
+            "{rel}: {}",
+            r.content
+        );
+        let calls = approver.take_calls();
+        assert_eq!(calls.len(), 1, "{rel}: {calls:?}");
+    }
+    assert!(!edit_wt.join(".git").exists());
+    assert!(!edit_wt.join("sub/.git/config").exists());
+    assert!(!wt_dir.join("X.json").exists());
+    assert!(!other_wt.join("a.rs").exists());
+    assert_eq!(
+        std::fs::read_to_string(wt_dir.join("X.edit.json")).unwrap(),
+        "{}\n"
+    );
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&edit_wt, tasks_dir.join("to_edit")).unwrap();
+        let r = execute(
+            root,
+            &shell,
+            &fs,
+            "write",
+            &json!({ "path": ".wt/tasks/to_edit/src/via_link.rs", "content": "ok\n" }),
+        );
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(edit_wt.join("src/via_link.rs")).unwrap(),
+            "ok\n"
+        );
+        assert!(approver.take_calls().is_empty());
+
+        std::os::unix::fs::symlink(&main_src, tasks_dir.join("to_main")).unwrap();
+        let r = execute(
+            root,
+            &shell,
+            &fs,
+            "write",
+            &json!({ "path": ".wt/tasks/to_main/escape.rs", "content": "bad\n" }),
+        );
+        assert!(r.is_error, "symlink to main checkout must be refused");
+        assert!(!main_src.join("escape.rs").exists());
+        assert_eq!(approver.take_calls().len(), 1);
+    }
+
+    std::fs::write(wt_dir.join("X.json"), "{}\n").unwrap();
+    let r = execute(
+        root,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": ".wt/X/src/after_finish.rs", "content": "blocked\n" }),
+    );
+    assert!(r.is_error, "finished edit worktree must be refused");
+    assert!(!edit_wt.join("src/after_finish.rs").exists());
+    assert_eq!(approver.take_calls().len(), 1);
+
+    std::fs::remove_file(wt_dir.join("X.json")).unwrap();
+    std::fs::remove_file(wt_dir.join("X.edit.json")).unwrap();
+    let r = execute(
+        root,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": ".wt/X/src/no_edit_file.rs", "content": "blocked\n" }),
+    );
+    assert!(r.is_error, "worktree without .edit.json must be refused");
+    assert!(!edit_wt.join("src/no_edit_file.rs").exists());
+    assert_eq!(approver.take_calls().len(), 1);
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(wt_dir.join("Z.edit.json"), wt_dir.join("Z.edit.json")).unwrap();
+        let loop_wt = wt_dir.join("Z");
+        std::fs::create_dir_all(&loop_wt).unwrap();
+        let r = execute(
+            root,
+            &shell,
+            &fs,
+            "write",
+            &json!({ "path": ".wt/Z/src/a.rs", "content": "blocked\n" }),
+        );
+        assert!(r.is_error, "unreadable marker must return error");
+        assert!(r.content.contains("Z.edit.json"), "{}", r.content);
+        assert!(approver.take_calls().is_empty());
+        assert!(!loop_wt.join("src/a.rs").exists());
+    }
+
+    std::fs::write(wt_dir.join("X.edit.json"), "{}\n").unwrap();
+    set_write_scope(Some(WriteScope {
+        allowed: vec![tasks_canon],
+        edit_worktrees: None,
+    }));
+    for rel in [
+        ".wt/X/src/none_case.rs",
+        ".wt/X/.git",
+        ".wt/X/sub/.git/config",
+        ".wt/X.json",
+        ".wt/X.edit.json",
+        ".wt/Y/a.rs",
+    ] {
+        let r = execute(
+            root,
+            &shell,
+            &fs,
+            "write",
+            &json!({ "path": rel, "content": "blocked\n" }),
+        );
+        assert!(r.is_error, "edit_worktrees: None must refuse {rel}");
+        assert_eq!(approver.take_calls().len(), 1, "{rel}");
+    }
+    #[cfg(unix)]
+    {
+        let r = execute(
+            root,
+            &shell,
+            &fs,
+            "write",
+            &json!({ "path": ".wt/tasks/to_edit/src/none_link.rs", "content": "blocked\n" }),
+        );
+        assert!(
+            r.is_error,
+            "edit_worktrees: None must refuse symlink to edit"
+        );
+        assert!(!edit_wt.join("src/none_link.rs").exists());
+        assert_eq!(approver.take_calls().len(), 1);
+    }
 }

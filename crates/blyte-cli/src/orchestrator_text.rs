@@ -8,7 +8,7 @@ pub const REFERENCE_DISPATCH_TOOL: &str =
     include_str!("../assets/orchestrator/reference-dispatch-tool.md");
 pub const DEFAULT_PROCESS: &str = include_str!("../assets/orchestrator/process.md");
 
-pub const SANDBOX_ON_PARAGRAPH: &str = "The shell is sandboxed: the shell and the write tools can write only in `.wt/tasks` and temporary directories,\ncannot read credentials and have no network. A command that must leave the sandbox (for example `git push`)\ntakes `unsandboxed` with a reason and runs only when the user approves, and a write or edit outside those\ndirectories also needs the user's approval.";
+pub const SANDBOX_ON_PARAGRAPH: &str = "The shell is sandboxed: the shell and the write tools can write only in `.wt/tasks` and temporary directories,\ncannot read credentials and have no network. The write tools can also write in the worktree of an edit started\nwith `blyte edit-start`, until it finishes. A command that must leave the sandbox (for example `git push`)\ntakes `unsandboxed` with a reason and runs only when the user approves, and a write or edit outside those\ndirectories also needs the user's approval.";
 pub const SANDBOX_OFF_PARAGRAPH: &str = "The shell is not sandboxed.";
 
 pub fn sandbox_start_line(sandbox_on: bool, allowed_in_advance: usize) -> String {

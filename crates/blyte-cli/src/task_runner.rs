@@ -155,6 +155,13 @@ pub fn configure_orchestrate_policy(
     let tasks_canon = tasks_dir
         .canonicalize()
         .map_err(|e| format!("cannot canonicalize {}: {e}", tasks_dir.display()))?;
+    let edit_worktrees = tasks_canon
+        .parent()
+        .map(|p| {
+            p.canonicalize()
+                .map_err(|e| format!("cannot canonicalize {}: {e}", p.display()))
+        })
+        .transpose()?;
     let mut allowed = vec![tasks_canon];
     for dir in blyte_agent::sandbox::orchestrator_allowed(root) {
         if let Ok(canon) = dir.canonicalize() {
@@ -163,7 +170,10 @@ pub fn configure_orchestrate_policy(
             }
         }
     }
-    blyte_agent::tools::set_write_scope(Some(blyte_agent::tools::WriteScope { allowed }));
+    blyte_agent::tools::set_write_scope(Some(blyte_agent::tools::WriteScope {
+        allowed,
+        edit_worktrees,
+    }));
     let rules = crate::approval_file::load()?;
     let count = rules.len();
     let approver: Arc<dyn blyte_agent::approval::Approver> = match approver {
