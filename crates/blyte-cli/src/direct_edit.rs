@@ -6,13 +6,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::{EditFinishArgs, EditStartArgs};
 use crate::dispatch::{CommitRecord, DispatchSummary};
+use crate::report::{RunRecord, UsageRecord, SCHEMA_VERSION};
 
 const TAIL_MAX_LINES: usize = 80;
 const TAIL_MAX_BYTES: usize = 8192;
+const ALREADY_PASSED_LOG: &str = "check skipped: tree already passed\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditRecord {
@@ -37,28 +40,87 @@ pub struct EditGateFailedOutput {
     pub output_tail: String,
 }
 
+struct StepOutput {
+    command: String,
+    output: String,
+}
+
+struct GateOutcome {
+    elapsed: Duration,
+    gate_attempts: u32,
+    gate_wait_ms: u64,
+    log_text: String,
+}
+
 struct EnvShell<S> {
     inner: S,
     env: BTreeMap<String, String>,
+    steps: Mutex<Vec<StepOutput>>,
 }
 
 impl<S: Shell> Shell for EnvShell<S> {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        if self.env.is_empty() {
-            return self.inner.exec(command, cwd, timeout);
-        }
-        let mut script = String::new();
-        for (k, v) in &self.env {
-            let quoted = format!("'{}'", v.replace('\'', "'\\''"));
-            script.push_str(&format!("export {k}={quoted}\n"));
-        }
-        script.push_str(command);
-        self.inner.exec(&script, cwd, timeout)
+        let res = if self.env.is_empty() {
+            self.inner.exec(command, cwd, timeout)
+        } else {
+            let mut script = String::new();
+            for (k, v) in &self.env {
+                let quoted = format!("'{}'", v.replace('\'', "'\\''"));
+                script.push_str(&format!("export {k}={quoted}\n"));
+            }
+            script.push_str(command);
+            self.inner.exec(&script, cwd, timeout)
+        };
+        let recorded = match &res {
+            Ok(out) => format_step_output(out),
+            Err(e) => format!("error: {e}\n"),
+        };
+        self.steps.lock().unwrap().push(StepOutput {
+            command: command.to_string(),
+            output: recorded,
+        });
+        res
     }
 
     fn describe(&self) -> String {
         self.inner.describe()
     }
+}
+
+fn format_step_output(out: &Output) -> String {
+    let mut text = String::new();
+    if !out.stdout.is_empty() {
+        text.push_str(&out.stdout);
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    if !out.stderr.is_empty() {
+        text.push_str(&out.stderr);
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    if text.is_empty() || out.exit_code != 0 {
+        text.push_str(&format!("exit {}\n", out.exit_code));
+    }
+    text
+}
+
+fn format_gate_log(steps: &[StepOutput]) -> String {
+    let mut log = String::new();
+    for (idx, step) in steps.iter().enumerate() {
+        if idx > 0 {
+            log.push('\n');
+        }
+        log.push_str(&format!("$ {}\n", step.command));
+        log.push_str(&step.output);
+    }
+    log
+}
+
+fn write_log(path: &Path, content: &str) -> Result<(), String> {
+    std::fs::write(path, content).map_err(|e| format!("cannot write log {}: {e}", path.display()))
 }
 
 fn tail_output(text: &str, max_lines: usize, max_bytes: usize) -> String {
@@ -348,6 +410,8 @@ pub fn run_edit_finish_in(
     let summary_path = wt_parent.join(format!("{}.json", args.id));
     let start_path = wt_parent.join(format!("{}.start.json", args.id));
     let task_path = wt_parent.join(format!("{}.task.md", args.id));
+    let log_path = wt_parent.join(format!("{}.log", args.id));
+    let report_path = wt_parent.join(format!("{}.report.json", args.id));
     let worktree_dir = wt_parent.join(&args.id);
     let branch = format!("wip/{}", args.id);
 
@@ -507,12 +571,18 @@ pub fn run_edit_finish_in(
         }
     };
 
-    let (seconds, gate_attempts) = if already_passed {
-        (0, 0)
+    let gate_outcome = if already_passed {
+        GateOutcome {
+            elapsed: Duration::ZERO,
+            gate_attempts: 0,
+            gate_wait_ms: 0,
+            log_text: ALREADY_PASSED_LOG.to_string(),
+        }
     } else {
         let shell = EnvShell {
             inner: LocalShell::new(),
             env: dispatch_cfg.env.clone(),
+            steps: Mutex::new(Vec::new()),
         };
         let mut deadline = None;
         let started = Instant::now();
@@ -525,8 +595,13 @@ pub fn run_edit_finish_in(
             |_| {},
             &Instant::now,
         );
-        let elapsed = started.elapsed().as_secs();
+        let elapsed = started.elapsed();
+        let log_text = format_gate_log(&shell.steps.lock().unwrap());
         if !gate_result.passed {
+            if let Err(e) = write_log(&log_path, &log_text) {
+                eprintln!("error: {e}");
+                return 2;
+            }
             let (failing_step, raw_output) = match gate_result.failures.first() {
                 Some(f) => (f.step.clone(), f.output.as_str()),
                 None => (full_gate.clone(), gate_result.output.as_str()),
@@ -554,8 +629,91 @@ pub fn run_edit_finish_in(
                 return 2;
             }
         }
-        (elapsed, 1)
+        GateOutcome {
+            elapsed,
+            gate_attempts: 1,
+            gate_wait_ms: gate_result.wait_ms,
+            log_text,
+        }
     };
+
+    if let Err(e) = write_log(&log_path, &gate_outcome.log_text) {
+        eprintln!("error: {e}");
+        return 2;
+    }
+
+    let gate_elapsed_ms = gate_outcome.elapsed.as_millis() as u64;
+    let (gate_ms, gate_turns, gate_wait_ms, gate_seconds) = if gate_outcome.gate_attempts > 0 {
+        (
+            vec![gate_elapsed_ms],
+            vec![0],
+            vec![gate_outcome.gate_wait_ms],
+            gate_elapsed_ms as f64 / 1000.0,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), 0.0)
+    };
+    let report_record = RunRecord {
+        schema_version: SCHEMA_VERSION,
+        harness_build: env!("BLYTE_BUILD").into(),
+        outcome: "verified".into(),
+        error: None,
+        final_message: Some(task_text.clone()),
+        model_requested: None,
+        model_id: None,
+        effort: None,
+        context: String::new(),
+        gated: true,
+        gate_source: gate_source.to_string(),
+        gate_left_out: Vec::new(),
+        container: None,
+        container_workdir: String::new(),
+        sandboxed: false,
+        sandbox: "off".into(),
+        network: "on".into(),
+        allow_read: Vec::new(),
+        pass_env: Vec::new(),
+        withheld_env: Vec::new(),
+        duration_seconds: gate_outcome.elapsed.as_secs_f64(),
+        turns: 0,
+        empty_turns: 0,
+        truncated_turns: 0,
+        read_loop: false,
+        peak_read_repeats: 0,
+        fold_thrash: false,
+        stalled: false,
+        big_read_turns: 0,
+        tool_calls: 0,
+        gate_attempts: gate_outcome.gate_attempts,
+        rollbacks: 0,
+        provider_retries: 0,
+        cost_usd: Some(0.0),
+        max_cost_usd: None,
+        cost_capped: false,
+        fold_budget: None,
+        turn_usage: Vec::new(),
+        usage: UsageRecord::default(),
+        gate_ms,
+        gate_turns,
+        gate_wait_ms,
+        gate_failures: Vec::new(),
+        tool_counts: BTreeMap::new(),
+        model_seconds: 0.0,
+        tools_seconds: 0.0,
+        gate_seconds,
+        quote_problems: None,
+        claim_check: None,
+        claim_check_skipped: None,
+        base_check_passed: None,
+        base_check_seconds: None,
+    };
+    if let Err(e) = crate::report::write(&report_path, &report_record) {
+        eprintln!("error: {e}");
+        return 2;
+    }
+
+    let seconds = gate_outcome.elapsed.as_secs();
+    let gate_attempts = gate_outcome.gate_attempts;
 
     let comments_str = match comments {
         crate::config::CommentMode::Gate => "gate",
@@ -631,8 +789,8 @@ pub fn run_edit_finish_in(
         sandbox: "none".to_string(),
         // A direct edit has no implementer to send fallbacks back to.
         fix_round: None,
-        log: String::new(),
-        report: String::new(),
+        log: log_path.display().to_string(),
+        report: report_path.display().to_string(),
         gate_source,
         research_report: None,
         base_check_seconds: None,

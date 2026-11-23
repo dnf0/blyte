@@ -11,13 +11,13 @@ use std::time::Duration;
 use blyte_agent::run::{Outcome, RunReport};
 use blyte_agent::sandbox::Profile;
 use blyte_agent::state::State;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::task_runner::TaskConfig;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageRecord {
     pub input: u64,
     pub cached: u64,
@@ -37,7 +37,7 @@ fn outcome_name(outcome: &Outcome) -> (&'static str, Option<String>) {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RunRecord {
     pub schema_version: u32,
     /// The commit this blyte was built from (`build.rs`), or `unknown`.

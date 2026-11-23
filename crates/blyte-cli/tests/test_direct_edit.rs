@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use blyte_cli::cli::EditFinishArgs;
 use blyte_cli::combine::{CombineCheck, CombineRecord, CombineState};
-use blyte_cli::requests::Readiness;
+use blyte_cli::report::RunRecord;
+use blyte_cli::requests::{maybe_combine, Readiness, RealPublisher, RequestsState};
+use blyte_cli::serve::{generate_token, Surface};
+use blyte_cli::session::{EntryBody, PromptRunner, Session};
 use tempfile::TempDir;
 
 fn blyte_bin() -> &'static str {
@@ -796,4 +801,408 @@ fn configure_orchestrate_policy_allows_writes_only_while_direct_edit_is_open() {
 
     blyte_agent::tools::set_write_scope(None);
     blyte_agent::tools::set_approval(None);
+}
+
+struct IdleRunner;
+
+impl PromptRunner for IdleRunner {
+    fn run(
+        &mut self,
+        _prompt: &str,
+        _model: &str,
+        _emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn make_idle_surface(root: PathBuf) -> Surface {
+    let repo = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("repo")
+        .to_string();
+    let session = Session::start(Box::new(IdleRunner), "test-model".to_string());
+    Surface {
+        root,
+        repo,
+        session,
+        session_id: "sess-direct-edit-test".to_string(),
+        started_at: now_epoch(),
+        days: 14,
+        token: generate_token().unwrap(),
+        requests: Arc::new(RequestsState::new()),
+        publisher: Arc::new(RealPublisher),
+    }
+}
+
+#[test]
+fn edit_finish_passing_is_listed_by_live_runs_with_report_and_log() {
+    let repo = setup_repo("[dispatch]\ngate = \"echo step-one-ok\\necho step-two-ok\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(root, &["edit-start", "e-live", "--task", "Live run task"]);
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-live");
+    std::fs::write(wt.join("live.txt"), "ok\n").unwrap();
+
+    let finish_out = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-live",
+            "--request",
+            "req-live",
+            "--message",
+            "feat: live run",
+        ],
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+
+    let now = now_epoch() + 1;
+    let live = blyte_cli::live_runs::collect(root, now, 14).unwrap();
+    assert!(live.running.is_empty(), "running: {:?}", live.running);
+    assert!(live.skipped.is_empty(), "skipped: {:?}", live.skipped);
+    assert_eq!(live.runs.len(), 1, "runs: {:?}", live.runs);
+    let run = &live.runs[0];
+    assert_eq!(run.id, "e-live");
+    assert_eq!(run.request.as_deref(), Some("req-live"));
+    assert_eq!(run.outcome, "verified");
+    assert!(!run.research);
+
+    let report_path = root.join(".wt/e-live.report.json");
+    let report_raw = std::fs::read_to_string(&report_path).expect("report.json exists");
+    let record: RunRecord = serde_json::from_str(&report_raw).expect("parses as RunRecord");
+    assert_eq!(record.outcome, "verified");
+    assert_eq!(record.final_message.as_deref(), Some("Live run task"));
+    assert_eq!(record.turns, 0);
+    assert_eq!(record.cost_usd, Some(0.0));
+    assert_eq!(record.gate_attempts, 1);
+    assert_eq!(record.gate_ms.len(), 1);
+    assert_eq!(record.gate_turns, vec![0]);
+    assert!(record.model_requested.is_none());
+    assert!(record.model_id.is_none());
+    assert!(record.effort.is_none());
+    assert!(record.gated);
+    assert!(!record.sandboxed);
+    assert!(record.gate_failures.is_empty());
+
+    let log_path = root.join(".wt/e-live.log");
+    let log = std::fs::read_to_string(&log_path).expect("log exists");
+    let idx1_cmd = log.find("echo step-one-ok").expect("first step cmd in log");
+    let idx1_out = log.find("step-one-ok").expect("first step output in log");
+    let idx2_cmd = log
+        .find("echo step-two-ok")
+        .expect("second step cmd in log");
+    let idx2_out = log[idx2_cmd..]
+        .find("step-two-ok")
+        .expect("second step output in log");
+    assert!(idx1_cmd <= idx1_out);
+    assert!(idx1_cmd < idx2_cmd);
+    assert!(idx2_out > 0);
+}
+
+#[test]
+fn edit_finish_stays_listed_when_start_file_pid_is_not_alive() {
+    let repo = setup_repo("[dispatch]\ngate = \"echo pid-check\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-deadpid", "--task", "Exited pid task"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-deadpid");
+    std::fs::write(wt.join("dead.txt"), "ok\n").unwrap();
+
+    let finish_out = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-deadpid",
+            "--request",
+            "req-deadpid",
+            "--message",
+            "feat: dead pid",
+        ],
+    );
+    assert_eq!(finish_out.status.code(), Some(0));
+
+    let mut exited = Command::new("true").spawn().expect("spawn true");
+    let dead_pid = exited.id();
+    let _ = exited.wait();
+
+    let start_path = root.join(".wt/e-deadpid.start.json");
+    let mut start_val: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&start_path).unwrap()).unwrap();
+    start_val["pid"] = serde_json::json!(dead_pid);
+    std::fs::write(
+        &start_path,
+        serde_json::to_string_pretty(&start_val).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let now = now_epoch() + 1;
+    let live = blyte_cli::live_runs::collect(root, now, 14).unwrap();
+    assert!(live.running.is_empty(), "running: {:?}", live.running);
+    assert!(live.skipped.is_empty(), "skipped: {:?}", live.skipped);
+    assert_eq!(live.runs.len(), 1, "runs: {:?}", live.runs);
+    let run = &live.runs[0];
+    assert_eq!(run.id, "e-deadpid");
+    assert_eq!(run.request.as_deref(), Some("req-deadpid"));
+    assert_eq!(run.outcome, "verified");
+    assert!(!run.research);
+}
+
+#[test]
+fn edit_finish_surface_maybe_combine_combines_request_branch() {
+    let repo = setup_repo("[dispatch]\ngate = \"echo combine-ok\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-surf", "--task", "Surface combine task"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-surf");
+    std::fs::write(wt.join("surface.txt"), "combined content\n").unwrap();
+
+    let finish_out = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-surf",
+            "--request",
+            "req-surf",
+            "--message",
+            "feat: surface combine commit",
+        ],
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+
+    let surface = make_idle_surface(root.to_path_buf());
+    let started = maybe_combine(&surface, "req-surf").expect("maybe_combine");
+    assert!(started, "maybe_combine must return true");
+    surface.requests.wait_for_idle("req-surf");
+
+    let rec_path = root.join(".wt/combined/req-surf.json");
+    assert!(rec_path.is_file(), "combine record missing");
+    let rec: CombineRecord =
+        serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
+    assert_eq!(rec.state, CombineState::Combined);
+    assert_eq!(rec.branch, "blyte/req-surf");
+    let combined_subject = git(root, &["show", "-s", "--format=%s", &rec.branch]);
+    assert_eq!(combined_subject, "feat: surface combine commit");
+    let combined_file = git(root, &["show", &format!("{}:surface.txt", rec.branch)]);
+    assert_eq!(combined_file, "combined content");
+}
+
+#[test]
+fn edit_finish_gate_failure_writes_and_replaces_log_without_report_start_or_summary() {
+    let repo =
+        setup_repo("[dispatch]\ngate = \"echo step-before-fail\\ncat fail_msg.txt >&2; exit 1\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-fail-log", "--task", "Failing gate"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-fail-log");
+    std::fs::write(wt.join("fail_msg.txt"), "first failure reason\n").unwrap();
+
+    let fail1 = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-fail-log",
+            "--message",
+            "feat: first failing attempt",
+        ],
+    );
+    assert_eq!(fail1.status.code(), Some(1));
+
+    let log_path = root.join(".wt/e-fail-log.log");
+    assert!(log_path.is_file());
+    let log1 = std::fs::read_to_string(&log_path).unwrap();
+    assert!(log1.contains("echo step-before-fail"), "log1: {log1}");
+    assert!(log1.contains("step-before-fail"), "log1: {log1}");
+    assert!(log1.contains("first failure reason"), "log1: {log1}");
+    assert!(!root.join(".wt/e-fail-log.report.json").exists());
+    assert!(!root.join(".wt/e-fail-log.start.json").exists());
+    assert!(!root.join(".wt/e-fail-log.json").exists());
+
+    std::fs::write(wt.join("fail_msg.txt"), "second failure reason\n").unwrap();
+    let fail2 = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-fail-log",
+            "--message",
+            "feat: second failing attempt",
+        ],
+    );
+    assert_eq!(fail2.status.code(), Some(1));
+
+    let log2 = std::fs::read_to_string(&log_path).unwrap();
+    assert!(log2.contains("second failure reason"), "log2: {log2}");
+    assert!(!log2.contains("first failure reason"), "log2: {log2}");
+    assert!(!root.join(".wt/e-fail-log.report.json").exists());
+    assert!(!root.join(".wt/e-fail-log.start.json").exists());
+    assert!(!root.join(".wt/e-fail-log.json").exists());
+}
+
+#[test]
+fn edit_finish_already_passed_writes_one_line_log_and_is_listed() {
+    let repo = setup_repo("[dispatch]\ngate = \"echo should-not-run\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-skipped", "--task", "Already passed tree"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-skipped");
+    std::fs::write(wt.join("already.txt"), "clean\n").unwrap();
+    git(&wt, &["add", "already.txt"]);
+    git(&wt, &["commit", "-m", "feat: already passed"]);
+
+    let head_tree = blyte_cli::passed_trees::tree_of(&wt, "HEAD").unwrap();
+    let key = blyte_cli::passed_trees::check_key("echo should-not-run", &BTreeMap::new());
+    blyte_cli::passed_trees::record_passed(root, &head_tree, &key).unwrap();
+
+    let finish_out = run_blyte(
+        root,
+        &["edit-finish", "e-skipped", "--request", "req-skipped"],
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+
+    let log = std::fs::read_to_string(root.join(".wt/e-skipped.log")).expect("log exists");
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 1, "expected one line log, got: {log:?}");
+    assert!(
+        lines[0].to_lowercase().contains("skipped")
+            && lines[0].to_lowercase().contains("already passed"),
+        "unexpected skipped log line: {:?}",
+        lines[0]
+    );
+    assert!(!log.contains("should-not-run"), "log: {log}");
+
+    let report_raw =
+        std::fs::read_to_string(root.join(".wt/e-skipped.report.json")).expect("report exists");
+    let record: RunRecord = serde_json::from_str(&report_raw).expect("parses as RunRecord");
+    assert_eq!(record.outcome, "verified");
+    assert_eq!(record.gate_attempts, 0);
+    assert!(record.gate_ms.is_empty());
+
+    let now = now_epoch() + 1;
+    let live = blyte_cli::live_runs::collect(root, now, 14).unwrap();
+    assert!(live.running.is_empty(), "running: {:?}", live.running);
+    assert!(live.skipped.is_empty(), "skipped: {:?}", live.skipped);
+    assert_eq!(live.runs.len(), 1, "runs: {:?}", live.runs);
+    let run = &live.runs[0];
+    assert_eq!(run.id, "e-skipped");
+    assert_eq!(run.request.as_deref(), Some("req-skipped"));
+    assert_eq!(run.outcome, "verified");
+    assert!(!run.research);
+}
+
+#[test]
+fn edit_finish_reports_error_naming_path_and_resumes_when_report_or_log_write_fails() {
+    let repo = setup_repo("[dispatch]\ngate = \"echo ok\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-write-err", "--task", "Write failure"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-write-err");
+    std::fs::write(wt.join("file.txt"), "content\n").unwrap();
+
+    let report_path = root.join(".wt/e-write-err.report.json");
+    std::fs::create_dir_all(&report_path).unwrap();
+
+    let fail_out = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-write-err",
+            "--request",
+            "req-write-err",
+            "--message",
+            "feat: write err",
+        ],
+    );
+    assert_eq!(fail_out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&fail_out.stderr);
+    assert!(
+        stderr.contains("e-write-err.report.json"),
+        "stderr must name report path: {stderr}"
+    );
+    assert!(!root.join(".wt/e-write-err.start.json").exists());
+    assert!(!root.join(".wt/e-write-err.json").exists());
+
+    std::fs::remove_dir(&report_path).unwrap();
+
+    let log_path = root.join(".wt/e-write-err.log");
+    std::fs::remove_file(&log_path).unwrap();
+    std::fs::create_dir_all(&log_path).unwrap();
+
+    let fail_log_out = run_blyte(
+        root,
+        &["edit-finish", "e-write-err", "--request", "req-write-err"],
+    );
+    assert_eq!(fail_log_out.status.code(), Some(2));
+    let stderr_log = String::from_utf8_lossy(&fail_log_out.stderr);
+    assert!(
+        stderr_log.contains("e-write-err.log"),
+        "stderr must name log path: {stderr_log}"
+    );
+    assert!(!root.join(".wt/e-write-err.start.json").exists());
+    assert!(!root.join(".wt/e-write-err.json").exists());
+
+    std::fs::remove_dir(&log_path).unwrap();
+
+    let retry = run_blyte(
+        root,
+        &["edit-finish", "e-write-err", "--request", "req-write-err"],
+    );
+    assert_eq!(
+        retry.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(log_path.is_file());
+    assert!(report_path.is_file());
+    assert!(root.join(".wt/e-write-err.start.json").is_file());
+    assert!(root.join(".wt/e-write-err.json").is_file());
+
+    let live = blyte_cli::live_runs::collect(root, now_epoch() + 1, 14).unwrap();
+    assert_eq!(live.runs.len(), 1);
+    assert_eq!(live.runs[0].id, "e-write-err");
+    assert_eq!(live.runs[0].outcome, "verified");
 }
