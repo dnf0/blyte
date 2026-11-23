@@ -1391,7 +1391,9 @@ impl<'a> Runner<'a> {
                     } else {
                         let tool_timeout = deadline
                             .map(|d| d.saturating_duration_since(now()))
-                            .unwrap_or(tools::COMMAND_TIMEOUT);
+                            // No run deadline: each tool's own ceiling applies (300 s for most,
+                            // longer for `blyte edit-finish`, which runs the check).
+                            .unwrap_or(Duration::MAX);
                         tools::execute_with_timeout(
                             &self.root,
                             self.shell,
