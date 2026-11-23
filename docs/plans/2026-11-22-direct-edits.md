@@ -138,3 +138,105 @@ Run: `cargo test -p blyte --test test_direct_edit` and the `blyte-agent` test fi
 
 **Commit message.**
 `feat(surface): edit-start and edit-finish, a gated path for a change the conversation model makes itself`
+
+## After the write restriction (2026-11-23)
+
+The conversation model can now write only in `.wt/tasks` and temporary directories; its shell
+cannot write in the repository or in `.git` at all. So, as built in E1, a direct edit cannot be
+made (the write tools ask for approval in `.wt/<id>`) or committed (`git commit` in the worktree
+writes to the main checkout's `.git`). Decisions:
+
+5. **The write tools may write in an open edit's worktree, and nowhere else new.** An edit is
+   open when `.wt/<id>.edit.json` exists and `.wt/<id>.json` does not. The shell's sandbox is
+   not widened.
+6. **`edit-finish` makes the commit.** The model never runs `git commit`; `edit-finish` takes
+   the message, commits what the write tools left in the worktree, then runs the check.
+
+### Task E2
+
+**Goal.** Make a direct edit possible under the write restriction: the `write` and `edit` tools
+may write inside an open edit's worktree without approval, and `blyte edit-finish` commits the
+changes itself.
+
+**Files.**
+- `crates/blyte-agent/src/tools.rs` (`WriteScope`, `check_write_scope`).
+- `crates/blyte-cli/src/task_runner.rs` (`configure_orchestrate_policy` fills the new field).
+- `crates/blyte-cli/src/direct_edit.rs`, `crates/blyte-cli/src/cli.rs` (`--message`).
+- `crates/blyte-cli/assets/orchestrator/reference.md` (the "Direct edits" section),
+  `crates/blyte-cli/src/orchestrator_text.rs` (`SANDBOX_ON_PARAGRAPH`).
+- Tests: `crates/blyte-cli/tests/test_direct_edit.rs`; the existing write-scope tests' file in
+  `crates/blyte-agent/tests/` (find it by searching for `set_write_scope`); any test that builds a
+  `WriteScope` literal or asserts `SANDBOX_ON_PARAGRAPH` text gets the minimal update.
+- Do **not** change `crates/blyte-agent/src/sandbox.rs`, `assets/orchestrator/process.md`,
+  `combine.rs`, `requests.rs`, `serve.rs` or `assets/surface/index.html`.
+
+**What to build.**
+
+1. `WriteScope` gains `pub edit_worktrees: Option<PathBuf>`: the canonical `.wt` directory of the
+   main checkout, or `None` when direct edits are not available. `configure_orchestrate_policy`
+   sets it to the canonical parent of the tasks directory it already canonicalises.
+2. `check_write_scope`: after the existing `allowed` test and before asking for approval, a
+   write is allowed without approval when all of these hold for the resolved real target:
+   - it is under `<edit_worktrees>/<id>/` for a single path component `<id>`;
+   - `<edit_worktrees>/<id>.edit.json` exists and `<edit_worktrees>/<id>.json` does not (read
+     through the `Fs` the function already receives if it offers an existence test, otherwise
+     `std::fs`; an error other than "not found" while testing is returned as the tool's error,
+     naming the path, not treated as "does not exist");
+   - no component of the path below `<id>/` is `.git` (the worktree's `.git` file must not be
+     writable).
+   Otherwise behaviour is unchanged: the approval request, and the same refusal messages. Put the
+   rule in one small function with a doc comment.
+3. `blyte edit-finish <id> [--request <request>] [--message <text>]`:
+   - Worktree has uncommitted or untracked changes and `--message` is given (not empty after
+     trimming; an empty one is an error): run `git add -A` and `git commit --no-gpg-sign -m
+     <message>` in the worktree (use the same way of running git the file already uses, in the
+     worktree, never the current directory). A failing git command is an error naming the
+     command and its stderr; nothing else is written.
+   - Worktree has uncommitted or untracked changes and no `--message`: the existing error, with
+     "pass --message to commit them" added.
+   - Worktree clean: `--message` is ignored only if there is nothing to commit **and** there is
+     at least one commit beyond `base_sha` (the resume case after a failed check where the fix was
+     already committed); a clean worktree with no commit beyond `base_sha` stays the existing
+     error.
+   - Everything after the commit is as it is now.
+4. The `blyte` tool: nothing to change unless `--message` needs passing through; confirm with a
+   test that `edit-finish X --message "fix: y"` reaches the command with the message intact
+   (a message with spaces and a quote character).
+5. `reference.md` "Direct edits": edits are made with the `write` and `edit` tools in the path
+   `edit-start` prints; the shell cannot write there; do not run `git commit`; `edit-finish <id>
+   --message "<conventional commit subject>"` commits and runs the check; after a failed check,
+   edit again and call it again with a message. `SANDBOX_ON_PARAGRAPH`: add that the write tools
+   can also write in the worktree of an edit started with `blyte edit-start`, until it finishes.
+
+**Tests.**
+- Write scope (agent crate, real temporary directories): with `edit_worktrees` set and
+  `X.edit.json` present, a write to `<wt>/X/src/a.rs` succeeds with an approver that would refuse
+  (prove the approver was not asked); with `X.json` also present it is refused; with no
+  `X.edit.json` it is refused; `<wt>/X/.git` and `<wt>/X/sub/.git/config` are refused;
+  `<wt>/X.json`, `<wt>/X.edit.json`, `<wt>/Y/a.rs` (no edit file for Y) and a path reaching
+  `<wt>/X/` through a symlink placed in the tasks directory that points outside are each handled
+  by the resolved real target (the symlink to an open edit's worktree is allowed; one to the main
+  checkout is refused); `edit_worktrees: None` refuses all of them.
+- `edit-finish` (`test_direct_edit.rs`): dirty worktree with `--message` commits with exactly
+  that subject, includes an untracked new file, then passes the gate and writes the summary with
+  that commit; dirty with no `--message` is an error mentioning `--message` and leaves no start
+  file or summary and no commit; empty `--message` is an error; gate fails after the commit, a
+  further edit plus a second `edit-finish --message` adds a second commit and passes; clean
+  worktree with an earlier commit and `--message` given passes without a new commit; a commit
+  that git refuses (use a `pre-commit` hook that exits 1 in the test repository) is an error that
+  includes the hook's stderr and writes no summary.
+
+Run: `cargo test -p blyte --test test_direct_edit`, the agent test file you change, then the
+repository's full check.
+
+**Constraints.**
+- **No fallbacks**: a path whose state cannot be determined is an error naming it, never
+  "allowed" and never silently "refused" without the reason.
+- **Resumable**: `edit-finish` can be called again after any failure.
+- The shell sandbox is not widened. No command pushes, opens a pull request or merges.
+- Existing tests pass unmodified except where named above.
+- Keep existing comments.
+- Depends on: E1 (already on this branch). Siblings: none.
+
+**Commit message.**
+`feat(surface): a direct edit is written with the write tools and committed by edit-finish`
