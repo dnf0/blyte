@@ -1,43 +1,31 @@
+use clap::{CommandFactory, Parser};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn init_repo() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path();
-
-    let status = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(p)
-        .status()
+fn fast_import(dir: &Path, script: &str) {
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-    assert!(status.success());
-
-    Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(p)
-        .status()
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
         .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
-        .current_dir(p)
-        .status()
-        .unwrap();
-
-    fs::write(p.join("README.md"), "hello\n").unwrap();
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(p)
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-qm", "init", "--no-gpg-sign"])
-        .current_dir(p)
-        .status()
-        .unwrap();
-
-    dir
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "git fast-import failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -61,47 +49,96 @@ fn write_file(path: &Path, content: &str) {
     fs::write(path, content).unwrap();
 }
 
-fn create_merged_run(root: &Path, id: &str) {
-    let wt_path = root.join(".wt").join(id);
-    let branch = format!("wip/{id}");
-    git(
-        root,
-        &["worktree", "add", "-b", &branch, wt_path.to_str().unwrap()],
+fn setup_repo_with_runs(merged_ids: &[&str], unmerged_ids: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    let mut script = String::from(
+        "commit refs/heads/main\nmark :1\ncommitter Test User <test@example.com> 1700000000 +0000\ndata 4\ninit\nM 100644 inline README.md\ndata 6\nhello\n\n",
     );
-    write_file(&wt_path.join(format!("{id}.txt")), &format!("work {id}\n"));
-    git(&wt_path, &["add", "."]);
-    git(
-        &wt_path,
-        &["commit", "-qm", &format!("feat: {id}"), "--no-gpg-sign"],
-    );
-    git(
-        root,
-        &["merge", "--no-ff", &branch, "-m", "merge", "--no-gpg-sign"],
-    );
+    let mut next_mark = 2usize;
+    let mut main_mark = 1usize;
+
+    for id in merged_ids {
+        let br_mark = next_mark;
+        next_mark += 1;
+        let msg = format!("feat: {id}");
+        let body = format!("work {id}\n");
+        script.push_str(&format!(
+            "commit refs/heads/wip/{id}\nmark :{br_mark}\ncommitter Test User <test@example.com> 1700000000 +0000\ndata {}\n{msg}\nfrom :{main_mark}\nM 100644 inline {id}.txt\ndata {}\n{body}\n",
+            msg.len(),
+            body.len()
+        ));
+        let merge_mark = next_mark;
+        next_mark += 1;
+        script.push_str(&format!(
+            "commit refs/heads/main\nmark :{merge_mark}\ncommitter Test User <test@example.com> 1700000000 +0000\ndata 5\nmerge\nfrom :{main_mark}\nmerge :{br_mark}\nM 100644 inline {id}.txt\ndata {}\n{body}\n",
+            body.len()
+        ));
+        main_mark = merge_mark;
+    }
+
+    for id in unmerged_ids {
+        let br_mark = next_mark;
+        next_mark += 1;
+        let msg = format!("feat: {id}");
+        let body = format!("unmerged work {id}\n");
+        script.push_str(&format!(
+            "commit refs/heads/wip/{id}\nmark :{br_mark}\ncommitter Test User <test@example.com> 1700000000 +0000\ndata {}\n{msg}\nfrom :{main_mark}\nM 100644 inline {id}.txt\ndata {}\n{body}\n",
+            msg.len(),
+            body.len()
+        ));
+    }
+
+    fast_import(root, &script);
 
     let wt_dir = root.join(".wt");
-    write_file(
-        &wt_dir.join(format!("{id}.start.json")),
-        &serde_json::json!({ "id": id, "pid": 999999 }).to_string(),
-    );
-    write_file(
-        &wt_dir.join(format!("{id}.json")),
-        &serde_json::json!({ "outcome": "verified" }).to_string(),
-    );
-    write_file(
-        &wt_dir.join(format!("{id}.verdict.json")),
-        &serde_json::json!({ "verdict": "accepted" }).to_string(),
-    );
+    for id in merged_ids {
+        let wt_path = wt_dir.join(id);
+        let branch = format!("wip/{id}");
+        git(
+            root,
+            &["worktree", "add", "-q", wt_path.to_str().unwrap(), &branch],
+        );
+        write_file(
+            &wt_dir.join(format!("{id}.start.json")),
+            &serde_json::json!({ "id": id, "pid": 999999 }).to_string(),
+        );
+        write_file(
+            &wt_dir.join(format!("{id}.json")),
+            &serde_json::json!({ "outcome": "verified" }).to_string(),
+        );
+        write_file(
+            &wt_dir.join(format!("{id}.verdict.json")),
+            &serde_json::json!({ "verdict": "accepted" }).to_string(),
+        );
+    }
+
+    for id in unmerged_ids {
+        let wt_path = wt_dir.join(id);
+        let branch = format!("wip/{id}");
+        git(
+            root,
+            &["worktree", "add", "-q", wt_path.to_str().unwrap(), &branch],
+        );
+        write_file(
+            &wt_dir.join(format!("{id}.start.json")),
+            &serde_json::json!({ "id": id, "pid": 999999 }).to_string(),
+        );
+        write_file(
+            &wt_dir.join(format!("{id}.json")),
+            &serde_json::json!({ "outcome": "verified" }).to_string(),
+        );
+    }
+
+    dir
 }
 
 #[test]
 fn test_clean_quiet_skip_keeps_skipped_and_prints_nothing_to_stdout() {
-    let repo = init_repo();
+    let repo = setup_repo_with_runs(&["A", "B", "C"], &[]);
     let root = repo.path();
-
-    create_merged_run(root, "A");
-    create_merged_run(root, "B");
-    create_merged_run(root, "C");
 
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["clean", "--quiet", "--skip", "B"])
@@ -127,10 +164,8 @@ fn test_clean_quiet_skip_keeps_skipped_and_prints_nothing_to_stdout() {
 
 #[test]
 fn test_clean_quiet_live_lock_exits_zero_and_removes_nothing() {
-    let repo = init_repo();
+    let repo = setup_repo_with_runs(&["A"], &[]);
     let root = repo.path();
-
-    create_merged_run(root, "A");
 
     let lock_path = root.join(".wt/clean.lock");
     write_file(&lock_path, &format!("{}\n", std::process::id()));
@@ -156,12 +191,9 @@ fn test_clean_quiet_live_lock_exits_zero_and_removes_nothing() {
 
 #[test]
 fn test_clean_quiet_dead_lock_replaces_and_removes_lock_afterwards() {
-    let repo = init_repo();
+    let repo = setup_repo_with_runs(&["A"], &[]);
     let root = repo.path();
 
-    create_merged_run(root, "A");
-
-    // Spawn a short-lived process to get a guaranteed dead PID
     let mut child = Command::new("true").spawn().unwrap();
     let dead_pid = child.id();
     let _ = child.wait();
@@ -200,35 +232,25 @@ fn test_clean_quiet_dead_lock_replaces_and_removes_lock_afterwards() {
 
 #[test]
 fn test_clean_quiet_rejects_all_and_dry_run_and_hides_flags_in_help() {
-    let repo = init_repo();
-    let root = repo.path();
-
     for bad_args in [
-        &["clean", "--quiet", "--all"][..],
-        &["clean", "--quiet", "--dry-run"][..],
-        &["clean", "--skip", "A", "--all"][..],
-        &["clean", "--skip", "A", "--dry-run"][..],
+        &["blyte", "clean", "--quiet", "--all"][..],
+        &["blyte", "clean", "--quiet", "--dry-run"][..],
+        &["blyte", "clean", "--skip", "A", "--all"][..],
+        &["blyte", "clean", "--skip", "A", "--dry-run"][..],
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-            .args(bad_args)
-            .current_dir(root)
-            .env("BLYTE_NO_UPDATE_CHECK", "1")
-            .output()
-            .unwrap();
         assert!(
-            !out.status.success(),
+            blyte_cli::cli::Cli::try_parse_from(bad_args).is_err(),
             "expected {:?} to be rejected",
             bad_args
         );
     }
 
-    let help_out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--help"])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(help_out.status.success());
-    let help_text = String::from_utf8_lossy(&help_out.stdout);
+    let mut cmd = blyte_cli::cli::Cli::command();
+    let help_text = cmd
+        .find_subcommand_mut("clean")
+        .unwrap()
+        .render_help()
+        .to_string();
     assert!(
         !help_text.contains("--quiet"),
         "--quiet should be hidden from --help: {help_text}"
@@ -241,29 +263,9 @@ fn test_clean_quiet_rejects_all_and_dry_run_and_hides_flags_in_help() {
 
 #[test]
 fn test_review_accepted_removes_another_merged_run_in_background() {
-    let repo = init_repo();
+    let repo = setup_repo_with_runs(&["M1"], &["R1"]);
     let root = repo.path();
-
-    // Another merged run M1 that should be cleaned by the background clean
-    create_merged_run(root, "M1");
-
-    // Unmerged run R1 being reviewed now
     let wt_r1 = root.join(".wt/R1");
-    git(
-        root,
-        &["worktree", "add", "-b", "wip/R1", wt_r1.to_str().unwrap()],
-    );
-    write_file(&wt_r1.join("r1.txt"), "unmerged work\n");
-    git(&wt_r1, &["add", "."]);
-    git(&wt_r1, &["commit", "-qm", "feat: r1", "--no-gpg-sign"]);
-    write_file(
-        &root.join(".wt/R1.start.json"),
-        &serde_json::json!({ "id": "R1", "pid": 999999 }).to_string(),
-    );
-    write_file(
-        &root.join(".wt/R1.json"),
-        &serde_json::json!({ "outcome": "verified" }).to_string(),
-    );
 
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", "R1", "--verdict", "accepted"])
@@ -280,7 +282,7 @@ fn test_review_accepted_removes_another_merged_run_in_background() {
     let wt_m1 = root.join(".wt/M1");
     let deadline = Instant::now() + Duration::from_secs(60);
     while wt_m1.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(10));
     }
 
     assert!(

@@ -122,21 +122,70 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn fast_import_commit(
+    root: &Path,
+    branch: &str,
+    from: Option<&str>,
+    files: &[(&str, &str)],
+    subject: &str,
+) -> String {
+    use std::io::Write;
+    let mut stream = String::new();
+    stream.push_str(&format!("commit refs/heads/{branch}\n"));
+    stream.push_str("mark :1\n");
+    stream.push_str("committer Test User <test@example.com> 1700000000 +0000\n");
+    stream.push_str(&format!("data {}\n{subject}\n", subject.len()));
+    if let Some(parent) = from {
+        stream.push_str(&format!("from {parent}\n"));
+    }
+    for (file, content) in files {
+        stream.push_str(&format!("M 100644 inline {file}\n"));
+        stream.push_str(&format!("data {}\n{content}\n", content.len()));
+    }
+    stream.push_str("get-mark :1\n");
+    stream.push_str("done\n");
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "git fast-import failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn init_repo_with_gate(gate: &str) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    git(root, &["init", "-b", "main"]);
-    git(root, &["config", "user.email", "test@example.com"]);
-    git(root, &["config", "user.name", "Test User"]);
+    git(root, &["init", "-q", "-b", "main"]);
+    let cfg_path = root.join(".git/config");
+    let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    cfg.push_str("\n[user]\n\temail = test@example.com\n\tname = Test User\n");
+    std::fs::write(&cfg_path, cfg).unwrap();
+    let toml = format!("[dispatch]\ngate = {gate:?}\n");
+    let base_sha = fast_import_commit(
+        root,
+        "main",
+        None,
+        &[("README.md", "hello\n"), ("blyte.toml", &toml)],
+        "initial commit",
+    );
     std::fs::write(root.join("README.md"), "hello\n").unwrap();
-    std::fs::write(
-        root.join("blyte.toml"),
-        format!("[dispatch]\ngate = {gate:?}\n"),
-    )
-    .unwrap();
-    git(root, &["add", "."]);
-    git(root, &["commit", "-m", "initial commit"]);
-    let base_sha = git(root, &["rev-parse", "HEAD"]);
+    std::fs::write(root.join("blyte.toml"), &toml).unwrap();
     std::fs::create_dir_all(root.join(".wt")).unwrap();
     (dir, base_sha)
 }
@@ -149,27 +198,19 @@ fn create_run_branch(
     content: &str,
     subject: &str,
 ) -> String {
-    let wt = root.join(".wt").join(id);
-    let branch = format!("wip/{id}");
-    git(
+    fast_import_commit(
         root,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            wt.to_str().unwrap(),
-            base_sha,
-        ],
-    );
-    let target = wt.join(file);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(&target, content).unwrap();
-    git(&wt, &["add", "."]);
-    git(&wt, &["commit", "-m", subject]);
-    git(&wt, &["rev-parse", "HEAD"])
+        &format!("wip/{id}"),
+        Some(base_sha),
+        &[(file, content)],
+        subject,
+    )
+}
+
+fn assert_session_idle(session: &Session) {
+    let info = session.info();
+    assert!(!info.busy, "expected idle session, got busy");
+    assert_eq!(info.queued, 0, "expected empty queue, got {}", info.queued);
 }
 
 fn write_start_file_with_base(
@@ -491,7 +532,7 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
         .collect();
     assert_eq!(ids[0], "req-poll");
 
-    std::thread::sleep(Duration::from_millis(100));
+    assert_session_idle(&surface.session);
     assert!(prompts.lock().unwrap().is_empty());
 }
 
@@ -529,7 +570,7 @@ fn conflict_queues_once_and_success_queues_none() {
     if triggered_again {
         surface.requests.wait_for_idle("req-conflict");
     }
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&surface.session);
     assert_eq!(prompts.lock().unwrap().len(), 1);
 
     create_run_branch(root, "OK1", &base, "ok.txt", "ok\n", "feat: ok");
@@ -539,7 +580,7 @@ fn conflict_queues_once_and_success_queues_none() {
 
     assert!(maybe_combine(&surface, "req-ok").unwrap());
     surface.requests.wait_for_idle("req-ok");
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&surface.session);
     assert_eq!(prompts.lock().unwrap().len(), 1);
 }
 
@@ -577,7 +618,7 @@ fn accept_triggers_combine_and_does_not_queue_combine_message() {
     assert_eq!(rec.state, CombineState::Combined);
     assert_eq!(rec.branch, "blyte/req-accept");
 
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&surface.session);
     assert!(prompts.lock().unwrap().is_empty());
 }
 
@@ -838,7 +879,7 @@ fn push_and_pull_request_routes_and_error_handling() {
         .unwrap()
         .contains("gh is not signed in"));
 
-    let entries = surface.session.entries_after(0, Duration::from_millis(50));
+    let entries = surface.session.entries_after(0, Duration::ZERO);
     assert!(entries.iter().any(|e| matches!(
         &e.body,
         EntryBody::Decision { run, action, .. } if run == "req-pub" && action == "push"
@@ -929,7 +970,7 @@ fn combine_exit_two_reports_error_once_and_surfaces_in_api() {
     if maybe_combine(&surface, "req-err").unwrap() {
         surface.requests.wait_for_idle("req-err");
     }
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&surface.session);
     assert_eq!(prompts.lock().unwrap().len(), 1);
 }
 
@@ -959,12 +1000,12 @@ fn check_failed_does_not_rerun_on_second_trigger_or_restart_and_retries_unreport
     assert!(attempt.error.is_none());
 
     assert!(!maybe_combine(&surface, "req-cf").unwrap());
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&surface.session);
     assert_eq!(prompts.lock().unwrap().len(), 1);
 
     let (restarted, restarted_prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
     assert!(!maybe_combine(&restarted, "req-cf").unwrap());
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&restarted.session);
     assert!(restarted_prompts.lock().unwrap().is_empty());
 
     let gate_count = std::fs::read_to_string(&marker).unwrap().lines().count();
@@ -992,10 +1033,13 @@ fn error_request_does_not_rerun_and_persists_error_state_after_restart() {
     let (repo, base1) = init_repo_with_gate("true");
     let root = repo.path();
 
-    std::fs::write(root.join("extra.txt"), "second base\n").unwrap();
-    git(root, &["add", "extra.txt"]);
-    git(root, &["commit", "-m", "second base commit"]);
-    let base2 = git(root, &["rev-parse", "HEAD"]);
+    let base2 = fast_import_commit(
+        root,
+        "main",
+        Some(&base1),
+        &[("extra.txt", "second base\n")],
+        "second base commit",
+    );
 
     create_run_branch(root, "EB1", &base1, "b1.txt", "1\n", "feat: from base1");
     write_start_file(root, "EB1", Some("req-diffbase"), &base1, 100, false);
@@ -1024,12 +1068,12 @@ fn error_request_does_not_rerun_and_persists_error_state_after_restart() {
         .contains("different base commits"));
 
     assert!(!maybe_combine(&surface, "req-diffbase").unwrap());
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&surface.session);
     assert_eq!(prompts.lock().unwrap().len(), 1);
 
     let (restarted, restarted_prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
     assert!(!maybe_combine(&restarted, "req-diffbase").unwrap());
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&restarted.session);
     assert!(restarted_prompts.lock().unwrap().is_empty());
 
     let reqs = parse_json(&route(&restarted, &get("/api/requests"), now_secs()));
@@ -1060,11 +1104,13 @@ fn changing_run_tip_triggers_combine_again() {
     assert_eq!(prompts.lock().unwrap().len(), 1);
     assert!(!maybe_combine(&surface, "req-tipchange").unwrap());
 
-    let wt = root.join(".wt/TC1");
-    std::fs::write(wt.join("pass.flag"), "ok\n").unwrap();
-    git(&wt, &["add", "pass.flag"]);
-    git(&wt, &["commit", "-m", "fix: make gate pass"]);
-    let tip2 = git(&wt, &["rev-parse", "HEAD"]);
+    let tip2 = fast_import_commit(
+        root,
+        "wip/TC1",
+        Some(&tip1),
+        &[("pass.flag", "ok\n")],
+        "fix: make gate pass",
+    );
     assert_ne!(tip1, tip2);
 
     assert!(maybe_combine(&surface, "req-tipchange").unwrap());
@@ -1120,10 +1166,13 @@ fn push_then_rebuild_invalidates_pushed_and_blocks_pr_until_repushed() {
     );
     assert_eq!(pr1.status, 200);
 
-    let wt = root.join(".wt/RP1");
-    std::fs::write(wt.join("item.txt"), "v2\n").unwrap();
-    git(&wt, &["add", "item.txt"]);
-    git(&wt, &["commit", "-m", "feat: v2"]);
+    fast_import_commit(
+        root,
+        "wip/RP1",
+        Some("refs/heads/wip/RP1^0"),
+        &[("item.txt", "v2\n")],
+        "feat: v2",
+    );
 
     assert!(maybe_combine(&surface, "req-repush").unwrap());
     surface.requests.wait_for_idle("req-repush");
@@ -1228,7 +1277,7 @@ fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file(
 
     let runs_resp = route(&surface, &get("/api/runs"), now + 2);
     assert_eq!(runs_resp.status, 200);
-    let session_entries = surface.session.entries_after(0, Duration::from_millis(50));
+    let session_entries = surface.session.entries_after(0, Duration::ZERO);
     assert!(session_entries.iter().any(|e| matches!(
         &e.body,
         EntryBody::Error { message } if message.contains("req-bad-attempt.attempt.json")
@@ -1723,6 +1772,6 @@ fn conflict_failure_message_is_not_queued_while_busy_and_queued_once_after() {
     }
 
     assert!(!maybe_combine(&surface, "req-busy-conflict").unwrap());
-    std::thread::sleep(Duration::from_millis(150));
+    assert_session_idle(&surface.session);
     assert_eq!(handle.prompts.lock().unwrap().len(), 2);
 }
