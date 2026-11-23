@@ -1,15 +1,32 @@
 //! Research runs periodically remind the model to keep report.md updated.
 
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{LocalShell, Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
+
+struct NoopShell;
+
+impl Shell for NoopShell {
+    fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    fn describe(&self) -> String {
+        "noop".into()
+    }
+}
 
 const REMINDER: &str =
     "Update report.md now with what you have found so far, even if unfinished, then carry on.";
@@ -77,7 +94,7 @@ fn research_reminder_at_turn_30_and_not_again_at_60_if_report_changed() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &NoopShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -140,7 +157,7 @@ fn research_reminder_repeats_at_turn_60_if_report_never_changed() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &NoopShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),

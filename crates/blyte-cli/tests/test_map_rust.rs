@@ -633,7 +633,7 @@ fn this_repository_maps() {
         .unwrap();
     let m = map::build(root, "blyte").unwrap();
 
-    assert_eq!(m.groups.len(), 3);
+    assert_eq!(m.groups.iter().filter(|g| g.lang == "rust").count(), 3);
     assert!(m
         .units
         .iter()

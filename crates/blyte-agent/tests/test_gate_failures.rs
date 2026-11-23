@@ -75,7 +75,7 @@ fn the_multi_step_summary_names_the_failing_steps() {
 fn long_output_keeps_the_head_and_the_tail() {
     // The failure is usually reported last; the first line names the failing steps.
     let rep = run(
-        "for i in $(seq 1 300); do echo \"line $i $(printf 'x%.0s' $(seq 1 60))\"; done; echo final-failure-marker; exit 1",
+        "i=1; while [ $i -le 300 ]; do echo \"line $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i + 1)); done; echo final-failure-marker; exit 1",
         1,
     );
     let g = &rep.gate_failures[0];
@@ -89,7 +89,7 @@ fn long_output_keeps_the_head_and_the_tail() {
 #[test]
 fn multi_byte_output_is_cut_on_character_boundaries() {
     let rep = run(
-        "for i in $(seq 1 300); do echo 'é€é€é€é€é€é€é€é€é€é€'; done; exit 1",
+        "i=1; while [ $i -le 300 ]; do echo 'é€é€é€é€é€é€é€é€é€é€'; i=$((i + 1)); done; exit 1",
         1,
     );
     let g = &rep.gate_failures[0];

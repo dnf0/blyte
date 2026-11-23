@@ -277,8 +277,10 @@ fn init_repo(repo: &Path, blyte_toml: Option<&str>) {
         std::fs::write(repo.join("blyte.toml"), cfg).unwrap();
     }
     git(repo, &["init", "-q"]);
-    git(repo, &["config", "user.email", "t@t"]);
-    git(repo, &["config", "user.name", "t"]);
+    let config_path = repo.join(".git/config");
+    let mut cfg_text = std::fs::read_to_string(&config_path).unwrap();
+    cfg_text.push_str("\n[user]\n\temail = t@t\n\tname = t\n");
+    std::fs::write(&config_path, cfg_text).unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-q", "-m", "init"]);
 }
@@ -289,6 +291,10 @@ fn spawn_dispatch(repo: &Path, home: &Path, args: &[&str], port: u16) -> std::pr
         .current_dir(repo)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_GATE_SLOT_DIR", home.join("slots"))
+        .env("BLYTE_GATE_SLOTS", "16")
+        .env_remove("BLYTE_ENV_FILE")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
