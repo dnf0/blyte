@@ -614,6 +614,8 @@ pub fn run_edit_finish_in(
         model: None,
         seconds,
         sandbox: "none".to_string(),
+        // A direct edit has no implementer to send fallbacks back to.
+        fix_round: None,
         log: String::new(),
         report: String::new(),
         gate_source,
