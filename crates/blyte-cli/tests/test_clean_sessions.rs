@@ -32,6 +32,31 @@ fn init_repo_with_parent() -> (tempfile::TempDir, std::path::PathBuf) {
     (outer, root)
 }
 
+fn blyte_output(cwd: &Path, state_dir: Option<&Path>, args: &[&str]) -> std::process::Output {
+    let env_dir = tempfile::tempdir().unwrap();
+    let default_state = env_dir.path().join("state");
+    let state = state_dir.unwrap_or(&default_state);
+    Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(args)
+        .current_dir(cwd)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_ENV_FILE", "")
+        .env("BLYTE_STATE_DIR", state)
+        .env("BLYTE_GATE_SLOT_DIR", env_dir.path().join("slots"))
+        .env("HOME", env_dir.path().join("home"))
+        .env("XDG_CONFIG_HOME", env_dir.path().join("home/.config"))
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
+        .env_remove("OLLAMA_HOST")
+        .env_remove("BLYTE_MODEL")
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn test_clean_reports_merged_clean_sibling_worktree_with_ds_store() {
     let (outer, root) = init_repo_with_parent();
@@ -56,11 +81,7 @@ fn test_clean_reports_merged_clean_sibling_worktree_with_ds_store() {
     // Add untracked .DS_Store
     write_file(&side_path.join(".DS_Store"), "finder data\n");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = blyte_output(&root, None, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -88,11 +109,7 @@ fn test_clean_reports_merged_clean_sibling_worktree_with_ds_store() {
     );
 
     // Test --dry-run produces the same output
-    let out_dry = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--dry-run"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out_dry = blyte_output(&root, None, &["clean", "--dry-run"]);
 
     let stdout_dry = String::from_utf8_lossy(&out_dry.stdout);
     assert!(out_dry.status.success());
@@ -118,11 +135,7 @@ fn test_clean_sibling_with_unmerged_commit_not_reported() {
         &["commit", "-qm", "feat: unmerged", "--no-gpg-sign"],
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = blyte_output(&root, None, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -161,11 +174,7 @@ fn test_clean_sibling_with_modified_tracked_file_not_reported() {
     // Modify a tracked file without committing
     write_file(&side_path.join("file.txt"), "modified content\n");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = blyte_output(&root, None, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -220,8 +229,10 @@ fn test_dispatch_quiet_clean_prints_nothing_about_sibling_worktrees() {
 
     write_file(&root.join("task.md"), "implement something\n");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args([
+    let out = blyte_output(
+        &root,
+        Some(&outer.path().join(".blyte-state")),
+        &[
             "dispatch",
             "D1",
             "task.md",
@@ -229,15 +240,9 @@ fn test_dispatch_quiet_clean_prints_nothing_about_sibling_worktrees() {
             "true",
             "--sandbox",
             "off",
-        ])
-        .current_dir(&root)
-        .env("BLYTE_NO_UPDATE_CHECK", "1")
-        .env_remove("GEMINI_API_KEY")
-        .env_remove("GOOGLE_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .output()
-        .unwrap();
+            "--no-base-check",
+        ],
+    );
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -295,11 +300,7 @@ fn test_clean_sibling_detached_head_merged_reported() {
     );
     let detached_path = outer.path().join("my-repo--detached");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = blyte_output(&root, None, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -348,12 +349,7 @@ fn test_clean_linked_worktree_reports_nothing_about_other_worktrees() {
     )
     .unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--all"])
-        .env("BLYTE_STATE_DIR", state_dir.path())
-        .current_dir(&linked_path)
-        .output()
-        .unwrap();
+    let out = blyte_output(&linked_path, Some(state_dir.path()), &["clean", "--all"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -367,12 +363,11 @@ fn test_clean_linked_worktree_reports_nothing_about_other_worktrees() {
     );
 
     // Also verify with --dry-run
-    let out_dry = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--all", "--dry-run"])
-        .env("BLYTE_STATE_DIR", state_dir.path())
-        .current_dir(&linked_path)
-        .output()
-        .unwrap();
+    let out_dry = blyte_output(
+        &linked_path,
+        Some(state_dir.path()),
+        &["clean", "--all", "--dry-run"],
+    );
 
     let stdout_dry = String::from_utf8_lossy(&out_dry.stdout);
     assert!(
@@ -413,11 +408,7 @@ fn test_clean_never_lists_main_worktree_from_main_or_all() {
     git(&root, &["cherry-pick", &sha]);
 
     // 1. Cleaning from the main checkout: main worktree must not be listed
-    let out_main = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out_main = blyte_output(&root, None, &["clean"]);
     let stdout_main = String::from_utf8_lossy(&out_main.stdout);
     assert!(out_main.status.success(), "clean failed: {stdout_main}");
     assert!(
@@ -445,12 +436,7 @@ fn test_clean_never_lists_main_worktree_from_main_or_all() {
     std::fs::create_dir_all(state_dir.path()).unwrap();
     std::fs::write(state_dir.path().join("repos"), repos_content).unwrap();
 
-    let out_all = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--all"])
-        .env("BLYTE_STATE_DIR", state_dir.path())
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out_all = blyte_output(&root, Some(state_dir.path()), &["clean", "--all"]);
     let stdout_all = String::from_utf8_lossy(&out_all.stdout);
     assert!(out_all.status.success(), "clean --all failed: {stdout_all}");
     assert!(
@@ -501,11 +487,7 @@ fn test_clean_outside_worktree_shows_absolute_path() {
     // Cherry pick onto main
     git(&root, &["cherry-pick", &commit_sha]);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = blyte_output(&root, None, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -562,11 +544,7 @@ fn test_clean_worktree_under_wt_directory_not_listed() {
     git(&root, &["cherry-pick", &commit_sha]);
 
     // Clean from main root
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(&root)
-        .output()
-        .unwrap();
+    let out = blyte_output(&root, None, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");

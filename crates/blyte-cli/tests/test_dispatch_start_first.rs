@@ -24,7 +24,14 @@ fn setup_repo(r: &Path) {
 }
 
 fn run_dispatch(r: &Path, id: &str, extra: &[&str]) -> Output {
-    let mut args = vec!["dispatch", id, "task.md", "--sandbox", "off"];
+    let mut args = vec![
+        "dispatch",
+        id,
+        "task.md",
+        "--no-base-check",
+        "--sandbox",
+        "off",
+    ];
     if !extra.contains(&"--research") {
         args.extend_from_slice(&["--gate", "true"]);
     }
@@ -32,10 +39,20 @@ fn run_dispatch(r: &Path, id: &str, extra: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(&args)
         .current_dir(r)
+        .env("HOME", r)
+        .env("XDG_CONFIG_HOME", r)
         .env("BLYTE_STATE_DIR", r.join(".state"))
+        .env("BLYTE_GATE_SLOT_DIR", r.join(".slots"))
+        .env("BLYTE_GATE_SLOTS", "16")
+        .env("BLYTE_ENV_FILE", "")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
+        .env_remove("OLLAMA_HOST")
         .env_remove("BLYTE_MODEL")
         .output()
         .unwrap()

@@ -29,13 +29,16 @@ fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_STATE_DIR", dir.join(".state"))
+        .env("BLYTE_GATE_SLOT_DIR", dir.join(".slots"))
+        .env("BLYTE_GATE_SLOTS", "16")
+        .env("BLYTE_ENV_FILE", "")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("OLLAMA_API_KEY")
-        .env_remove("BLYTE_ENV_FILE")
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir)
         .output()
@@ -77,7 +80,17 @@ fn dispatch_explains_existing_merged_wip_branch() {
     );
 
     std::fs::write(r.path().join("task.md"), "Do work.\n").unwrap();
-    let out = blyte(r.path(), &["dispatch", "A1", "task.md", "--sandbox", "off"]);
+    let out = blyte(
+        r.path(),
+        &[
+            "dispatch",
+            "A1",
+            "task.md",
+            "--no-base-check",
+            "--sandbox",
+            "off",
+        ],
+    );
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
