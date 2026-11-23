@@ -1,14 +1,86 @@
 //! The loop, driven by a scripted provider so the behaviour is deterministic.
 
+use std::path::Path;
+use std::process::Command;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::{ContextStrategy, Conversational};
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::{LocalShell, Shell};
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
 use serde_json::json;
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let trimmed = command.trim();
+        if command.lines().any(|l| l.trim() == "true") {
+            return Ok(Output {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("echo ") {
+            return Ok(Output {
+                stdout: format!("{rest}\n"),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+        }
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        vec!["git".into()]
+    }
+}
+
+struct FastShell;
+
+impl Shell for FastShell {
+    fn exec(&self, command: &str, cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .current_dir(cwd)
+            .output()
+            .map_err(|e| format!("failed to run bash: {e}"))?;
+        Ok(Output {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            exit_code: out.status.code().unwrap_or(-1),
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        vec!["git".into()]
+    }
+}
 
 /// Replays a fixed list of responses and records every request it was given.
 struct ScriptedProvider {
@@ -65,34 +137,45 @@ fn calls(name: &str, args: serde_json::Value) -> Response {
     }
 }
 
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?} failed");
+}
+
 fn repo() -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
-    let sh = LocalShell;
-    sh.exec(
-        "git init -q && git config user.email a@b && git config user.name c",
-        d.path(),
-        std::time::Duration::from_secs(30),
-    )
-    .unwrap();
+    git(d.path(), &["init", "-q"]);
     std::fs::write(d.path().join("marker"), "0\n").unwrap();
-    sh.exec(
-        "git add -A && git commit -qm base",
+    git(d.path(), &["add", "-A"]);
+    git(
         d.path(),
-        std::time::Duration::from_secs(30),
-    )
-    .unwrap();
+        &[
+            "-c",
+            "user.email=a@b",
+            "-c",
+            "user.name=c",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    );
     d
 }
 
 fn runner<'a>(
     p: &'a ScriptedProvider,
+    shell: &'a dyn Shell,
     root: &std::path::Path,
     ctx: &'a dyn ContextStrategy,
     rollback: bool,
 ) -> Runner<'a> {
     Runner {
         provider: p,
-        shell: &LocalShell,
+        shell,
         fs: &LocalFs,
         context: ctx,
         root: root.to_path_buf(),
@@ -135,10 +218,10 @@ fn the_gate_is_not_in_the_tool_surface() {
 
 #[test]
 fn stopping_triggers_the_gate_and_passing_it_ends_the_run() {
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
     let p = ScriptedProvider::new(vec![says("I think that is done.")]);
     let mut st = State::new("make it work", "true");
-    let (outcome, rep) = runner(&p, d.path(), &Conversational, true).run(&mut st);
+    let (outcome, rep) = runner(&p, &StubShell, d.path(), &Conversational, true).run(&mut st);
     assert_eq!(outcome, Outcome::Verified);
     assert_eq!(rep.gate_attempts, 1);
 }
@@ -146,14 +229,14 @@ fn stopping_triggers_the_gate_and_passing_it_ends_the_run() {
 #[test]
 fn the_model_cannot_finish_by_claiming_to_have_finished() {
     // It says it is done, confidently, repeatedly. The command disagrees, and the command wins.
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
     let p = ScriptedProvider::new(vec![
         says("Done! All tests pass."),
         says("Definitely finished now."),
         says("Complete."),
     ]);
     let mut st = State::new("fix it", "false");
-    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    let (outcome, rep) = runner(&p, &StubShell, d.path(), &Conversational, false).run(&mut st);
     assert_eq!(outcome, Outcome::GateFailed);
     assert_eq!(
         rep.gate_attempts, 3,
@@ -165,10 +248,10 @@ fn the_model_cannot_finish_by_claiming_to_have_finished() {
 fn a_gate_that_cannot_run_is_a_failure_not_a_pass() {
     // Treating an execution error as success is how an ungated run gets mistaken for a
     // verified one -- the defect that made a whole family of earlier results unreadable.
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
     let p = ScriptedProvider::new(vec![says("done")]);
     let mut st = State::new("g", "this-command-does-not-exist-anywhere");
-    let (outcome, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    let (outcome, _) = runner(&p, &FastShell, d.path(), &Conversational, false).run(&mut st);
     assert_eq!(outcome, Outcome::GateFailed);
 }
 
@@ -184,7 +267,7 @@ fn a_failed_gate_resets_the_tree_to_the_checkpoint() {
         says("done"),
     ]);
     let mut st = State::new("g", "false");
-    let (_, _) = runner(&p, d.path(), &Conversational, true).run(&mut st);
+    let (_, _) = runner(&p, &FastShell, d.path(), &Conversational, true).run(&mut st);
     assert_eq!(
         std::fs::read_to_string(d.path().join("marker")).unwrap(),
         "0\n",
@@ -197,13 +280,14 @@ fn a_failed_gate_resets_the_tree_to_the_checkpoint() {
 fn rollback_can_be_switched_off_because_it_is_not_free() {
     // One run reset a worker's COMMITTED feature five times (FINDINGS 13.2), so the policy is
     // a switch rather than a law.
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("marker"), "0\n").unwrap();
     let p = ScriptedProvider::new(vec![
         calls("write", json!({"path": "marker", "content": "kept\n"})),
         says("done"),
     ]);
     let mut st = State::new("g", "false");
-    let (_, _) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    let (_, _) = runner(&p, &StubShell, d.path(), &Conversational, false).run(&mut st);
     assert_eq!(
         std::fs::read_to_string(d.path().join("marker")).unwrap(),
         "kept\n"
@@ -222,7 +306,7 @@ fn the_worker_is_told_when_its_edits_were_reverted() {
         says("done"),
     ]);
     let mut st = State::new("g", "false");
-    runner(&p, d.path(), &Conversational, true).run(&mut st);
+    runner(&p, &FastShell, d.path(), &Conversational, true).run(&mut st);
     let last = p.seen.lock().unwrap().last().cloned().unwrap();
     let text = format!("{:?}", last.messages);
     assert!(
@@ -233,10 +317,10 @@ fn the_worker_is_told_when_its_edits_were_reverted() {
 
 #[test]
 fn the_system_prompt_states_the_gate_without_offering_it() {
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
     let p = ScriptedProvider::new(vec![says("done")]);
     let mut st = State::new("fix the parser", "npm test");
-    runner(&p, d.path(), &Conversational, false).run(&mut st);
+    runner(&p, &StubShell, d.path(), &Conversational, false).run(&mut st);
     let sys = p.seen.lock().unwrap()[0].system.clone();
     assert!(
         sys.contains("npm test"),
@@ -251,13 +335,13 @@ fn the_system_prompt_states_the_gate_without_offering_it() {
 
 #[test]
 fn conversational_context_does_grow_which_is_the_thing_being_compared() {
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
     let script: Vec<_> = (0..6)
         .map(|i| calls("bash", json!({"command": format!("echo {i}")})))
         .collect();
     let p = ScriptedProvider::new(script);
     let mut st = State::new("g", "true");
-    runner(&p, d.path(), &Conversational, false).run(&mut st);
+    runner(&p, &StubShell, d.path(), &Conversational, false).run(&mut st);
     let seen = p.seen.lock().unwrap();
     let first = seen.first().unwrap().messages.len();
     let last = seen.last().unwrap().messages.len();
@@ -278,11 +362,11 @@ fn a_provider_error_is_reported_as_an_error_not_as_failed_work() {
             "broken".into()
         }
     }
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
     let mut st = State::new("g", "true");
     let r = Runner {
         provider: &Broken,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -303,13 +387,13 @@ fn a_provider_error_is_reported_as_an_error_not_as_failed_work() {
 
 #[test]
 fn the_turn_budget_bounds_a_model_that_never_stops() {
-    let d = repo();
+    let d = tempfile::tempdir().unwrap();
     let script: Vec<_> = (0..500)
         .map(|_| calls("bash", json!({"command": "true"})))
         .collect();
     let p = ScriptedProvider::new(script);
     let mut st = State::new("g", "true");
-    let (outcome, rep) = runner(&p, d.path(), &Conversational, false).run(&mut st);
+    let (outcome, rep) = runner(&p, &StubShell, d.path(), &Conversational, false).run(&mut st);
     assert_eq!(outcome, Outcome::BudgetExhausted);
     assert_eq!(rep.outcome_turns, 12);
 }

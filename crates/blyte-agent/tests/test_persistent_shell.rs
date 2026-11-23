@@ -21,7 +21,7 @@ fn setup() -> (tempfile::TempDir, PathBuf, PersistentShell) {
 #[test]
 fn harness_commands_match_a_fresh_process_exactly() {
     let (_d, root, p) = setup();
-    for cmd in [
+    let cmds = [
         "echo hi",
         "printf 'no newline'",
         "echo out; echo err >&2; exit 3",
@@ -33,9 +33,24 @@ fn harness_commands_match_a_fresh_process_exactly() {
         "echo $((6*7))",
         "printf 'a\\tb\\n\\n\\n'",
         "for i in 1 2 3; do echo line $i; done",
-    ] {
-        let old = LocalShell.exec(cmd, &root, T).unwrap();
-        let new = p.exec(cmd, &root, T).unwrap();
+    ];
+    let (olds, news) = std::thread::scope(|s| {
+        let old_handles: Vec<_> = cmds
+            .iter()
+            .map(|&cmd| {
+                let root = &root;
+                s.spawn(move || LocalShell.exec(cmd, root, T).unwrap())
+            })
+            .collect();
+        let new_handle = s.spawn(|| {
+            cmds.iter()
+                .map(|&cmd| p.exec(cmd, &root, T).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let olds: Vec<_> = old_handles.into_iter().map(|h| h.join().unwrap()).collect();
+        (olds, new_handle.join().unwrap())
+    });
+    for ((cmd, old), new) in cmds.iter().zip(olds).zip(news) {
         assert_eq!(new, old, "{cmd}");
     }
 }
@@ -63,12 +78,12 @@ fn the_models_shell_keeps_its_directory_and_environment() {
 fn a_timeout_kills_the_command_and_keeps_its_output() {
     let (_d, root, p) = setup();
     let o = p
-        .exec_user("echo start; sleep 10", &root, Duration::from_secs(1))
+        .exec_user("echo start; sleep 10", &root, Duration::from_millis(250))
         .unwrap();
     assert_eq!(o.exit_code, 124);
     assert_eq!(o.stdout, "start\n");
     assert!(
-        o.stderr.ends_with("[killed by blyte after 1s]"),
+        o.stderr.ends_with("[killed by blyte after 0s]"),
         "{:?}",
         o.stderr
     );

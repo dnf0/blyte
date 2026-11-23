@@ -1,15 +1,42 @@
 //! The model is told once, ten turns before the end, to save its work: runs ran out of turns
 //! without writing their report or committing (2026-10-01).
 
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let exit_code = if command.trim() == "true" { 0 } else { 1 };
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 /// Asks for a tool call every turn and records, per call, whether the request carried the warning.
 struct Busy {
@@ -44,7 +71,7 @@ fn the_warning_arrives_once_ten_turns_before_the_end() {
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),

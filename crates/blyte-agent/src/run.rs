@@ -776,13 +776,24 @@ impl<'a> Runner<'a> {
         state: &mut State,
         now: &(dyn Fn() -> std::time::Instant + Sync),
     ) -> (Outcome, RunReport) {
-        self.run_until(state, now)
+        self.run_until(state, now, &std::thread::sleep)
+    }
+
+    /// Like [`run_with_clock`](Self::run_with_clock), using `sleep` for retry waits.
+    pub fn run_with_clock_and_sleep(
+        &self,
+        state: &mut State,
+        now: &(dyn Fn() -> std::time::Instant + Sync),
+        sleep: &(dyn Fn(std::time::Duration) + Sync),
+    ) -> (Outcome, RunReport) {
+        self.run_until(state, now, sleep)
     }
 
     fn run_until(
         &self,
         state: &mut State,
         now: &(dyn Fn() -> std::time::Instant + Sync),
+        sleep: &(dyn Fn(std::time::Duration) + Sync),
     ) -> (Outcome, RunReport) {
         let is_empty_conversation = state
             .runtime
@@ -849,6 +860,7 @@ impl<'a> Runner<'a> {
             loop_deadline,
             deadline,
             now,
+            sleep,
         );
         if let BaseCheck::Polled(handle) = self.base_check {
             if outcome != Outcome::Verified && report.base_check_passed.is_none() {
@@ -912,6 +924,7 @@ impl<'a> Runner<'a> {
         deadline: Option<std::time::Instant>,
         claim_deadline: Option<std::time::Instant>,
         now: &(dyn Fn() -> std::time::Instant + Sync),
+        sleep: &(dyn Fn(std::time::Duration) + Sync),
     ) -> (Outcome, RunReport) {
         let mut deadline = deadline;
         let mut report = RunReport::default();
@@ -1239,7 +1252,7 @@ impl<'a> Runner<'a> {
                                 wait_ms: wait.as_millis() as u64,
                                 reason,
                             });
-                            std::thread::sleep(wait);
+                            sleep(wait);
                         } else {
                             let err_msg = match quota_exhausted(&e) {
                                 Some(msg) => format!("{msg}: {e}"),

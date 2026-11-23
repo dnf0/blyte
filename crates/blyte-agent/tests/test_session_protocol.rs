@@ -20,16 +20,41 @@ fn setup() -> (tempfile::TempDir, PathBuf, PersistentShell) {
 #[test]
 fn awkward_commands_and_large_outputs_are_exact() {
     let (_d, root, p) = setup();
-    for cmd in [
+    let cmds = [
         "printf '%s\\n' '__BLYTE_CMD_0_0__' \"a'b\" '$HOME' '`x`'",
         "head -c 1000000 /dev/zero | tr '\\0' a",
         "printf 'tail without newline'; printf 'err without newline' >&2",
         "cat <<'EOF'\nline one\n  indented $NOT_EXPANDED\nEOF",
         "true",
-    ] {
-        let old = LocalShell.exec(cmd, &root, T).unwrap();
-        assert_eq!(p.exec(cmd, &root, T).unwrap(), old, "exec: {cmd}");
-        assert_eq!(p.exec_user(cmd, &root, T).unwrap(), old, "exec_user: {cmd}");
+    ];
+    let (olds, execs, users) = std::thread::scope(|s| {
+        let old_handles: Vec<_> = cmds
+            .iter()
+            .map(|&cmd| {
+                let root = &root;
+                s.spawn(move || LocalShell.exec(cmd, root, T).unwrap())
+            })
+            .collect();
+        let exec_handle = s.spawn(|| {
+            cmds.iter()
+                .map(|&cmd| p.exec(cmd, &root, T).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let user_handle = s.spawn(|| {
+            cmds.iter()
+                .map(|&cmd| p.exec_user(cmd, &root, T).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let olds: Vec<_> = old_handles.into_iter().map(|h| h.join().unwrap()).collect();
+        (
+            olds,
+            exec_handle.join().unwrap(),
+            user_handle.join().unwrap(),
+        )
+    });
+    for ((cmd, old), (ex, us)) in cmds.iter().zip(olds).zip(execs.into_iter().zip(users)) {
+        assert_eq!(ex, old, "exec: {cmd}");
+        assert_eq!(us, old, "exec_user: {cmd}");
     }
 }
 

@@ -1458,6 +1458,7 @@ fn run_command_bounded(
     });
 
     let deadline = std::time::Instant::now() + timeout;
+    let mut poll = Duration::from_millis(1);
     let status = loop {
         match child
             .try_wait()
@@ -1483,7 +1484,11 @@ fn run_command_bounded(
                 let _ = child.wait();
                 break None;
             }
-            None => std::thread::sleep(Duration::from_millis(50)),
+            None => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(poll.min(remaining));
+                poll = (poll * 2).min(Duration::from_millis(50));
+            }
         }
     };
 

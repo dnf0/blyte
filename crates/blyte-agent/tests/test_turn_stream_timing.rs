@@ -1,15 +1,45 @@
 //! Each turn's `TurnUsage` carries the stream timing of its model call, and of every attempt
 //! that failed and was retried.
 
+use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, FailedAttempt, Outcome, Runner, TurnUsage};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, StreamTiming};
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let exit_code = if command.lines().any(|l| l.trim() == "true") {
+            0
+        } else {
+            1
+        };
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 /// Each call answers with the next scripted result and reports the next scripted timing,
 /// as a streaming provider does, including after a failed call.
@@ -67,7 +97,7 @@ fn run_with(provider: &dyn Provider) -> (Outcome, Vec<TurnUsage>) {
     let dir = tempfile::tempdir().unwrap();
     let runner = Runner {
         provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: dir.path().to_path_buf(),
@@ -83,7 +113,7 @@ fn run_with(provider: &dyn Provider) -> (Outcome, Vec<TurnUsage>) {
         base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("g", "true");
-    let (outcome, report) = runner.run(&mut state);
+    let (outcome, report) = runner.run_with_clock_and_sleep(&mut state, &Instant::now, &|_| {});
     (outcome, report.turn_usage)
 }
 

@@ -1,13 +1,50 @@
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let exit_code = if command.lines().any(|l| l.trim() == "true") {
+            0
+        } else if command.lines().any(|l| l.trim() == "test -s report.md") {
+            if std::fs::metadata(cwd.join("report.md")).is_ok_and(|m| m.len() > 0) {
+                0
+            } else {
+                1
+            }
+        } else {
+            1
+        };
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 struct ScriptedProvider {
     replies: Mutex<VecDeque<Response>>,
@@ -63,7 +100,7 @@ fn same_read_every_turn_warns_on_third_and_stops_after_31_turns() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -138,7 +175,7 @@ fn write_every_second_turn_never_warns_or_stops_early() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -196,7 +233,7 @@ fn two_different_reads_alternating_warn_from_each_ones_third_occurrence() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -265,7 +302,7 @@ fn turn_8_reminder_sent_when_report_missing_and_not_when_it_has_content() {
     let provider_missing = ScriptedProvider::new(replies_missing);
     let runner_missing = Runner {
         provider: &provider_missing,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d_missing.path().to_path_buf(),
@@ -316,7 +353,7 @@ fn turn_8_reminder_sent_when_report_missing_and_not_when_it_has_content() {
     let provider_present = ScriptedProvider::new(replies_present);
     let runner_present = Runner {
         provider: &provider_present,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d_present.path().to_path_buf(),
@@ -363,7 +400,7 @@ fn research_20_repeat_warning_added_once_and_third_use_mentions_report_md() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -463,7 +500,7 @@ fn research_at_30_repeats_closes_reading_allows_write_and_ends_normally() {
     let provider = ScriptedProvider::new(replies);
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -559,7 +596,7 @@ fn research_at_30_repeats_exhausts_budget_after_3_grace_turns() {
     let provider = ScriptedProvider::new(replies);
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
