@@ -118,53 +118,6 @@ impl From<&crate::cli::Cli> for TaskConfig {
     }
 }
 
-fn orchestrator_extra_writes(root: &Path) -> Vec<PathBuf> {
-    let output = match std::process::Command::new("git")
-        .args(["-C"])
-        .arg(root)
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-dir",
-            "--git-common-dir",
-        ])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines().map(str::trim).filter(|s| !s.is_empty());
-    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
-        return Vec::new();
-    };
-    let git_dir_path = PathBuf::from(git_dir);
-    let common_dir_path = PathBuf::from(common_dir);
-    let git_canon = git_dir_path.canonicalize().unwrap_or(git_dir_path);
-    let common_canon = common_dir_path
-        .canonicalize()
-        .unwrap_or_else(|_| common_dir_path.clone());
-    if git_canon == common_canon {
-        return Vec::new();
-    }
-    let mut extra = vec![common_canon.clone()];
-    if common_dir_path != common_canon {
-        extra.push(common_dir_path.clone());
-    }
-    if common_dir_path.file_name() == Some(std::ffi::OsStr::new(".git")) {
-        if let Some(main_root) = common_dir_path.parent() {
-            let main_canon = main_root
-                .canonicalize()
-                .unwrap_or_else(|_| main_root.to_path_buf());
-            extra.push(main_canon.join(".wt"));
-            if main_canon != main_root {
-                extra.push(main_root.join(".wt"));
-            }
-        }
-    }
-    extra
-}
-
 pub fn build_sandbox_profile(config: &TaskConfig) -> blyte_agent::sandbox::Profile {
     build_sandbox_profile_for_root(config, &config.root)
 }
@@ -173,57 +126,56 @@ fn build_sandbox_profile_for_root(
     config: &TaskConfig,
     root: &Path,
 ) -> blyte_agent::sandbox::Profile {
-    let extra = if config.orchestrate {
-        orchestrator_extra_writes(root)
+    if config.orchestrate {
+        blyte_agent::sandbox::orchestrator_profile_net(
+            root,
+            &config.allow_read,
+            config.network == "on",
+        )
     } else {
-        Vec::new()
-    };
-    if extra.is_empty() {
-        return blyte_agent::sandbox::default_profile_net(
-            root,
-            &config.allow_read,
-            config.network == "on",
-        );
+        blyte_agent::sandbox::default_profile_net(root, &config.allow_read, config.network == "on")
     }
-    #[cfg(target_os = "macos")]
-    {
-        let mut allowed = blyte_agent::sandbox::default_allowed(root);
-        allowed.extend(extra);
-        let deny_read = match std::env::var_os("HOME") {
-            Some(home) if !home.is_empty() => blyte_agent::sandbox::read_denied(Path::new(&home)),
-            _ => Vec::new(),
-        };
-        let base =
-            blyte_agent::sandbox::profile_with(root, &allowed, &deny_read, &config.allow_read);
-        if config.network == "on" {
-            blyte_agent::sandbox::Profile::Seatbelt(base)
-        } else {
-            let socks = match std::env::var_os("HOME") {
-                Some(home) if !home.is_empty() => {
-                    blyte_agent::sandbox::docker_sockets(Path::new(&home))
-                }
-                _ => Vec::new(),
-            };
-            blyte_agent::sandbox::Profile::Seatbelt(blyte_agent::sandbox::offline(base, &socks))
-        }
+}
+
+pub fn configure_orchestrate_policy(
+    orchestrate: bool,
+    sandbox_on: bool,
+    root: &Path,
+    approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
+    has_conversation: bool,
+) -> Result<usize, String> {
+    if !orchestrate || !sandbox_on {
+        blyte_agent::tools::set_write_scope(None);
+        blyte_agent::tools::set_approval(None);
+        return Ok(0);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut profile = blyte_agent::sandbox::default_profile_net(
-            root,
-            &config.allow_read,
-            config.network == "on",
-        );
-        match &mut profile {
-            blyte_agent::sandbox::Profile::Landlock(write)
-            | blyte_agent::sandbox::Profile::LandlockOffline(write)
-            | blyte_agent::sandbox::Profile::LandlockConfined { write, .. } => {
-                write.extend(extra);
+    let tasks_dir = blyte_agent::sandbox::orchestrator_tasks_dir(root);
+    std::fs::create_dir_all(&tasks_dir)
+        .map_err(|e| format!("cannot create {}: {e}", tasks_dir.display()))?;
+    let tasks_canon = tasks_dir
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", tasks_dir.display()))?;
+    let mut allowed = vec![tasks_canon];
+    for dir in blyte_agent::sandbox::orchestrator_allowed(root) {
+        if let Ok(canon) = dir.canonicalize() {
+            if !allowed.contains(&canon) {
+                allowed.push(canon);
             }
-            blyte_agent::sandbox::Profile::Seatbelt(_) => {}
         }
-        profile
     }
+    blyte_agent::tools::set_write_scope(Some(blyte_agent::tools::WriteScope { allowed }));
+    let rules = crate::approval_file::load()?;
+    let count = rules.len();
+    let approver: Arc<dyn blyte_agent::approval::Approver> = match approver {
+        Some(a) => a,
+        None if has_conversation => Arc::new(crate::tty_approver::TtyApprover),
+        None => Arc::new(blyte_agent::approval::NoApprover),
+    };
+    blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
+        rules,
+        approver,
+    }));
+    Ok(count)
 }
 
 struct BackgroundBaseCheckData {
@@ -560,7 +512,17 @@ pub fn run_task_with_state_and_events(
     state: &mut blyte_agent::state::State,
     on_event: &(dyn Fn(&blyte_agent::run::Event<'_>) + Sync),
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
-    run_task_with_event_callback(config, state, &|event| on_event(event))
+    run_task_with_event_callback(config, state, None, &|event| on_event(event))
+}
+
+/// Executes an autonomous solver run with an explicit approver override (used by the surface).
+pub fn run_task_with_approver(
+    config: &TaskConfig,
+    state: &mut blyte_agent::state::State,
+    approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
+    on_event: &(dyn Fn(&blyte_agent::run::Event<'_>) + Sync),
+) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
+    run_task_with_event_callback(config, state, approver, &|event| on_event(event))
 }
 
 /// Executes an autonomous solver run against an existing mutable `State`, streaming events to `writer`
@@ -607,7 +569,7 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
             }
         }
     };
-    run_task_with_event_callback(config, state, &on_event)
+    run_task_with_event_callback(config, state, None, &on_event)
 }
 
 fn build_usage_entry(
@@ -708,6 +670,7 @@ fn usage_remainder(
 fn run_task_with_event_callback(
     config: &TaskConfig,
     state: &mut blyte_agent::state::State,
+    approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
     on_event: &dyn Fn(&blyte_agent::run::Event<'_>),
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
@@ -725,24 +688,13 @@ fn run_task_with_event_callback(
             std::env::set_var("BLYTE_SESSION", &id);
         }
         let sandbox_on = config.sandbox == "on";
-        let allowed_count = if sandbox_on {
-            let rules = crate::approval_file::load()?;
-            let count = rules.len();
-            let approver: Arc<dyn blyte_agent::approval::Approver> =
-                if state.runtime.conversation.is_some() {
-                    Arc::new(crate::tty_approver::TtyApprover)
-                } else {
-                    Arc::new(blyte_agent::approval::NoApprover)
-                };
-            blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
-                rules,
-                approver,
-            }));
-            count
-        } else {
-            blyte_agent::tools::set_approval(None);
-            0
-        };
+        let allowed_count = configure_orchestrate_policy(
+            true,
+            sandbox_on,
+            &config.root,
+            approver,
+            state.runtime.conversation.is_some(),
+        )?;
         if state.orchestrator.instructions.is_none() {
             let lines = crate::orchestrator_text::set_state_instructions(
                 state,
@@ -761,7 +713,7 @@ fn run_task_with_event_callback(
             .map_err(|e| format!("cannot locate blyte executable for the blyte tool: {e}"))?;
         blyte_agent::tools::set_blyte_tool(Some(exe));
     } else {
-        blyte_agent::tools::set_approval(None);
+        configure_orchestrate_policy(false, false, &config.root, None, false)?;
         blyte_agent::tools::set_blyte_tool(None);
     }
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());

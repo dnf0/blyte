@@ -260,6 +260,559 @@ pub struct DispatchSummary {
     pub base_check_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_round: Option<crate::fix_round::FixRoundSummary>,
+}
+
+struct ImplementerConfig<'a> {
+    current_exe: &'a Path,
+    worktree_dir: &'a Path,
+    root: &'a Path,
+    id: &'a str,
+    gate: &'a str,
+    env: &'a std::collections::BTreeMap<String, String>,
+    model: Option<&'a str>,
+    max_seconds: u64,
+    max_turns: u32,
+    max_cost: Option<f64>,
+    fold_budget: Option<usize>,
+    sandbox: &'a str,
+    network: &'a str,
+    config_allow_read: &'a [PathBuf],
+    cli_allow_read: &'a [PathBuf],
+    pass_env: &'a [String],
+    research: bool,
+    no_claim_check: bool,
+    left_out: &'a [(String, String)],
+}
+
+struct PassReport {
+    report_outcome: String,
+    error: Option<String>,
+    final_message: Option<String>,
+    turns: u32,
+    report_turns: Option<u64>,
+    gate_attempts: u32,
+    gate_failures: Vec<String>,
+    cost_usd: Option<f64>,
+    model: Option<String>,
+    seconds: u64,
+    sandbox: String,
+    base_check_passed: Option<bool>,
+    base_check_seconds: Option<f64>,
+}
+
+fn open_pass_log(log_path: &Path, append_header: Option<&str>) -> Result<std::fs::File, String> {
+    match append_header {
+        None => std::fs::File::create(log_path)
+            .map_err(|e| format!("error creating log file {}: {e}", log_path.display())),
+        Some(header) => {
+            use std::io::Write;
+            let needs_leading_nl = match std::fs::read(log_path) {
+                Ok(bytes) => !bytes.is_empty() && !bytes.ends_with(b"\n"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    return Err(format!(
+                        "error reading log file {}: {e}",
+                        log_path.display()
+                    ));
+                }
+            };
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+                .map_err(|e| format!("error opening log file {}: {e}", log_path.display()))?;
+            if needs_leading_nl {
+                writeln!(f)
+                    .map_err(|e| format!("error writing log file {}: {e}", log_path.display()))?;
+            }
+            writeln!(f, "{header}")
+                .map_err(|e| format!("error writing log file {}: {e}", log_path.display()))?;
+            Ok(f)
+        }
+    }
+}
+
+fn run_implementer_pass<F>(
+    cfg: &ImplementerConfig<'_>,
+    log_path: &Path,
+    append_log_header: Option<&str>,
+    report_path: &Path,
+    task_prompt: &str,
+    base_check_dir: Option<&Path>,
+    on_spawn: F,
+) -> Result<(), String>
+where
+    F: FnOnce(u32),
+{
+    if report_path.exists() {
+        std::fs::remove_file(report_path)
+            .map_err(|e| format!("error removing {}: {e}", report_path.display()))?;
+    }
+    let log_file = open_pass_log(log_path, append_log_header)?;
+    let log_file_err = log_file
+        .try_clone()
+        .map_err(|e| format!("error cloning log file handle: {e}"))?;
+
+    let mut cmd = Command::new(cfg.current_exe);
+    cmd.current_dir(cfg.worktree_dir);
+    cmd.stdout(log_file);
+    cmd.stderr(log_file_err);
+
+    for (k, v) in cfg.env {
+        cmd.env(k, v);
+    }
+    cmd.env("BLYTE_DISPATCH_ID", cfg.id);
+
+    cmd.arg("--gate").arg(cfg.gate);
+    cmd.arg("--rollback=false");
+    cmd.arg("--max-seconds").arg(cfg.max_seconds.to_string());
+    cmd.arg("--max-turns").arg(cfg.max_turns.to_string());
+    cmd.arg("--report").arg(report_path);
+
+    if let Some(m) = cfg.model {
+        cmd.arg("--model").arg(m);
+    }
+    if let Some(c) = cfg.max_cost {
+        cmd.arg("--max-cost").arg(c.to_string());
+    }
+    if let Some(fb) = cfg.fold_budget {
+        cmd.arg("--fold-budget").arg(fb.to_string());
+    }
+    cmd.arg("--sandbox").arg(cfg.sandbox);
+    cmd.arg("--network").arg(cfg.network);
+    for r in cfg.config_allow_read {
+        cmd.arg("--allow-read").arg(r);
+    }
+    for r in cfg.cli_allow_read {
+        cmd.arg("--allow-read").arg(r);
+    }
+    for p in cfg.pass_env {
+        cmd.arg("--pass-env").arg(p);
+    }
+    for r in cfg.config_allow_read.iter().chain(cfg.cli_allow_read) {
+        cmd.arg("--read-root").arg(r);
+    }
+    if cfg.research {
+        cmd.arg("--read-root").arg(cfg.root);
+        cmd.arg("--no-gate-slot");
+        cmd.arg("--research");
+        if !cfg.no_claim_check {
+            cmd.arg("--claim-check");
+        }
+    } else if let Some(base_wt_dir) = base_check_dir {
+        cmd.arg("--base-check");
+        cmd.arg("--base-check-dir").arg(base_wt_dir);
+    }
+
+    cmd.arg("--");
+    cmd.arg(task_prompt);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("error spawning child process: {e}"))?;
+    let pid = child.id();
+    on_spawn(pid);
+    if let Err(msg) = crate::keep_awake::hold(pid) {
+        eprintln!("blyte: warning: {msg}; the machine may sleep during this run");
+    }
+
+    let _ = child.wait();
+
+    if !cfg.left_out.is_empty() {
+        if let Ok(report_str) = std::fs::read_to_string(report_path) {
+            if let Ok(mut report_val) = serde_json::from_str::<serde_json::Value>(&report_str) {
+                let formatted: Vec<String> = cfg
+                    .left_out
+                    .iter()
+                    .map(|(cmd_name, reason)| format!("{cmd_name} ({reason})"))
+                    .collect();
+                report_val["gate_left_out"] = serde_json::json!(formatted);
+                if let Ok(updated) = serde_json::to_string_pretty(&report_val) {
+                    let _ = std::fs::write(report_path, updated + "\n");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_pass_report(report_path: &Path, default_sandbox: &str) -> Result<PassReport, String> {
+    let raw = std::fs::read_to_string(report_path)
+        .map_err(|e| format!("missing report {}: {e}", report_path.display()))?;
+    let rec: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("unreadable report JSON {}: {e}", report_path.display()))?;
+
+    let gate_failures = match rec.get("gate_failures").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| {
+                if s.chars().count() > 1000 {
+                    s.chars().take(1000).collect()
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let raw_turns = rec.get("turns").and_then(|v| v.as_u64());
+    let rec_outcome = rec
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing \"outcome\" in {}", report_path.display()))?;
+    let turns = match raw_turns {
+        Some(t) => t as u32,
+        None => 0,
+    };
+    let gate_attempts = match rec.get("gate_attempts").and_then(|v| v.as_u64()) {
+        Some(n) => n as u32,
+        None => 0,
+    };
+    let seconds = match rec.get("duration_seconds").and_then(|v| v.as_f64()) {
+        Some(d) => d.round() as u64,
+        None => 0,
+    };
+    let sandbox = match rec.get("sandbox").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => default_sandbox.to_string(),
+    };
+
+    Ok(PassReport {
+        report_outcome: rec_outcome.to_string(),
+        error: summary_error(rec_outcome, rec.get("error").and_then(|v| v.as_str())),
+        final_message: rec
+            .get("final_message")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        turns,
+        report_turns: raw_turns,
+        gate_attempts,
+        gate_failures,
+        cost_usd: rec.get("cost_usd").and_then(|v| v.as_f64()),
+        model: rec
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        seconds,
+        sandbox,
+        base_check_passed: rec.get("base_check_passed").and_then(|v| v.as_bool()),
+        base_check_seconds: rec.get("base_check_seconds").and_then(|v| v.as_f64()),
+    })
+}
+
+fn pass_report_from_error(err_msg: String, default_sandbox: &str) -> PassReport {
+    PassReport {
+        report_outcome: "error".to_string(),
+        error: Some(err_msg),
+        final_message: None,
+        turns: 0,
+        report_turns: None,
+        gate_attempts: 0,
+        gate_failures: Vec::new(),
+        cost_usd: None,
+        model: None,
+        seconds: 0,
+        sandbox: default_sandbox.to_string(),
+        base_check_passed: None,
+        base_check_seconds: None,
+    }
+}
+
+fn git_head_sha(worktree_dir: &Path) -> Result<String, String> {
+    let wt = worktree_dir
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 worktree path {}", worktree_dir.display()))?;
+    let out = Command::new("git")
+        .args(["-C", wt, "rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("failed to execute git rev-parse HEAD in {wt}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed in {wt}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn git_reset_hard(worktree_dir: &Path, sha: &str) -> Result<(), String> {
+    let wt = worktree_dir
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 worktree path {}", worktree_dir.display()))?;
+    let out = Command::new("git")
+        .args(["-C", wt, "reset", "--hard", sha])
+        .output()
+        .map_err(|e| format!("failed to run git reset --hard {sha} in {wt}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git reset --hard {sha} failed in {wt}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+fn git_commits_since(worktree_dir: &Path, base_sha: &str) -> Vec<CommitRecord> {
+    let log_out = Command::new("git")
+        .args([
+            "-C",
+            worktree_dir.to_str().unwrap(),
+            "log",
+            "--reverse",
+            "--format=%h%x09%s",
+            &format!("{base_sha}..HEAD"),
+        ])
+        .output();
+
+    let mut commits = Vec::new();
+    if let Ok(o) = log_out {
+        let text = String::from_utf8_lossy(&o.stdout);
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((sha, subject)) = line.split_once('\t') {
+                commits.push(CommitRecord {
+                    sha: sha.to_string(),
+                    subject: subject.to_string(),
+                });
+            }
+        }
+    }
+    commits
+}
+
+fn git_changed_files_since(worktree_dir: &Path, base_sha: &str) -> Vec<String> {
+    let diff_out = Command::new("git")
+        .args([
+            "-C",
+            worktree_dir.to_str().unwrap(),
+            "diff",
+            "--name-only",
+            &format!("{base_sha}..HEAD"),
+        ])
+        .output();
+
+    let mut changed_files = Vec::new();
+    if let Ok(o) = diff_out {
+        let text = String::from_utf8_lossy(&o.stdout);
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                changed_files.push(line.to_string());
+            }
+        }
+    }
+    changed_files
+}
+
+fn update_start_record_pid(start_path: &Path, pid: u32) {
+    let raw = match std::fs::read_to_string(start_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: cannot read {}: {e}", start_path.display());
+            return;
+        }
+    };
+    let mut val = match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("warning: cannot parse {}: {e}", start_path.display());
+            return;
+        }
+    };
+    val["pid"] = serde_json::json!(pid);
+    if let Err(e) = write_start_record(start_path, &val) {
+        eprintln!("warning: cannot update {}: {e}", start_path.display());
+    }
+}
+
+fn read_start_base_sha(start_path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(start_path)
+        .map_err(|e| format!("cannot read {}: {e}", start_path.display()))?;
+    let val: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("cannot parse {}: {e}", start_path.display()))?;
+    val.get("base_sha")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("missing \"base_sha\" in {}", start_path.display()))
+}
+
+fn read_start_task_content(root: &Path, start_path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(start_path)
+        .map_err(|e| format!("cannot read {}: {e}", start_path.display()))?;
+    let val: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("cannot parse {}: {e}", start_path.display()))?;
+    let task_file_str = val
+        .get("task_file")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing \"task_file\" in {}", start_path.display()))?;
+    let task_path = Path::new(task_file_str);
+    let resolved = if task_path.is_absolute() {
+        task_path.to_path_buf()
+    } else {
+        root.join(task_path)
+    };
+    std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("cannot read task file {}: {e}", resolved.display()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_error_summary(
+    id: &str,
+    worktree_dir: &Path,
+    branch: String,
+    err_msg: String,
+    sandbox: String,
+    log_path: &Path,
+    report_path: &Path,
+    gate_source: &'static str,
+    warnings: Vec<String>,
+) -> DispatchSummary {
+    let outcome = "error";
+    DispatchSummary {
+        id: id.to_string(),
+        worktree: worktree_dir.display().to_string(),
+        branch,
+        outcome,
+        exit: exit_code(outcome),
+        error: Some(err_msg),
+        commits: Vec::new(),
+        changed_files: Vec::new(),
+        final_message: None,
+        turns: 0,
+        gate_attempts: 0,
+        gate_failures: Vec::new(),
+        cost_usd: None,
+        model: None,
+        seconds: 0,
+        sandbox,
+        log: log_path.display().to_string(),
+        report: report_path.display().to_string(),
+        gate_source,
+        research_report: None,
+        base_check_seconds: None,
+        warnings,
+        fix_round: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_fix_round(
+    root: &Path,
+    start_path: &Path,
+    impl_cfg: &ImplementerConfig<'_>,
+    log_path: &Path,
+    fix_report_path: &Path,
+    fixround_path: &Path,
+    passed_key: Option<&str>,
+    original_task: &str,
+    pre_round_sha: String,
+    fallbacks_sent: Vec<crate::fix_round::ConfirmedFallback>,
+    round_started_at: u64,
+    warnings: &mut Vec<String>,
+) -> Result<(crate::fix_round::FixRoundSummary, PassReport), String> {
+    let round_task = crate::fix_round::task_text(original_task, &fallbacks_sent);
+    let mut round_prompt = wrap_task(&round_task);
+    if let Some(qs) = quick_steps(impl_cfg.gate) {
+        round_prompt.push_str("\n\n");
+        round_prompt.push_str(&qs);
+    }
+
+    if fix_report_path.exists() {
+        std::fs::remove_file(fix_report_path).map_err(|e| {
+            format!(
+                "cannot remove stale fix round report {}: {e}",
+                fix_report_path.display()
+            )
+        })?;
+    }
+
+    run_implementer_pass(
+        impl_cfg,
+        log_path,
+        Some("== fix round"),
+        fix_report_path,
+        &round_prompt,
+        None,
+        |pid| update_start_record_pid(start_path, pid),
+    )?;
+
+    let round_report = match parse_pass_report(fix_report_path, impl_cfg.sandbox) {
+        Ok(r) => r,
+        Err(err_msg) => pass_report_from_error(err_msg, impl_cfg.sandbox),
+    };
+    let round_commits = git_commits_since(impl_cfg.worktree_dir, &pre_round_sha);
+
+    let (kept, round_outcome, done_commits, fallbacks_left) =
+        if round_report.report_outcome == "verified" && !round_commits.is_empty() {
+            let second_review = match crate::queue_actions::evaluate_verified_run(root, impl_cfg.id)
+            {
+                Ok(mr) => mr,
+                Err(err) => {
+                    eprintln!(
+                        "warning: post-dispatch review check failed for {}: {err}",
+                        impl_cfg.id
+                    );
+                    None
+                }
+            };
+            let round_warnings = record_passed_after_run(
+                root,
+                impl_cfg.worktree_dir,
+                false,
+                BaseCheckDecision::Disabled,
+                None,
+                passed_key,
+                "verified",
+                None,
+            );
+            for w in &round_warnings {
+                eprintln!("warning: {w}");
+            }
+            warnings.extend(round_warnings);
+            let left = crate::fix_round::fallbacks_left(second_review.as_ref());
+            let commit_shas = round_commits.into_iter().map(|c| c.sha).collect();
+            (true, "verified".to_string(), commit_shas, left)
+        } else {
+            let round_outcome = if round_report.report_outcome == "verified" {
+                "no_change".to_string()
+            } else {
+                match round_report.report_outcome.as_str() {
+                    "gate_failed" => "gate_failed".to_string(),
+                    "budget_exhausted" => "budget_exhausted".to_string(),
+                    "blocked" => "blocked".to_string(),
+                    _ => "error".to_string(),
+                }
+            };
+            git_reset_hard(impl_cfg.worktree_dir, &pre_round_sha)?;
+            let flag = crate::fix_round::failure_flag(&round_outcome);
+            crate::fix_round::append_check_flag(root, impl_cfg.id, &flag)?;
+            (false, round_outcome, Vec::new(), Some(fallbacks_sent.len()))
+        };
+
+    let fix_summary = crate::fix_round::FixRoundSummary {
+        outcome: round_outcome,
+        turns: round_report.turns,
+        cost_usd: round_report.cost_usd,
+        seconds: round_report.seconds,
+        commits: done_commits,
+        fallbacks_left,
+        kept,
+    };
+    let done_record = crate::fix_round::FixRoundRecord::Done {
+        pre_round_sha: Some(pre_round_sha),
+        fallbacks_sent,
+        started_at: Some(round_started_at),
+        summary: fix_summary.clone(),
+    };
+    crate::fix_round::write_record(fixround_path, &done_record)?;
+    Ok((fix_summary, round_report))
 }
 
 struct BaseWorktreeGuard {
@@ -531,6 +1084,32 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         .or(dispatch_cfg.network.as_deref())
         .unwrap_or("on");
 
+    let wt_parent = root.join(".wt");
+    let worktree_dir = wt_parent.join(&args.id);
+    let branch = format!("wip/{}", args.id);
+    let task_md_path = wt_parent.join(format!("{}.task.md", args.id));
+    let summary_path = wt_parent.join(format!("{}.json", args.id));
+    let fixround_path = crate::fix_round::record_path(&wt_parent, &args.id);
+
+    let existing_fixround = if args.research {
+        None
+    } else {
+        match crate::fix_round::load_record(&fixround_path) {
+            Ok(rec) => rec,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
+    };
+
+    let resuming_fix_round = !args.research
+        && !summary_path.exists()
+        && matches!(
+            existing_fixround,
+            Some(crate::fix_round::FixRoundRecord::Started { .. })
+        );
+
     let (task_content, recorded_task_file) = if let Some(ref tf) = args.task_file {
         let content = match std::fs::read_to_string(tf) {
             Ok(s) => s,
@@ -564,6 +1143,16 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 };
                 let content = format!("From the plan {plan_path}:\n\n{section}");
                 (content, None)
+            }
+            _ if resuming_fix_round => {
+                let start_path = wt_parent.join(format!("{}.start.json", args.id));
+                match read_start_task_content(&root, &start_path) {
+                    Ok(content) => (content, None),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return 2;
+                    }
+                }
             }
             _ => {
                 eprintln!("error: give a task file, or --plan with --plan-task");
@@ -638,13 +1227,10 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     }
 
-    let wt_parent = root.join(".wt");
-    let worktree_dir = wt_parent.join(&args.id);
-    let branch = format!("wip/{}", args.id);
-    let task_md_path = wt_parent.join(format!("{}.task.md", args.id));
     let task_file_recorded =
         recorded_task_file.unwrap_or_else(|| task_md_path.display().to_string());
 
+    let mut replaced_earlier_run = false;
     if !args.research {
         let start_path = wt_parent.join(format!("{}.start.json", args.id));
         if start_path.exists() {
@@ -671,7 +1257,6 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             };
             if crate::clean::is_pid_alive(pid) {
-                let summary_path = wt_parent.join(format!("{}.json", args.id));
                 let finished_since_start = if summary_path.exists() {
                     let meta = match std::fs::metadata(&summary_path) {
                         Ok(m) => m,
@@ -708,6 +1293,153 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             }
         }
 
+        if let Some(crate::fix_round::FixRoundRecord::Started {
+            pre_round_sha,
+            fallbacks_sent,
+            started_at: round_started_at,
+        }) = existing_fixround.clone()
+        {
+            if !summary_path.exists() {
+                if !worktree_dir.exists() {
+                    eprintln!("error: missing worktree {}", worktree_dir.display());
+                    return 2;
+                }
+                let base_sha = match read_start_base_sha(&start_path) {
+                    Ok(sha) => sha,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return 2;
+                    }
+                };
+                let report_path = wt_parent.join(format!("{}.report.json", args.id));
+                let log_path = wt_parent.join(format!("{}.log", args.id));
+                let fix_report_path = wt_parent.join(format!("{}.fix.report.json", args.id));
+                let pass1 = match parse_pass_report(&report_path, &args.sandbox) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return 2;
+                    }
+                };
+                let current_exe = match std::env::current_exe() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error getting current executable: {e}");
+                        return 2;
+                    }
+                };
+                let configured_gate = gate;
+                let passed_key = Some(crate::passed_trees::check_key(
+                    &configured_gate,
+                    &dispatch_cfg.env,
+                ));
+                let effective_gate = if comments == crate::config::CommentMode::Gate {
+                    gate_with_comment_step(&configured_gate, &comment_step(&current_exe, &base_sha))
+                } else {
+                    configured_gate
+                };
+                let mut warnings = Vec::new();
+                if let Err(err_msg) = git_reset_hard(&worktree_dir, &pre_round_sha) {
+                    let summary = build_error_summary(
+                        &args.id,
+                        &worktree_dir,
+                        branch,
+                        err_msg,
+                        pass1.sandbox,
+                        &log_path,
+                        &report_path,
+                        gate_source,
+                        warnings,
+                    );
+                    return finish_summary(&summary, &wt_parent);
+                }
+                let impl_cfg = ImplementerConfig {
+                    current_exe: &current_exe,
+                    worktree_dir: &worktree_dir,
+                    root: &root,
+                    id: &args.id,
+                    gate: &effective_gate,
+                    env: &dispatch_cfg.env,
+                    model: model.map(String::as_str),
+                    max_seconds,
+                    max_turns,
+                    max_cost,
+                    fold_budget,
+                    sandbox: &args.sandbox,
+                    network,
+                    config_allow_read: &config_allow_read,
+                    cli_allow_read: &args.allow_read,
+                    pass_env: &args.pass_env,
+                    research: false,
+                    no_claim_check: args.no_claim_check,
+                    left_out: &left_out,
+                };
+                let (fix_summary, round_report) = match execute_fix_round(
+                    &root,
+                    &start_path,
+                    &impl_cfg,
+                    &log_path,
+                    &fix_report_path,
+                    &fixround_path,
+                    passed_key.as_deref(),
+                    &task_content,
+                    pre_round_sha,
+                    fallbacks_sent,
+                    round_started_at,
+                    &mut warnings,
+                ) {
+                    Ok(res) => res,
+                    Err(err_msg) => {
+                        let summary = build_error_summary(
+                            &args.id,
+                            &worktree_dir,
+                            branch,
+                            err_msg,
+                            pass1.sandbox,
+                            &log_path,
+                            &report_path,
+                            gate_source,
+                            warnings,
+                        );
+                        return finish_summary(&summary, &wt_parent);
+                    }
+                };
+                let commits = git_commits_since(&worktree_dir, &base_sha);
+                let changed_files = git_changed_files_since(&worktree_dir, &base_sha);
+                let kept = fix_summary.kept;
+                let summary = DispatchSummary {
+                    id: args.id.clone(),
+                    worktree: worktree_dir.display().to_string(),
+                    branch,
+                    outcome: "verified",
+                    exit: exit_code("verified"),
+                    error: pass1.error,
+                    commits,
+                    changed_files,
+                    final_message: crate::fix_round::combined_final_message(
+                        pass1.final_message,
+                        round_report.final_message,
+                        kept,
+                    ),
+                    turns: pass1.turns.saturating_add(round_report.turns),
+                    gate_attempts: pass1.gate_attempts,
+                    gate_failures: pass1.gate_failures,
+                    cost_usd: crate::fix_round::sum_costs(pass1.cost_usd, round_report.cost_usd),
+                    model: pass1.model.or(round_report.model),
+                    seconds: pass1.seconds.saturating_add(round_report.seconds),
+                    sandbox: pass1.sandbox,
+                    log: log_path.display().to_string(),
+                    report: report_path.display().to_string(),
+                    gate_source,
+                    research_report: None,
+                    base_check_seconds: pass1.base_check_seconds,
+                    warnings,
+                    fix_round: Some(fix_summary),
+                };
+                return finish_summary(&summary, &wt_parent);
+            }
+        }
+
         let branch_ref = format!("refs/heads/{branch}");
         let branch_out = Command::new("git")
             .args(["show-ref", "--verify", "--quiet", &branch_ref])
@@ -732,6 +1464,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         if worktree_dir.exists() || branch_exists {
             match crate::clean::remove_finished_run(&root, &args.id) {
                 Ok(Some(reason)) => {
+                    replaced_earlier_run = true;
                     let secs =
                         match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                             Ok(d) => d.as_secs(),
@@ -753,6 +1486,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         "start.json",
                         "verdict.json",
                         "checks.json",
+                        "model-review.json",
+                        "fixround.json",
+                        "fix.report.json",
                         "log",
                     ] {
                         let file_name = format!("{}.{ext}", args.id);
@@ -785,6 +1521,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         eprintln!("error: {} already exists", worktree_dir.display());
         return 2;
     }
+
+    let fix_round_already_done = !replaced_earlier_run
+        && matches!(
+            existing_fixround,
+            Some(crate::fix_round::FixRoundRecord::Done { .. })
+        );
 
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1108,6 +1850,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     research_report: None,
                     base_check_seconds: None,
                     warnings: Vec::new(),
+                    fix_round: None,
                 };
                 return finish_summary(&summary, &wt_parent);
             }
@@ -1163,21 +1906,6 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         eprintln!("base check: this commit's content already passed");
     }
 
-    let log_file = match std::fs::File::create(&log_path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error creating log file {}: {e}", log_path.display());
-            return 2;
-        }
-    };
-    let log_file_err = match log_file.try_clone() {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error cloning log file handle: {e}");
-            return 2;
-        }
-    };
-
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -1192,70 +1920,23 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         configured_gate
     };
 
-    let mut cmd = Command::new(current_exe);
-    cmd.current_dir(&worktree_dir);
-    cmd.stdout(log_file);
-    cmd.stderr(log_file_err);
-
-    for (k, v) in &dispatch_cfg.env {
-        cmd.env(k, v);
-    }
-    cmd.env("BLYTE_DISPATCH_ID", &args.id);
-
-    cmd.arg("--gate").arg(&gate);
-    cmd.arg("--rollback=false");
-    cmd.arg("--max-seconds").arg(max_seconds.to_string());
-    cmd.arg("--max-turns").arg(max_turns.to_string());
-    cmd.arg("--report").arg(&report_path);
-
-    if let Some(m) = model {
-        cmd.arg("--model").arg(m);
-    }
-    if let Some(c) = max_cost {
-        cmd.arg("--max-cost").arg(c.to_string());
-    }
-    if let Some(fb) = fold_budget {
-        cmd.arg("--fold-budget").arg(fb.to_string());
-    }
-    cmd.arg("--sandbox").arg(&args.sandbox);
-    cmd.arg("--network").arg(network);
-    for r in &config_allow_read {
-        cmd.arg("--allow-read").arg(r);
-    }
-    for r in &args.allow_read {
-        cmd.arg("--allow-read").arg(r);
-    }
-    for p in &args.pass_env {
-        cmd.arg("--pass-env").arg(p);
-    }
-    // The read and grep tools may read what the sandbox may read.
-    for r in config_allow_read.iter().chain(&args.allow_read) {
-        cmd.arg("--read-root").arg(r);
-    }
     let mut base_wt_guard: Option<BaseWorktreeGuard> = None;
-    if args.research {
-        cmd.arg("--read-root").arg(&root);
-        cmd.arg("--no-gate-slot");
-        cmd.arg("--research");
-        if !args.no_claim_check {
-            cmd.arg("--claim-check");
-        }
-    } else if base_check_decision == BaseCheckDecision::Run {
+    let base_check_dir = if !args.research && base_check_decision == BaseCheckDecision::Run {
         let base_wt_dir = wt_parent.join(format!("{}.base", args.id));
         match BaseWorktreeGuard::create(&root, base_wt_dir.clone(), &base_sha) {
             Ok(guard) => {
                 base_wt_guard = Some(guard);
-                cmd.arg("--base-check");
-                cmd.arg("--base-check-dir").arg(&base_wt_dir);
+                Some(base_wt_dir)
             }
             Err(e) => {
                 eprintln!("error creating base check worktree: {e}");
                 return 2;
             }
         }
-    }
+    } else {
+        None
+    };
 
-    cmd.arg("--");
     let research_sources = args
         .research
         .then(|| research_source_block(&root, &config_allow_read, &args.allow_read));
@@ -1269,19 +1950,28 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
         prompt
     };
-    cmd.arg(task_prompt);
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error spawning child process: {e}");
-            return 2;
-        }
+    let impl_cfg = ImplementerConfig {
+        current_exe: &current_exe,
+        worktree_dir: &worktree_dir,
+        root: &root,
+        id: &args.id,
+        gate: &gate,
+        env: &dispatch_cfg.env,
+        model: model.map(String::as_str),
+        max_seconds,
+        max_turns,
+        max_cost,
+        fold_budget,
+        sandbox: &args.sandbox,
+        network,
+        config_allow_read: &config_allow_read,
+        cli_allow_read: &args.allow_read,
+        pass_env: &args.pass_env,
+        research: args.research,
+        no_claim_check: args.no_claim_check,
+        left_out: &left_out,
     };
-    start_guard.armed = false;
-    if let Err(msg) = crate::keep_awake::hold(child.id()) {
-        eprintln!("blyte: warning: {msg}; the machine may sleep during this run");
-    }
 
     let comments_str = if args.research {
         "off"
@@ -1293,64 +1983,61 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         }
     };
     let env_names: Vec<&str> = dispatch_cfg.env.keys().map(String::as_str).collect();
-    let mut start_json = serde_json::json!({
-        "id": args.id,
-        "pid": child.id(),
-        "started_at": started_at,
-        "task_file": task_file_recorded,
-        "gate": gate,
-        "tags": tags,
-        "env": env_names,
-        "max_turns": max_turns,
-        "max_seconds": max_seconds,
-        "plan": args.plan,
-        "plan_task": args.plan_task,
-        "request": args.request,
-        "base": args.base,
-        "base_sha": base_commit,
-        "base_check": base_check_decision.as_json(),
-        "comments": comments_str,
-    });
-    if let Some(session) = session {
-        start_json["session"] = serde_json::json!(session);
-    }
-    if let Some(ref missing) = brief_missing {
-        start_json["research"] = serde_json::json!(true);
-        start_json["brief_missing"] = serde_json::json!(missing);
-    }
-    if !left_out.is_empty() {
-        start_json["gate_left_out"] = serde_json::json!(left_out
-            .iter()
-            .map(|(command, reason)| serde_json::json!({
-                "command": command,
-                "reason": reason,
-            }))
-            .collect::<Vec<_>>());
-    }
-    if let Err(err) = write_start_record(&start_path, &start_json) {
-        eprintln!(
-            "error: could not write the start record {}: {err}",
-            start_path.display()
-        );
-    }
-
-    let _ = child.wait();
-    drop(base_wt_guard);
-
-    if !left_out.is_empty() {
-        if let Ok(report_str) = std::fs::read_to_string(&report_path) {
-            if let Ok(mut report_val) = serde_json::from_str::<serde_json::Value>(&report_str) {
-                let formatted: Vec<String> = left_out
-                    .iter()
-                    .map(|(cmd, reason)| format!("{cmd} ({reason})"))
-                    .collect();
-                report_val["gate_left_out"] = serde_json::json!(formatted);
-                if let Ok(updated) = serde_json::to_string_pretty(&report_val) {
-                    let _ = std::fs::write(&report_path, updated + "\n");
-                }
+    if let Err(e) = run_implementer_pass(
+        &impl_cfg,
+        &log_path,
+        None,
+        &report_path,
+        &task_prompt,
+        base_check_dir.as_deref(),
+        |pid| {
+            start_guard.armed = false;
+            let mut start_json = serde_json::json!({
+                "id": args.id,
+                "pid": pid,
+                "started_at": started_at,
+                "task_file": task_file_recorded,
+                "gate": gate,
+                "tags": tags,
+                "env": env_names,
+                "max_turns": max_turns,
+                "max_seconds": max_seconds,
+                "plan": args.plan,
+                "plan_task": args.plan_task,
+                "request": args.request,
+                "base": args.base,
+                "base_sha": base_commit,
+                "base_check": base_check_decision.as_json(),
+                "comments": comments_str,
+            });
+            if let Some(ref session) = session {
+                start_json["session"] = serde_json::json!(session);
             }
-        }
+            if let Some(ref missing) = brief_missing {
+                start_json["research"] = serde_json::json!(true);
+                start_json["brief_missing"] = serde_json::json!(missing);
+            }
+            if !left_out.is_empty() {
+                start_json["gate_left_out"] = serde_json::json!(left_out
+                    .iter()
+                    .map(|(command, reason)| serde_json::json!({
+                        "command": command,
+                        "reason": reason,
+                    }))
+                    .collect::<Vec<_>>());
+            }
+            if let Err(err) = write_start_record(&start_path, &start_json) {
+                eprintln!(
+                    "error: could not write the start record {}: {err}",
+                    start_path.display()
+                );
+            }
+        },
+    ) {
+        eprintln!("{e}");
+        return 2;
     }
+    drop(base_wt_guard);
 
     let scratch_report = worktree_dir.join("report.md");
     if args.research {
@@ -1377,146 +2064,16 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     // 5. Read report, commits and changed files
-    let log_out = Command::new("git")
-        .args([
-            "-C",
-            worktree_dir.to_str().unwrap(),
-            "log",
-            "--reverse",
-            "--format=%h%x09%s",
-            &format!("{base_sha}..HEAD"),
-        ])
-        .output();
+    let mut commits = git_commits_since(&worktree_dir, &base_sha);
+    let mut changed_files = git_changed_files_since(&worktree_dir, &base_sha);
 
-    let mut commits = Vec::new();
-    if let Ok(o) = log_out {
-        let text = String::from_utf8_lossy(&o.stdout);
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((sha, subject)) = line.split_once('\t') {
-                commits.push(CommitRecord {
-                    sha: sha.to_string(),
-                    subject: subject.to_string(),
-                });
-            }
-        }
-    }
-
-    let diff_out = Command::new("git")
-        .args([
-            "-C",
-            worktree_dir.to_str().unwrap(),
-            "diff",
-            "--name-only",
-            &format!("{base_sha}..HEAD"),
-        ])
-        .output();
-
-    let mut changed_files = Vec::new();
-    if let Ok(o) = diff_out {
-        let text = String::from_utf8_lossy(&o.stdout);
-        for line in text.lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                changed_files.push(line.to_string());
-            }
-        }
-    }
-
-    let report_read = std::fs::read_to_string(&report_path);
-    let record: Result<serde_json::Value, String> = match report_read {
-        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("unreadable report JSON: {e}")),
-        Err(e) => Err(format!("missing report: {e}")),
-    };
-
-    let (
-        report_outcome,
-        error,
-        final_message,
-        turns,
-        report_turns,
-        gate_attempts,
-        gate_failures,
-        cost_usd,
-        model,
-        seconds,
-        sandbox,
-        base_check_passed,
-        base_check_seconds,
-    ) = match record {
-        Ok(rec) => {
-            let gate_failures = rec
-                .get("gate_failures")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| {
-                            if s.chars().count() > 1000 {
-                                s.chars().take(1000).collect()
-                            } else {
-                                s.to_string()
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let raw_turns = rec.get("turns").and_then(|v| v.as_u64());
-            let rec_outcome = rec
-                .get("outcome")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error");
-
-            (
-                rec_outcome.to_string(),
-                summary_error(rec_outcome, rec.get("error").and_then(|v| v.as_str())),
-                rec.get("final_message")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                raw_turns.unwrap_or(0) as u32,
-                raw_turns,
-                rec.get("gate_attempts")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                gate_failures,
-                rec.get("cost_usd").and_then(|v| v.as_f64()),
-                rec.get("model_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                rec.get("duration_seconds")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0)
-                    .round() as u64,
-                rec.get("sandbox")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&args.sandbox)
-                    .to_string(),
-                rec.get("base_check_passed").and_then(|v| v.as_bool()),
-                rec.get("base_check_seconds").and_then(|v| v.as_f64()),
-            )
-        }
-        Err(err_msg) => (
-            "error".to_string(),
-            Some(err_msg),
-            None,
-            0,
-            None,
-            0,
-            Vec::new(),
-            None,
-            None,
-            0,
-            args.sandbox.clone(),
-            None,
-            None,
-        ),
+    let pass1 = match parse_pass_report(&report_path, &args.sandbox) {
+        Ok(r) => r,
+        Err(err_msg) => pass_report_from_error(err_msg, &args.sandbox),
     };
 
     let outcome = if args.research {
-        match report_outcome.as_str() {
+        match pass1.report_outcome.as_str() {
             "verified" => "verified",
             "gate_failed" => "gate_failed",
             "budget_exhausted" => "budget_exhausted",
@@ -1524,15 +2081,17 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             _ => "error",
         }
     } else {
-        dispatch_outcome(&report_outcome, commits.len())
+        dispatch_outcome(&pass1.report_outcome, commits.len())
     };
     let exit = exit_code(outcome);
 
     if args.research {
         if research_report_path.exists() {
-            if let Err(err) =
-                crate::provenance::mark_if_unverified(&research_report_path, outcome, report_turns)
-            {
+            if let Err(err) = crate::provenance::mark_if_unverified(
+                &research_report_path,
+                outcome,
+                pass1.report_turns,
+            ) {
                 eprintln!(
                     "error: could not mark {} as not verified: {err}",
                     research_report_path.display()
@@ -1542,7 +2101,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         if let Some(ref report_to) = args.report_to {
             if report_to.exists() {
                 if let Err(err) =
-                    crate::provenance::mark_if_unverified(report_to, outcome, report_turns)
+                    crate::provenance::mark_if_unverified(report_to, outcome, pass1.report_turns)
                 {
                     eprintln!(
                         "error: could not mark {} as not verified: {err}",
@@ -1559,7 +2118,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         None
     };
 
-    let warnings = record_passed_after_run(
+    let mut warnings = record_passed_after_run(
         &root,
         &worktree_dir,
         args.research,
@@ -1567,10 +2126,162 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         base_tree.as_deref(),
         passed_key.as_deref(),
         outcome,
-        base_check_passed,
+        pass1.base_check_passed,
     );
     for warning in &warnings {
         eprintln!("warning: {warning}");
+    }
+
+    let mut final_message = pass1.final_message;
+    let mut turns = pass1.turns;
+    let mut cost_usd = pass1.cost_usd;
+    let mut seconds = pass1.seconds;
+    let mut summary_model = pass1.model;
+    let mut fix_round_summary: Option<crate::fix_round::FixRoundSummary> = None;
+
+    if outcome == "verified" && !args.research {
+        let first_review = match crate::queue_actions::evaluate_verified_run(&root, &args.id) {
+            Ok(mr) => mr,
+            Err(err) => {
+                eprintln!(
+                    "warning: post-dispatch review check failed for {}: {err}",
+                    args.id
+                );
+                None
+            }
+        };
+
+        if !fix_round_already_done
+            && crate::fix_round::should_run(
+                args.research,
+                outcome,
+                dispatch_cfg.fix_round,
+                first_review.as_ref(),
+            )
+        {
+            let review_ref = first_review.as_ref().unwrap();
+            let pre_round_sha = match git_head_sha(&worktree_dir) {
+                Ok(sha) => sha,
+                Err(err_msg) => {
+                    let summary = build_error_summary(
+                        &args.id,
+                        &worktree_dir,
+                        branch,
+                        err_msg,
+                        pass1.sandbox,
+                        &log_path,
+                        &report_path,
+                        gate_source,
+                        warnings,
+                    );
+                    return finish_summary(&summary, &wt_parent);
+                }
+            };
+            let fallbacks_sent = match crate::fix_round::collect_confirmed_fallbacks(
+                &root,
+                &args.id,
+                &worktree_dir,
+                review_ref,
+            ) {
+                Ok(fbs) => fbs,
+                Err(err_msg) => {
+                    let summary = build_error_summary(
+                        &args.id,
+                        &worktree_dir,
+                        branch,
+                        err_msg,
+                        pass1.sandbox,
+                        &log_path,
+                        &report_path,
+                        gate_source,
+                        warnings,
+                    );
+                    return finish_summary(&summary, &wt_parent);
+                }
+            };
+            let round_started_at =
+                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => d.as_secs(),
+                    Err(e) => {
+                        let summary = build_error_summary(
+                            &args.id,
+                            &worktree_dir,
+                            branch,
+                            format!("system clock before UNIX_EPOCH: {e}"),
+                            pass1.sandbox,
+                            &log_path,
+                            &report_path,
+                            gate_source,
+                            warnings,
+                        );
+                        return finish_summary(&summary, &wt_parent);
+                    }
+                };
+            let started_record = crate::fix_round::FixRoundRecord::Started {
+                pre_round_sha: pre_round_sha.clone(),
+                fallbacks_sent: fallbacks_sent.clone(),
+                started_at: round_started_at,
+            };
+            if let Err(err_msg) = crate::fix_round::write_record(&fixround_path, &started_record) {
+                let summary = build_error_summary(
+                    &args.id,
+                    &worktree_dir,
+                    branch,
+                    err_msg,
+                    pass1.sandbox,
+                    &log_path,
+                    &report_path,
+                    gate_source,
+                    warnings,
+                );
+                return finish_summary(&summary, &wt_parent);
+            }
+
+            let fix_report_path = wt_parent.join(format!("{}.fix.report.json", args.id));
+            match execute_fix_round(
+                &root,
+                &start_path,
+                &impl_cfg,
+                &log_path,
+                &fix_report_path,
+                &fixround_path,
+                passed_key.as_deref(),
+                &task_content,
+                pre_round_sha,
+                fallbacks_sent,
+                round_started_at,
+                &mut warnings,
+            ) {
+                Ok((fix_sum, round_report)) => {
+                    commits = git_commits_since(&worktree_dir, &base_sha);
+                    changed_files = git_changed_files_since(&worktree_dir, &base_sha);
+                    turns = turns.saturating_add(round_report.turns);
+                    cost_usd = crate::fix_round::sum_costs(cost_usd, round_report.cost_usd);
+                    seconds = seconds.saturating_add(round_report.seconds);
+                    summary_model = summary_model.or(round_report.model);
+                    final_message = crate::fix_round::combined_final_message(
+                        final_message,
+                        round_report.final_message,
+                        fix_sum.kept,
+                    );
+                    fix_round_summary = Some(fix_sum);
+                }
+                Err(err_msg) => {
+                    let summary = build_error_summary(
+                        &args.id,
+                        &worktree_dir,
+                        branch,
+                        err_msg,
+                        pass1.sandbox,
+                        &log_path,
+                        &report_path,
+                        gate_source,
+                        warnings,
+                    );
+                    return finish_summary(&summary, &wt_parent);
+                }
+            }
+        }
     }
 
     // 6. Print JSON summary
@@ -1580,33 +2291,25 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         branch,
         outcome,
         exit,
-        error,
+        error: pass1.error,
         commits,
         changed_files,
         final_message,
         turns,
-        gate_attempts,
-        gate_failures,
+        gate_attempts: pass1.gate_attempts,
+        gate_failures: pass1.gate_failures,
         cost_usd,
-        model,
+        model: summary_model,
         seconds,
-        sandbox,
+        sandbox: pass1.sandbox,
         log: log_path.display().to_string(),
         report: report_path.display().to_string(),
         gate_source,
         research_report,
-        base_check_seconds,
+        base_check_seconds: pass1.base_check_seconds,
         warnings,
+        fix_round: fix_round_summary,
     };
-
-    if outcome == "verified" && !args.research {
-        if let Err(err) = crate::queue_actions::evaluate_verified_run(&root, &args.id) {
-            eprintln!(
-                "warning: post-dispatch review check failed for {}: {err}",
-                args.id
-            );
-        }
-    }
 
     finish_summary(&summary, &wt_parent)
 }
@@ -1663,15 +2366,23 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             }
         }
     };
-    if let Some(ref mr) = stored_model_review {
-        if let Some(flag) = mr.flag() {
-            if !data
-                .checks
-                .flags
-                .iter()
-                .any(|f| f.starts_with("model review"))
-            {
-                data.checks.flags.push(flag);
+    if !args.model_review {
+        data.checks
+            .flags
+            .extend(crate::fallback_check::flags_for_review(
+                &data.fallbacks,
+                stored_model_review.as_ref(),
+            ));
+        if let Some(ref mr) = stored_model_review {
+            if let Some(flag) = mr.flag() {
+                if !data
+                    .checks
+                    .flags
+                    .iter()
+                    .any(|f| f.starts_with("model review"))
+                {
+                    data.checks.flags.push(flag);
+                }
             }
         }
     }
@@ -1823,6 +2534,10 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
     if args.model_review && wt_exists {
         let mr = crate::model_review::run(&root, &args.id, &base, &wt);
         crate::model_review::print_result(&mr);
+        checks.flags.extend(crate::fallback_check::flags_for_review(
+            &fallbacks,
+            Some(&mr),
+        ));
         if let Some(flag) = mr.flag() {
             checks.flags.push(flag);
         }
@@ -1837,6 +2552,9 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             return 2;
         }
     } else if args.model_review {
+        checks
+            .flags
+            .extend(crate::fallback_check::flags_for_review(&fallbacks, None));
         if let Err(e) = crate::queue_actions::write_checks_file(
             &root,
             &args.id,

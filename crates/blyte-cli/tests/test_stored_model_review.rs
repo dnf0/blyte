@@ -291,3 +291,55 @@ fn replay_treats_unreadable_model_review_as_waiting_and_shows_error() {
         run.flags
     );
 }
+
+#[test]
+fn blyte_review_prints_confirmed_fallbacks_with_reasons_and_dismissed_count() {
+    let r = init_repo();
+    setup_run(r.path(), "FBPRINT");
+    let checks_path = r.path().join(".wt/FBPRINT.checks.json");
+    let mr = serde_json::json!({
+        "ts": 1700000000u64,
+        "flags": ["fallbacks added: 1 (src/a.rs:2)"],
+        "model_review": {
+            "status": "ok",
+            "model": "gemini-2.5-flash",
+            "cost_usd": 0.01,
+            "concerns": [],
+            "fallbacks": [
+                {
+                    "file": "src/a.rs",
+                    "line": 2,
+                    "verdict": "fallback",
+                    "reason": "Substitutes default region when config is missing."
+                },
+                {
+                    "file": "src/a.rs",
+                    "line": 5,
+                    "verdict": "not_fallback",
+                    "reason": "Normal string prefix stripping."
+                }
+            ],
+            "error": null
+        }
+    });
+    std::fs::write(&checks_path, serde_json::to_string_pretty(&mr).unwrap()).unwrap();
+
+    let out = blyte(r.path(), &["review", "FBPRINT"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("== model review"), "{stdout}");
+    assert!(stdout.contains("confirmed fallbacks (1):"), "{stdout}");
+    assert!(
+        stdout.contains("src/a.rs:2 Substitutes default region when config is missing."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("fallback candidates dismissed: 1"),
+        "{stdout}"
+    );
+}

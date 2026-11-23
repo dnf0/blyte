@@ -10,6 +10,7 @@ pub mod dashboard;
 pub mod dispatch;
 pub mod env_file;
 pub mod fallback_check;
+pub mod fix_round;
 pub mod gate_drift;
 pub mod http;
 pub mod init;

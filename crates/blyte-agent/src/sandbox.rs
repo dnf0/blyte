@@ -352,6 +352,125 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
     allowed
 }
 
+fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().map(str::trim).find(|s| !s.is_empty())?;
+    Some(PathBuf::from(line))
+}
+
+fn main_checkout_root(root: &Path) -> PathBuf {
+    if let Some(common_dir) = git_common_dir(root) {
+        if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+            if let Some(main_root) = common_dir.parent() {
+                return main_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| main_root.to_path_buf());
+            }
+        }
+    }
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// Returns the `.wt/tasks` directory under the main checkout for `root`.
+pub fn orchestrator_tasks_dir(root: &Path) -> PathBuf {
+    main_checkout_root(root).join(".wt").join("tasks")
+}
+
+/// Returns the writable directories allowed for the orchestrate-mode sandboxed shell:
+/// `.wt/tasks` under the main checkout, system temporary directories, and common developer caches.
+pub fn orchestrator_allowed(root: &Path) -> Vec<PathBuf> {
+    let mut allowed = vec![
+        orchestrator_tasks_dir(root),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/var/folders"),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/dev"),
+    ];
+
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        if !tmp.is_empty() {
+            allowed.push(PathBuf::from(tmp));
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        if !home.is_empty() {
+            let home_path = PathBuf::from(home);
+            for sub in [
+                ".cargo",
+                ".rustup",
+                ".cache",
+                ".npm",
+                ".local",
+                "Library/Caches",
+                ".gradle",
+                ".m2",
+                "go",
+                ".docker/buildx",
+            ] {
+                allowed.push(home_path.join(sub));
+            }
+        }
+    }
+
+    allowed
+}
+
+/// Returns the orchestrate-mode sandbox profile for the current platform.
+pub fn orchestrator_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
+    orchestrator_profile_net(root, allow_read, true)
+}
+
+/// Returns the orchestrate-mode sandbox profile with network configuration.
+pub fn orchestrator_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
+    #[cfg(target_os = "macos")]
+    {
+        let deny_read = match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
+            _ => Vec::new(),
+        };
+        let base = profile_with(root, &orchestrator_allowed(root), &deny_read, allow_read);
+        if network {
+            Profile::Seatbelt(base)
+        } else {
+            let socks = match std::env::var_os("HOME") {
+                Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
+                _ => Vec::new(),
+            };
+            Profile::Seatbelt(offline(base, &socks))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let home = std::env::var_os("HOME");
+        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
+        let mut extra_read = vec![root.to_path_buf()];
+        if let Some(common_dir) = git_common_dir(root) {
+            extra_read.push(common_dir);
+        }
+        let main_wt = main_checkout_root(root).join(".wt");
+        if main_wt.exists() {
+            extra_read.push(main_wt);
+        }
+        extra_read.extend_from_slice(allow_read);
+        Profile::LandlockConfined {
+            write: orchestrator_allowed(root),
+            read: read_allowed(home_path, &extra_read),
+            block_tcp: !network,
+        }
+    }
+}
+
 /// Returns the standard Unix socket paths used by Docker and container runtimes.
 pub fn docker_sockets(home: &Path) -> Vec<PathBuf> {
     vec![

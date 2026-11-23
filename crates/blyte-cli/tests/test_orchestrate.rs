@@ -87,7 +87,9 @@ fn dispatch_cmd_with_orchestrate_is_accepted() {
 
 #[test]
 fn session_gets_instructions() {
+    let tmp = tempfile::tempdir().unwrap();
     let config = ReplConfig {
+        repo_root: tmp.path().to_path_buf(),
         orchestrate: true,
         ..Default::default()
     };
@@ -98,6 +100,7 @@ fn session_gets_instructions() {
     assert!(instructions.contains("blyte wait"));
 
     let config_normal = ReplConfig {
+        repo_root: tmp.path().to_path_buf(),
         orchestrate: false,
         ..Default::default()
     };
@@ -107,7 +110,9 @@ fn session_gets_instructions() {
 
 #[test]
 fn gate_refused_in_orchestrate() {
+    let tmp = tempfile::tempdir().unwrap();
     let config = ReplConfig {
+        repo_root: tmp.path().to_path_buf(),
         orchestrate: true,
         ..Default::default()
     };

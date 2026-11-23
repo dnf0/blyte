@@ -173,6 +173,7 @@ pub trait PromptRunner: Send + 'static {
 
 pub struct AgentRunner {
     repl: crate::repl::ReplSession,
+    approver: Arc<dyn blyte_agent::approval::Approver>,
 }
 
 impl AgentRunner {
@@ -182,14 +183,9 @@ impl AgentRunner {
     ) -> Self {
         let mut cfg = config.clone();
         cfg.orchestrate = true;
-        let repl = crate::repl::ReplSession::new(&cfg);
-        if let Some(approval) = blyte_agent::tools::approval() {
-            blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
-                approver,
-                rules: approval.rules,
-            }));
-        }
-        Self { repl }
+        let repl = crate::repl::ReplSession::try_new_with_approver(&cfg, Some(approver.clone()))
+            .expect("failed to initialize REPL session");
+        Self { repl, approver }
     }
 }
 
@@ -250,9 +246,10 @@ impl PromptRunner for AgentRunner {
             }
             _ => {}
         };
-        let (outcome, _) = crate::task_runner::run_task_with_state_and_events(
+        let (outcome, _) = crate::task_runner::run_task_with_approver(
             &task_config,
             &mut self.repl.state,
+            Some(self.approver.clone()),
             &on_event,
         )?;
         match outcome {

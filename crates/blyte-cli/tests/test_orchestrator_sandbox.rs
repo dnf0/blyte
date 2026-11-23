@@ -13,7 +13,9 @@ use blyte_cli::cli::Cli;
 use blyte_cli::instructions_cmd;
 use blyte_cli::orchestrator_text;
 use blyte_cli::repl::{render_banner_to, ReplConfig, ReplSession};
-use blyte_cli::task_runner::{build_local_shell, TaskConfig};
+use blyte_cli::task_runner::{
+    build_local_shell, build_sandbox_profile, run_task_with_state_and_events, TaskConfig,
+};
 use blyte_cli::tty_approver::decide;
 use clap::Parser;
 
@@ -121,11 +123,7 @@ fn orchestrate_task_config_sandbox_and_network_defaults() {
 }
 
 #[test]
-fn orchestrator_shell_blocks_outside_writes_and_allows_git_commit() {
-    if !sandbox::available() {
-        return;
-    }
-
+fn orchestrator_shell_allows_wt_tasks_and_blocks_root_git_and_wt_passed() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let root = tempfile::tempdir_in(tmp_base).unwrap();
@@ -137,29 +135,72 @@ fn orchestrator_shell_blocks_outside_writes_and_allows_git_commit() {
         .status()
         .unwrap();
     assert!(git_ok.success());
-    assert!(Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
-        .current_dir(root.path())
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(root.path())
-        .status()
-        .unwrap()
-        .success());
+    let tasks = root.path().join(".wt/tasks");
+    let passed = root.path().join(".wt/passed");
+    std::fs::create_dir_all(&tasks).unwrap();
+    std::fs::create_dir_all(&passed).unwrap();
 
     let cli = Cli::try_parse_from(["blyte", "--orchestrate"]).unwrap();
     let mut cfg = TaskConfig::from(&cli);
     cfg.root = root.path().to_path_buf();
     assert_eq!(cfg.sandbox, "on");
 
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let root_canon = canon(root.path());
+    let tasks_canon = canon(&tasks);
+    let git_canon = canon(&root.path().join(".git"));
+    let wt_canon = canon(&root.path().join(".wt"));
+    match build_sandbox_profile(&cfg) {
+        sandbox::Profile::Seatbelt(s) => {
+            assert!(
+                s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    tasks_canon.display()
+                )),
+                "{s}"
+            );
+            assert!(
+                !s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    root_canon.display()
+                )),
+                "{s}"
+            );
+            assert!(
+                !s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    git_canon.display()
+                )),
+                "{s}"
+            );
+            assert!(
+                !s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    wt_canon.display()
+                )),
+                "{s}"
+            );
+        }
+        sandbox::Profile::LandlockConfined { write, .. }
+        | sandbox::Profile::Landlock(write)
+        | sandbox::Profile::LandlockOffline(write) => {
+            assert!(write.iter().any(|p| canon(p) == tasks_canon), "{write:?}");
+            assert!(!write.iter().any(|p| canon(p) == root_canon), "{write:?}");
+            assert!(!write.iter().any(|p| canon(p) == git_canon), "{write:?}");
+            assert!(!write.iter().any(|p| canon(p) == wt_canon), "{write:?}");
+        }
+    }
+
+    if !sandbox::available() {
+        return;
+    }
+
     let shell = build_local_shell(&cfg);
 
+    let task_file = tasks.join("task.md");
     let probe = shell
         .exec(
-            "echo inside > inside.txt",
+            &format!("echo inside > '{}'", task_file.display()),
             root.path(),
             Duration::from_secs(30),
         )
@@ -168,38 +209,37 @@ fn orchestrator_shell_blocks_outside_writes_and_allows_git_commit() {
         return;
     }
     assert_eq!(probe.exit_code, 0, "{}", probe.merged());
-    assert!(root.path().join("inside.txt").exists());
+    assert!(task_file.exists());
 
-    let outside_file = outside.path().join("escaped.txt");
-    let denied = shell
-        .exec(
-            &format!("echo no > '{}'", outside_file.display()),
-            root.path(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert_ne!(denied.exit_code, 0, "write outside root must fail");
-    assert!(
-        !outside_file.exists(),
-        "file outside root must not be created"
-    );
-
-    let commit = shell
-        .exec(
-            "git add inside.txt && git commit --no-gpg-sign -m 'initial'",
-            root.path(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert_eq!(commit.exit_code, 0, "{}", commit.merged());
+    for denied_file in [
+        root.path().join("inside.txt"),
+        root.path().join(".git/forged"),
+        passed.join("forged.json"),
+        outside.path().join("escaped.txt"),
+    ] {
+        let denied = shell
+            .exec(
+                &format!("echo no > '{}'", denied_file.display()),
+                root.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(
+            denied.exit_code,
+            0,
+            "write to {} must fail",
+            denied_file.display()
+        );
+        assert!(
+            !denied_file.exists(),
+            "{} must not be created",
+            denied_file.display()
+        );
+    }
 }
 
 #[test]
-fn orchestrator_shell_in_linked_worktree_allows_main_wt_and_git_common_dir() {
-    if !sandbox::available() {
-        return;
-    }
-
+fn orchestrator_shell_in_linked_worktree_allows_only_main_wt_tasks() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let main_repo = tempfile::tempdir_in(tmp_base).unwrap();
@@ -238,7 +278,10 @@ fn orchestrator_shell_in_linked_worktree_allows_main_wt_and_git_common_dir() {
         .success());
 
     let wt_dir = main_repo.path().join(".wt");
-    std::fs::create_dir_all(&wt_dir).unwrap();
+    let tasks_dir = wt_dir.join("tasks");
+    let passed_dir = wt_dir.join("passed");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::create_dir_all(&passed_dir).unwrap();
     let linked = wt_dir.join("orch");
     assert!(Command::new("git")
         .args(["worktree", "add", "-q", "-b", "orch"])
@@ -251,12 +294,66 @@ fn orchestrator_shell_in_linked_worktree_allows_main_wt_and_git_common_dir() {
     let cli = Cli::try_parse_from(["blyte", "--orchestrate"]).unwrap();
     let mut cfg = TaskConfig::from(&cli);
     cfg.root = linked.clone();
+
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let main_tasks_canon = canon(&tasks_dir);
+    let linked_canon = canon(&linked);
+    let wt_canon = canon(&wt_dir);
+    let git_canon = canon(&main_repo.path().join(".git"));
+    match build_sandbox_profile(&cfg) {
+        sandbox::Profile::Seatbelt(s) => {
+            assert!(
+                s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    main_tasks_canon.display()
+                )),
+                "{s}"
+            );
+            assert!(
+                !s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    linked_canon.display()
+                )),
+                "{s}"
+            );
+            assert!(
+                !s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    wt_canon.display()
+                )),
+                "{s}"
+            );
+            assert!(
+                !s.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    git_canon.display()
+                )),
+                "{s}"
+            );
+        }
+        sandbox::Profile::LandlockConfined { write, .. }
+        | sandbox::Profile::Landlock(write)
+        | sandbox::Profile::LandlockOffline(write) => {
+            assert!(
+                write.iter().any(|p| canon(p) == main_tasks_canon),
+                "{write:?}"
+            );
+            assert!(!write.iter().any(|p| canon(p) == linked_canon), "{write:?}");
+            assert!(!write.iter().any(|p| canon(p) == wt_canon), "{write:?}");
+            assert!(!write.iter().any(|p| canon(p) == git_canon), "{write:?}");
+        }
+    }
+
+    if !sandbox::available() {
+        return;
+    }
+
     let shell = build_local_shell(&cfg);
 
-    let wt_marker = wt_dir.join("marker.txt");
+    let task_file = tasks_dir.join("from-wt.md");
     let wt_write = shell
         .exec(
-            &format!("echo ok > '{}'", wt_marker.display()),
+            &format!("echo ok > '{}'", task_file.display()),
             &linked,
             Duration::from_secs(30),
         )
@@ -265,27 +362,34 @@ fn orchestrator_shell_in_linked_worktree_allows_main_wt_and_git_common_dir() {
         return;
     }
     assert_eq!(wt_write.exit_code, 0, "{}", wt_write.merged());
-    assert!(wt_marker.exists());
+    assert!(task_file.exists());
 
-    let commit = shell
-        .exec(
-            "echo wt > wt.txt && git add wt.txt && git commit --no-gpg-sign -m 'wt commit'",
-            &linked,
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert_eq!(commit.exit_code, 0, "{}", commit.merged());
-
-    let outside_file = outside.path().join("no.txt");
-    let denied = shell
-        .exec(
-            &format!("echo no > '{}'", outside_file.display()),
-            &linked,
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert_ne!(denied.exit_code, 0);
-    assert!(!outside_file.exists());
+    for denied_file in [
+        wt_dir.join("marker.txt"),
+        passed_dir.join("forged.json"),
+        linked.join("wt.txt"),
+        main_repo.path().join(".git/forged"),
+        outside.path().join("no.txt"),
+    ] {
+        let denied = shell
+            .exec(
+                &format!("echo no > '{}'", denied_file.display()),
+                &linked,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(
+            denied.exit_code,
+            0,
+            "write to {} must fail",
+            denied_file.display()
+        );
+        assert!(
+            !denied_file.exists(),
+            "{} must not be created",
+            denied_file.display()
+        );
+    }
 }
 
 #[test]
@@ -312,6 +416,12 @@ fn blyte_instructions_includes_unsandboxed_and_switches_sandbox_paragraph() {
     let stdout_on = String::from_utf8(out_on.stdout).unwrap();
     assert!(stdout_on.contains("unsandboxed"), "{stdout_on}");
     assert!(stdout_on.contains("The shell is sandboxed:"), "{stdout_on}");
+    assert!(
+        stdout_on.contains(
+            "the shell and the write tools can write only in `.wt/tasks` and temporary directories"
+        ),
+        "{stdout_on}"
+    );
     assert!(
         !stdout_on.contains("The shell is not sandboxed."),
         "{stdout_on}"
@@ -444,4 +554,112 @@ fn start_lines_and_banner_report_sandbox_state() {
         .unwrap();
     let stderr_off = String::from_utf8_lossy(&out_off.stderr);
     assert!(stderr_off.contains("blyte: sandbox: off"), "{stderr_off}");
+}
+
+#[test]
+fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
+    let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(tmp_base).unwrap();
+    let root = tempfile::tempdir_in(tmp_base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root.path())
+        .status()
+        .unwrap()
+        .success());
+
+    let _guard = EnvGuard::set(xdg.path(), home.path());
+
+    let _session_on = ReplSession::try_new(&ReplConfig {
+        repo_root: root.path().to_path_buf(),
+        orchestrate: true,
+        sandbox: "on".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    let tasks_dir = root.path().join(".wt/tasks");
+    assert!(tasks_dir.is_dir(), ".wt/tasks must be created on start");
+    let tasks_canon = tasks_dir.canonicalize().unwrap();
+    let root_canon = root.path().canonicalize().unwrap();
+    let scope = blyte_agent::tools::write_scope().expect("orchestrate + sandbox on must set scope");
+    assert!(scope.allowed.contains(&tasks_canon), "{:?}", scope.allowed);
+    assert!(!scope.allowed.contains(&root_canon), "{:?}", scope.allowed);
+    assert!(
+        !scope.allowed.contains(&root_canon.join(".git")),
+        "{:?}",
+        scope.allowed
+    );
+    assert!(
+        !scope.allowed.contains(&root_canon.join(".wt")),
+        "{:?}",
+        scope.allowed
+    );
+
+    let _session_off = ReplSession::try_new(&ReplConfig {
+        repo_root: root.path().to_path_buf(),
+        orchestrate: true,
+        sandbox: "off".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(blyte_agent::tools::write_scope().is_none());
+
+    let _session_on_again = ReplSession::try_new(&ReplConfig {
+        repo_root: root.path().to_path_buf(),
+        orchestrate: true,
+        sandbox: "on".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(blyte_agent::tools::write_scope().is_some());
+
+    let mut impl_state = blyte_agent::state::State::new("impl", String::new());
+    let cli_impl = Cli::try_parse_from(["blyte", "--model", "unknown-model-for-test"]).unwrap();
+    let mut impl_cfg = TaskConfig::from(&cli_impl);
+    impl_cfg.root = root.path().to_path_buf();
+    impl_cfg.sandbox = "on".to_string();
+    assert!(!impl_cfg.orchestrate);
+    let _ = run_task_with_state_and_events(&impl_cfg, &mut impl_state, &|_| {});
+    assert!(
+        blyte_agent::tools::write_scope().is_none(),
+        "implementer run must not set write scope"
+    );
+
+    let mut orch_state = blyte_agent::state::State::new("orch", String::new());
+    let cli_orch = Cli::try_parse_from([
+        "blyte",
+        "--orchestrate",
+        "--model",
+        "unknown-model-for-test",
+    ])
+    .unwrap();
+    let mut orch_cfg = TaskConfig::from(&cli_orch);
+    orch_cfg.root = root.path().to_path_buf();
+    let _ = run_task_with_state_and_events(&orch_cfg, &mut orch_state, &|_| {});
+    let scope = blyte_agent::tools::write_scope()
+        .expect("run_task with orchestrate + sandbox on must set scope");
+    assert!(scope.allowed.contains(&tasks_canon), "{:?}", scope.allowed);
+
+    let mut orch_off_state = blyte_agent::state::State::new("orch-off", String::new());
+    let cli_orch_off = Cli::try_parse_from([
+        "blyte",
+        "--orchestrate",
+        "--sandbox",
+        "off",
+        "--model",
+        "unknown-model-for-test",
+    ])
+    .unwrap();
+    let mut orch_off_cfg = TaskConfig::from(&cli_orch_off);
+    orch_off_cfg.root = root.path().to_path_buf();
+    let _ = run_task_with_state_and_events(&orch_off_cfg, &mut orch_off_state, &|_| {});
+    assert!(
+        blyte_agent::tools::write_scope().is_none(),
+        "run_task with orchestrate + sandbox off must clear scope"
+    );
+
+    blyte_agent::tools::set_write_scope(None);
+    blyte_agent::tools::set_approval(None);
 }

@@ -104,11 +104,9 @@ fn review_writes_the_checks_file() {
     assert!(val["ts"].as_u64().unwrap() > 0);
     let flags = val["flags"].as_array().unwrap();
     assert_eq!(flags.len(), 1);
-    assert!(
-        flags[0]
-            .as_str()
-            .unwrap()
-            .starts_with("possible fallbacks added (1)"),
+    assert_eq!(
+        flags[0].as_str().unwrap(),
+        "possible fallbacks added: 1 (not judged: no review)",
         "{flags:?}"
     );
 
@@ -117,6 +115,10 @@ fn review_writes_the_checks_file() {
     assert_eq!(fallbacks[0]["file"].as_str().unwrap(), "src/a.rs");
     assert!(fallbacks[0]["line"].as_u64().unwrap() > 0);
     assert!(!fallbacks[0]["pattern"].as_str().unwrap().is_empty());
+    assert_eq!(
+        fallbacks[0]["text"].as_str().unwrap(),
+        "let v = x.unwrap_or(0);"
+    );
 }
 
 #[test]
@@ -136,7 +138,10 @@ fn all_fallbacks_are_saved_not_three() {
     let out = blyte(r.path(), &["review", "R2"]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("and 2 more"), "{stdout}");
+    assert!(
+        stdout.contains("possible fallbacks added: 5 (not judged: no review)"),
+        "{stdout}"
+    );
 
     let val: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(r.path().join(".wt/R2.checks.json")).unwrap(),
@@ -144,9 +149,16 @@ fn all_fallbacks_are_saved_not_three() {
     .unwrap();
     let flags = val["flags"].as_array().unwrap();
     assert_eq!(flags.len(), 1);
-    assert!(flags[0].as_str().unwrap().contains("and 2 more"));
+    assert_eq!(
+        flags[0].as_str().unwrap(),
+        "possible fallbacks added: 5 (not judged: no review)"
+    );
     let fallbacks = val["fallbacks"].as_array().unwrap();
     assert_eq!(fallbacks.len(), 5);
+    assert_eq!(
+        fallbacks[0]["text"].as_str(),
+        Some("let v1 = x.unwrap_or(0);")
+    );
 }
 
 #[test]
@@ -241,9 +253,9 @@ fn a_second_review_overwrites() {
         serde_json::from_str(&std::fs::read_to_string(&checks_path).unwrap()).unwrap();
     let flags = val2["flags"].as_array().unwrap();
     assert_eq!(flags.len(), 1);
-    assert!(flags[0]
-        .as_str()
-        .unwrap()
-        .starts_with("possible fallbacks added (1)"));
+    assert_eq!(
+        flags[0].as_str().unwrap(),
+        "possible fallbacks added: 1 (not judged: no review)"
+    );
     assert_eq!(val2["fallbacks"].as_array().unwrap().len(), 1);
 }

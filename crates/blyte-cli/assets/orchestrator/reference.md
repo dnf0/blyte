@@ -8,7 +8,8 @@ the words after `blyte` are passed as `args`.
 
 `blyte dispatch <id> <task.md>` starts one implementer on one task, in its own git worktree at
 `.wt/<id>` on a branch `wip/<id>`. The implementer sees only the task text and the repository. A
-dispatch takes minutes.
+dispatch takes minutes. Task and question files go in `.wt/tasks/<name>.md`; writes elsewhere need
+the user's approval.
 
 - `--plan <plan.md> --plan-task "Task <ID>"` takes the task from the plan section headed
   `### Task <ID>: …`, with no task file. Dispatch refuses a heading it cannot find. The implementer
@@ -37,7 +38,7 @@ Each foreground `blyte` call and shell command times out after 300 s. Calling `b
 `background: true` starts a `dispatch` and returns at once:
 
 ```json
-{"args": ["dispatch", "T1", "task.md"], "background": true}
+{"args": ["dispatch", "T1", ".wt/tasks/T1.md"], "background": true}
 ```
 
 When a run ends, blyte shows the user its report and sends you a message only if it did not pass.
