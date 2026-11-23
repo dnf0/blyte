@@ -395,15 +395,30 @@ pub fn run_edit_finish_in(
         }
     };
 
-    match crate::passed_trees::worktree_is_clean(&worktree_dir) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!(
-                "error: worktree {} has uncommitted or untracked changes",
-                worktree_dir.display()
-            );
+    if let Some(ref msg) = args.message {
+        if msg.trim().is_empty() {
+            eprintln!("error: --message must not be empty");
             return 2;
         }
+    }
+
+    match crate::passed_trees::worktree_is_clean(&worktree_dir) {
+        Ok(true) => {}
+        Ok(false) => match args.message.as_deref() {
+            Some(msg) => {
+                if let Err(e) = commit_worktree_changes(&worktree_dir, msg) {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+            }
+            None => {
+                eprintln!(
+                    "error: worktree {} has uncommitted or untracked changes; pass --message to commit them",
+                    worktree_dir.display()
+                );
+                return 2;
+            }
+        },
         Err(e) => {
             eprintln!("error: failed to check worktree status: {e}");
             return 2;
@@ -632,6 +647,32 @@ pub fn run_edit_finish_in(
     let json = serde_json::to_string_pretty(&summary).unwrap();
     println!("{json}");
     0
+}
+
+fn commit_worktree_changes(worktree_dir: &Path, message: &str) -> Result<(), String> {
+    let add_out = Command::new("git")
+        .current_dir(worktree_dir)
+        .args(["add", "-A"])
+        .output()
+        .map_err(|e| format!("failed to run git add -A: {e}"))?;
+    if !add_out.status.success() {
+        return Err(format!(
+            "git add -A failed: {}",
+            String::from_utf8_lossy(&add_out.stderr).trim()
+        ));
+    }
+    let commit_out = Command::new("git")
+        .current_dir(worktree_dir)
+        .args(["commit", "--no-gpg-sign", "-m", message])
+        .output()
+        .map_err(|e| format!("failed to run git commit: {e}"))?;
+    if !commit_out.status.success() {
+        return Err(format!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit_out.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 fn collect_commits(worktree_dir: &Path, base_sha: &str) -> Result<Vec<CommitRecord>, String> {

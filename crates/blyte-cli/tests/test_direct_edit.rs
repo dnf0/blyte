@@ -38,7 +38,11 @@ fn run_blyte(dir: &Path, args: &[&str]) -> Output {
 
 fn setup_repo(toml_body: &str) -> TempDir {
     let dir = TempDir::new().expect("tempdir");
-    let root = dir.path();
+    init_repo(dir.path(), toml_body);
+    dir
+}
+
+fn init_repo(root: &Path, toml_body: &str) {
     git(root, &["init", "-b", "main"]);
     git(root, &["config", "user.name", "Test User"]);
     git(root, &["config", "user.email", "test@example.com"]);
@@ -47,7 +51,6 @@ fn setup_repo(toml_body: &str) -> TempDir {
     std::fs::write(root.join("blyte.toml"), toml_body).unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-m", "initial commit"]);
-    dir
 }
 
 fn branch_exists(root: &Path, branch: &str) -> bool {
@@ -383,6 +386,7 @@ fn edit_finish_recovers_after_crash_between_start_record_and_summary() {
     let args = EditFinishArgs {
         id: "e-crash".to_string(),
         request: Some("req-crash".to_string()),
+        message: None,
     };
     let crash_hook = || Err("simulated crash before summary".to_string());
     let code = blyte_cli::direct_edit::run_edit_finish_in(
@@ -524,4 +528,272 @@ fn edit_start_honours_explicit_base_and_edit_finish_runs_comment_step_and_env() 
         "stderr: {}",
         String::from_utf8_lossy(&pass_out.stderr)
     );
+}
+
+#[test]
+fn edit_finish_commits_dirty_worktree_including_untracked_file_with_message() {
+    let repo = setup_repo("[dispatch]\ngate = \"test -f new_file.txt\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &[
+            "edit-start",
+            "e-msg",
+            "--task",
+            "Update readme and add file",
+        ],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-msg");
+
+    std::fs::write(wt.join("README.md"), "updated content\n").unwrap();
+    std::fs::write(wt.join("new_file.txt"), "brand new\n").unwrap();
+
+    let subject = "feat: update readme and add \"new_file\"";
+    let finish_out = run_blyte(root, &["edit-finish", "e-msg", "--message", subject]);
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+
+    let head_subject = git(&wt, &["show", "-s", "--format=%s", "HEAD"]);
+    assert_eq!(head_subject, subject);
+    let committed_files = git(&wt, &["show", "--name-only", "--format=", "HEAD"]);
+    assert!(committed_files.lines().any(|l| l == "README.md"));
+    assert!(committed_files.lines().any(|l| l == "new_file.txt"));
+
+    let summary: serde_json::Value =
+        serde_json::from_slice(&finish_out.stdout).expect("summary json");
+    assert_eq!(summary["outcome"], "verified");
+    assert_eq!(summary["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["commits"][0]["subject"], subject);
+    assert!(root.join(".wt/e-msg.json").is_file());
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".wt/e-msg.json")).unwrap())
+            .unwrap();
+    assert_eq!(on_disk["commits"][0]["subject"], subject);
+}
+
+#[test]
+fn edit_finish_rejects_dirty_worktree_without_message_and_empty_message() {
+    let repo = setup_repo("[dispatch]\ngate = \"true\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(root, &["edit-start", "e-dirty", "--task", "Edit file"]);
+    assert!(start_out.status.success());
+    let started: serde_json::Value = serde_json::from_slice(&start_out.stdout).unwrap();
+    let base_sha = started["base_sha"].as_str().unwrap().to_string();
+    let wt = root.join(".wt/e-dirty");
+
+    std::fs::write(wt.join("README.md"), "dirty change\n").unwrap();
+
+    let no_msg = run_blyte(root, &["edit-finish", "e-dirty"]);
+    assert_eq!(no_msg.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&no_msg.stderr);
+    assert!(err.contains("--message"), "stderr: {err}");
+    assert!(!root.join(".wt/e-dirty.start.json").exists());
+    assert!(!root.join(".wt/e-dirty.json").exists());
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), base_sha);
+
+    for empty in ["", "   \t\n"] {
+        let empty_out = run_blyte(root, &["edit-finish", "e-dirty", "--message", empty]);
+        assert_eq!(empty_out.status.code(), Some(2));
+        let err = String::from_utf8_lossy(&empty_out.stderr);
+        assert!(err.contains("--message"), "stderr: {err}");
+        assert!(!root.join(".wt/e-dirty.start.json").exists());
+        assert!(!root.join(".wt/e-dirty.json").exists());
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), base_sha);
+    }
+}
+
+#[test]
+fn edit_finish_commits_again_after_gate_failure_and_handles_clean_worktree_with_message() {
+    let repo = setup_repo("[dispatch]\ngate = \"test -f pass.txt\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(root, &["edit-start", "e-retry", "--task", "Add pass.txt"]);
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-retry");
+
+    std::fs::write(wt.join("first.txt"), "attempt 1\n").unwrap();
+    let fail_out = run_blyte(
+        root,
+        &["edit-finish", "e-retry", "--message", "feat: first attempt"],
+    );
+    assert_eq!(fail_out.status.code(), Some(1));
+    let failed: serde_json::Value = serde_json::from_slice(&fail_out.stdout).unwrap();
+    assert_eq!(failed["outcome"], "gate_failed");
+    assert!(!root.join(".wt/e-retry.json").exists());
+    assert_eq!(
+        git(&wt, &["show", "-s", "--format=%s", "HEAD"]),
+        "feat: first attempt"
+    );
+
+    std::fs::write(wt.join("pass.txt"), "attempt 2\n").unwrap();
+    let pass_out = run_blyte(
+        root,
+        &["edit-finish", "e-retry", "--message", "fix: add pass.txt"],
+    );
+    assert_eq!(
+        pass_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&pass_out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&pass_out.stdout).unwrap();
+    assert_eq!(summary["outcome"], "verified");
+    let commits = summary["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0]["subject"], "feat: first attempt");
+    assert_eq!(commits[1]["subject"], "fix: add pass.txt");
+
+    let start2 = run_blyte(
+        root,
+        &["edit-start", "e-clean", "--task", "Already committed"],
+    );
+    assert!(start2.status.success());
+    let wt2 = root.join(".wt/e-clean");
+    let clean_no_commit = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-clean",
+            "--message",
+            "chore: nothing changed",
+        ],
+    );
+    assert_eq!(clean_no_commit.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&clean_no_commit.stderr).contains("no commits"),
+        "stderr: {}",
+        String::from_utf8_lossy(&clean_no_commit.stderr)
+    );
+
+    std::fs::write(wt2.join("pass.txt"), "committed earlier\n").unwrap();
+    git(&wt2, &["add", "pass.txt"]);
+    git(&wt2, &["commit", "-m", "feat: earlier commit"]);
+    let sha_before = git(&wt2, &["rev-parse", "HEAD"]);
+
+    let clean_pass = run_blyte(
+        root,
+        &["edit-finish", "e-clean", "--message", "chore: ignored"],
+    );
+    assert_eq!(
+        clean_pass.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&clean_pass.stderr)
+    );
+    assert_eq!(git(&wt2, &["rev-parse", "HEAD"]), sha_before);
+    let summary2: serde_json::Value = serde_json::from_slice(&clean_pass.stdout).unwrap();
+    let commits2 = summary2["commits"].as_array().unwrap();
+    assert_eq!(commits2.len(), 1);
+    assert_eq!(commits2[0]["subject"], "feat: earlier commit");
+}
+
+#[cfg(unix)]
+#[test]
+fn edit_finish_reports_hook_stderr_when_git_commit_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = setup_repo("[dispatch]\ngate = \"true\"\n");
+    let root = repo.path();
+
+    let hook_path = root.join(".git/hooks/pre-commit");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\necho \"pre-commit refused this change\" >&2\nexit 1\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&hook_path, perms).unwrap();
+
+    let start_out = run_blyte(root, &["edit-start", "e-hook", "--task", "Blocked by hook"]);
+    assert!(start_out.status.success());
+    let started: serde_json::Value = serde_json::from_slice(&start_out.stdout).unwrap();
+    let base_sha = started["base_sha"].as_str().unwrap().to_string();
+    let wt = root.join(".wt/e-hook");
+
+    std::fs::write(wt.join("README.md"), "hook will reject\n").unwrap();
+
+    let out = run_blyte(
+        root,
+        &["edit-finish", "e-hook", "--message", "feat: rejected"],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("git commit"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("pre-commit refused this change"),
+        "stderr: {stderr}"
+    );
+    assert!(!root.join(".wt/e-hook.start.json").exists());
+    assert!(!root.join(".wt/e-hook.json").exists());
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), base_sha);
+}
+
+#[test]
+fn configure_orchestrate_policy_allows_writes_only_while_direct_edit_is_open() {
+    let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(tmp_base).unwrap();
+    let repo = tempfile::tempdir_in(tmp_base).expect("tempdir in target tmpdir");
+    let root = repo.path();
+    init_repo(root, "[dispatch]\ngate = \"true\"\n");
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-policy", "--task", "Write via tool"],
+    );
+    assert!(start_out.status.success());
+
+    let _ = blyte_cli::task_runner::configure_orchestrate_policy(true, true, root, None, false)
+        .expect("configure policy");
+    let scope = blyte_agent::tools::write_scope().expect("write scope set");
+    assert_eq!(
+        scope.edit_worktrees,
+        Some(root.join(".wt").canonicalize().unwrap())
+    );
+
+    let shell = blyte_agent::shell::LocalShell::new();
+    let fs = blyte_agent::fs::LocalFs;
+    let during = blyte_agent::tools::execute(
+        root,
+        &shell,
+        &fs,
+        "write",
+        &serde_json::json!({ "path": ".wt/e-policy/tool_edit.txt", "content": "written\n" }),
+    );
+    assert!(!during.is_error, "{}", during.content);
+
+    let finish_out = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-policy",
+            "--message",
+            "feat: write via tool",
+        ],
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+
+    let after = blyte_agent::tools::execute(
+        root,
+        &shell,
+        &fs,
+        "write",
+        &serde_json::json!({ "path": ".wt/e-policy/after.txt", "content": "blocked\n" }),
+    );
+    assert!(after.is_error, "write after edit-finish must be refused");
+
+    blyte_agent::tools::set_write_scope(None);
+    blyte_agent::tools::set_approval(None);
 }

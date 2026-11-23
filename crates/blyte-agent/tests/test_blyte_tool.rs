@@ -542,3 +542,51 @@ fn blyte_command_timeout_gives_edit_finish_3600s_and_others_300s() {
     );
     assert_eq!(blyte_command_timeout("status"), Duration::from_secs(300));
 }
+
+#[test]
+fn blyte_tool_passes_edit_finish_message_with_spaces_and_quotes_intact() {
+    let root = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = write_script(
+        scripts.path(),
+        "fake-blyte",
+        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+    );
+    let _g = BlyteToolGuard::acquire(Some(script));
+    let _reset = RequestReset;
+
+    let msg = "fix: handle \"quoted\" y";
+    set_blyte_request(Some("r1700000000-99".to_string()));
+    let with_req = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "X", "--message", msg]}),
+    );
+    assert!(!with_req.is_error, "{}", with_req.content);
+    let lines: Vec<&str> = with_req.content.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "edit-finish",
+            "X",
+            "--message",
+            msg,
+            "--request",
+            "r1700000000-99"
+        ]
+    );
+
+    set_blyte_request(None);
+    let without_req = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "X", "--message", msg]}),
+    );
+    assert!(!without_req.is_error, "{}", without_req.content);
+    let lines: Vec<&str> = without_req.content.lines().collect();
+    assert_eq!(lines, vec!["edit-finish", "X", "--message", msg]);
+}

@@ -195,6 +195,10 @@ pub struct EditFinishArgs {
     /// Request identifier this edit belongs to
     #[arg(long, value_name = "ID")]
     pub request: Option<String>,
+
+    /// Commit message used to commit uncommitted or untracked changes in the worktree
+    #[arg(long, value_name = "TEXT")]
+    pub message: Option<String>,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
