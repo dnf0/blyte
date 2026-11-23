@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -5,10 +6,26 @@ use std::time::{Duration, Instant};
 use blyte_agent::context::Folded;
 use blyte_agent::fs::LocalFs as RealFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell as RealShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, Usage};
 use serde_json::json;
+
+struct NoopShell;
+
+impl Shell for NoopShell {
+    fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    fn describe(&self) -> String {
+        "noop".into()
+    }
+}
 
 const NUDGE_PREFIX: &str =
     "[blyte] You have spent 20 turns without changing any file or running the gate.";
@@ -87,7 +104,7 @@ fn fix_run_without_progress_nudges_at_21_last_calls_at_31_and_stops_at_32() {
         provider: &provider,
         context: &Folded::default(),
         fs: &RealFs,
-        shell: &RealShell,
+        shell: &NoopShell,
         root: dir.path().to_path_buf(),
         budget: Budget {
             max_turns: 60,
@@ -194,7 +211,7 @@ fn replying_without_tools_after_last_call_stops_normally_without_stalling() {
         provider: &provider,
         context: &Folded::default(),
         fs: &RealFs,
-        shell: &RealShell,
+        shell: &NoopShell,
         root: dir.path().to_path_buf(),
         budget: Budget {
             max_turns: 60,
@@ -269,7 +286,7 @@ fn successful_write_disables_no_progress_nudge_and_stop() {
         provider: &provider,
         context: &Folded::default(),
         fs: &RealFs,
-        shell: &RealShell,
+        shell: &NoopShell,
         root: dir.path().to_path_buf(),
         budget: Budget {
             max_turns: 60,
@@ -310,7 +327,7 @@ fn research_run_never_receives_no_progress_nudge_or_stops() {
         provider: &provider,
         context: &Folded::default(),
         fs: &RealFs,
-        shell: &RealShell,
+        shell: &NoopShell,
         root: dir.path().to_path_buf(),
         budget: Budget {
             max_turns: 40,
@@ -351,7 +368,7 @@ fn time_fraction_triggers_nudge_early_and_last_call_before_end() {
         provider: &provider,
         context: &Folded::default(),
         fs: &RealFs,
-        shell: &RealShell,
+        shell: &NoopShell,
         root: dir.path().to_path_buf(),
         budget: Budget {
             max_turns: 200,

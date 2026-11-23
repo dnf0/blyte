@@ -54,6 +54,12 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn init_wt_dir() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".wt")).unwrap();
+    (dir, "0000000000000000000000000000000000000000".to_string())
+}
+
 fn init_repo() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -161,7 +167,7 @@ fn wait_for_prompts(prompts: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec<S
         if current.len() >= expected {
             return current;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(2));
     }
     prompts.lock().unwrap().clone()
 }
@@ -185,7 +191,7 @@ fn now_secs() -> u64 {
 
 #[test]
 fn verified_run_adds_notice_once_writes_marker_and_queues_nothing() {
-    let (repo, base) = init_repo();
+    let (repo, base) = init_wt_dir();
     let root = repo.path();
     let now = now_secs();
 
@@ -235,7 +241,8 @@ fn verified_run_adds_notice_once_writes_marker_and_queues_nothing() {
     assert_eq!(marker["outcome"], "verified");
     assert!(marker["ts"].as_u64().is_some());
 
-    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(surface.session.info().queued, 0);
+    assert!(!surface.session.info().busy);
     assert!(prompts.lock().unwrap().is_empty());
 
     let seq_after_first = entries.last().unwrap().seq;
@@ -248,7 +255,7 @@ fn verified_run_adds_notice_once_writes_marker_and_queues_nothing() {
 
 #[test]
 fn gate_failed_run_adds_notice_and_queues_one_message_with_last_20_failure_lines() {
-    let (repo, base) = init_repo();
+    let (repo, base) = init_wt_dir();
     let root = repo.path();
     let now = now_secs();
 
@@ -305,7 +312,7 @@ fn gate_failed_run_adds_notice_and_queues_one_message_with_last_20_failure_lines
 
     let count_before = surface.session.entries_after(0, Duration::ZERO).len();
     report_finished_runs(&surface).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(surface.session.info().queued, 0);
     assert_eq!(prompts.lock().unwrap().len(), 1);
     let count_after = surface.session.entries_after(0, Duration::ZERO).len();
     assert_eq!(count_after, count_before);
@@ -313,7 +320,7 @@ fn gate_failed_run_adds_notice_and_queues_one_message_with_last_20_failure_lines
 
 #[test]
 fn ignores_runs_without_request_research_runs_and_unfinished_runs() {
-    let (repo, base) = init_repo();
+    let (repo, base) = init_wt_dir();
     let root = repo.path();
     let now = now_secs();
 
@@ -351,7 +358,8 @@ fn ignores_runs_without_request_research_runs_and_unfinished_runs() {
     report_finished_runs(&surface).unwrap();
 
     assert!(surface.session.entries_after(0, Duration::ZERO).is_empty());
-    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(surface.session.info().queued, 0);
+    assert!(!surface.session.info().busy);
     assert!(prompts.lock().unwrap().is_empty());
     assert!(!root.join(".wt/NOREQ.reported.json").exists());
     assert!(!root.join(".wt/RES1.reported.json").exists());
@@ -360,7 +368,7 @@ fn ignores_runs_without_request_research_runs_and_unfinished_runs() {
 
 #[test]
 fn truncates_5000_char_final_message_at_4000_char_boundary() {
-    let (repo, base) = init_repo();
+    let (repo, base) = init_wt_dir();
     let root = repo.path();
     let now = now_secs();
 
@@ -399,7 +407,7 @@ fn truncates_5000_char_final_message_at_4000_char_boundary() {
 
 #[test]
 fn unparseable_or_incomplete_summary_returns_err_naming_file_and_writes_no_marker() {
-    let (repo, base) = init_repo();
+    let (repo, base) = init_wt_dir();
     let root = repo.path();
     let now = now_secs();
 
@@ -462,7 +470,8 @@ fn unparseable_or_incomplete_summary_returns_err_naming_file_and_writes_no_marke
     assert!(!root.join(".wt/BAD1.reported.json").exists());
 
     assert!(surface.session.entries_after(0, Duration::ZERO).is_empty());
-    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(surface.session.info().queued, 0);
+    assert!(!surface.session.info().busy);
     assert!(prompts.lock().unwrap().is_empty());
 }
 
@@ -515,6 +524,7 @@ fn router_get_api_runs_adds_entry_once_across_two_calls() {
     assert!(note.starts_with("Run RT1: verified, 5 turns, USD 0.19, 2.0 min\nAdded rt1.txt."));
     assert!(root.join(".wt/RT1.reported.json").exists());
 
-    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(surface.session.info().queued, 0);
+    assert!(!surface.session.info().busy);
     assert!(prompts.lock().unwrap().is_empty());
 }
