@@ -292,6 +292,8 @@ fn no_data_timing(started: Instant) -> StreamTiming {
     }
 }
 
+const DEFAULT_HELPER_TIMEOUT_GRACE: Duration = Duration::from_secs(5);
+
 pub struct Gemini {
     auth: Auth,
     api_root: Option<String>,
@@ -300,6 +302,7 @@ pub struct Gemini {
     thought_summaries: bool,
     idle_timeout: Option<Duration>,
     stream_cap: Option<Duration>,
+    helper_timeout_grace: Duration,
     last_timing: Mutex<Option<StreamTiming>>,
 }
 
@@ -319,6 +322,7 @@ impl Gemini {
             thought_summaries: thought_summaries_from_env(),
             idle_timeout: None,
             stream_cap: None,
+            helper_timeout_grace: DEFAULT_HELPER_TIMEOUT_GRACE,
             last_timing: Mutex::new(None),
         })
     }
@@ -359,6 +363,7 @@ impl Gemini {
             thought_summaries: thought_summaries_from_env(),
             idle_timeout: None,
             stream_cap: None,
+            helper_timeout_grace: DEFAULT_HELPER_TIMEOUT_GRACE,
             last_timing: Mutex::new(None),
         })
     }
@@ -374,6 +379,7 @@ impl Gemini {
             thought_summaries: true,
             idle_timeout: None,
             stream_cap: None,
+            helper_timeout_grace: DEFAULT_HELPER_TIMEOUT_GRACE,
             last_timing: Mutex::new(None),
         }
     }
@@ -389,6 +395,7 @@ impl Gemini {
             thought_summaries: true,
             idle_timeout: None,
             stream_cap: None,
+            helper_timeout_grace: DEFAULT_HELPER_TIMEOUT_GRACE,
             last_timing: Mutex::new(None),
         }
     }
@@ -402,6 +409,12 @@ impl Gemini {
     pub fn with_stream_timeouts(mut self, idle: Duration, cap: Duration) -> Self {
         self.idle_timeout = Some(idle);
         self.stream_cap = Some(cap);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_helper_timeout_grace(mut self, grace: Duration) -> Self {
+        self.helper_timeout_grace = grace;
         self
     }
 
@@ -1071,20 +1084,32 @@ impl std::io::Read for ChannelReader {
     }
 }
 
+#[derive(Clone, Copy)]
+struct StreamTimeouts {
+    idle: Duration,
+    cap: Duration,
+    deadline: Instant,
+    helper_grace: Duration,
+}
+
 fn start_stream_request(
     agent: ureq::Agent,
     url: String,
     auth_header: (&'static str, String),
     body: Value,
-    idle: Duration,
-    cap: Duration,
-    deadline: Instant,
+    timeouts: StreamTimeouts,
 ) -> HeadOutcome {
+    let StreamTimeouts {
+        idle,
+        cap,
+        deadline,
+        helper_grace,
+    } = timeouts;
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return HeadOutcome::Transport(format!("timed out: stream exceeded {cap:?}"));
     }
-    let ureq_timeout = remaining.saturating_add(Duration::from_secs(5));
+    let ureq_timeout = remaining.saturating_add(helper_grace);
     let (tx, rx) = std::sync::mpsc::channel();
     let (header_name, header_value) = auth_header;
 
@@ -1179,17 +1204,17 @@ impl Gemini {
         let deadline = started
             .checked_add(cap)
             .unwrap_or_else(|| started + Duration::from_secs(365 * 24 * 3600));
+        let timeouts = StreamTimeouts {
+            idle,
+            cap,
+            deadline,
+            helper_grace: self.helper_timeout_grace,
+        };
 
         let outcome = match &self.auth {
-            Auth::ApiKey(key) => start_stream_request(
-                agent,
-                url,
-                ("x-goog-api-key", key.clone()),
-                body,
-                idle,
-                cap,
-                deadline,
-            ),
+            Auth::ApiKey(key) => {
+                start_stream_request(agent, url, ("x-goog-api-key", key.clone()), body, timeouts)
+            }
             Auth::Vertex(vertex) => {
                 let rem = deadline.saturating_duration_since(Instant::now());
                 if rem.is_zero() {
@@ -1221,9 +1246,7 @@ impl Gemini {
                     url.clone(),
                     ("Authorization", format!("Bearer {token}")),
                     body.clone(),
-                    idle,
-                    cap,
-                    deadline,
+                    timeouts,
                 );
                 if matches!(first, HeadOutcome::Api { status: 401, .. }) {
                     let rem = deadline.saturating_duration_since(Instant::now());
@@ -1274,9 +1297,7 @@ impl Gemini {
                         url,
                         ("Authorization", format!("Bearer {new_token}")),
                         body,
-                        idle,
-                        cap,
-                        deadline,
+                        timeouts,
                     )
                 } else {
                     first
