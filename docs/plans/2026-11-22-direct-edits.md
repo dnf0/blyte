@@ -240,3 +240,62 @@ repository's full check.
 
 **Commit message.**
 `feat(surface): a direct edit is written with the write tools and committed by edit-finish`
+
+## Found by the pilot trial (2026-11-23)
+
+A direct edit passed its check and was then never combined: the surface lists runs through
+`live_runs::collect` (`dashboard::collect_jobs`), which leaves out a run that has neither
+`.wt/<id>.report.json` nor `.wt/<id>.log` once its process has exited. A direct edit writes
+neither, so `/api/runs` was empty and nothing triggered the combine. E1's claim that the surface
+needs no change was tested only against `request_readiness` and `combine_in`.
+
+### Task E3
+
+**Goal.** A finished direct edit appears on the surface as a finished run and its request is
+combined, exactly as for a dispatched run.
+
+**Files.**
+- `crates/blyte-cli/src/direct_edit.rs`.
+- `crates/blyte-cli/tests/test_direct_edit.rs`.
+- Do **not** change `dashboard.rs`, `live_runs.rs`, `serve.rs`, `requests.rs`, `combine.rs` or
+  `assets/surface/index.html`. If the goal cannot be met without changing one of them, stop and
+  say which and why in the final message instead of changing it.
+
+**What to build.**
+1. `edit-finish`, when the check passes, also writes the two files a dispatched run leaves:
+   - `.wt/<id>.report.json`: the same report type a dispatch writes there (find where
+     `dispatch.rs` writes `report.json` and use the same type and writer), with outcome
+     `verified`, the task text as the final message, zero turns and zero cost, the gate attempt,
+     and every other field set to what is true for a run with no model turns. Do not invent
+     values: a field that has no true value for a direct edit is the type's "absent" form.
+   - `.wt/<id>.log`: the output of the check (each step's command and its output, in the order
+     run), so the surface's log view shows what was checked. If the check was skipped because the
+     tree had already passed, the log says exactly that in one line.
+   Both are written before the start file and the summary; the summary stays last. A failure to
+   write either is an error naming the path, and no summary is written.
+2. When the check fails, `.wt/<id>.log` is still written (replacing any earlier one) so the
+   failure can be read; no report, start file or summary, as now.
+
+**Tests** (`test_direct_edit.rs`).
+- After a passing `edit-finish --request R`: `live_runs::collect(root, now, 14)` lists the run
+  once, as finished (not running, not skipped), with request `R`, outcome verified and
+  `research` false; the report file parses with the dispatch report type; the log contains the
+  gate command and its output.
+- The same with the worktree's creating process long gone: the start file's `pid` is the
+  `edit-finish` process, which has exited by the time the surface looks; simulate by rewriting
+  `pid` in the start file to a pid that is not alive and assert the run is still listed.
+- A `Surface` built over the repository (as the existing serve or requests tests build one, with
+  an idle session): `requests::maybe_combine(&surface, R)` returns `true` and, once its thread
+  finishes, a combine record with result `combined` exists whose branch contains the commit.
+- Gate fails: the log exists and has the failing step's output; no report, start file or summary.
+- Already-passed tree: the log has the one line; the run is listed.
+
+Run: `cargo test -p blyte --test test_direct_edit`, then the repository's full check.
+
+**Constraints.**
+- **No fallbacks**; **resumable** (a second `edit-finish` after any failure completes the files).
+- Existing tests pass unmodified. Keep existing comments.
+- Depends on: E2 (on this branch). Siblings: none.
+
+**Commit message.**
+`fix(surface): a finished direct edit is listed as a run, so its request is combined`
