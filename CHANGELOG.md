@@ -1,3 +1,9 @@
+## v0.58.1 (2026-11-23)
+
+### Fix
+
+- fallbacks are judged and sent back once, and the conversation model cannot write around the check (#404)
+
 ## v0.58.0 (2026-11-22)
 
 ### Feat
