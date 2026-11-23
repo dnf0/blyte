@@ -2,7 +2,7 @@
 //! time-based warnings share a single `wrap_up_sent` guard so at most one fires per run.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use blyte_agent::context::Conversational;
@@ -31,7 +31,7 @@ impl Shell for FastShell {
 
 struct Busy {
     requests: Mutex<Vec<Vec<Message>>>,
-    start: Instant,
+    clock: Option<Arc<Mutex<Duration>>>,
     step_at: Option<(usize, Duration)>,
     end_at: Option<(usize, Duration)>,
 }
@@ -43,17 +43,16 @@ impl Provider for Busy {
         let call = reqs.len();
         drop(reqs);
 
-        if let Some((target_call, target_elapsed)) = self.step_at {
-            if call == target_call {
-                if let Some(rem) = target_elapsed.checked_sub(self.start.elapsed()) {
-                    std::thread::sleep(rem);
+        if let Some(clock) = &self.clock {
+            let mut elapsed = clock.lock().unwrap();
+            if let Some((target_call, target_elapsed)) = self.step_at {
+                if call == target_call && *elapsed < target_elapsed {
+                    *elapsed = target_elapsed;
                 }
             }
-        }
-        if let Some((target_call, target_elapsed)) = self.end_at {
-            if call >= target_call {
-                if let Some(rem) = target_elapsed.checked_sub(self.start.elapsed()) {
-                    std::thread::sleep(rem);
+            if let Some((target_call, target_elapsed)) = self.end_at {
+                if call >= target_call && *elapsed < target_elapsed {
+                    *elapsed = target_elapsed;
                 }
             }
         }
@@ -89,11 +88,11 @@ fn ended_with_user_message(messages: &[Message], needle: &str) -> bool {
 fn time_warning_arrives_once_under_ten_percent_of_max_duration() {
     const BUDGET: Duration = Duration::from_secs(5);
     let d = tempfile::tempdir().unwrap();
+    let base = Instant::now();
+    let clock = Arc::new(Mutex::new(Duration::ZERO));
     let p = Busy {
         requests: Mutex::new(Vec::new()),
-        start: Instant::now(),
-        // Step into the final 10% window (4.5 s..5.0 s) on call 2, and past the deadline on call 4,
-        // while FastShell avoids spawning OS processes per turn.
+        clock: Some(Arc::clone(&clock)),
         step_at: Some((2, Duration::from_millis(4550))),
         end_at: Some((4, BUDGET)),
     };
@@ -115,7 +114,7 @@ fn time_warning_arrives_once_under_ten_percent_of_max_duration() {
         base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut st = State::new("g", "true");
-    let (outcome, _) = r.run(&mut st);
+    let (outcome, _) = r.run_with_clock(&mut st, &|| base + *clock.lock().unwrap());
     assert_eq!(outcome, Outcome::BudgetExhausted);
 
     let time_warn = "You have about 1 minutes left of 1. Wrap up now: make sure your work is saved before you run out: committed, or written to the file the task asks for. Then stop calling tools.";
@@ -151,7 +150,7 @@ fn without_time_limit_only_turn_warning_appears_at_turn_21() {
     let d = tempfile::tempdir().unwrap();
     let p = Busy {
         requests: Mutex::new(Vec::new()),
-        start: Instant::now(),
+        clock: None,
         step_at: None,
         end_at: None,
     };
@@ -203,7 +202,7 @@ fn long_time_limit_with_fast_provider_sends_only_turn_warning_once() {
     let d = tempfile::tempdir().unwrap();
     let p = Busy {
         requests: Mutex::new(Vec::new()),
-        start: Instant::now(),
+        clock: None,
         step_at: None,
         end_at: None,
     };

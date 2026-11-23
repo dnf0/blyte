@@ -1,15 +1,65 @@
 //! Transient provider failures are waited out; everything else fails at once; and no wait ever
 //! outlasts the run's deadline.
 
-use std::sync::Mutex;
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{is_transient, retry_delay, Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response};
+
+static RETRY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct RetryDelayGuard {
+    _lock: MutexGuard<'static, ()>,
+    prev: Option<OsString>,
+}
+
+impl RetryDelayGuard {
+    fn set(val: Option<&str>) -> Self {
+        let lock = RETRY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("BLYTE_RETRY_DELAY_MS");
+        unsafe {
+            match val {
+                Some(v) => std::env::set_var("BLYTE_RETRY_DELAY_MS", v),
+                None => std::env::remove_var("BLYTE_RETRY_DELAY_MS"),
+            }
+        }
+        Self { _lock: lock, prev }
+    }
+}
+
+impl Drop for RetryDelayGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("BLYTE_RETRY_DELAY_MS", v),
+                None => std::env::remove_var("BLYTE_RETRY_DELAY_MS"),
+            }
+        }
+    }
+}
+
+struct FastShell;
+
+impl Shell for FastShell {
+    fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+}
 
 /// Fails with each queued error in turn, then answers "done".
 struct Flaky {
@@ -60,7 +110,7 @@ impl Provider for Flaky {
 fn runner<'a>(p: &'a Flaky, root: &std::path::Path, max: Option<Duration>) -> Runner<'a> {
     Runner {
         provider: p,
-        shell: &LocalShell,
+        shell: &FastShell,
         fs: &LocalFs,
         context: &Conversational,
         root: root.to_path_buf(),
@@ -104,12 +154,14 @@ fn transient_errors_are_recognised() {
 
 #[test]
 fn the_backoff_doubles_to_a_one_minute_ceiling() {
+    let _g = RetryDelayGuard::set(None);
     let secs: Vec<u64> = (1..=7).map(|a| retry_delay(a).as_secs()).collect();
     assert_eq!(secs, vec![2, 4, 8, 16, 32, 60, 60]);
 }
 
 #[test]
 fn a_rate_limit_is_waited_out() {
+    let _g = RetryDelayGuard::set(Some("1"));
     let d = tempfile::tempdir().unwrap();
     let p = Flaky::new(vec![api(429)]);
     let mut st = State::new("g", "true");
@@ -135,6 +187,7 @@ fn a_bad_request_fails_at_once() {
 
 #[test]
 fn no_wait_outlasts_the_deadline() {
+    let _g = RetryDelayGuard::set(None);
     let d = tempfile::tempdir().unwrap();
     let p = Flaky::always(429);
     let mut st = State::new("g", "true");
@@ -161,6 +214,7 @@ fn no_answer(input: u64) -> ProviderError {
 
 #[test]
 fn no_answer_is_retried_once_and_recovers() {
+    let _g = RetryDelayGuard::set(Some("1"));
     let d = tempfile::tempdir().unwrap();
     let p = Flaky::new(vec![no_answer(300)]);
     let mut st = State::new("g", "true");
@@ -173,6 +227,7 @@ fn no_answer_is_retried_once_and_recovers() {
 
 #[test]
 fn no_answer_fails_after_one_retry() {
+    let _g = RetryDelayGuard::set(Some("1"));
     let d = tempfile::tempdir().unwrap();
     let p = Flaky::new(vec![no_answer(300), no_answer(400), no_answer(500)]);
     let mut st = State::new("g", "true");

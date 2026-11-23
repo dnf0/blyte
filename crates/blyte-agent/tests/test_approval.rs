@@ -352,10 +352,10 @@ fn bash_spec_exposes_unsandboxed_fields_only_when_approval_is_set() {
 #[test]
 fn local_shell_exec_host_runs_outside_sandbox() {
     let dir = tempfile::tempdir().unwrap();
-    let sh = if sandbox::available() {
-        LocalShell::sandboxed(sandbox::default_profile(dir.path(), &[]))
-    } else {
-        LocalShell::new()
+    let profile = sandbox::available().then(|| sandbox::default_profile(dir.path(), &[]));
+    let sh = match profile.clone() {
+        Some(p) => LocalShell::sandboxed(p),
+        None => LocalShell::new(),
     };
     let out = sh
         .exec_host("echo hi", dir.path(), Duration::from_secs(30))
@@ -363,13 +363,9 @@ fn local_shell_exec_host_runs_outside_sandbox() {
     assert_eq!(out.exit_code, 0, "{}", out.merged());
     assert_eq!(out.stdout.trim(), "hi");
 
-    let persistent = if sandbox::available() {
-        PersistentShell::local_sandboxed(
-            dir.path().to_path_buf(),
-            sandbox::default_profile(dir.path(), &[]),
-        )
-    } else {
-        PersistentShell::local(dir.path().to_path_buf())
+    let persistent = match profile {
+        Some(p) => PersistentShell::local_sandboxed(dir.path().to_path_buf(), p),
+        None => PersistentShell::local(dir.path().to_path_buf()),
     };
     let out = persistent
         .exec_host("echo hi", dir.path(), Duration::from_secs(30))

@@ -1,16 +1,67 @@
 //! A check that fails before the change is reported as blocked, proven at the base commit, and a
 //! model that only claims it is not blocked keeps the old behaviour (2026-10-01).
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
+
+struct DirectShell;
+
+impl Shell for DirectShell {
+    fn exec(&self, command: &str, cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        if command.starts_with("for c in ") {
+            return Ok(Output {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+        }
+        if command.trim() == "test -f ok"
+            || (command.contains("BLYTE_IN_GATE=1") && command.contains("\ntest -f ok\n"))
+        {
+            return Ok(Output {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: if cwd.join("ok").is_file() { 0 } else { 1 },
+            });
+        }
+        if command.trim() == "rm ok" {
+            let exit_code = if std::fs::remove_file(cwd.join("ok")).is_ok() {
+                0
+            } else {
+                1
+            };
+            return Ok(Output {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code,
+            });
+        }
+        let out = Command::new("sh")
+            .args(["-c", command])
+            .current_dir(cwd)
+            .output()
+            .map_err(|e| format!("spawn failed: {e}"))?;
+        Ok(Output {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            exit_code: out.status.code().unwrap_or(-1),
+        })
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+}
 
 /// Plays its responses in order: each is either a bash command (a tool call) or a reply that stops.
 struct Script {
@@ -73,7 +124,7 @@ fn run(dir: &std::path::Path, steps: Vec<Result<String, String>>) -> (Outcome, u
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &DirectShell,
         fs: &LocalFs,
         context: &Conversational,
         root: dir.to_path_buf(),

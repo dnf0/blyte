@@ -49,10 +49,10 @@ fn session_keeps_a_redirected_background_job_alive() {
     assert!(pid > 0, "unexpected pid {pid}");
     let _guard = PidGuard(pid);
 
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(150));
     assert!(
         is_alive(pid),
-        "expected background job {pid} to still be alive after 1s in persistent session"
+        "expected background job {pid} to still be alive after 150ms in persistent session"
     );
 }
 
@@ -72,9 +72,9 @@ fn per_command_executor_keeps_a_redirected_background_job_alive() {
     assert!(pid > 0, "unexpected pid {pid}");
     let _guard = PidGuard(pid);
 
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(150));
     assert!(
         is_alive(pid),
-        "expected background job {pid} to still be alive after 1s in per-command executor"
+        "expected background job {pid} to still be alive after 150ms in per-command executor"
     );
 }

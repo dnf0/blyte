@@ -1,14 +1,32 @@
 //! An exhausted usage quota ends the run at once: a free-plan ChatGPT login returned
 //! usage_limit_reached (resets in 9 days) and blyte retried six times over two minutes (2026-09-27).
 
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{is_transient, quota_exhausted, Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response};
+
+struct FastShell;
+
+impl Shell for FastShell {
+    fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+}
 
 fn e429(body: &str) -> ProviderError {
     ProviderError::Api {
@@ -82,7 +100,7 @@ fn a_run_stops_on_the_first_quota_error_without_retrying() {
     };
     let runner = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &FastShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -114,14 +132,16 @@ fn a_run_stops_on_the_first_quota_error_without_retrying() {
 }
 
 /// Answers with a quota error only after the request's time limit has passed.
-struct LateQuota;
+struct LateQuota {
+    clock: Arc<Mutex<Duration>>,
+}
 
 impl Provider for LateQuota {
     fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         let t = req
             .timeout
             .expect("a run with a deadline sets the request's time limit");
-        std::thread::sleep(t + std::time::Duration::from_millis(50));
+        *self.clock.lock().unwrap() += t + Duration::from_millis(50);
         Err(e429(CHATGPT_FREE))
     }
     fn model_id(&self) -> String {
@@ -132,16 +152,21 @@ impl Provider for LateQuota {
 #[test]
 fn a_quota_error_past_the_deadline_is_still_an_error() {
     let d = tempfile::tempdir().unwrap();
+    let base = Instant::now();
+    let clock = Arc::new(Mutex::new(Duration::ZERO));
+    let provider = LateQuota {
+        clock: Arc::clone(&clock),
+    };
     let runner = Runner {
-        provider: &LateQuota,
-        shell: &LocalShell,
+        provider: &provider,
+        shell: &FastShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
         budget: Budget {
             max_turns: 5,
             max_gate_attempts: 1,
-            max_duration: Some(std::time::Duration::from_secs(2)),
+            max_duration: Some(Duration::from_secs(2)),
         },
         rollback: false,
         on_event: None,
@@ -150,7 +175,7 @@ fn a_quota_error_past_the_deadline_is_still_an_error() {
         base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut st = State::new("g", "true");
-    let (outcome, _) = runner.run(&mut st);
+    let (outcome, _) = runner.run_with_clock(&mut st, &|| base + *clock.lock().unwrap());
     match outcome {
         Outcome::Error(e) => assert!(e.starts_with("usage quota exhausted"), "{e}"),
         other => panic!("expected the quota error, got {other:?}"),
