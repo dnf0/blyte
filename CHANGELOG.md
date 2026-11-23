@@ -1,3 +1,10 @@
+## v0.59.0 (2026-11-23)
+
+### Feat
+
+- **surface**: direct edits for small changes, gated and recorded as a run (#406)
+- **check**: test only the crates a change affects; make the five slowest test files fast (#407)
+
 ## v0.58.1 (2026-11-23)
 
 ### Fix
