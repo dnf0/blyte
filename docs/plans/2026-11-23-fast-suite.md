@@ -43,6 +43,12 @@ Rules for every task:
 - Every existing test and assertion stays. Do not delete, `#[ignore]`, merge or weaken a test.
 - Production behaviour does not change. No new command-line flag, `blyte.toml` key or environment
   variable.
+- The only change allowed under `src/` is making an existing wait, interval or clock injectable
+  (a parameter or a configuration field whose default is the present value). Do not change how
+  production code starts processes, reads or writes files, makes temporary directories or calls
+  git, even when the change looks equivalent and faster: report it as a finding instead. (Added
+  after run FSA1 rewrote session temporary directories and replaced `cat` and `git rev-parse` in
+  product code; those changes were removed in review.)
 - No fallbacks: do not replace a failing wait with a default or a skipped check.
 - Do not make a test depend on timing more than it does now: a test that passes alone must also
   pass while the machine is busy.
