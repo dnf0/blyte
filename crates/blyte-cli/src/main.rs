@@ -1,6 +1,5 @@
 use blyte_cli::cli::{apply_orchestrate_defaults, Cli, SurfaceArgs};
 use clap::{CommandFactory, FromArgMatches};
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// Restore the default SIGPIPE behaviour.
@@ -337,7 +336,7 @@ fn main() {
         }
     }
 
-    let use_terminal = cli.terminal || !std::io::stdin().is_terminal();
+    let use_terminal = cli.terminal;
     if !use_terminal {
         cli.orchestrate = true;
         apply_orchestrate_defaults(&mut cli, &matches);

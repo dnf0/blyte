@@ -1,5 +1,13 @@
 # Running tasks
 
+## Live surface
+
+```bash
+blyte [--port N] [--no-open] [--days N]
+```
+
+Running bare `blyte` inside a git repository starts the live surface for that repository, prints `blyte: surface at http://127.0.0.1:<port>/#token=<token>`, opens it in the browser unless `--no-open` is passed, and serves until `SIGINT` or `SIGTERM`. It starts the surface whether or not standard input is a terminal (so it can be run under a service manager or with `< /dev/null`). Pass `blyte --terminal` to run the interactive terminal session instead.
+
 ## Headless runs
 
 ```bash
