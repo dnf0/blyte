@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 
 enum ImplementerPass {
@@ -266,23 +266,49 @@ fn git_head(dir: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let ty = entry.file_type().unwrap();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+fn base_template_repo() -> &'static Path {
+    static TEMPLATE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(
+                repo.join("src/app.rs"),
+                "pub fn greet() -> &'static str { \"hi\" }\n",
+            )
+            .unwrap();
+            git(repo, &["init", "-q"]);
+            let config_path = repo.join(".git/config");
+            let mut cfg_text = std::fs::read_to_string(&config_path).unwrap();
+            cfg_text.push_str("\n[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = false\n");
+            std::fs::write(&config_path, cfg_text).unwrap();
+            git(repo, &["add", "."]);
+            git(repo, &["commit", "-q", "-m", "init"]);
+            dir
+        })
+        .path()
+}
+
 fn init_repo(repo: &Path, blyte_toml: Option<&str>) {
-    std::fs::create_dir_all(repo.join("src")).unwrap();
-    std::fs::write(
-        repo.join("src/app.rs"),
-        "pub fn greet() -> &'static str { \"hi\" }\n",
-    )
-    .unwrap();
+    copy_dir_all(base_template_repo(), repo);
     if let Some(cfg) = blyte_toml {
         std::fs::write(repo.join("blyte.toml"), cfg).unwrap();
     }
-    git(repo, &["init", "-q"]);
-    let config_path = repo.join(".git/config");
-    let mut cfg_text = std::fs::read_to_string(&config_path).unwrap();
-    cfg_text.push_str("\n[user]\n\temail = t@t\n\tname = t\n");
-    std::fs::write(&config_path, cfg_text).unwrap();
-    git(repo, &["add", "."]);
-    git(repo, &["commit", "-q", "-m", "init"]);
 }
 
 fn spawn_dispatch(repo: &Path, home: &Path, args: &[&str], port: u16) -> std::process::Output {
@@ -293,6 +319,8 @@ fn spawn_dispatch(repo: &Path, home: &Path, args: &[&str], port: u16) -> std::pr
         .env("XDG_CONFIG_HOME", home)
         .env("BLYTE_STATE_DIR", home.join("state"))
         .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_USAGE_LOG", "off")
         .env("BLYTE_GATE_SLOT_DIR", home.join("slots"))
         .env("BLYTE_GATE_SLOTS", "16")
         .env("BLYTE_ENV_FILE", "")
@@ -530,7 +558,7 @@ fn no_confirmed_fallback_runs_once_without_fix_round() {
 
     let server = MockServer::start(
         vec![ImplementerPass::RunBashThenDone {
-            bash_command: "printf 'pub fn f(s: &str) -> &str { s.strip_prefix(\"a\").unwrap_or(s) }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: strip'".to_string(),
+            bash_command: "printf 'pub fn f(s: &str) -> &str { s.strip_prefix(\"a\").unwrap_or(s) }\\n' > src/app.rs && git commit -am 'feat: strip'".to_string(),
             final_message: "pass 1 done".to_string(),
         }],
         vec![not_fallback_reply(
@@ -564,7 +592,7 @@ fn fix_round_disabled_skips_round_and_keeps_fallback_flag() {
 
     let server = MockServer::start(
         vec![ImplementerPass::RunBashThenDone {
-            bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: default region'".to_string(),
+            bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git commit -am 'feat: default region'".to_string(),
             final_message: "pass 1 done".to_string(),
         }],
         vec![confirmed_fallback_reply(
@@ -614,11 +642,11 @@ fn fix_round_kept_removes_fallback_and_sums_totals() {
     let server = MockServer::start(
         vec![
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: region'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git commit -am 'feat: region'".to_string(),
                 final_message: "pass 1 message".to_string(),
             },
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> Result<&str, &\\x27static str> { x.ok_or(\"missing region\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'fix: fail loudly where review found a fallback'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> Result<&str, &\\x27static str> { x.ok_or(\"missing region\") }\\n' > src/app.rs && git commit -am 'fix: fail loudly where review found a fallback'".to_string(),
                 final_message: "fixed fallback".to_string(),
             },
         ],
@@ -722,11 +750,11 @@ fn fix_round_kept_with_one_still_confirmed_does_not_run_third_pass() {
     let server = MockServer::start(
         vec![
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: region'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git commit -am 'feat: region'".to_string(),
                 final_message: "pass 1".to_string(),
             },
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"eu\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'fix: fail loudly where review found a fallback'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"eu\") }\\n' > src/app.rs && git commit -am 'fix: fail loudly where review found a fallback'".to_string(),
                 final_message: "still fallback".to_string(),
             },
         ],
@@ -773,11 +801,11 @@ fn fix_round_gate_failed_resets_worktree_and_appends_flag() {
     let server = MockServer::start(
         vec![
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: region'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git commit -am 'feat: region'".to_string(),
                 final_message: "pass 1".to_string(),
             },
             ImplementerPass::RunBashThenDone {
-                bash_command: "touch FAIL_GATE && git add FAIL_GATE && git commit -m 'bad fix'".to_string(),
+                bash_command: "> FAIL_GATE && git add FAIL_GATE && git commit -m 'bad fix'".to_string(),
                 final_message: "tried fix".to_string(),
             },
         ],
@@ -846,7 +874,7 @@ fn fix_round_no_commit_marks_no_change_and_appends_flag() {
     let server = MockServer::start(
         vec![
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: region'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git commit -am 'feat: region'".to_string(),
                 final_message: "pass 1".to_string(),
             },
             ImplementerPass::ReplyOnly {
@@ -899,7 +927,7 @@ fn summary_does_not_exist_while_fix_round_is_running() {
     let fixround_path = repo.join(".wt/NOSUM.fixround.json");
     let saw_fixround_marker = d.path().join("saw_fixround");
     let gate = format!(
-        "test ! -e '{}' && (if [ -e '{}' ]; then touch '{}'; fi)",
+        "test ! -e '{}' && (! [ -e '{}' ] || > '{}')",
         summary_path.display(),
         fixround_path.display(),
         saw_fixround_marker.display()
@@ -908,11 +936,11 @@ fn summary_does_not_exist_while_fix_round_is_running() {
     let server = MockServer::start(
         vec![
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: region'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git commit -am 'feat: region'".to_string(),
                 final_message: "pass 1".to_string(),
             },
             ImplementerPass::RunBashThenDone {
-                bash_command: "printf 'pub fn f(x: Option<&str>) -> Result<&str, &\\x27static str> { x.ok_or(\"missing region\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'fix: fail loudly where review found a fallback'".to_string(),
+                bash_command: "printf 'pub fn f(x: Option<&str>) -> Result<&str, &\\x27static str> { x.ok_or(\"missing region\") }\\n' > src/app.rs && git commit -am 'fix: fail loudly where review found a fallback'".to_string(),
                 final_message: "fixed".to_string(),
             },
         ],
@@ -960,8 +988,7 @@ fn resume_started_fix_round_skips_first_pass_and_writes_summary() {
         "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
     )
     .unwrap();
-    git(&wt_dir, &["add", "src/app.rs"]);
-    git(&wt_dir, &["commit", "-q", "-m", "feat: region"]);
+    git(&wt_dir, &["commit", "-q", "-am", "feat: region"]);
     let pre_round_sha = git_head(&wt_dir);
 
     std::fs::write(wt_dir.join("STRAY_FILE"), "should be reset\n").unwrap();
@@ -1038,7 +1065,7 @@ fn resume_started_fix_round_skips_first_pass_and_writes_summary() {
 
     let server = MockServer::start(
         vec![ImplementerPass::RunBashThenDone {
-            bash_command: "printf 'pub fn f(x: Option<&str>) -> Result<&str, &\\x27static str> { x.ok_or(\"missing region\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'fix: fail loudly where review found a fallback'".to_string(),
+            bash_command: "printf 'pub fn f(x: Option<&str>) -> Result<&str, &\\x27static str> { x.ok_or(\"missing region\") }\\n' > src/app.rs && git commit -am 'fix: fail loudly where review found a fallback'".to_string(),
             final_message: "resumed fix".to_string(),
         }],
         vec![serde_json::json!({"concerns": [], "fallbacks": []}).to_string()],
@@ -1152,7 +1179,7 @@ fn done_fixround_never_runs_a_second_round() {
 
     let server = MockServer::start(
         vec![ImplementerPass::RunBashThenDone {
-            bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: region'".to_string(),
+            bash_command: "printf 'pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\\n' > src/app.rs && git commit -am 'feat: region'".to_string(),
             final_message: "pass 1".to_string(),
         }],
         vec![confirmed_fallback_reply(
