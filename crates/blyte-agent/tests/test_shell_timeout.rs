@@ -38,7 +38,9 @@ fn output_produced_before_the_kill_is_kept() {
         .exec(
             "echo progress-so-far; sleep 30",
             d.path(),
-            Duration::from_millis(800),
+            // Long enough for the shell to start and echo while other test files run
+            // beside this one on a small CI machine: 800 ms was not.
+            Duration::from_secs(5),
         )
         .unwrap();
     assert!(
