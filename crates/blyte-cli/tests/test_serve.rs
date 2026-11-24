@@ -15,7 +15,7 @@ use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::{
     authenticated_api_get_routes, constant_time_eq, generate_token, route, run_with_hooks,
-    run_with_io, Surface, TOKEN_HEADER,
+    run_with_io, Surface, RECONCILE_SAFETY_NET_INTERVAL, TOKEN_HEADER,
 };
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
 
@@ -211,6 +211,7 @@ fn make_surface(
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
         reconcile_lock: Mutex::new(()),
+        reconcile_requested: std::sync::atomic::AtomicBool::new(false),
     };
     (surface, calls)
 }
@@ -1376,6 +1377,18 @@ fn post_endpoints_reject_missing_and_wrong_token() {
     assert!(!repo.join(".wt/T1.hold.json").exists());
     assert_eq!(surface.session.info().last_seq, 0);
 
+    let changed_body = serde_json::json!({});
+    for headers in [vec![], vec![(TOKEN_HEADER, wrong.as_str())]] {
+        let resp = route(
+            &surface,
+            &post_json_headers("/api/runs/changed", &changed_body, headers),
+            t,
+        );
+        assert_eq!(resp.status, 403);
+        assert!(parse_json(&resp)["error"].is_string());
+    }
+    assert!(!surface.reconcile_requested.load(Ordering::Acquire));
+
     let ok_effort = route(
         &surface,
         &post_json_headers(
@@ -2217,4 +2230,165 @@ fn events_survive_a_restart() {
 
     stop2.store(true, Ordering::Relaxed);
     assert_eq!(handle2.join().unwrap(), 0);
+}
+
+#[test]
+fn runs_changed_needs_the_token() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("changed-token-repo");
+    init_git_repo(&repo);
+    let t = now_secs();
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    let wrong = flip_last_hex_char(&surface.token);
+
+    let missing = route(
+        &surface,
+        &Request {
+            method: "POST".to_string(),
+            path: "/api/runs/changed".to_string(),
+            query: Vec::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        t,
+    );
+    assert_eq!(missing.status, 403);
+    assert!(!surface.reconcile_requested.load(Ordering::Acquire));
+
+    let bad = route(
+        &surface,
+        &Request {
+            method: "POST".to_string(),
+            path: "/api/runs/changed".to_string(),
+            query: Vec::new(),
+            headers: vec![(TOKEN_HEADER.to_string(), wrong)],
+            body: Vec::new(),
+        },
+        t,
+    );
+    assert_eq!(bad.status, 403);
+    assert!(!surface.reconcile_requested.load(Ordering::Acquire));
+
+    let ok = route(
+        &surface,
+        &Request {
+            method: "POST".to_string(),
+            path: "/api/runs/changed".to_string(),
+            query: Vec::new(),
+            headers: vec![(TOKEN_HEADER.to_string(), surface.token.clone())],
+            body: Vec::new(),
+        },
+        t,
+    );
+    assert_eq!(ok.status, 202);
+    assert_eq!(parse_json(&ok), serde_json::json!({}));
+    assert!(surface.reconcile_requested.load(Ordering::Acquire));
+
+    let wrong_method = route(&surface, &get(&surface, "/api/runs/changed", vec![]), t);
+    assert_eq!(wrong_method.status, 405);
+}
+
+#[test]
+fn the_safety_net_interval_is_30_seconds() {
+    assert_eq!(RECONCILE_SAFETY_NET_INTERVAL, Duration::from_secs(30));
+}
+
+#[test]
+fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("changed-combine-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+
+    let (port, token, stop, handle) = start_stoppable_surface(&repo);
+
+    std::thread::sleep(Duration::from_millis(250));
+
+    let wt_run = repo.join(".wt/NC1");
+    std::fs::create_dir_all(repo.join(".wt")).unwrap();
+    assert!(Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "wip/NC1"])
+        .arg(&wt_run)
+        .arg(&base_sha)
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    write_file(&wt_run.join("notify.txt"), "notified\n");
+    assert!(Command::new("git")
+        .args(["add", "notify.txt"])
+        .current_dir(&wt_run)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-q", "-m", "feat: notify"])
+        .current_dir(&wt_run)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&wt_run)
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let now = now_secs();
+    write_file(
+        &repo.join(".wt/NC1.start.json"),
+        &format!(
+            r#"{{"id":"NC1","pid":999999,"started_at":{now},"base_sha":"{base_sha}","task_file":".wt/tasks/NC1.md","research":false,"request":"req-notify"}}"#
+        ),
+    );
+    write_file(
+        &repo.join(".wt/NC1.report.json"),
+        r#"{"outcome":"verified","turns":2}"#,
+    );
+    write_file(
+        &repo.join(".wt/NC1.json"),
+        r#"{"id":"NC1","outcome":"verified","branch":"wip/NC1","turns":2,"seconds":5,"cost_usd":0.01,"final_message":"done"}"#,
+    );
+    write_file(
+        &repo.join(".wt/NC1.checks.json"),
+        r#"{"flags":[],"fallbacks":[]}"#,
+    );
+
+    let rec_path = repo.join(".wt/combined/req-notify.json");
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !rec_path.exists(),
+        "run should not have been combined before POST /api/runs/changed"
+    );
+
+    let post_resp = send_http(
+        port,
+        &format!(
+            "POST /api/runs/changed HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(
+        post_resp.starts_with("HTTP/1.1 202"),
+        "expected 202 from POST /api/runs/changed, got: {post_resp}"
+    );
+    assert_eq!(http_json_body(&post_resp), serde_json::json!({}));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !rec_path.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
+
+    assert!(
+        rec_path.is_file(),
+        "expected {} to exist within 5 s after POST /api/runs/changed",
+        rec_path.display()
+    );
+    let rec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
+    assert_eq!(rec["state"].as_str(), Some("combined"));
+    assert_eq!(rec["branch"].as_str(), Some("blyte/req-notify"));
 }

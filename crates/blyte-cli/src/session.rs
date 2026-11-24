@@ -283,6 +283,7 @@ struct QueuedMessage {
 struct EntryLog {
     path: PathBuf,
     file: File,
+    fail_writes_with: Option<String>,
 }
 
 impl EntryLog {
@@ -312,10 +313,17 @@ impl EntryLog {
                 .and_then(|_| file.flush())
                 .map_err(|e| format!("failed to write to {}: {e}", path.display()))?;
         }
-        Ok((Self { path, file }, entries))
+        Ok((
+            Self {
+                path,
+                file,
+                fail_writes_with: None,
+            },
+            entries,
+        ))
     }
 
-    fn append(&mut self, entry: &Entry) {
+    fn append(&mut self, entry: &Entry) -> Result<(), String> {
         let mut line = match serde_json::to_string(entry) {
             Ok(s) => s,
             Err(e) => {
@@ -323,17 +331,30 @@ impl EntryLog {
                     "blyte: failed to serialize entry for {}: {e}",
                     self.path.display()
                 );
-                return;
+                return Err(e.to_string());
             }
         };
         line.push('\n');
-        if let Err(e) = self
-            .file
-            .write_all(line.as_bytes())
-            .and_then(|_| self.file.flush())
-        {
+        let write_result = match &self.fail_writes_with {
+            Some(reason) => Err(std::io::Error::other(reason.clone())),
+            None => self
+                .file
+                .write_all(line.as_bytes())
+                .and_then(|_| self.file.flush()),
+        };
+        if let Err(e) = write_result {
             eprintln!("blyte: failed to write to {}: {e}", self.path.display());
+            return Err(e.to_string());
         }
+        Ok(())
+    }
+}
+
+fn gap_notice_message(missing: u64) -> String {
+    if missing == 1 {
+        "blyte: 1 entry was not saved here".to_string()
+    } else {
+        format!("blyte: {missing} entries were not saved here")
     }
 }
 
@@ -351,6 +372,7 @@ fn load_entries_file(
     }
 
     let mut entries = Vec::new();
+    let mut prev_seq = 0u64;
     let mut pos = 0usize;
     let mut line_no = 0usize;
     let mut truncate_to = None;
@@ -371,6 +393,26 @@ fn load_entries_file(
             .and_then(|s| serde_json::from_str::<Entry>(s).map_err(|e| e.to_string()));
         match parsed {
             Ok(entry) => {
+                if entry.seq <= prev_seq {
+                    return Err(format!(
+                        "invalid entry in {} at line {}: seq {} does not follow seq {}",
+                        path.display(),
+                        line_no,
+                        entry.seq,
+                        prev_seq
+                    ));
+                }
+                if entry.seq > prev_seq + 1 {
+                    let missing = entry.seq - prev_seq - 1;
+                    entries.push(Entry {
+                        seq: prev_seq + 1,
+                        ts: entry.ts,
+                        body: EntryBody::Error {
+                            message: gap_notice_message(missing),
+                        },
+                    });
+                }
+                prev_seq = entry.seq;
                 entries.push(entry);
                 valid_end = end;
             }
@@ -419,6 +461,7 @@ struct SessionState {
     entries: Vec<Entry>,
     last_seq: u64,
     log: Option<EntryLog>,
+    write_failure_noticed: bool,
     queue: VecDeque<QueuedMessage>,
     session_prefix: String,
     request_seq: u64,
@@ -436,10 +479,23 @@ impl SessionState {
         let seq = self.last_seq;
         let ts = now_secs();
         let entry = Entry { seq, ts, body };
-        if let Some(log) = &mut self.log {
-            log.append(&entry);
-        }
+        let append_failure = self
+            .log
+            .as_mut()
+            .and_then(|log| log.append(&entry).err().map(|err| (log.path.clone(), err)));
         self.entries.push(entry);
+        if let Some((path, err)) = append_failure {
+            if !self.write_failure_noticed {
+                self.write_failure_noticed = true;
+                self.push_entry(EntryBody::Error {
+                    message: format!(
+                        "blyte: could not save this session's entries to {}: {}; entries from here on may be missing after a restart",
+                        path.display(),
+                        err
+                    ),
+                });
+            }
+        }
         seq
     }
 
@@ -496,6 +552,7 @@ impl Shared {
                 entries: Vec::new(),
                 last_seq: 0,
                 log: None,
+                write_failure_noticed: false,
                 queue: VecDeque::new(),
                 session_prefix: new_session_prefix(),
                 request_seq: 0,
@@ -532,6 +589,7 @@ impl Shared {
             entries,
             last_seq,
             log,
+            write_failure_noticed: false,
             queue: VecDeque::new(),
             session_prefix: new_session_prefix(),
             request_seq: 0,
@@ -661,6 +719,14 @@ impl Session {
             },
             tx,
         )
+    }
+
+    #[doc(hidden)]
+    pub fn fail_log_writes(&self, reason: &str) {
+        let mut state = self.guard.shared.lock_state();
+        if let Some(log) = &mut state.log {
+            log.fail_writes_with = Some(reason.to_string());
+        }
     }
 
     pub fn approver(&self) -> Arc<SurfaceApprover> {

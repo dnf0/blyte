@@ -5,7 +5,10 @@ use std::sync::Mutex;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
-use blyte_agent::run::{Budget, RunReport, Runner};
+use blyte_agent::run::{
+    append_sandbox_denial_hint, base_check_tail, cut_gate_output, run_gate_steps,
+    sandbox_denial_hint, Budget, RunReport, Runner,
+};
 use blyte_agent::shell::{LocalShell, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response};
@@ -112,4 +115,96 @@ fn each_gate_attempt_records_its_turn() {
         rep.gate_turns
     );
     assert!(*rep.gate_turns.last().unwrap() <= rep.outcome_turns);
+}
+
+#[test]
+fn the_hint_is_added_once_to_a_failed_check_that_was_denied() {
+    let d = tempfile::tempdir().unwrap();
+    let mut deadline = None;
+    let res = run_gate_steps(
+        &LocalShell,
+        "echo 'cat: /x/.env: Operation not permitted'; exit 1",
+        d.path(),
+        &[],
+        &mut deadline,
+        |_| {},
+        &std::time::Instant::now,
+    );
+    assert!(!res.passed);
+    let hint = sandbox_denial_hint("OPERATION NOT PERMITTED").unwrap();
+    assert_eq!(res.output.lines().last(), Some(hint));
+    assert_eq!(
+        res.failures.last().unwrap().output.lines().last(),
+        Some(hint)
+    );
+    assert_eq!(res.output.matches(hint).count(), 1);
+
+    let mut again = res.output.clone();
+    append_sandbox_denial_hint(&mut again);
+    assert_eq!(again, res.output);
+    assert_eq!(again.matches(hint).count(), 1);
+}
+
+#[test]
+fn a_passing_check_gets_no_hint() {
+    let d = tempfile::tempdir().unwrap();
+    let mut deadline = None;
+    let res = run_gate_steps(
+        &LocalShell,
+        "echo 'cat: /x/.env: Operation not permitted'; exit 0",
+        d.path(),
+        &[],
+        &mut deadline,
+        |_| {},
+        &std::time::Instant::now,
+    );
+    assert!(res.passed);
+    let hint = sandbox_denial_hint("operation not permitted").unwrap();
+    assert!(!res.output.contains(hint));
+}
+
+#[test]
+fn a_failed_check_without_the_phrase_gets_no_hint() {
+    let d = tempfile::tempdir().unwrap();
+    let mut deadline = None;
+    let res = run_gate_steps(
+        &LocalShell,
+        "echo 'assertion failed: 1 != 2'; exit 1",
+        d.path(),
+        &[],
+        &mut deadline,
+        |_| {},
+        &std::time::Instant::now,
+    );
+    assert!(!res.passed);
+    assert_eq!(sandbox_denial_hint(&res.output), None);
+    let hint = sandbox_denial_hint("operation not permitted").unwrap();
+    assert!(!res.output.contains(hint));
+    assert!(!res.failures[0].output.contains(hint));
+}
+
+#[test]
+fn the_hint_survives_the_stored_cut() {
+    let mut raw = String::new();
+    for i in 1..=5_000 {
+        raw.push_str(&format!("line {i}: some check output payload\n"));
+    }
+    raw.push_str("cat: /x/.env: Operation not permitted");
+    append_sandbox_denial_hint(&mut raw);
+    let hint = sandbox_denial_hint(&raw).unwrap();
+    let cut = cut_gate_output(&raw);
+    assert_eq!(cut.lines().last(), Some(hint));
+}
+
+#[test]
+fn the_hint_survives_the_base_check_tail() {
+    let mut raw = String::new();
+    for i in 1..=100 {
+        raw.push_str(&format!("line {i}\n"));
+    }
+    raw.push_str("cat: /x/.env: Operation not permitted");
+    append_sandbox_denial_hint(&mut raw);
+    let hint = sandbox_denial_hint(&raw).unwrap();
+    let tail = base_check_tail(&raw);
+    assert_eq!(tail.lines().last(), Some(hint));
 }

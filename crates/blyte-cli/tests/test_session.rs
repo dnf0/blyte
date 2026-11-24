@@ -1614,3 +1614,350 @@ fn a_complete_bad_last_line_stops_the_start() {
     assert!(err.contains("line 2"), "got: {err}");
     assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
 }
+
+#[test]
+fn a_failed_write_shows_one_notice_on_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    )
+    .unwrap();
+
+    session.fail_log_writes("disk full");
+
+    let seq1 = session
+        .record_decision("run-1", "accept", Some("first"), None)
+        .unwrap();
+    let seq2 = session
+        .record_decision("run-2", "accept", Some("second"), None)
+        .unwrap();
+    let seq3 = session
+        .record_decision("run-3", "accept", Some("third"), None)
+        .unwrap();
+    assert_eq!(seq1, 1);
+    assert_eq!(seq2, 3);
+    assert_eq!(seq3, 4);
+
+    let entries = session.entries_after(0, Duration::ZERO);
+    assert_eq!(entries.len(), 4);
+    assert_eq!(
+        entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+
+    let notices: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::Error { message } if message.contains("could not save") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "entries: {entries:?}");
+    assert_eq!(
+        notices[0],
+        format!(
+            "blyte: could not save this session's entries to {}: disk full; entries from here on may be missing after a restart",
+            log_path.display()
+        )
+    );
+
+    let decisions: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::Decision { run, .. } => Some(run.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(decisions, vec!["run-1", "run-2", "run-3"]);
+    assert!(std::fs::read_to_string(&log_path).unwrap().is_empty());
+}
+
+#[test]
+fn a_gap_in_the_saved_entries_is_shown_at_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::UserMessage {
+            text: "one".into(),
+            reports: Vec::new(),
+            queued: false,
+        },
+    };
+    let e2 = Entry {
+        seq: 2,
+        ts: 1_700_000_002,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let e5 = Entry {
+        seq: 5,
+        ts: 1_700_000_005,
+        body: EntryBody::Idle {
+            turns: 1,
+            cost_usd: Some(0.01),
+        },
+    };
+    let l1 = serde_json::to_string(&e1).unwrap();
+    let l2 = serde_json::to_string(&e2).unwrap();
+    let l5 = serde_json::to_string(&e5).unwrap();
+    let raw = format!("{l1}\n{l2}\n{l5}\n");
+    std::fs::write(&log_path, &raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    )
+    .unwrap();
+
+    let loaded = session.entries_after(0, Duration::ZERO);
+    assert_eq!(loaded.len(), 5);
+    assert_eq!(
+        loaded.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3, 5, 6]
+    );
+    assert_eq!(loaded[0], e1);
+    assert_eq!(loaded[1], e2);
+    assert_eq!(
+        loaded[2],
+        Entry {
+            seq: 3,
+            ts: 1_700_000_005,
+            body: EntryBody::Error {
+                message: "blyte: 2 entries were not saved here".to_string(),
+            },
+        }
+    );
+    assert_eq!(loaded[3], e5);
+    assert_eq!(loaded[4].seq, 6);
+    assert_eq!(
+        loaded[4].body,
+        EntryBody::Error {
+            message: blyte_cli::session::RESTART_NOTICE_TEXT.to_string(),
+        }
+    );
+
+    let after_2 = session.entries_after(2, Duration::ZERO);
+    assert_eq!(
+        after_2.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![3, 5, 6]
+    );
+
+    let disk = std::fs::read_to_string(&log_path).unwrap();
+    let disk_lines: Vec<&str> = disk.lines().collect();
+    assert_eq!(disk_lines.len(), 4);
+    assert_eq!(disk_lines[0], l1);
+    assert_eq!(disk_lines[1], l2);
+    assert_eq!(disk_lines[2], l5);
+    let restart_on_disk: Entry = serde_json::from_str(disk_lines[3]).unwrap();
+    assert_eq!(restart_on_disk.seq, 6);
+}
+
+#[test]
+fn a_missing_first_entry_is_shown_at_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e2 = Entry {
+        seq: 2,
+        ts: 1_700_000_002,
+        body: EntryBody::UserMessage {
+            text: "second".into(),
+            reports: Vec::new(),
+            queued: false,
+        },
+    };
+    let e3 = Entry {
+        seq: 3,
+        ts: 1_700_000_003,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let l2 = serde_json::to_string(&e2).unwrap();
+    let l3 = serde_json::to_string(&e3).unwrap();
+    std::fs::write(&log_path, format!("{l2}\n{l3}\n")).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    )
+    .unwrap();
+
+    let loaded = session.entries_after(0, Duration::ZERO);
+    assert_eq!(loaded.len(), 4);
+    assert_eq!(
+        loaded[0],
+        Entry {
+            seq: 1,
+            ts: 1_700_000_002,
+            body: EntryBody::Error {
+                message: "blyte: 1 entry was not saved here".to_string(),
+            },
+        }
+    );
+    assert_eq!(loaded[1], e2);
+    assert_eq!(loaded[2], e3);
+    assert_eq!(loaded[3].seq, 4);
+    assert_eq!(
+        loaded[3].body,
+        EntryBody::Error {
+            message: blyte_cli::session::RESTART_NOTICE_TEXT.to_string(),
+        }
+    );
+
+    let disk = std::fs::read_to_string(&log_path).unwrap();
+    let disk_lines: Vec<&str> = disk.lines().collect();
+    assert_eq!(disk_lines.len(), 3);
+    assert_eq!(disk_lines[0], l2);
+    assert_eq!(disk_lines[1], l3);
+}
+
+#[test]
+fn entries_out_of_order_stop_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let e3 = Entry {
+        seq: 3,
+        ts: 1_700_000_003,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let e2 = Entry {
+        seq: 2,
+        ts: 1_700_000_002,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let raw = format!(
+        "{}\n{}\n{}\n",
+        serde_json::to_string(&e1).unwrap(),
+        serde_json::to_string(&e3).unwrap(),
+        serde_json::to_string(&e2).unwrap(),
+    );
+    std::fs::write(&log_path, &raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let result = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    );
+    let err = match result {
+        Ok(_) => panic!("expected out-of-order entries to fail startup"),
+        Err(err) => err,
+    };
+    assert!(err.contains("entries.jsonl"), "got: {err}");
+    assert!(err.contains("line 3"), "got: {err}");
+    assert!(err.contains("seq 2 does not follow seq 3"), "got: {err}");
+    assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
+}
+
+#[test]
+fn a_repeated_seq_stops_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let raw = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&e1).unwrap(),
+        serde_json::to_string(&e1).unwrap(),
+    );
+    std::fs::write(&log_path, &raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let result = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    );
+    let err = match result {
+        Ok(_) => panic!("expected repeated seq to fail startup"),
+        Err(err) => err,
+    };
+    assert!(err.contains("entries.jsonl"), "got: {err}");
+    assert!(err.contains("line 2"), "got: {err}");
+    assert!(err.contains("seq 1 does not follow seq 1"), "got: {err}");
+    assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
+}
+
+#[test]
+fn seq_zero_stops_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e0 = Entry {
+        seq: 0,
+        ts: 1_700_000_000,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let raw = format!("{}\n", serde_json::to_string(&e0).unwrap());
+    std::fs::write(&log_path, &raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let result = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    );
+    let err = match result {
+        Ok(_) => panic!("expected seq 0 to fail startup"),
+        Err(err) => err,
+    };
+    assert!(err.contains("entries.jsonl"), "got: {err}");
+    assert!(err.contains("line 1"), "got: {err}");
+    assert!(err.contains("seq 0 does not follow seq 0"), "got: {err}");
+    assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
+}
