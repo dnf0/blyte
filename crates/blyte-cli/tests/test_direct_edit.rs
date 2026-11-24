@@ -986,6 +986,7 @@ fn make_idle_surface(root: PathBuf) -> Surface {
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),
+        reconcile_requested: std::sync::atomic::AtomicBool::new(false),
     }
 }
 

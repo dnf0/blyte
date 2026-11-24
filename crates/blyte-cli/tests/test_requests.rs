@@ -381,6 +381,7 @@ fn make_surface_with_session(
         requests: Arc::new(RequestsState::new()),
         publisher,
         reconcile_lock: Mutex::new(()),
+        reconcile_requested: std::sync::atomic::AtomicBool::new(false),
     }
 }
 

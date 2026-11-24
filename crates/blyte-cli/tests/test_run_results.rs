@@ -157,6 +157,7 @@ fn make_surface(root: PathBuf) -> (Surface, Arc<Mutex<Vec<String>>>) {
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),
+        reconcile_requested: std::sync::atomic::AtomicBool::new(false),
     };
     (surface, prompts)
 }

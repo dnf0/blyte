@@ -18,11 +18,11 @@ use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsStat
 use crate::session::{AgentRunner, AnswerError, ApprovalAnswer, Attachment, EntryBody, Session};
 
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
+pub const RECONCILE_SAFETY_NET_INTERVAL: Duration = Duration::from_secs(30);
 
 const INDEX_HTML: &str = include_str!("../assets/surface/index.html");
 const MAX_WAIT_MS: u64 = 25_000;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 const RECONCILE_POLL_WAIT: Duration = Duration::from_millis(50);
 const TOKEN_BYTES: usize = 32;
 
@@ -39,6 +39,7 @@ pub struct Surface {
     pub requests: Arc<RequestsState>,
     pub publisher: Arc<dyn Publisher>,
     pub reconcile_lock: Mutex<()>,
+    pub reconcile_requested: AtomicBool,
 }
 
 pub fn generate_token() -> Result<String, String> {
@@ -454,6 +455,11 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
     }
 }
 
+fn handle_runs_changed(surface: &Surface) -> Response {
+    surface.reconcile_requested.store(true, Ordering::Release);
+    Response::json(202, &serde_json::json!({}))
+}
+
 fn handle_run_diff(surface: &Surface, id: &str) -> Response {
     if !is_valid_run_id(id) {
         return json_error(404, format!("unknown run: {id}"));
@@ -736,6 +742,12 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
             }
             handle_post_effort(surface, req)
         }
+        "/api/runs/changed" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_runs_changed(surface)
+        }
         path => {
             if let Some(id) = path.strip_prefix("/api/session/approvals/") {
                 if !id.is_empty() && !id.contains('/') {
@@ -990,9 +1002,13 @@ fn spawn_reconcile_timer(surface: Arc<Surface>) -> ReconcileTimerGuard {
         let mut next_tick = Instant::now();
         let mut seen_errors: HashSet<String> = HashSet::new();
         while !thread_stop.load(Ordering::Acquire) {
-            let wait = next_tick
-                .saturating_duration_since(Instant::now())
-                .min(RECONCILE_POLL_WAIT);
+            let wait = if surface.reconcile_requested.load(Ordering::Acquire) {
+                Duration::ZERO
+            } else {
+                next_tick
+                    .saturating_duration_since(Instant::now())
+                    .min(RECONCILE_POLL_WAIT)
+            };
             let entries = surface.session.entries_after(after, wait);
             let mut went_idle = false;
             for entry in entries {
@@ -1004,7 +1020,8 @@ fn spawn_reconcile_timer(surface: Arc<Surface>) -> ReconcileTimerGuard {
             if thread_stop.load(Ordering::Acquire) {
                 break;
             }
-            if went_idle || Instant::now() >= next_tick {
+            let requested = surface.reconcile_requested.swap(false, Ordering::AcqRel);
+            if went_idle || requested || Instant::now() >= next_tick {
                 match now_duration().and_then(|d| reconcile_runs(&surface, d.as_secs())) {
                     Ok((_, errors)) => {
                         for msg in errors {
@@ -1020,7 +1037,7 @@ fn spawn_reconcile_timer(surface: Arc<Surface>) -> ReconcileTimerGuard {
                         }
                     }
                 }
-                next_tick = Instant::now() + RECONCILE_INTERVAL;
+                next_tick = Instant::now() + RECONCILE_SAFETY_NET_INTERVAL;
             }
         }
     });
@@ -1226,6 +1243,7 @@ where
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),
+        reconcile_requested: AtomicBool::new(false),
     });
 
     let timer_guard = spawn_reconcile_timer(Arc::clone(&surface));

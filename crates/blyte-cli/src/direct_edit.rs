@@ -937,6 +937,9 @@ pub fn run_edit_finish_in(
         return 2;
     }
 
+    let notify_outcome = crate::surface_notify::notify_runs_changed(root, &args.id);
+    crate::surface_notify::report(&notify_outcome, &mut std::io::stderr());
+
     let json = serde_json::to_string_pretty(&summary).unwrap();
     println!("{json}");
     0
