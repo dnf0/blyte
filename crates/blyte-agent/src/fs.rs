@@ -185,7 +185,8 @@ impl Fs for SessionFs {
         let mkdir = if dir.is_empty() {
             String::new()
         } else {
-            format!("mkdir -p -- {} && ", sh_quote(&dir))
+            let d = sh_quote(&dir);
+            format!("{{ [ -d {d} ] || mkdir -p -- {d}; }} && ")
         };
         // Content through a heredoc read by the `read` builtin: no process, no encoding. The
         // heredoc adds one final newline, which is stripped, so the bytes are exact.
