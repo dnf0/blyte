@@ -47,7 +47,19 @@ fn template_repo() -> &'static Path {
             std::fs::write(root.join("f.txt"), "a\n").unwrap();
             std::fs::write(root.join("task.md"), "do the task").unwrap();
             git(root, &["add", "."]);
-            git(root, &["commit", "-qm", "init", "--no-gpg-sign"]);
+            git(
+                root,
+                &[
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                    "commit",
+                    "-qm",
+                    "init",
+                    "--no-gpg-sign",
+                ],
+            );
             dir
         })
         .path()

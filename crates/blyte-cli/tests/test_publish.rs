@@ -68,6 +68,10 @@ fn main_template() -> &'static TemplateRepo {
         run_git(
             &work,
             &[
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
                 "commit",
                 "--no-gpg-sign",
                 "--allow-empty",

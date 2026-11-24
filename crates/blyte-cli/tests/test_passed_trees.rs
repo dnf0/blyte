@@ -91,7 +91,19 @@ fn init_repo() -> tempfile::TempDir {
 fn commit_file(dir: &Path, name: &str, content: &str, msg: &str) -> String {
     std::fs::write(dir.join(name), content).unwrap();
     git(dir, &["add", name]);
-    git(dir, &["commit", "-qm", msg, "--no-gpg-sign"]);
+    git(
+        dir,
+        &[
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-qm",
+            msg,
+            "--no-gpg-sign",
+        ],
+    );
     git(dir, &["rev-parse", "HEAD"])
 }
 

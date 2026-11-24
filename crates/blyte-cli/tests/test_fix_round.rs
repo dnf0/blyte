@@ -298,7 +298,19 @@ fn base_template_repo() -> &'static Path {
             cfg_text.push_str("\n[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = false\n");
             std::fs::write(&config_path, cfg_text).unwrap();
             git(repo, &["add", "."]);
-            git(repo, &["commit", "-q", "-m", "init"]);
+            git(
+                repo,
+                &[
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "init",
+                ],
+            );
             dir
         })
         .path()
@@ -988,12 +1000,36 @@ fn resume_started_fix_round_skips_first_pass_and_writes_summary() {
         "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
     )
     .unwrap();
-    git(&wt_dir, &["commit", "-q", "-am", "feat: region"]);
+    git(
+        &wt_dir,
+        &[
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-q",
+            "-am",
+            "feat: region",
+        ],
+    );
     let pre_round_sha = git_head(&wt_dir);
 
     std::fs::write(wt_dir.join("STRAY_FILE"), "should be reset\n").unwrap();
     git(&wt_dir, &["add", "STRAY_FILE"]);
-    git(&wt_dir, &["commit", "-q", "-m", "stray interrupted commit"]);
+    git(
+        &wt_dir,
+        &[
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-q",
+            "-m",
+            "stray interrupted commit",
+        ],
+    );
 
     let task_rel = ".wt/RES1.task.md";
     std::fs::write(

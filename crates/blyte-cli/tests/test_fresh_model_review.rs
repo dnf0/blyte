@@ -242,7 +242,20 @@ fn base_template_repo() -> &'static Path {
             cfg_text.push_str("\n[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = false\n");
             std::fs::write(&cfg_path, cfg_text).unwrap();
             git(repo, &["add", "."]);
-            git(repo, &["commit", "-q", "-m", "init", "--no-gpg-sign"]);
+            git(
+                repo,
+                &[
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "init",
+                    "--no-gpg-sign",
+                ],
+            );
             dir
         })
         .path()
@@ -800,12 +813,32 @@ fn setup_worktree_run(
         git(&wt, &["add", "."]);
         git(
             &wt,
-            &["commit", "-q", "-m", "feat: change", "--no-gpg-sign"],
+            &[
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "commit",
+                "-q",
+                "-m",
+                "feat: change",
+                "--no-gpg-sign",
+            ],
         );
     } else {
         git(
             &wt,
-            &["commit", "-q", "-am", "feat: change", "--no-gpg-sign"],
+            &[
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "commit",
+                "-q",
+                "-am",
+                "feat: change",
+                "--no-gpg-sign",
+            ],
         );
     }
     (base, wt)

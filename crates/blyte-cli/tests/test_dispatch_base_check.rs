@@ -132,7 +132,16 @@ fn base_repo_template() -> &'static Path {
                 .output()
                 .unwrap();
             Command::new("git")
-                .args(["commit", "-m", "initial", "--no-gpg-sign"])
+                .args([
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                    "commit",
+                    "-m",
+                    "initial",
+                    "--no-gpg-sign",
+                ])
                 .current_dir(p)
                 .output()
                 .unwrap();
@@ -281,7 +290,16 @@ fn test_dispatch_config_base_check_false_skips_base_check() {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["commit", "-m", "add blyte.toml", "--no-gpg-sign"])
+        .args([
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "commit",
+            "-m",
+            "add blyte.toml",
+            "--no-gpg-sign",
+        ])
         .current_dir(repo_dir)
         .output()
         .unwrap();
