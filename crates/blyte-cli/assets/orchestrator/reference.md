@@ -37,17 +37,25 @@ waiting) and prints, for each ready task, the exact `blyte dispatch` command.
 `blyte edit-start <id> --task "<text>" [--base <ref>]` creates a worktree at `.wt/<id>` on a new
 branch `wip/<id>` at `--base` (default `HEAD`), runs `[dispatch].setup`, writes `.wt/<id>.task.md`
 and `.wt/<id>.edit.json`, and prints `{ "id", "path", "base_sha" }`. Make edits with the `write`
-and `edit` tools in the worktree `path` it prints; the shell cannot write there, and do not run
-`git commit`.
+and `edit` tools in the worktree `path` it prints; the shell and the write tools can write there,
+and do not run `git commit`.
 
 `blyte edit-finish <id> --message "<conventional commit subject>"` commits any uncommitted or
-untracked changes in the worktree and runs the repository's gate (including the comment check) in
+untracked changes in the worktree. Direct edits are limited to documentation (`docs/`, `README*`,
+`CHANGELOG*`, `LICENSE*`, or `.md`, `.mdx`, `.rst`, `.txt`, `.adoc`) or a change confined to one
+file; if the edit exceeds that scope, it prints
+`{ "id", "outcome": "out_of_scope", "changed_files", "error" }`, leaves the edit open, and exits 2
+without running the gate. Otherwise it runs the repository's gate (including the comment check) in
 that worktree unless the tip's tree has already passed it. If the gate fails, it prints
 `{ "id", "outcome": "gate_failed", "failing_step", "output_tail" }` and exits 1; edit again and
 call `blyte edit-finish <id> --message "<conventional commit subject>"` again. When the gate passes,
-it writes `.wt/<id>.start.json` and `.wt/<id>.json`, evaluates the post-run checks, and prints the
-summary JSON. `edit-finish` has a 3600 s tool time limit (other foreground `blyte` calls have
-300 s).
+it writes `.wt/<id>.start.json` and runs the post-run checks and a fresh model review. If the
+review reports findings and no fix round has happened yet, it writes `.wt/<id>.fixround.json`,
+prints `{ "id", "outcome": "review_findings", "findings": [...] }`, leaves the edit open, and
+exits 1; fix what the review found and call `blyte edit-finish` again, once. Otherwise (a clean
+review, a failed review, or the second call after `review_findings`), it writes `.wt/<id>.json` and
+prints the summary JSON (exit 0). `edit-finish` has a 3600 s tool time limit (other foreground
+`blyte` calls have 300 s).
 
 ### While runs are going
 

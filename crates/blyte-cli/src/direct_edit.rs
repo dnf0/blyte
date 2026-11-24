@@ -40,6 +40,57 @@ pub struct EditGateFailedOutput {
     pub output_tail: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct EditOutOfScopeOutput {
+    pub id: String,
+    pub outcome: &'static str,
+    pub changed_files: Vec<String>,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EditReviewFinding {
+    pub file: String,
+    pub line: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EditReviewFindingsOutput {
+    pub id: String,
+    pub outcome: &'static str,
+    pub findings: Vec<EditReviewFinding>,
+}
+
+pub fn direct_edit_scope(changed: &[String]) -> Result<(), String> {
+    if changed.len() <= 1 || changed.iter().all(|p| is_documentation_path(p)) {
+        return Ok(());
+    }
+    Err(format!(
+        "direct edits are for documentation or a change confined to one file; this edit changes {} files ({}): hand it to a run with blyte dispatch",
+        changed.len(),
+        changed.join(", ")
+    ))
+}
+
+fn is_documentation_path(path: &str) -> bool {
+    if path.starts_with("docs/") {
+        return true;
+    }
+    let p = Path::new(path);
+    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+        if matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "md" | "mdx" | "rst" | "txt" | "adoc"
+        ) {
+            return true;
+        }
+    }
+    p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+        name.starts_with("README") || name.starts_with("CHANGELOG") || name.starts_with("LICENSE")
+    })
+}
+
 struct StepOutput {
     command: String,
     output: String,
@@ -512,6 +563,18 @@ pub fn run_edit_finish_in(
         }
     };
 
+    if let Err(error) = direct_edit_scope(&changed_files) {
+        let out = EditOutOfScopeOutput {
+            id: args.id.clone(),
+            outcome: "out_of_scope",
+            changed_files,
+            error,
+        };
+        let json = serde_json::to_string_pretty(&out).unwrap();
+        println!("{json}");
+        return 2;
+    }
+
     let (repo_config, from_main) = match crate::config::load_with_fallback(start_dir) {
         Ok(Some((cfg, from_main))) => (Some(cfg), from_main),
         Ok(None) => (None, false),
@@ -763,11 +826,79 @@ pub fn run_edit_finish_in(
         }
     }
 
-    if let Err(e) = crate::queue_actions::evaluate_verified_run(root, &args.id) {
-        eprintln!(
-            "warning: post-edit review check failed for {}: {e}",
-            args.id
-        );
+    let review = match crate::queue_actions::evaluate_verified_run_with(
+        root,
+        &args.id,
+        true,
+        crate::model_review::run,
+    ) {
+        Ok(mr) => mr,
+        Err(e) => {
+            eprintln!(
+                "warning: post-edit review check failed for {}: {e}",
+                args.id
+            );
+            None
+        }
+    };
+
+    let fixround_path = crate::fix_round::record_path(&wt_parent, &args.id);
+    let existing_fixround = match crate::fix_round::load_record(&fixround_path) {
+        Ok(rec) => rec,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let needs_fix_round = crate::fix_round::should_run(false, "verified", true, review.as_ref())
+        || review
+            .as_ref()
+            .is_some_and(crate::model_review::ModelReviewResult::has_findings);
+    if existing_fixround.is_none() && needs_fix_round {
+        let mr = review.as_ref().unwrap();
+        let pre_round_sha = match git_head_sha(&worktree_dir) {
+            Ok(sha) => sha,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+        let fallbacks_sent = if crate::fix_round::confirmed_count(mr) > 0 {
+            match crate::fix_round::collect_confirmed_fallbacks(root, &args.id, &worktree_dir, mr) {
+                Ok(fbs) => fbs,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let started_at = match now_secs() {
+            Ok(ts) => ts,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+        let started_record = crate::fix_round::FixRoundRecord::Started {
+            pre_round_sha,
+            fallbacks_sent,
+            started_at,
+        };
+        if let Err(e) = crate::fix_round::write_record(&fixround_path, &started_record) {
+            eprintln!("error: {e}");
+            return 2;
+        }
+        let findings = collect_review_findings(mr);
+        let findings_out = EditReviewFindingsOutput {
+            id: args.id.clone(),
+            outcome: "review_findings",
+            findings,
+        };
+        let json = serde_json::to_string_pretty(&findings_out).unwrap();
+        println!("{json}");
+        return 1;
     }
 
     let summary = DispatchSummary {
@@ -787,7 +918,6 @@ pub fn run_edit_finish_in(
         model: None,
         seconds,
         sandbox: "none".to_string(),
-        // A direct edit has no implementer to send fallbacks back to.
         fix_round: None,
         log: log_path.display().to_string(),
         report: report_path.display().to_string(),
@@ -865,6 +995,46 @@ fn collect_commits(worktree_dir: &Path, base_sha: &str) -> Result<Vec<CommitReco
         }
     }
     Ok(commits)
+}
+
+fn git_head_sha(worktree_dir: &Path) -> Result<String, String> {
+    let out = Command::new("git")
+        .current_dir(worktree_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("failed to run git rev-parse HEAD: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() {
+        return Err("git rev-parse HEAD returned empty output".to_string());
+    }
+    Ok(sha)
+}
+
+fn collect_review_findings(
+    review: &crate::model_review::ModelReviewResult,
+) -> Vec<EditReviewFinding> {
+    let mut out = Vec::new();
+    for c in &review.concerns {
+        out.push(EditReviewFinding {
+            file: c.file.clone(),
+            line: c.line,
+            text: c.text.clone(),
+        });
+    }
+    for f in review.fallbacks.iter().filter(|f| f.verdict == "fallback") {
+        out.push(EditReviewFinding {
+            file: f.file.clone(),
+            line: Some(f.line as u64),
+            text: f.reason.clone(),
+        });
+    }
+    out
 }
 
 fn collect_changed_files(worktree_dir: &Path, base_sha: &str) -> Result<Vec<String>, String> {

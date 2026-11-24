@@ -1,11 +1,17 @@
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, OnceLock,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use blyte_cli::cli::EditFinishArgs;
 use blyte_cli::combine::{CombineCheck, CombineRecord, CombineState};
+use blyte_cli::direct_edit::direct_edit_scope;
 use blyte_cli::report::RunRecord;
 use blyte_cli::requests::{maybe_combine, Readiness, RealPublisher, RequestsState};
 use blyte_cli::serve::{generate_token, Surface};
@@ -14,6 +20,121 @@ use tempfile::TempDir;
 
 fn blyte_bin() -> &'static str {
     env!("CARGO_BIN_EXE_blyte")
+}
+
+enum MockReviewReply {
+    Ok(String),
+    HttpError(u16, String),
+}
+
+struct MockReviewServer {
+    port: u16,
+    calls: Arc<AtomicUsize>,
+}
+
+impl MockReviewServer {
+    fn start(reply: MockReviewReply) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_bg = Arc::clone(&calls);
+
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let _ = read_http_body(&mut stream);
+                calls_bg.fetch_add(1, Ordering::SeqCst);
+                match &reply {
+                    MockReviewReply::Ok(text) => {
+                        let body = serde_json::json!({
+                            "id": "rev-1",
+                            "object": "chat.completion",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": text,
+                                },
+                                "finish_reason": "stop",
+                            }],
+                            "usage": {
+                                "prompt_tokens": 50,
+                                "completion_tokens": 20,
+                                "total_tokens": 70,
+                            }
+                        })
+                        .to_string();
+                        write_http_response(&mut stream, 200, "OK", &body);
+                    }
+                    MockReviewReply::HttpError(code, msg) => {
+                        write_http_response(&mut stream, *code, "Error", msg);
+                    }
+                }
+            }
+        });
+
+        Self { port, calls }
+    }
+}
+
+fn read_http_body(stream: &mut std::net::TcpStream) -> String {
+    let mut buf = vec![0u8; 65536];
+    let mut got = Vec::new();
+    let mut header_end = None;
+    let mut content_len = 0usize;
+    loop {
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+        if header_end.is_none() {
+            let text = String::from_utf8_lossy(&got);
+            if let Some(i) = text.find("\r\n\r\n") {
+                header_end = Some(i + 4);
+                content_len = text[..i]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+            }
+        }
+        if let Some(end) = header_end {
+            if got.len() >= end + content_len {
+                break;
+            }
+        }
+    }
+    match header_end {
+        Some(end) => String::from_utf8_lossy(&got[end..]).into_owned(),
+        None => String::new(),
+    }
+}
+
+fn write_http_response(stream: &mut std::net::TcpStream, status: u16, reason: &str, body: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+}
+
+fn default_clean_review_port() -> u16 {
+    static SERVER: OnceLock<MockReviewServer> = OnceLock::new();
+    SERVER
+        .get_or_init(|| {
+            MockReviewServer::start(MockReviewReply::Ok(
+                r#"{"concerns": [], "fallbacks": []}"#.to_string(),
+            ))
+        })
+        .port
+}
+
+fn isolated_home() -> &'static Path {
+    static HOME_DIR: OnceLock<TempDir> = OnceLock::new();
+    HOME_DIR.get_or_init(|| TempDir::new().unwrap()).path()
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -33,12 +154,36 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn run_blyte(dir: &Path, args: &[&str]) -> Output {
+fn run_blyte_with_review(dir: &Path, args: &[&str], review_port: u16) -> Output {
+    let home = isolated_home();
     Command::new(blyte_bin())
         .args(args)
         .current_dir(dir)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("BLYTE_STATE_DIR", home.join("state"))
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_USAGE_LOG", "off")
+        .env("BLYTE_ENV_FILE", "")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_HOST")
+        .env_remove("OLLAMA_API_KEY")
+        .env(
+            "OPENAI_BASE_URL",
+            format!("http://127.0.0.1:{review_port}/v1"),
+        )
+        .env("OPENAI_API_KEY", "test")
+        .env("BLYTE_MODEL", "openai/gemini-3.8-flash")
         .output()
         .expect("blyte failed to launch")
+}
+
+fn run_blyte(dir: &Path, args: &[&str]) -> Output {
+    run_blyte_with_review(dir, args, default_clean_review_port())
 }
 
 fn setup_repo(toml_body: &str) -> TempDir {
@@ -1205,4 +1350,257 @@ fn edit_finish_reports_error_naming_path_and_resumes_when_report_or_log_write_fa
     assert_eq!(live.runs.len(), 1);
     assert_eq!(live.runs[0].id, "e-write-err");
     assert_eq!(live.runs[0].outcome, "verified");
+}
+
+#[test]
+fn scope_allows_one_file_and_documentation_only() {
+    let s = |xs: &[&str]| xs.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+
+    assert_eq!(direct_edit_scope(&s(&[])), Ok(()));
+    assert_eq!(direct_edit_scope(&s(&["src/a.rs"])), Ok(()));
+    assert_eq!(
+        direct_edit_scope(&s(&["docs/x.md", "README.md", "notes.TXT"])),
+        Ok(())
+    );
+    assert_eq!(direct_edit_scope(&s(&["docs/a.png", "docs/b.md"])), Ok(()));
+
+    let err_two_code = direct_edit_scope(&s(&["src/a.rs", "src/b.rs"])).unwrap_err();
+    assert_eq!(
+        err_two_code,
+        "direct edits are for documentation or a change confined to one file; this edit changes 2 files (src/a.rs, src/b.rs): hand it to a run with blyte dispatch"
+    );
+
+    let err_mixed = direct_edit_scope(&s(&["src/a.rs", "README.md"])).unwrap_err();
+    assert_eq!(
+        err_mixed,
+        "direct edits are for documentation or a change confined to one file; this edit changes 2 files (src/a.rs, README.md): hand it to a run with blyte dispatch"
+    );
+}
+
+#[test]
+fn a_two_file_code_edit_is_refused_before_the_gate() {
+    let marker_dir = TempDir::new().unwrap();
+    let marker = marker_dir.path().join("gate.ran");
+    let gate_cmd = format!("touch '{}'", marker.display());
+    let repo = setup_repo(&format!("[dispatch]\ngate = \"{gate_cmd}\"\n"));
+    let root = repo.path();
+
+    let start_out = run_blyte(root, &["edit-start", "e-scope", "--task", "Edit two files"]);
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-scope");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(wt.join("src/a.rs"), "pub fn a() -> i32 { 1 }\n").unwrap();
+    std::fs::write(wt.join("src/b.rs"), "pub fn b() -> i32 { 2 }\n").unwrap();
+
+    let finish_out = run_blyte(
+        root,
+        &["edit-finish", "e-scope", "--message", "feat: two files"],
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&finish_out.stdout),
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&finish_out.stdout).expect("out_of_scope json");
+    assert_eq!(parsed["id"], "e-scope");
+    assert_eq!(parsed["outcome"], "out_of_scope");
+    assert_eq!(
+        parsed["changed_files"],
+        serde_json::json!(["src/a.rs", "src/b.rs"])
+    );
+    assert_eq!(
+        parsed["error"],
+        "direct edits are for documentation or a change confined to one file; this edit changes 2 files (src/a.rs, src/b.rs): hand it to a run with blyte dispatch"
+    );
+    assert!(!marker.exists(), "gate must not run when out of scope");
+    assert!(root.join(".wt/e-scope.edit.json").is_file());
+    assert!(!root.join(".wt/e-scope.json").exists());
+}
+
+#[test]
+fn a_direct_edit_is_always_reviewed() {
+    let repo = setup_repo("[dispatch]\ngate = \"true\"\n");
+    let root = repo.path();
+
+    let server = MockReviewServer::start(MockReviewReply::Ok(
+        r#"{"concerns": [], "fallbacks": []}"#.to_string(),
+    ));
+
+    let start_out = run_blyte_with_review(
+        root,
+        &[
+            "edit-start",
+            "e-reviewed",
+            "--task",
+            "Improve the greeting text.",
+        ],
+        server.port,
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-reviewed");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(
+        wt.join("src/app.rs"),
+        "pub fn greet() -> &'static str { \"hello\" }\n",
+    )
+    .unwrap();
+
+    let finish_out = run_blyte_with_review(
+        root,
+        &["edit-finish", "e-reviewed", "--message", "feat: greeting"],
+        server.port,
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&finish_out.stdout),
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    assert!(root.join(".wt/e-reviewed.model-review.json").is_file());
+    assert!(root.join(".wt/e-reviewed.json").is_file());
+}
+
+#[test]
+fn review_findings_come_back_once_then_the_edit_finishes() {
+    let repo = setup_repo("[dispatch]\ngate = \"true\"\n");
+    let root = repo.path();
+
+    let review_reply = serde_json::json!({
+        "concerns": [],
+        "fallbacks": [{
+            "file": "src/app.rs",
+            "line": 1,
+            "verdict": "fallback",
+            "reason": "Substitutes a hardcoded region when missing."
+        }]
+    })
+    .to_string();
+    let server = MockReviewServer::start(MockReviewReply::Ok(review_reply));
+
+    let start_out = run_blyte_with_review(
+        root,
+        &["edit-start", "e-findings", "--task", "Update `src/app.rs`."],
+        server.port,
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-findings");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(
+        wt.join("src/app.rs"),
+        "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
+    )
+    .unwrap();
+
+    let first = run_blyte_with_review(
+        root,
+        &["edit-finish", "e-findings", "--message", "feat: add f"],
+        server.port,
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("review_findings json");
+    assert_eq!(first_json["id"], "e-findings");
+    assert_eq!(first_json["outcome"], "review_findings");
+    let findings = first_json["findings"].as_array().expect("findings array");
+    assert_eq!(findings.len(), 1, "{first_json}");
+    assert_eq!(findings[0]["file"], "src/app.rs");
+    assert_eq!(findings[0]["line"], 1);
+    assert_eq!(
+        findings[0]["text"],
+        "Substitutes a hardcoded region when missing."
+    );
+    assert!(!root.join(".wt/e-findings.json").exists());
+    assert!(root.join(".wt/e-findings.edit.json").is_file());
+    assert!(root.join(".wt/e-findings.fixround.json").is_file());
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+
+    let second = run_blyte_with_review(
+        root,
+        &["edit-finish", "e-findings", "--message", "feat: retry f"],
+        server.port,
+    );
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+    assert!(root.join(".wt/e-findings.json").is_file());
+    let checks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".wt/e-findings.checks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        checks["flags"],
+        serde_json::json!(["fallbacks added: 1 (src/app.rs:1)"])
+    );
+}
+
+#[test]
+fn a_failed_review_is_recorded_not_passed() {
+    let repo = setup_repo("[dispatch]\ngate = \"true\"\n");
+    let root = repo.path();
+
+    let server = MockReviewServer::start(MockReviewReply::HttpError(
+        500,
+        r#"{"error":{"message":"review backend down"}}"#.to_string(),
+    ));
+
+    let start_out = run_blyte_with_review(
+        root,
+        &["edit-start", "e-rev-fail", "--task", "Update `src/app.rs`."],
+        server.port,
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-rev-fail");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(
+        wt.join("src/app.rs"),
+        "pub fn greet() -> &'static str { \"hi\" }\n",
+    )
+    .unwrap();
+
+    let finish_out = run_blyte_with_review(
+        root,
+        &["edit-finish", "e-rev-fail", "--message", "feat: greet"],
+        server.port,
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&finish_out.stdout),
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    assert!(root.join(".wt/e-rev-fail.json").is_file());
+
+    let checks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".wt/e-rev-fail.checks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(checks["model_review"]["status"].as_str(), Some("failed"));
+    let flags: Vec<&str> = checks["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        flags.iter().any(|f| f.starts_with("model review failed:")),
+        "{flags:?}"
+    );
 }

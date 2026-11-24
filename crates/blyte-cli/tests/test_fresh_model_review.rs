@@ -962,13 +962,18 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
         }]
     })
     .to_string();
-    blyte_cli::queue_actions::evaluate_verified_run_with(&repo, "FB_OK", |root, id, base, wt| {
-        let prov = SequenceProvider::new(
-            "gemini/gemini-3.8-flash",
-            vec![Ok(make_response(&ok_reply, Some("STOP"), 100, 50))],
-        );
-        blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
-    })
+    blyte_cli::queue_actions::evaluate_verified_run_with(
+        &repo,
+        "FB_OK",
+        false,
+        |root, id, base, wt| {
+            let prov = SequenceProvider::new(
+                "gemini/gemini-3.8-flash",
+                vec![Ok(make_response(&ok_reply, Some("STOP"), 100, 50))],
+            );
+            blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
+        },
+    )
     .unwrap();
     let checks1: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(repo.join(".wt/FB_OK.checks.json")).unwrap())
@@ -1009,6 +1014,7 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
     blyte_cli::queue_actions::evaluate_verified_run_with(
         &repo,
         "FB_CONFIRMED",
+        false,
         |root, id, base, wt| {
             let prov = SequenceProvider::new(
                 "gemini/gemini-3.8-flash",
@@ -1037,6 +1043,7 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
     blyte_cli::queue_actions::evaluate_verified_run_with(
         &repo,
         "FB_CONFIRMED",
+        false,
         |root, id, base, wt| {
             let prov = SequenceProvider::new(
                 "gemini/gemini-3.8-flash",
@@ -1060,6 +1067,7 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
     blyte_cli::queue_actions::evaluate_verified_run_with(
         &repo,
         "FB_CONFIRMED",
+        false,
         |root, id, base, wt| {
             let prov = SequenceProvider::new(
                 "gemini/gemini-3.8-flash",

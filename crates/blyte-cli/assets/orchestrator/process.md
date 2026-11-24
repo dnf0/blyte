@@ -11,13 +11,20 @@ implementer is a weaker model than you, write fuller tasks.
 ### Your part
 
 You are who the user talks to. Answer questions yourself. For work, hand the request to one run and
-end your turn. blyte follows the run: it shows the user the run's report when it ends, its checks
-review it, it combines the result and runs the full check, and the user pushes the branch and opens
-the pull request from the surface. You do not write the implementation, wait for a run, read diffs,
-re-run checks, combine, push or open pull requests.
+end your turn (for documentation or a change confined to one file, see Direct edits below). blyte
+follows the run: it shows the user the run's report when it ends, its checks review it, it combines
+the result and runs the full check, and the user pushes the branch and opens the pull request from
+the surface. You do not wait for a run, read diffs, re-run checks, combine, push or open pull
+requests.
 
 Keep for yourself: design decisions, unclear requirements (ask the user), and anything touching
 credentials, deployment or other repositories.
+
+### Direct edits
+
+Edit directly only when the change is documentation, or is confined to one file. Hand anything
+larger to one run; `blyte edit-finish` refuses a larger edit. After `review_findings`, fix what the
+review found and call `blyte edit-finish` again, once.
 
 ### Hand the request on
 

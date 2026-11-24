@@ -247,3 +247,21 @@ fn default_process_hands_a_request_to_one_run_and_ends_the_turn() {
     assert!(REFERENCE.contains("blyte wait --any <ids>"), "{REFERENCE}");
     assert!(!REFERENCE.contains(r#"{"args": ["wait""#), "{REFERENCE}");
 }
+
+#[test]
+fn default_process_says_when_to_edit_directly() {
+    let normalized = DEFAULT_PROCESS
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized.contains("confined to one file"),
+        "{DEFAULT_PROCESS}"
+    );
+    assert!(normalized.contains("documentation"), "{DEFAULT_PROCESS}");
+    assert!(
+        normalized.contains("hand the request to one run")
+            || normalized.contains("Hand anything larger to one run"),
+        "{DEFAULT_PROCESS}"
+    );
+}

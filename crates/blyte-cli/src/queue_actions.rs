@@ -790,12 +790,13 @@ pub fn evaluate_verified_run(
     root: &Path,
     id: &str,
 ) -> Result<Option<crate::model_review::ModelReviewResult>, String> {
-    evaluate_verified_run_with(root, id, crate::model_review::run)
+    evaluate_verified_run_with(root, id, false, crate::model_review::run)
 }
 
 pub fn evaluate_verified_run_with<F>(
     root: &Path,
     id: &str,
+    force_review: bool,
     run_model_review: F,
 ) -> Result<Option<crate::model_review::ModelReviewResult>, String>
 where
@@ -831,12 +832,14 @@ where
         }
     };
 
-    if crate::review_checks::should_run_model_review(
-        &flags,
-        data.task_text.as_deref(),
-        &risky_matches,
-        data.fallbacks.len(),
-    ) {
+    if force_review
+        || crate::review_checks::should_run_model_review(
+            &flags,
+            data.task_text.as_deref(),
+            &risky_matches,
+            data.fallbacks.len(),
+        )
+    {
         let result = run_model_review(root, id, &data.base, &data.wt);
         flags.extend(crate::fallback_check::flags_for_review(
             &data.fallbacks,
