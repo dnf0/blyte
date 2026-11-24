@@ -815,6 +815,8 @@ fn shell_writes_in_an_open_edit_worktree_and_nowhere_else_new() {
     if !sandbox::available() {
         return;
     }
+    // The profile depends on HOME, which other tests here change under this lock.
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let root = init_git_repo_in_target_tmp();
     let e1 = open_edit_worktree(root.path(), "E1");
@@ -915,6 +917,8 @@ fn shell_loses_the_worktree_when_the_edit_finishes() {
     if !sandbox::available() {
         return;
     }
+    // The profile depends on HOME, which other tests here change under this lock.
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let root = init_git_repo_in_target_tmp();
     let e1 = open_edit_worktree(root.path(), "E1");
@@ -967,6 +971,8 @@ fn shell_keeps_its_directory_and_says_when_it_restarted() {
     if !sandbox::available() {
         return;
     }
+    // The profile depends on HOME, which other tests here change under this lock.
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let root = init_git_repo_in_target_tmp();
     let sub = root.path().join("subdir");
@@ -1040,6 +1046,8 @@ fn shell_does_not_restart_when_open_edits_are_unchanged() {
     if !sandbox::available() {
         return;
     }
+    // The profile depends on HOME, which other tests here change under this lock.
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let root = init_git_repo_in_target_tmp();
     let cfg = orchestrator_config(root.path());
