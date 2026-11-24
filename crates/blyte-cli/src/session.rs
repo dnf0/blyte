@@ -363,7 +363,8 @@ fn load_entries_file(
             Some(rel) => pos + rel + 1,
             None => bytes.len(),
         };
-        let is_last = end == bytes.len();
+        // A cut-off write never ends in a newline; a complete bad line is corruption.
+        let is_last = end == bytes.len() && !bytes[start..end].ends_with(b"\n");
         let line_slice = &bytes[start..end];
         let parsed = std::str::from_utf8(line_slice)
             .map_err(|e| e.to_string())

@@ -1578,3 +1578,39 @@ fn a_loaded_approval_request_is_not_live() {
     );
     t.join().unwrap();
 }
+
+#[test]
+fn a_complete_bad_last_line_stops_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    // The bad line ends in a newline, so it was written whole: not a cut-off write.
+    let raw = format!(
+        "{}\n{{not valid json\n",
+        serde_json::to_string(&e1).unwrap()
+    );
+    std::fs::write(&log_path, &raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let result = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    );
+    let err = match result {
+        Ok(_) => panic!("expected a complete bad last line to fail startup"),
+        Err(err) => err,
+    };
+    assert!(err.contains("entries.jsonl"), "got: {err}");
+    assert!(err.contains("line 2"), "got: {err}");
+    assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
+}
