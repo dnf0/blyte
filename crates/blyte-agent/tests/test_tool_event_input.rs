@@ -1,14 +1,40 @@
 //! Tool event lines show the command in full (up to 2000 characters) instead of cutting at 70.
 
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Event, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 struct Scripted(Mutex<Vec<Response>>);
 
@@ -45,7 +71,7 @@ fn run_bash(cmd: &str) -> String {
     };
     let runner = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -154,7 +180,7 @@ fn blyte_tool_event_formats_command_and_background() {
     };
     let runner = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),

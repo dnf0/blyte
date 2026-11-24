@@ -1,13 +1,44 @@
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Event, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let exit_code = if command.lines().any(|l| l.trim() == "true") {
+            0
+        } else {
+            1
+        };
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 struct ScriptedProvider {
     replies: Mutex<VecDeque<Response>>,
@@ -69,7 +100,7 @@ fn max_tokens_reply_skips_tool_call_and_adds_harness_note() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -145,7 +176,7 @@ fn continuation_reply_does_not_run_gate_until_normal_reply() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -203,7 +234,7 @@ fn normal_stop_behaves_as_before() {
 
     let runner = Runner {
         provider: &provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -248,7 +279,7 @@ fn other_provider_truncation_reasons_and_normal_stops() {
         ]);
         let runner = Runner {
             provider: &provider,
-            shell: &LocalShell,
+            shell: &StubShell,
             fs: &LocalFs,
             context: &Conversational,
             root: d.path().to_path_buf(),
@@ -286,7 +317,7 @@ fn other_provider_truncation_reasons_and_normal_stops() {
         }]);
         let runner = Runner {
             provider: &provider,
-            shell: &LocalShell,
+            shell: &StubShell,
             fs: &LocalFs,
             context: &Conversational,
             root: d.path().to_path_buf(),

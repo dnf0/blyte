@@ -107,8 +107,8 @@ impl GateClock {
 #[test]
 fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    const BUDGET: Duration = Duration::from_secs(1);
-    const HOLD: Duration = Duration::from_secs(2);
+    const BUDGET: Duration = Duration::from_millis(80);
+    const HOLD: Duration = Duration::from_millis(120);
 
     let d = tempfile::tempdir().unwrap();
     let slot_dir = tempfile::tempdir().unwrap();

@@ -1,16 +1,50 @@
 //! In a research run, once the wrap-up warning has been sent, every tool except `write` and `edit`
 //! is closed until `report.md` has changed.
 
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let trimmed = command.trim();
+        let exit_code = if trimmed == "true" {
+            0
+        } else if let Some(file) = trimmed.strip_prefix("touch ") {
+            std::fs::write(cwd.join(file.trim()), "").map_err(|e| e.to_string())?;
+            0
+        } else {
+            1
+        };
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 const CLOSED_MSG: &str = "[blyte] almost out of budget: write report.md now (write or edit). Other tools are closed until report.md has changed.";
 
@@ -75,7 +109,7 @@ fn run_with(provider: &ScriptedAgent, research: bool) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
     let runner = Runner {
         provider,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),

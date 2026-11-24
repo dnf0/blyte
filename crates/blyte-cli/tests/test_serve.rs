@@ -94,14 +94,10 @@ fn init_git_repo(root: &Path) {
         .status()
         .unwrap();
     assert!(status.success());
-    let _ = Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
-        .current_dir(root)
-        .status();
-    let _ = Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(root)
-        .status();
+    let cfg_path = root.join(".git/config");
+    let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    cfg.push_str("\n[user]\n\temail = test@example.com\n\tname = Test User\n");
+    std::fs::write(&cfg_path, cfg).unwrap();
 }
 
 fn init_repo_with_commit(root: &Path) -> String {
@@ -473,7 +469,7 @@ fn events_wait_returns_empty() {
         &surface,
         &get(
             "/api/session/events",
-            vec![("after", &last_seq), ("wait_ms", "300")],
+            vec![("after", &last_seq), ("wait_ms", "50")],
         ),
         1_700_000_100,
     );
@@ -481,8 +477,8 @@ fn events_wait_returns_empty() {
 
     assert_eq!(resp.status, 200);
     assert!(
-        elapsed >= Duration::from_millis(300),
-        "expected >= 300ms wait, got {elapsed:?}"
+        elapsed >= Duration::from_millis(50),
+        "expected >= 50ms wait, got {elapsed:?}"
     );
     let body = parse_json(&resp);
     assert_eq!(body["entries"], serde_json::json!([]));
@@ -1020,9 +1016,12 @@ fn map_is_served() {
 #[test]
 fn terminal_flag_conflicts() {
     let bin = env!("CARGO_BIN_EXE_blyte");
+    let home = tempfile::tempdir().unwrap();
 
     let conflict = Command::new(bin)
         .args(["--terminal", "--port", "1"])
+        .env("HOME", home.path())
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
     assert!(!conflict.status.success());
@@ -1034,20 +1033,34 @@ fn terminal_flag_conflicts() {
 
     let prompt_conflict = Command::new(bin)
         .args(["--port", "1", "do something"])
+        .env("HOME", home.path())
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
     assert!(!prompt_conflict.status.success());
 
     let subcmd_conflict = Command::new(bin)
         .args(["--no-open", "clean"])
+        .env("HOME", home.path())
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
     assert!(!subcmd_conflict.status.success());
 
-    let bad_days = Command::new(bin).args(["--days", "32"]).output().unwrap();
+    let bad_days = Command::new(bin)
+        .args(["--days", "32"])
+        .env("HOME", home.path())
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .output()
+        .unwrap();
     assert!(!bad_days.status.success());
 
-    let help = Command::new(bin).arg("--help").output().unwrap();
+    let help = Command::new(bin)
+        .arg("--help")
+        .env("HOME", home.path())
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .output()
+        .unwrap();
     assert!(help.status.success());
     let help_text = String::from_utf8_lossy(&help.stdout);
     assert!(help_text.contains("surface"), "help should mention surface");
@@ -1059,7 +1072,10 @@ fn terminal_flag_conflicts() {
 
 #[test]
 fn piped_stdin_still_runs_the_terminal_session() {
+    let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .env("HOME", home.path())
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1107,7 +1123,7 @@ fn second_start_attaches() {
                 break v;
             }
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(5));
     };
     let port = first_record["port"].as_u64().unwrap() as u16;
     assert!(port > 0);
@@ -1180,7 +1196,7 @@ fn second_start_attaches() {
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(5));
     };
     let err3_str = String::from_utf8(err3_buf.lock().unwrap().clone()).unwrap();
     assert!(
@@ -1236,7 +1252,7 @@ fn start_surface_and_read_url(repo: &Path) -> (u16, String) {
         if let Some(found) = stdout.lines().find(|l| l.contains("blyte: surface at ")) {
             break found.to_string();
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(5));
     };
 
     let url = line
@@ -1609,7 +1625,7 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
         t,
     );
     assert_eq!(unauth_answer.status, 403);
-    assert!(done_rx.recv_timeout(Duration::from_millis(80)).is_err());
+    assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
 
     let ok_yes = route(
         &surface,

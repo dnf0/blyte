@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use blyte_cli::dashboard::Sources;
@@ -19,13 +18,7 @@ fn write(p: &Path, text: &str) {
 }
 
 fn init_git_repo(root: &Path) {
-    std::fs::create_dir_all(root).unwrap();
-    let status = Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    std::fs::create_dir_all(root.join(".git")).unwrap();
 }
 
 fn sources_for(root: &Path) -> Sources {

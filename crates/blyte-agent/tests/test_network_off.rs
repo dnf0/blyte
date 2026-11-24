@@ -95,21 +95,19 @@ mod macos {
         let sh = LocalShell::sandboxed(offline(profile(&[ws.path().to_path_buf()]), &[]));
         let local = sh
             .exec(
-                &format!("curl -s -m 5 http://localhost:{port}/"),
+                &format!("curl -4 -s -m 2 http://localhost:{port}/"),
                 ws.path(),
                 Duration::from_secs(30),
             )
             .unwrap();
         if local.exit_code == 71 && local.merged().contains("Operation not permitted") {
-            return; // nested sandboxing is not permitted here
+            return;
         }
         assert_eq!(local.exit_code, 0, "{}", local.merged());
         assert!(local.merged().contains("ok"), "{}", local.merged());
-        // 192.0.2.1 is TEST-NET-1: never routed, so this never leaves the machine even unsandboxed.
-        // The sandbox refuses the connect at once instead of timing out.
         let out = sh
             .exec(
-                "curl -s -m 5 http://192.0.2.1/ ; echo rc=$?",
+                "curl -s -m 2 http://192.0.2.1/ ; echo rc=$?",
                 ws.path(),
                 Duration::from_secs(30),
             )

@@ -1,14 +1,41 @@
 //! A spending cap stops the run before the next model call once list-price spend reaches it.
 
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::LocalShell;
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall, Usage};
 use serde_json::json;
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let exit_code = if command.trim() == "true" { 0 } else { 1 };
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 /// Always asks for one more tool call; each call reports 100K fresh input and 10K output tokens,
 /// which at Gemini 3.8 Flash list price is $0.075 + $0.0375 = $0.1125 per call.
@@ -48,7 +75,7 @@ fn run(cap: Option<f64>) -> (Outcome, blyte_agent::run::RunReport, u32) {
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),

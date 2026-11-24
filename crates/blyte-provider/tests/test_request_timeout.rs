@@ -75,17 +75,17 @@ fn spawn_quick_server(content_type: &'static str, body: &'static str) -> String 
     format!("http://{addr}")
 }
 
-fn req_with_timeout(secs: u64) -> Request {
+fn req_with_timeout(timeout: Duration) -> Request {
     Request {
         system: String::new(),
         messages: vec![Message::User("hi".into())],
         tools: Vec::new(),
         max_output_tokens: None,
-        timeout: Some(Duration::from_secs(secs)),
+        timeout: Some(timeout),
     }
 }
 
-fn assert_timeout_err(err: ProviderError, elapsed: Duration) {
+fn assert_timeout_err(err: ProviderError, elapsed: Duration, limit: Duration) {
     assert!(
         elapsed < Duration::from_secs(10),
         "expected call to fail within 10s (well before 30s), took {elapsed:?}"
@@ -95,25 +95,27 @@ fn assert_timeout_err(err: ProviderError, elapsed: Duration) {
         "expected timeout ProviderError, got: {err:?}"
     );
     let msg = err.to_string();
+    let expected_limit = format!("{limit:?}");
     assert!(
-        msg.contains("time limit") && (msg.contains("1s") || msg.contains("1 s")),
-        "expected message to mention the request's time limit of 1s, got: {msg}"
+        msg.contains("time limit") && msg.contains(&expected_limit),
+        "expected message to mention the request's time limit of {expected_limit}, got: {msg}"
     );
 }
 
 #[test]
 fn gemini_request_timeout_and_quick_reply() {
+    let limit = Duration::from_millis(200);
     let stall_url = spawn_stalling_server();
     let p_stall = Gemini::new_api_key("test-key").with_api_root(stall_url);
     let start = Instant::now();
-    let err = p_stall.complete(&req_with_timeout(1)).unwrap_err();
-    assert_timeout_err(err, start.elapsed());
+    let err = p_stall.complete(&req_with_timeout(limit)).unwrap_err();
+    assert_timeout_err(err, start.elapsed(), limit);
 
     let sse_body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello from gemini\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":3}}\n\n";
     let quick_url = spawn_quick_server("text/event-stream", sse_body);
     let p_quick = Gemini::new_api_key("test-key").with_api_root(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(10))
+        .complete(&req_with_timeout(Duration::from_secs(10)))
         .expect("quick reply with 10s timeout should succeed");
     assert_eq!(resp.text, "hello from gemini");
 }
@@ -133,7 +135,7 @@ fn gemini_stream_cap_honors_request_timeout() {
             let _ = stream.write_all(head.as_bytes());
             let _ = stream.flush();
             for _ in 0..150 {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(40));
                 if stream.write_all(b": keepalive\n\n").is_err() {
                     break;
                 }
@@ -141,55 +143,59 @@ fn gemini_stream_cap_honors_request_timeout() {
             }
         }
     });
+    let limit = Duration::from_millis(250);
     let p = Gemini::new_api_key("test-key").with_api_root(format!("http://{addr}"));
     let start = Instant::now();
-    let err = p.complete(&req_with_timeout(1)).unwrap_err();
-    assert_timeout_err(err, start.elapsed());
+    let err = p.complete(&req_with_timeout(limit)).unwrap_err();
+    assert_timeout_err(err, start.elapsed(), limit);
 }
 
 #[test]
 fn anthropic_request_timeout_and_quick_reply() {
+    let limit = Duration::from_millis(200);
     let stall_url = spawn_stalling_server();
     let p_stall = Anthropic::new("test-key").with_api_root(stall_url);
     let start = Instant::now();
-    let err = p_stall.complete(&req_with_timeout(1)).unwrap_err();
-    assert_timeout_err(err, start.elapsed());
+    let err = p_stall.complete(&req_with_timeout(limit)).unwrap_err();
+    assert_timeout_err(err, start.elapsed(), limit);
 
     let json_body = r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hello from anthropic"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":3}}"#;
     let quick_url = spawn_quick_server("application/json", json_body);
     let p_quick = Anthropic::new("test-key").with_api_root(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(10))
+        .complete(&req_with_timeout(Duration::from_secs(10)))
         .expect("quick reply with 10s timeout should succeed");
     assert_eq!(resp.text, "hello from anthropic");
 }
 
 #[test]
 fn openai_request_timeout_and_quick_reply() {
+    let limit = Duration::from_millis(200);
     let stall_url = spawn_stalling_server();
     let p_stall = OpenAi::new("test-key").with_base_url(stall_url);
     let start = Instant::now();
-    let err = p_stall.complete(&req_with_timeout(1)).unwrap_err();
-    assert_timeout_err(err, start.elapsed());
+    let err = p_stall.complete(&req_with_timeout(limit)).unwrap_err();
+    assert_timeout_err(err, start.elapsed(), limit);
 
     let json_body = r#"{"choices":[{"message":{"role":"assistant","content":"hello from openai"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":3}}"#;
     let quick_url = spawn_quick_server("application/json", json_body);
     let p_quick = OpenAi::new("test-key").with_base_url(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(10))
+        .complete(&req_with_timeout(Duration::from_secs(10)))
         .expect("quick reply with 10s timeout should succeed");
     assert_eq!(resp.text, "hello from openai");
 }
 
 #[test]
 fn ollama_request_timeout_and_quick_reply() {
+    let limit = Duration::from_millis(200);
     let stall_url = spawn_stalling_server();
     let p_stall = Ollama::from_env_or_default()
         .with_model("qwen2.5-coder:32b")
         .with_api_root(stall_url);
     let start = Instant::now();
-    let err = p_stall.complete(&req_with_timeout(1)).unwrap_err();
-    assert_timeout_err(err, start.elapsed());
+    let err = p_stall.complete(&req_with_timeout(limit)).unwrap_err();
+    assert_timeout_err(err, start.elapsed(), limit);
 
     let json_body = r#"{"model":"qwen2.5-coder:32b","message":{"role":"assistant","content":"hello from ollama"},"done":true,"done_reason":"stop","prompt_eval_count":4,"eval_count":3}"#;
     let quick_url = spawn_quick_server("application/json", json_body);
@@ -197,7 +203,7 @@ fn ollama_request_timeout_and_quick_reply() {
         .with_model("qwen2.5-coder:32b")
         .with_api_root(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(10))
+        .complete(&req_with_timeout(Duration::from_secs(10)))
         .expect("quick reply with 10s timeout should succeed");
     assert_eq!(resp.text, "hello from ollama");
 }
@@ -250,11 +256,12 @@ fn chatgpt_for_test(base_url: String) -> (tempfile::TempDir, ChatGpt) {
 
 #[test]
 fn chatgpt_request_timeout_and_quick_reply() {
+    let limit = Duration::from_millis(200);
     let stall_url = spawn_stalling_server();
     let (_d1, p_stall) = chatgpt_for_test(stall_url);
     let start = Instant::now();
-    let err = p_stall.complete(&req_with_timeout(1)).unwrap_err();
-    assert_timeout_err(err, start.elapsed());
+    let err = p_stall.complete(&req_with_timeout(limit)).unwrap_err();
+    assert_timeout_err(err, start.elapsed(), limit);
 
     let sse_body = concat!(
         "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello from chatgpt\"}]}}\n\n",
@@ -263,7 +270,7 @@ fn chatgpt_request_timeout_and_quick_reply() {
     let quick_url = spawn_quick_server("text/event-stream", sse_body);
     let (_d2, p_quick) = chatgpt_for_test(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(10))
+        .complete(&req_with_timeout(Duration::from_secs(10)))
         .expect("quick reply with 10s timeout should succeed");
     assert_eq!(resp.text, "hello from chatgpt");
 }
@@ -376,7 +383,7 @@ fn reused_connection_stalling_before_headers_times_out() {
 
     let p = Gemini::new_api_key("test-key")
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
     let first = p
         .complete(&req_without_timeout())
         .expect("first call on pooled connection should succeed");
@@ -408,7 +415,7 @@ fn fresh_connection_stalling_before_headers_times_out() {
     let stall_url = spawn_stalling_server();
     let p = Gemini::new_api_key("test-key")
         .with_api_root(stall_url)
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
     let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
         p.complete(&req_without_timeout())
     });
@@ -423,7 +430,7 @@ fn fresh_connection_stalling_before_headers_times_out() {
     );
 }
 
-fn spawn_trickle_without_newline_server() -> String {
+fn spawn_trickle_without_newline_server(interval: Duration) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -434,7 +441,7 @@ fn spawn_trickle_without_newline_server() -> String {
             let _ = stream.write_all(head.as_bytes());
             let _ = stream.flush();
             for _ in 0..150 {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(interval);
                 if stream.write_all(b" ").is_err() {
                     break;
                 }
@@ -447,10 +454,10 @@ fn spawn_trickle_without_newline_server() -> String {
 
 #[test]
 fn trickle_without_newline_hits_the_cap() {
-    let url = spawn_trickle_without_newline_server();
+    let url = spawn_trickle_without_newline_server(Duration::from_millis(25));
     let p = Gemini::new_api_key("test-key")
         .with_api_root(url)
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+        .with_stream_timeouts(Duration::from_millis(250), Duration::from_millis(600));
     let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
         p.complete(&req_without_timeout())
     });
@@ -460,8 +467,8 @@ fn trickle_without_newline_hits_the_cap() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed >= Duration::from_secs(2) && elapsed <= Duration::from_secs(5),
-        "expected timeout between 2s and 5s, took {elapsed:?}"
+        elapsed >= Duration::from_millis(500) && elapsed <= Duration::from_secs(3),
+        "expected timeout between 500ms and 3s, took {elapsed:?}"
     );
 }
 
@@ -480,7 +487,7 @@ fn stall_after_first_chunk_times_out() {
     });
     let p = Gemini::new_api_key("test-key")
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
     let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
         p.complete(&req_without_timeout())
     });
@@ -514,7 +521,7 @@ fn slow_but_steady_stream_succeeds() {
     let fast_url = spawn_quick_server("text/event-stream", COMBINED);
     let p_fast = Gemini::new_api_key("test-key")
         .with_api_root(fast_url)
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(10));
+        .with_stream_timeouts(Duration::from_millis(300), Duration::from_secs(10));
     let fast_resp = p_fast
         .complete(&req_without_timeout())
         .expect("single-shot response should succeed");
@@ -530,7 +537,7 @@ fn slow_but_steady_stream_succeeds() {
             let _ = stream.flush();
             for (i, chunk) in chunks.iter().enumerate() {
                 if i > 0 {
-                    std::thread::sleep(Duration::from_millis(300));
+                    std::thread::sleep(Duration::from_millis(85));
                 }
                 if stream.write_all(chunk.as_bytes()).is_err() {
                     break;
@@ -542,7 +549,7 @@ fn slow_but_steady_stream_succeeds() {
 
     let p_slow = Gemini::new_api_key("test-key")
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(10));
+        .with_stream_timeouts(Duration::from_millis(300), Duration::from_secs(10));
     let slow_resp = p_slow
         .complete(&req_without_timeout())
         .expect("slow steady stream should succeed");
@@ -554,12 +561,12 @@ fn slow_but_steady_stream_succeeds() {
 
 #[test]
 fn request_timeout_shorter_than_cap_wins() {
-    let url = spawn_trickle_without_newline_server();
+    let url = spawn_trickle_without_newline_server(Duration::from_millis(25));
     let p = Gemini::new_api_key("test-key")
         .with_api_root(url)
         .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(10));
     let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
-        p.complete(&req_with_timeout(1))
+        p.complete(&req_with_timeout(Duration::from_millis(250)))
     });
     let err = res.expect_err("request timeout shorter than cap should win");
     assert!(
@@ -610,10 +617,11 @@ fn abandoned_helper_thread_ends() {
         }
     });
 
-    let cap = Duration::from_secs(3);
+    let cap = Duration::from_millis(400);
     let p = Gemini::new_api_key("test-key")
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_secs(1), cap);
+        .with_stream_timeouts(Duration::from_millis(200), cap)
+        .with_helper_timeout_grace(Duration::from_millis(200));
     let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
         p.complete(&req_without_timeout())
     });
@@ -671,7 +679,7 @@ fn vertex_fresh_connection_stalling_before_headers_times_out() {
     let p = Gemini::new_vertex("test-project", "global")
         .with_token_source(|| Ok("vertex-test-token".to_string()))
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(3));
+        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
     let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
         p.complete(&req_without_timeout())
     });

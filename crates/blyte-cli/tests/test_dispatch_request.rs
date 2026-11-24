@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_agent::fs::LocalFs;
@@ -23,13 +23,50 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let ty = entry.file_type().unwrap();
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn template_repo() -> &'static Path {
+    static TEMPLATE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            git(root, &["init", "-q"]);
+            std::fs::write(root.join("f.txt"), "a\n").unwrap();
+            std::fs::write(root.join("task.md"), "do the task").unwrap();
+            git(root, &["add", "."]);
+            git(
+                root,
+                &[
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                    "commit",
+                    "-qm",
+                    "init",
+                    "--no-gpg-sign",
+                ],
+            );
+            dir
+        })
+        .path()
+}
+
 fn init_repo(dir: &Path) {
-    std::fs::create_dir_all(dir).unwrap();
-    git(dir, &["init", "-q"]);
-    std::fs::write(dir.join("f.txt"), "a\n").unwrap();
-    std::fs::write(dir.join("task.md"), "do the task").unwrap();
-    git(dir, &["add", "."]);
-    git(dir, &["commit", "-qm", "init", "--no-gpg-sign"]);
+    copy_dir_all(template_repo(), dir);
 }
 
 fn run_dispatch_cli(repo: &Path, id: &str, extra: &[&str]) -> std::process::Output {
@@ -43,13 +80,26 @@ fn run_dispatch_cli(repo: &Path, id: &str, extra: &[&str]) -> std::process::Outp
         "off",
     ];
     args.extend_from_slice(extra);
+    let home = repo.join(".home");
+    let _ = std::fs::create_dir_all(&home);
     Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(&args)
         .current_dir(repo)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("BLYTE_ENV_FILE", "")
         .env("BLYTE_STATE_DIR", repo.join(".state"))
         .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_USAGE_LOG", "off")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_GATE_SLOT_DIR", repo.join(".slots"))
+        .env("BLYTE_GATE_SLOTS", "16")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
         .env_remove("BLYTE_MODEL")
         .output()
         .unwrap()
@@ -96,7 +146,7 @@ fn dispatch_records_and_validates_request_flag() {
     assert_eq!(start_r3["request"], max_len);
 
     let too_long = "a".repeat(65);
-    for (idx, bad) in [
+    let bad_ids = [
         "",
         too_long.as_str(),
         "bad/id",
@@ -104,26 +154,28 @@ fn dispatch_records_and_validates_request_flag() {
         "bad.id",
         "bad..id",
         "h\u{00e9}llo",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let id = format!("BAD{idx}");
-        let res = run_dispatch_cli(repo, &id, &["--request", bad]);
-        assert!(
-            !res.status.success(),
-            "expected failure for --request {bad:?}"
-        );
-        let stderr = String::from_utf8_lossy(&res.stderr);
-        assert!(
-            stderr.contains("--request"),
-            "expected --request error for {bad:?}, got stderr={stderr:?}"
-        );
-        assert!(
-            !repo.join(format!(".wt/{id}.start.json")).exists(),
-            "start.json should not be written for invalid --request {bad:?}"
-        );
-    }
+    ];
+    std::thread::scope(|s| {
+        for (idx, bad) in bad_ids.into_iter().enumerate() {
+            s.spawn(move || {
+                let id = format!("BAD{idx}");
+                let res = run_dispatch_cli(repo, &id, &["--request", bad]);
+                assert!(
+                    !res.status.success(),
+                    "expected failure for --request {bad:?}"
+                );
+                let stderr = String::from_utf8_lossy(&res.stderr);
+                assert!(
+                    stderr.contains("--request"),
+                    "expected --request error for {bad:?}, got stderr={stderr:?}"
+                );
+                assert!(
+                    !repo.join(format!(".wt/{id}.start.json")).exists(),
+                    "start.json should not be written for invalid --request {bad:?}"
+                );
+            });
+        }
+    });
 }
 
 struct DispatchingRunner {
@@ -219,7 +271,7 @@ fn get(path: &str) -> Request {
 fn wait_for_idle_count(session: &Session, expected_idles: usize) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let entries = session.entries_after(0, Duration::from_millis(50));
+        let entries = session.entries_after(0, Duration::from_millis(5));
         let idles = entries
             .iter()
             .filter(|e| matches!(e.body, EntryBody::Idle { .. }))
@@ -242,8 +294,16 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
 
     std::env::set_var("BLYTE_STATE_DIR", repo.join(".state"));
     std::env::set_var("BLYTE_NO_UPDATE_CHECK", "1");
+    std::env::set_var("BLYTE_USAGE_LOG", "off");
+    std::env::set_var("BLYTE_NO_KEEP_AWAKE", "1");
+    std::env::set_var("BLYTE_GATE_SLOT_DIR", repo.join(".slots"));
+    std::env::set_var("BLYTE_GATE_SLOTS", "16");
+    std::env::set_var("BLYTE_ENV_FILE", "");
     std::env::remove_var("GEMINI_API_KEY");
     std::env::remove_var("GOOGLE_API_KEY");
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("OPENROUTER_API_KEY");
     std::env::remove_var("BLYTE_MODEL");
 
     let _tool_reset = ToolReset;

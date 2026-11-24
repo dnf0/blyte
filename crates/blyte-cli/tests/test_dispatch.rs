@@ -41,10 +41,15 @@ fn repo() -> tempfile::TempDir {
 }
 
 fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
+    let home = dir.join(".git/test-home");
+    let _ = std::fs::create_dir_all(&home);
     Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(args)
         .current_dir(dir)
+        .env("HOME", &home)
         .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_GATE_SLOT_DIR", dir.join(".git/gate-slots"))
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("BLYTE_MODEL")
@@ -111,6 +116,7 @@ fn a_dispatch_makes_a_worktree_and_reports_json_even_when_the_run_fails() {
             "task.md",
             "--gate",
             "true",
+            "--no-base-check",
             "--sandbox",
             "off",
         ],
@@ -146,6 +152,7 @@ fn a_dispatch_makes_a_worktree_and_reports_json_even_when_the_run_fails() {
             "task.md",
             "--gate",
             "true",
+            "--no-base-check",
             "--sandbox",
             "off",
         ],
@@ -165,6 +172,7 @@ fn review_shows_the_run() {
             "task.md",
             "--gate",
             "true",
+            "--no-base-check",
             "--sandbox",
             "off",
         ],
@@ -187,6 +195,8 @@ fn review_shows_the_run() {
 fn summary_carries_model_from_report() {
     let r = repo();
     std::fs::write(r.path().join("task.md"), "Append b to f.txt.\n").unwrap();
+    let home = r.path().join(".git/test-home");
+    std::fs::create_dir_all(&home).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args([
             "dispatch",
@@ -198,10 +208,15 @@ fn summary_carries_model_from_report() {
             "gemini-4-argon",
             "--max-turns",
             "0",
+            "--no-base-check",
             "--sandbox",
             "off",
         ])
         .current_dir(r.path())
+        .env("HOME", &home)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_GATE_SLOT_DIR", r.path().join(".git/gate-slots"))
         .env("GEMINI_API_KEY", "test-key")
         .env("BLYTE_USAGE_LOG", "off")
         .env_remove("GOOGLE_API_KEY")

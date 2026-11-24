@@ -60,11 +60,14 @@ fn blyte_cmd(root: &Path, home: &Path, xdg: &Path) -> Command {
     cmd.current_dir(root)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", xdg)
-        .env_remove("BLYTE_ENV_FILE")
+        .env("BLYTE_STATE_DIR", home.join("state"))
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_ENV_FILE", "")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
         .env_remove("OLLAMA_API_KEY")
         .env_remove("OLLAMA_HOST");
     cmd

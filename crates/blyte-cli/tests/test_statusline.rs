@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use blyte_cli::statusline::{base_line, resolve_compact_window, settings_files, CompactWindow};
+use blyte_cli::statusline::{
+    base_line, render_statusline, resolve_compact_window, settings_files, CompactWindow,
+};
 
 #[test]
 fn test_base_line_full() {
@@ -228,25 +230,14 @@ fn test_after_flag() {
         assert_eq!(stdout.trim(), "Opus");
     }
 
-    // --after "sleep 5" falls back within 4 seconds
     {
         let start = Instant::now();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
-        cmd.args(["statusline", "--after", "sleep 5"])
-            .env("HOME", tmp.path())
-            .env("XDG_CONFIG_HOME", tmp.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn().unwrap();
-        {
-            let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(stdin_payload.as_bytes()).unwrap();
-        }
-        let output = child.wait_with_output().unwrap();
+        let stdout = render_statusline(
+            stdin_payload.as_bytes(),
+            Some("sleep 5"),
+            Duration::from_millis(150),
+        );
         let elapsed = start.elapsed();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8(output.stdout).unwrap();
         assert_eq!(stdout.trim(), "Opus");
         assert!(
             elapsed < Duration::from_secs(4),

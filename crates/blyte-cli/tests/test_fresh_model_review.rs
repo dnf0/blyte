@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 
 enum ReviewReply {
@@ -205,26 +205,67 @@ fn git_head(dir: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let ty = entry.file_type().unwrap();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+fn base_template_repo() -> &'static Path {
+    static TEMPLATE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(
+                repo.join("src/app.rs"),
+                "pub fn greet() -> &'static str { \"hi\" }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                repo.join("src/other.rs"),
+                "pub fn helper() -> usize { 1 }\n",
+            )
+            .unwrap();
+            git(repo, &["init", "-q"]);
+            let cfg_path = repo.join(".git/config");
+            let mut cfg_text = std::fs::read_to_string(&cfg_path).unwrap();
+            cfg_text.push_str("\n[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = false\n");
+            std::fs::write(&cfg_path, cfg_text).unwrap();
+            git(repo, &["add", "."]);
+            git(
+                repo,
+                &[
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "init",
+                    "--no-gpg-sign",
+                ],
+            );
+            dir
+        })
+        .path()
+}
+
 fn init_repo(repo: &Path, blyte_toml: Option<&str>) {
-    std::fs::create_dir_all(repo.join("src")).unwrap();
-    std::fs::write(
-        repo.join("src/app.rs"),
-        "pub fn greet() -> &'static str { \"hi\" }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        repo.join("src/other.rs"),
-        "pub fn helper() -> usize { 1 }\n",
-    )
-    .unwrap();
+    copy_dir_all(base_template_repo(), repo);
     if let Some(cfg) = blyte_toml {
         std::fs::write(repo.join("blyte.toml"), cfg).unwrap();
     }
-    git(repo, &["init", "-q"]);
-    git(repo, &["config", "user.email", "t@t"]);
-    git(repo, &["config", "user.name", "t"]);
-    git(repo, &["add", "."]);
-    git(repo, &["commit", "-q", "-m", "init"]);
 }
 
 fn run_dispatch(
@@ -248,6 +289,13 @@ fn run_dispatch(
         .current_dir(repo)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
+        .env("BLYTE_STATE_DIR", home.join("state"))
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_GATE_SLOT_DIR", home.join("gate-slots"))
+        .env("BLYTE_GATE_SLOTS", "16")
+        .env("BLYTE_USAGE_LOG", "off")
+        .env("BLYTE_ENV_FILE", "")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
@@ -369,7 +417,7 @@ fn clean_run_starts_no_review() {
     std::fs::write(&task, "Update `src/app.rs` so greet returns hello.\n").unwrap();
 
     let server = MockServer::start(
-        "printf 'pub fn greet() -> &\\x27static str { \"hello\" }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: greet hello'".to_string(),
+        "printf 'pub fn greet() -> &\\x27static str { \"hello\" }\\n' > src/app.rs && git commit -am 'feat: greet hello'".to_string(),
         ReviewReply::Ok("[]".to_string()),
     );
 
@@ -405,7 +453,7 @@ fn task_without_named_files_starts_no_review() {
     std::fs::write(&task, "Change the greeting to hello.\n").unwrap();
 
     let server = MockServer::start(
-        "printf 'pub fn greet() -> &\\x27static str { \"hello\" }\\n' > src/app.rs && git add src/app.rs && git commit -m 'feat: greet hello'".to_string(),
+        "printf 'pub fn greet() -> &\\x27static str { \"hello\" }\\n' > src/app.rs && git commit -am 'feat: greet hello'".to_string(),
         ReviewReply::Ok("[]".to_string()),
     );
 
@@ -447,7 +495,7 @@ fn flagged_run_triggers_fresh_review_and_findings_wait_in_queue() {
     .to_string();
 
     let server = MockServer::start(
-        "printf 'pub fn helper() -> usize { 2 }\\n' > src/other.rs && git add src/other.rs && git commit -m 'feat: touch other'".to_string(),
+        "printf 'pub fn helper() -> usize { 2 }\\n' > src/other.rs && git commit -am 'feat: touch other'".to_string(),
         ReviewReply::Ok(review_json),
     );
 
@@ -750,18 +798,49 @@ fn setup_worktree_run(
     )
     .unwrap();
     let wt = root.join(&wt_rel);
+    let mut has_new = false;
     for (rel, body) in files {
         let p = wt.join(rel);
+        if !p.exists() {
+            has_new = true;
+        }
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&p, body).unwrap();
-        git(&wt, &["add", rel]);
     }
-    git(
-        &wt,
-        &["commit", "-q", "-m", "feat: change", "--no-gpg-sign"],
-    );
+    if has_new {
+        git(&wt, &["add", "."]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "commit",
+                "-q",
+                "-m",
+                "feat: change",
+                "--no-gpg-sign",
+            ],
+        );
+    } else {
+        git(
+            &wt,
+            &[
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "commit",
+                "-q",
+                "-am",
+                "feat: change",
+                "--no-gpg-sign",
+            ],
+        );
+    }
     (base, wt)
 }
 
@@ -917,15 +996,8 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
         serde_json::json!(["fallbacks added: 1 (src/app.rs:1)"])
     );
 
-    let (_base3, _wt3) = setup_worktree_run(
-        &repo,
-        "FB_MISSING",
-        "Update `src/app.rs`.\n",
-        &[(
-            "src/app.rs",
-            "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
-        )],
-    );
+    let _ = std::fs::remove_file(repo.join(".wt/FB_CONFIRMED.checks.json"));
+    let _ = std::fs::remove_file(repo.join(".wt/FB_CONFIRMED.model-review.json"));
     let missing_reply = serde_json::json!({
         "concerns": [],
         "fallbacks": []
@@ -933,7 +1005,7 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
     .to_string();
     blyte_cli::queue_actions::evaluate_verified_run_with(
         &repo,
-        "FB_MISSING",
+        "FB_CONFIRMED",
         |root, id, base, wt| {
             let prov = SequenceProvider::new(
                 "gemini/gemini-3.8-flash",
@@ -944,7 +1016,7 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
     )
     .unwrap();
     let checks3: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(repo.join(".wt/FB_MISSING.checks.json")).unwrap(),
+        &std::fs::read_to_string(repo.join(".wt/FB_CONFIRMED.checks.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -952,28 +1024,25 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
         serde_json::json!(["fallback candidates not judged: 1 (src/app.rs:1)"])
     );
 
-    let (_base4, _wt4) = setup_worktree_run(
+    let _ = std::fs::remove_file(repo.join(".wt/FB_CONFIRMED.checks.json"));
+    let _ = std::fs::remove_file(repo.join(".wt/FB_CONFIRMED.model-review.json"));
+    blyte_cli::queue_actions::evaluate_verified_run_with(
         &repo,
-        "FB_FAIL",
-        "Update `src/app.rs`.\n",
-        &[(
-            "src/app.rs",
-            "pub fn f(x: Option<&str>) -> &str { x.unwrap_or(\"us\") }\n",
-        )],
-    );
-    blyte_cli::queue_actions::evaluate_verified_run_with(&repo, "FB_FAIL", |root, id, base, wt| {
-        let prov = SequenceProvider::new(
-            "gemini/gemini-3.8-flash",
-            vec![Err(blyte_provider::ProviderError::Api {
-                status: 500,
-                body: "boom".to_string(),
-            })],
-        );
-        blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
-    })
+        "FB_CONFIRMED",
+        |root, id, base, wt| {
+            let prov = SequenceProvider::new(
+                "gemini/gemini-3.8-flash",
+                vec![Err(blyte_provider::ProviderError::Api {
+                    status: 500,
+                    body: "boom".to_string(),
+                })],
+            );
+            blyte_cli::model_review::run_with_provider(root, id, base, wt, &prov)
+        },
+    )
     .unwrap();
     let checks4: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(repo.join(".wt/FB_FAIL.checks.json")).unwrap(),
+        &std::fs::read_to_string(repo.join(".wt/FB_CONFIRMED.checks.json")).unwrap(),
     )
     .unwrap();
     let flags4: Vec<&str> = checks4["flags"]

@@ -30,6 +30,29 @@ fn init_repo() -> tempfile::TempDir {
     t
 }
 
+fn blyte_output(cwd: &Path, args: &[&str]) -> std::process::Output {
+    let env_dir = tempfile::tempdir().unwrap();
+    Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(args)
+        .current_dir(cwd)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_ENV_FILE", "")
+        .env("BLYTE_STATE_DIR", env_dir.path().join("state"))
+        .env("BLYTE_GATE_SLOT_DIR", env_dir.path().join("slots"))
+        .env("HOME", env_dir.path().join("home"))
+        .env("XDG_CONFIG_HOME", env_dir.path().join("home/.config"))
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
+        .env_remove("OLLAMA_HOST")
+        .env_remove("BLYTE_MODEL")
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn test_clean_verdict_accepted_unmerged_kept() {
     let repo = init_repo();
@@ -67,11 +90,7 @@ fn test_clean_verdict_accepted_unmerged_kept() {
     // Also place an unrelated directory in .wt to verify it is left alone
     write_file(&wt_dir.join("other_dir/some_file"), "leave me\n");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -137,11 +156,7 @@ fn test_clean_cherry_picked_onto_main_deletes_branch() {
         &serde_json::json!({ "verdict": "accepted" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -213,11 +228,7 @@ fn test_clean_squash_merged_runs_removed_by_merge_tree_check() {
         &["commit", "-qm", "squash: s1 and s2", "--no-gpg-sign"],
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -283,11 +294,7 @@ fn test_clean_local_non_wip_branch_not_merged_kept() {
         &serde_json::json!({ "verdict": "accepted" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -345,11 +352,7 @@ fn test_clean_verdict_redone_removes_worktree_keeps_unmerged_branch() {
         &serde_json::json!({ "turns": 5 }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -401,11 +404,7 @@ fn test_clean_uncommitted_changes_kept() {
         &serde_json::json!({ "verdict": "redone" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -449,11 +448,7 @@ fn test_clean_no_verdict_recent_kept_older_than_zero_removed() {
     );
 
     // 1. blyte clean with default older-than (14 days) should keep it because it finished recently
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
@@ -464,11 +459,7 @@ fn test_clean_no_verdict_recent_kept_older_than_zero_removed() {
     assert!(wt_path.exists(), "worktree should still exist");
 
     // 2. blyte clean --older-than 0 should remove it but keep its branch
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--older-than", "0"])
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean", "--older-than", "0"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
@@ -514,11 +505,7 @@ fn test_clean_dry_run_changes_nothing() {
         &serde_json::json!({ "verdict": "redone" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["clean", "--dry-run"])
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean", "--dry-run"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
@@ -562,12 +549,7 @@ fn test_review_verdict_accepted_unmerged_worktree_kept() {
         &serde_json::json!({ "outcome": "verified" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["review", "T6", "--verdict", "accepted"])
-        .current_dir(root)
-        .env("BLYTE_NO_UPDATE_CHECK", "1")
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["review", "T6", "--verdict", "accepted"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "review failed: {stdout}");
@@ -620,12 +602,7 @@ fn test_review_verdict_redone_removes_worktree_keeps_branch() {
         &serde_json::json!({ "outcome": "verified" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["review", "T7", "--verdict", "redone"])
-        .current_dir(root)
-        .env("BLYTE_NO_UPDATE_CHECK", "1")
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["review", "T7", "--verdict", "redone"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "review failed: {stdout}");
@@ -684,12 +661,7 @@ fn test_review_verdict_accepted_merged_removes_worktree_deletes_branch() {
         &serde_json::json!({ "outcome": "verified" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args(["review", "T8", "--verdict", "accepted"])
-        .current_dir(root)
-        .env("BLYTE_NO_UPDATE_CHECK", "1")
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["review", "T8", "--verdict", "accepted"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "review failed: {stdout}");
@@ -738,11 +710,7 @@ fn test_clean_outcome_no_changes() {
         &serde_json::json!({ "outcome": "no_changes" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
@@ -769,11 +737,7 @@ fn test_clean_research_run() {
     );
     write_file(&wt_dir.join("R1.report.md"), "# Research Report\n");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
@@ -809,8 +773,9 @@ fn test_dispatch_cleans_quietly() {
     write_file(&root.join("task.md"), "implement something\n");
 
     // Run dispatch for D1 with a non-existent or failing gate, but verify OLD was cleaned
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args([
+    let out = blyte_output(
+        root,
+        &[
             "dispatch",
             "D1",
             "task.md",
@@ -818,20 +783,14 @@ fn test_dispatch_cleans_quietly() {
             "true",
             "--sandbox",
             "off",
-        ])
-        .current_dir(root)
-        .env("BLYTE_NO_UPDATE_CHECK", "1")
-        .env_remove("GEMINI_API_KEY")
-        .env_remove("GOOGLE_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .output()
-        .unwrap();
+            "--no-base-check",
+        ],
+    );
 
     let _ = out;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while wt_old.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(!wt_old.exists(), "old worktree should have been removed");
 }
@@ -870,11 +829,7 @@ fn test_clean_merged_on_origin_main_only() {
         &serde_json::json!({ "verdict": "accepted" }).to_string(),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
     assert!(
@@ -931,11 +886,7 @@ fn test_clean_squash_merged_run_lines_later_changed_on_main() {
         &["commit", "-qm", "main: edit code again", "--no-gpg-sign"],
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -1005,11 +956,7 @@ fn test_clean_unmerged_run_whose_files_main_later_changed_is_kept() {
         &["commit", "-qm", "main: change code", "--no-gpg-sign"],
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -1114,11 +1061,7 @@ fn test_clean_cherry_pick_record_squash_commit_blyte_clean_and_quiet() {
                 != main_tree
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");
@@ -1283,11 +1226,7 @@ fn test_clean_cherry_pick_record_partial_commits_not_merged() {
     git(root, &["add", "other.txt"]);
     git(root, &["commit", "-qm", &commit_msg, "--no-gpg-sign"]);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .arg("clean")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = blyte_output(root, &["clean"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "clean failed: {stdout}");

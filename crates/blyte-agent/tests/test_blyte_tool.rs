@@ -1,6 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use blyte_agent::fs::LocalFs;
@@ -12,16 +12,44 @@ use blyte_agent::tools::{
 use serde_json::json;
 
 static BLYTE_TOOL_LOCK: Mutex<()> = Mutex::new(());
+static DISPATCHER: OnceLock<(tempfile::TempDir, PathBuf, PathBuf)> = OnceLock::new();
+
+fn dispatcher() -> &'static (tempfile::TempDir, PathBuf, PathBuf) {
+    DISPATCHER.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("fake-blyte");
+        let body = dir.path().join("body.sh");
+        std::fs::write(&exe, format!("#!/bin/sh\n. '{}'\n", body.display())).unwrap();
+        let mut perms = std::fs::metadata(&exe).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exe, perms).unwrap();
+        (dir, exe, body)
+    })
+}
 
 struct BlyteToolGuard {
     _lock: MutexGuard<'static, ()>,
 }
 
 impl BlyteToolGuard {
-    fn acquire(exe: Option<PathBuf>) -> Self {
+    fn acquire_none() -> Self {
         let lock = BLYTE_TOOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_blyte_tool(exe);
+        set_blyte_tool(None);
         Self { _lock: lock }
+    }
+
+    fn acquire_script(body: &str) -> Self {
+        let lock = BLYTE_TOOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, exe, body_path) = dispatcher();
+        std::fs::write(body_path, body).unwrap();
+        set_blyte_tool(Some(exe.clone()));
+        Self { _lock: lock }
+    }
+
+    fn set_script(&self, body: &str) {
+        let (_, exe, body_path) = dispatcher();
+        std::fs::write(body_path, body).unwrap();
+        set_blyte_tool(Some(exe.clone()));
     }
 }
 
@@ -31,27 +59,16 @@ impl Drop for BlyteToolGuard {
     }
 }
 
-fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
-}
-
 #[test]
 fn specs_offers_blyte_tool_only_when_set() {
     {
-        let _g = BlyteToolGuard::acquire(None);
+        let _g = BlyteToolGuard::acquire_none();
         let all = specs();
         assert!(!all.iter().any(|t| t.name == "blyte"));
     }
 
     {
-        let dir = tempfile::tempdir().unwrap();
-        let script = write_script(dir.path(), "fake-blyte", "#!/bin/sh\nexit 0\n");
-        let _g = BlyteToolGuard::acquire(Some(script));
+        let _g = BlyteToolGuard::acquire_script("exit 0\n");
         let all = specs();
         let spec = all.iter().find(|t| t.name == "blyte").unwrap();
         let props = spec.parameters["properties"].as_object().unwrap();
@@ -79,13 +96,9 @@ fn specs_offers_blyte_tool_only_when_set() {
 #[test]
 fn runs_allowed_command_with_args_cwd_and_parent_env() {
     let root = tempfile::tempdir().unwrap();
-    let scripts = tempfile::tempdir().unwrap();
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        "#!/bin/sh\nprintf 'args=%s\\n' \"$*\"\nprintf 'cwd=%s\\n' \"$(pwd)\"\nprintf 'parent=%s\\n' \"$BLYTE_DISPATCH_PARENT\"\n",
+    let _g = BlyteToolGuard::acquire_script(
+        "printf 'args=%s\\n' \"$*\"\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'parent=%s\\n' \"$BLYTE_DISPATCH_PARENT\"\n",
     );
-    let _g = BlyteToolGuard::acquire(Some(script));
 
     let out = execute(
         root.path(),
@@ -125,12 +138,7 @@ fn rejects_empty_or_disallowed_commands_without_running_executable() {
     let root = tempfile::tempdir().unwrap();
     let scripts = tempfile::tempdir().unwrap();
     let marker = scripts.path().join("ran");
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-    );
-    let _g = BlyteToolGuard::acquire(Some(script));
+    let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", marker.display()));
 
     let expected_err =
         "the blyte tool runs only: dispatch, wait, status, review, plan, init, clean, edit-start, edit-finish";
@@ -156,13 +164,13 @@ fn rejects_empty_or_disallowed_commands_without_running_executable() {
 fn background_rules_and_async_dispatch() {
     let root = tempfile::tempdir().unwrap();
     let scripts = tempfile::tempdir().unwrap();
+    let gate = scripts.path().join("go");
     let marker = scripts.path().join("done");
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        &format!("#!/bin/sh\nsleep 2\ntouch '{}'\n", marker.display()),
-    );
-    let _g = BlyteToolGuard::acquire(Some(script));
+    let _g = BlyteToolGuard::acquire_script(&format!(
+        "until [ -f '{}' ]; do sleep 0.01; done\n: > '{}'\n",
+        gate.display(),
+        marker.display()
+    ));
 
     let non_dispatch = execute(
         root.path(),
@@ -207,9 +215,10 @@ fn background_rules_and_async_dispatch() {
     );
     assert!(!marker.exists(), "marker appeared too early");
 
+    std::fs::write(&gate, "").unwrap();
     let wait_until = Instant::now() + Duration::from_secs(5);
     while !marker.exists() && Instant::now() < wait_until {
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(5));
     }
     assert!(marker.exists(), "background script never created marker");
 }
@@ -217,13 +226,7 @@ fn background_rules_and_async_dispatch() {
 #[test]
 fn nonzero_exit_returns_error_with_stderr_text() {
     let root = tempfile::tempdir().unwrap();
-    let scripts = tempfile::tempdir().unwrap();
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        "#!/bin/sh\necho 'something went wrong on stderr' >&2\nexit 3\n",
-    );
-    let _g = BlyteToolGuard::acquire(Some(script));
+    let _g = BlyteToolGuard::acquire_script("echo 'something went wrong on stderr' >&2\nexit 3\n");
 
     let out = execute(
         root.path(),
@@ -248,13 +251,7 @@ fn nonzero_exit_returns_error_with_stderr_text() {
 #[test]
 fn wait_exit_2_is_still_waiting_not_error() {
     let root = tempfile::tempdir().unwrap();
-    let scripts = tempfile::tempdir().unwrap();
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        "#!/bin/sh\necho 'still running: IS1' >&2\nexit 2\n",
-    );
-    let _g = BlyteToolGuard::acquire(Some(script));
+    let _g = BlyteToolGuard::acquire_script("echo 'still running: IS1' >&2\nexit 2\n");
 
     let out = execute(
         root.path(),
@@ -275,13 +272,9 @@ fn wait_exit_2_is_still_waiting_not_error() {
 #[test]
 fn wait_exit_1_and_non_wait_exit_2_remain_errors() {
     let root = tempfile::tempdir().unwrap();
-    let scripts = tempfile::tempdir().unwrap();
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        "#!/bin/sh\nif [ \"$1\" = \"wait\" ]; then echo 'no dispatch IS1 here' >&2; exit 1; fi\nexit 2\n",
+    let _g = BlyteToolGuard::acquire_script(
+        "if [ \"$1\" = \"wait\" ]; then echo 'no dispatch IS1 here' >&2; exit 1; fi\nexit 2\n",
     );
-    let _g = BlyteToolGuard::acquire(Some(script));
 
     let wait_err = execute(
         root.path(),
@@ -315,18 +308,10 @@ impl Drop for RequestReset {
 #[test]
 fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
     let root = tempfile::tempdir().unwrap();
-    let scripts = tempfile::tempdir().unwrap();
     let bg_log = root.path().join("bg.args");
+    let bg_tmp = root.path().join("bg.args.tmp");
     let refused_marker = root.path().join("refused.ran");
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        &format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\nprintf '%s\\n' \"$@\" > '{}'\n",
-            bg_log.display()
-        ),
-    );
-    let _g = BlyteToolGuard::acquire(Some(script));
+    let g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _reset = RequestReset;
 
     set_blyte_request(Some("r1700000000-1".to_string()));
@@ -379,6 +364,12 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
     assert_eq!(status_lines, vec!["status", "T1"]);
 
     let _ = std::fs::remove_file(&bg_log);
+    g.set_script(&format!(
+        "printf '%s\\n' \"$@\" > '{}' && mv '{}' '{}'\n",
+        bg_tmp.display(),
+        bg_tmp.display(),
+        bg_log.display()
+    ));
     let bg = execute(
         root.path(),
         &LocalShell,
@@ -395,7 +386,7 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
             }
         }
         assert!(Instant::now() < deadline, "background script did not run");
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(5));
     };
     let bg_lines: Vec<&str> = bg_args.lines().collect();
     assert_eq!(
@@ -403,12 +394,7 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
         vec!["dispatch", "T2", "t.md", "--request", "r1700000000-1"]
     );
 
-    let touch_script = write_script(
-        scripts.path(),
-        "fake-blyte-refuse",
-        &format!("#!/bin/sh\ntouch '{}'\n", refused_marker.display()),
-    );
-    set_blyte_tool(Some(touch_script));
+    g.set_script(&format!(": > '{}'\n", refused_marker.display()));
 
     for bad_args in [
         json!({"args": ["dispatch", "T3", "t.md", "--request", "spoofed"]}),
@@ -437,12 +423,7 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
     assert!(refused_no_req.is_error);
     assert!(!refused_marker.exists());
 
-    let echo_script = write_script(
-        scripts.path(),
-        "fake-blyte-echo",
-        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
-    );
-    set_blyte_tool(Some(echo_script));
+    g.set_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let no_req = execute(
         root.path(),
         &LocalShell,
@@ -458,13 +439,7 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
 #[test]
 fn edit_start_and_edit_finish_are_accepted_and_request_injected_on_finish() {
     let root = tempfile::tempdir().unwrap();
-    let scripts = tempfile::tempdir().unwrap();
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
-    );
-    let _g = BlyteToolGuard::acquire(Some(script));
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _reset = RequestReset;
 
     set_blyte_request(Some("r1700000000-42".to_string()));
@@ -546,13 +521,7 @@ fn blyte_command_timeout_gives_edit_finish_3600s_and_others_300s() {
 #[test]
 fn blyte_tool_passes_edit_finish_message_with_spaces_and_quotes_intact() {
     let root = tempfile::tempdir().unwrap();
-    let scripts = tempfile::tempdir().unwrap();
-    let script = write_script(
-        scripts.path(),
-        "fake-blyte",
-        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
-    );
-    let _g = BlyteToolGuard::acquire(Some(script));
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _reset = RequestReset;
 
     let msg = "fix: handle \"quoted\" y";
