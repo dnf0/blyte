@@ -137,7 +137,16 @@ pub fn withheld_env() -> Vec<String> {
     withheld
 }
 
+pub const MODEL_SHELL_ENV: &str = "BLYTE_MODEL_SHELL";
+
+pub fn model_shell_refusal_message(command: &str) -> String {
+    format!(
+        "error: blyte {command} writes a record only the user or the harness may write, and cannot be run from a model's shell"
+    )
+}
+
 fn scrub_harness(cmd: &mut Command) {
+    cmd.env_remove(MODEL_SHELL_ENV);
     for name in HARNESS_ENV {
         cmd.env_remove(name);
     }
@@ -530,12 +539,19 @@ impl Shell for LocalShell {
         exec_command(cmd, timeout)
     }
 
+    fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let mut cmd = self.build_command(command, cwd)?;
+        cmd.env(MODEL_SHELL_ENV, "1");
+        exec_command(cmd, timeout)
+    }
+
     fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
         let full_command = inherited_path_prefix() + command;
         let mut cmd = Command::new("bash");
         cmd.arg("-lc").arg(&full_command);
         cmd.current_dir(cwd);
         scrub_harness(&mut cmd);
+        cmd.env(MODEL_SHELL_ENV, "1");
         exec_command(cmd, timeout)
     }
 
@@ -557,6 +573,22 @@ impl Shell for CancellableLocalShell {
         exec_command_cancellable(cmd, timeout, Some(&self.cancel))
     }
 
+    fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let mut cmd = self.inner.build_command(command, cwd)?;
+        cmd.env(MODEL_SHELL_ENV, "1");
+        exec_command_cancellable(cmd, timeout, Some(&self.cancel))
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let full_command = inherited_path_prefix() + command;
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc").arg(&full_command);
+        cmd.current_dir(cwd);
+        scrub_harness(&mut cmd);
+        cmd.env(MODEL_SHELL_ENV, "1");
+        exec_command_cancellable(cmd, timeout, Some(&self.cancel))
+    }
+
     fn describe(&self) -> String {
         self.inner.describe()
     }
@@ -574,9 +606,13 @@ pub struct ContainerShell {
 }
 
 impl ContainerShell {
-    fn build_command(&self, command: &str) -> Command {
+    fn build_command(&self, command: &str, model_shell: bool) -> Command {
         let mut cmd = Command::new("docker");
-        cmd.args(["exec", "-i", "-w"])
+        cmd.args(["exec", "-i"]);
+        if model_shell {
+            cmd.args(["-e", "BLYTE_MODEL_SHELL=1"]);
+        }
+        cmd.arg("-w")
             .arg(&self.workdir)
             .arg(&self.container_id)
             .args(["bash", "-lc", command]);
@@ -586,7 +622,11 @@ impl ContainerShell {
 
 impl Shell for ContainerShell {
     fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        exec_command(self.build_command(command), timeout)
+        exec_command(self.build_command(command, false), timeout)
+    }
+
+    fn exec_user(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        exec_command(self.build_command(command, true), timeout)
     }
 
     fn describe(&self) -> String {
@@ -608,7 +648,15 @@ pub struct CancellableContainerShell {
 impl Shell for CancellableContainerShell {
     fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
         exec_command_cancellable(
-            self.inner.build_command(command),
+            self.inner.build_command(command, false),
+            timeout,
+            Some(&self.cancel),
+        )
+    }
+
+    fn exec_user(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        exec_command_cancellable(
+            self.inner.build_command(command, true),
             timeout,
             Some(&self.cancel),
         )
@@ -648,7 +696,7 @@ pub enum Launcher {
 }
 
 impl Launcher {
-    fn command(&self) -> std::io::Result<Command> {
+    fn command(&self, model_shell: bool) -> std::io::Result<Command> {
         match self {
             Launcher::Local { root, profile } => {
                 let mut c = match profile {
@@ -725,6 +773,9 @@ impl Launcher {
                 };
                 c.current_dir(root);
                 scrub(&mut c);
+                if model_shell {
+                    c.env(MODEL_SHELL_ENV, "1");
+                }
                 Ok(c)
             }
             Launcher::Container {
@@ -732,7 +783,11 @@ impl Launcher {
                 workdir,
             } => {
                 let mut c = Command::new("docker");
-                c.args(["exec", "-i", "-w"])
+                c.args(["exec", "-i"]);
+                if model_shell {
+                    c.args(["-e", "BLYTE_MODEL_SHELL=1"]);
+                }
+                c.arg("-w")
                     .arg(workdir)
                     .arg(container_id)
                     .args(["bash", "-l"]);
@@ -807,8 +862,12 @@ enum ReadErr {
 
 impl Session {
     pub fn start(launcher: &Launcher) -> Result<Session, String> {
+        Self::start_with_marker(launcher, false)
+    }
+
+    fn start_with_marker(launcher: &Launcher, model_shell: bool) -> Result<Session, String> {
         let mut cmd = launcher
-            .command()
+            .command(model_shell)
             .map_err(|e| format!("cannot start a shell session: {e}"))?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1069,13 +1128,14 @@ impl PersistentShell {
     fn run(
         &self,
         slot: &Mutex<Option<Session>>,
+        model_shell: bool,
         command: &str,
         cwd: Option<&Path>,
         timeout: Duration,
     ) -> Option<Result<Output, String>> {
         let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
         if g.is_none() {
-            *g = Session::start(&self.launcher).ok();
+            *g = Session::start_with_marker(&self.launcher, model_shell).ok();
         }
         let session = g.as_mut()?;
         let (out, err, note, code) = match session.run(command, cwd, timeout) {
@@ -1119,13 +1179,13 @@ impl PersistentShell {
 
 impl Shell for PersistentShell {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        self.run(&self.harness, command, Some(cwd), timeout)
+        self.run(&self.harness, false, command, Some(cwd), timeout)
             .unwrap_or_else(|| self.fallback.exec(command, cwd, timeout))
     }
 
     fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        self.run(&self.user, command, None, timeout)
-            .unwrap_or_else(|| self.fallback.exec(command, cwd, timeout))
+        self.run(&self.user, true, command, None, timeout)
+            .unwrap_or_else(|| self.fallback.exec_user(command, cwd, timeout))
     }
 
     fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {

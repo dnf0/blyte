@@ -35,6 +35,38 @@ pub struct WriteScope {
     pub edit_worktrees: Option<PathBuf>,
 }
 
+fn refused_blyte_tool_command(args: &[String]) -> Option<&'static str> {
+    let first = args.first().map(|s| s.as_str())?;
+    if first == "combine" {
+        return Some("combine");
+    }
+    if first == "review" {
+        let mut iter = args[1..].iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--" {
+                break;
+            }
+            if arg == "--model-review" {
+                return Some("review --model-review");
+            }
+            let verdict_val = if arg == "--verdict" {
+                iter.next().map(|s| s.as_str())
+            } else {
+                arg.strip_prefix("--verdict=")
+            };
+            if let Some(val) = verdict_val {
+                if val.eq_ignore_ascii_case("accepted") {
+                    return Some("review --verdict accepted");
+                }
+                if val.eq_ignore_ascii_case("fixed") {
+                    return Some("review --verdict fixed");
+                }
+            }
+        }
+    }
+    None
+}
+
 pub const BLYTE_TOOL_COMMANDS: [&str; 9] = [
     "dispatch",
     "wait",
@@ -1307,6 +1339,9 @@ fn execute_unbounded(
                     BLYTE_TOOL_COMMANDS.join(", ")
                 ));
             };
+            if let Some(refused) = refused_blyte_tool_command(&cmd_args) {
+                return ToolOutcome::err(crate::shell::model_shell_refusal_message(refused));
+            }
             if !BLYTE_TOOL_COMMANDS.contains(&first) {
                 return ToolOutcome::err(format!(
                     "the blyte tool runs only: {}",
@@ -1346,6 +1381,7 @@ fn execute_unbounded(
             cmd_builder
                 .args(&exec_args)
                 .env("BLYTE_DISPATCH_PARENT", &parent_session)
+                .env_remove(crate::shell::MODEL_SHELL_ENV)
                 .stdin(std::process::Stdio::null());
             if root.is_dir() {
                 cmd_builder.current_dir(root);

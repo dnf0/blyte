@@ -666,3 +666,78 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
     blyte_agent::tools::set_write_scope(None);
     blyte_agent::tools::set_approval(None);
 }
+
+#[test]
+fn sandboxed_shell_cannot_write_the_usage_ledger_directory() {
+    if !sandbox::available() {
+        return;
+    }
+
+    let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(tmp_base).unwrap();
+    let home = tempfile::tempdir_in(tmp_base).unwrap();
+    let xdg = tempfile::tempdir_in(tmp_base).unwrap();
+    let repo = tempfile::tempdir_in(tmp_base).unwrap();
+
+    let blyte_state = home.path().join(".local").join("state").join("blyte");
+    let local_bin = home.path().join(".local").join("bin");
+    std::fs::create_dir_all(&blyte_state).unwrap();
+    std::fs::create_dir_all(&local_bin).unwrap();
+
+    let _env = EnvGuard::set(xdg.path(), home.path());
+    struct XdgStateGuard(Option<OsString>);
+    impl Drop for XdgStateGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
+    let _xdg_state = XdgStateGuard(std::env::var_os("XDG_STATE_HOME"));
+    std::env::remove_var("XDG_STATE_HOME");
+
+    for profile in [
+        sandbox::orchestrator_profile(repo.path(), &[]),
+        sandbox::default_profile(repo.path(), &[]),
+    ] {
+        let sh = blyte_agent::shell::LocalShell::sandboxed(profile);
+
+        let bin_target = local_bin.join("x");
+        let _ = std::fs::remove_file(&bin_target);
+        let allowed = sh
+            .exec_user(
+                &format!("echo ok > '{}'", bin_target.display()),
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        if allowed.exit_code == 71 && allowed.merged().contains("Operation not permitted") {
+            return;
+        }
+        assert_eq!(
+            allowed.exit_code,
+            0,
+            "write to .local/bin should succeed: {}",
+            allowed.merged()
+        );
+        assert!(bin_target.exists());
+
+        let ledger_target = blyte_state.join("x");
+        let _ = std::fs::remove_file(&ledger_target);
+        let denied = sh
+            .exec_user(
+                &format!("echo no > '{}'", ledger_target.display()),
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(
+            denied.exit_code,
+            0,
+            "write to .local/state/blyte should fail: {}",
+            denied.merged()
+        );
+        assert!(!ledger_target.exists());
+    }
+}

@@ -246,6 +246,78 @@ pub fn profile_with(
     out
 }
 
+fn push_home_local_grants(home_path: &Path, allowed: &mut Vec<PathBuf>) {
+    #[cfg(target_os = "macos")]
+    {
+        allowed.push(home_path.join(".local"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let local_dir = home_path.join(".local");
+        if let Ok(entries) = std::fs::read_dir(&local_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name() != std::ffi::OsStr::new("state") {
+                    allowed.push(entry.path());
+                }
+            }
+        }
+        let state_dir = local_dir.join("state");
+        if let Ok(entries) = std::fs::read_dir(&state_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name() != std::ffi::OsStr::new("blyte") {
+                    allowed.push(entry.path());
+                }
+            }
+        }
+    }
+}
+
+/// Returns the blyte state directory (`$XDG_STATE_HOME/blyte` when set, else `$HOME/.local/state/blyte`).
+pub fn state_blyte_dir() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("blyte"));
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".local").join("state").join("blyte"))
+}
+
+#[cfg(target_os = "macos")]
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    if let Ok(canon) = path.canonicalize() {
+        return canon;
+    }
+    let mut tail = Vec::new();
+    let mut cur = path;
+    while let Some(name) = cur.file_name() {
+        tail.push(name.to_os_string());
+        match cur.parent() {
+            Some(parent) => {
+                cur = parent;
+                if let Ok(mut canon) = cur.canonicalize() {
+                    for part in tail.into_iter().rev() {
+                        canon.push(part);
+                    }
+                    return canon;
+                }
+            }
+            None => break,
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(target_os = "macos")]
+fn deny_state_blyte_write(mut profile: String) -> String {
+    if let Some(dir) = state_blyte_dir() {
+        let escaped = escape_path(&canonicalize_existing_prefix(&dir));
+        profile.push_str(&format!(r#"(deny file-write* (subpath "{escaped}"))"#));
+    }
+    profile
+}
+
 /// Computes the default list of write-allowed paths for a local workspace run.
 ///
 /// Includes the workspace root, the git common directory (if in a git repo), system temp dirs,
@@ -302,7 +374,6 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
                 ".rustup",
                 ".cache",
                 ".npm",
-                ".local",
                 "Library/Caches",
                 ".gradle",
                 ".m2",
@@ -311,6 +382,7 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
             ] {
                 allowed.push(home_path.join(sub));
             }
+            push_home_local_grants(&home_path, &mut allowed);
         }
     }
 
@@ -411,7 +483,6 @@ pub fn orchestrator_allowed(root: &Path) -> Vec<PathBuf> {
                 ".rustup",
                 ".cache",
                 ".npm",
-                ".local",
                 "Library/Caches",
                 ".gradle",
                 ".m2",
@@ -420,6 +491,7 @@ pub fn orchestrator_allowed(root: &Path) -> Vec<PathBuf> {
             ] {
                 allowed.push(home_path.join(sub));
             }
+            push_home_local_grants(&home_path, &mut allowed);
         }
     }
 
@@ -439,7 +511,12 @@ pub fn orchestrator_profile_net(root: &Path, allow_read: &[PathBuf], network: bo
             Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
             _ => Vec::new(),
         };
-        let base = profile_with(root, &orchestrator_allowed(root), &deny_read, allow_read);
+        let base = deny_state_blyte_write(profile_with(
+            root,
+            &orchestrator_allowed(root),
+            &deny_read,
+            allow_read,
+        ));
         if network {
             Profile::Seatbelt(base)
         } else {
@@ -522,12 +599,12 @@ pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
             Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
             _ => Vec::new(),
         };
-        Profile::Seatbelt(profile_with(
+        Profile::Seatbelt(deny_state_blyte_write(profile_with(
             root,
             &default_allowed(root),
             &deny_read,
             allow_read,
-        ))
+        )))
     }
     #[cfg(not(target_os = "macos"))]
     {
