@@ -1,3 +1,9 @@
+## v0.61.0 (2026-11-24)
+
+### Feat
+
+- **surface**: combine when a run finishes, mark gaps in saved entries, show why a check failed (#414)
+
 ## v0.60.0 (2026-11-24)
 
 ### Feat
