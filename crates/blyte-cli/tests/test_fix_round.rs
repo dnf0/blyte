@@ -425,7 +425,7 @@ fn unit_task_text_and_should_run_and_config() {
         },
     ];
     let original = "Add region and timeout support in `src/app.rs` and `src/net.rs`.";
-    let text = blyte_cli::fix_round::task_text(original, &fallbacks);
+    let text = blyte_cli::fix_round::task_text(original, &fallbacks, &[]);
 
     assert!(
         text.contains(blyte_cli::fix_round::COMMIT_MESSAGE),
@@ -1230,4 +1230,337 @@ fn done_fixround_never_runs_a_second_round() {
     assert_eq!(server.implementer_starts.load(Ordering::SeqCst), 1);
     assert_eq!(server.review_calls.load(Ordering::SeqCst), 1);
     assert!(summary.get("fix_round").is_none(), "{summary}");
+}
+
+#[test]
+fn should_run_is_true_for_a_review_with_only_concerns() {
+    let review = blyte_cli::model_review::ModelReviewResult::ok(
+        "gemini/gemini-3.8-flash".to_string(),
+        Some(0.01),
+        vec![blyte_cli::model_review::Concern {
+            file: "src/app.rs".to_string(),
+            line: Some(10),
+            severity: "high".to_string(),
+            text: "does not validate input".to_string(),
+        }],
+    );
+
+    assert!(blyte_cli::fix_round::should_run(
+        false,
+        "verified",
+        true,
+        Some(&review)
+    ));
+    assert!(!blyte_cli::fix_round::should_run(
+        false,
+        "verified",
+        false,
+        Some(&review)
+    ));
+    assert!(!blyte_cli::fix_round::should_run(
+        true,
+        "verified",
+        true,
+        Some(&review)
+    ));
+    assert!(!blyte_cli::fix_round::should_run(
+        false,
+        "gate_failed",
+        true,
+        Some(&review)
+    ));
+}
+
+#[test]
+fn task_text_lists_concerns_alone() {
+    let concerns = vec![
+        blyte_cli::model_review::Concern {
+            file: "src/app.rs".to_string(),
+            line: Some(12),
+            severity: "high".to_string(),
+            text: "panics on empty input".to_string(),
+        },
+        blyte_cli::model_review::Concern {
+            file: "src/net.rs".to_string(),
+            line: None,
+            severity: "medium".to_string(),
+            text: "missing timeout test".to_string(),
+        },
+    ];
+    let original = "Add input handling in `src/app.rs` and `src/net.rs`.";
+    let text = blyte_cli::fix_round::task_text(original, &[], &concerns);
+
+    let expected_preamble = "\
+This work passed its check, and a review raised the concerns listed below.\n\
+For each one, change the code or the tests so that the concern no longer holds.\n\
+If a listed concern is wrong, leave the code as it is and say why in the final message.\n\
+Change nothing else.\n\
+Commit with the message `fix: address the review's concerns`.\n\n";
+    assert!(text.starts_with(expected_preamble), "{text}");
+    assert!(
+        text.contains(blyte_cli::fix_round::CONCERNS_COMMIT_MESSAGE),
+        "{text}"
+    );
+    let line1 = "[high] src/app.rs:12 panics on empty input";
+    let line2 = "[medium] src/net.rs missing timeout test";
+    let idx1 = text.find(line1).expect("missing first concern line");
+    let idx2 = text.find(line2).expect("missing second concern line");
+    assert!(idx1 < idx2, "{text}");
+    let heading = "## Original task (for context; already done)";
+    let heading_idx = text.find(heading).expect("missing original task heading");
+    let orig_idx = text.find(original).expect("missing original task text");
+    assert!(idx2 < heading_idx && heading_idx < orig_idx, "{text}");
+    assert!(!text.to_ascii_lowercase().contains("fallback"), "{text}");
+}
+
+#[test]
+fn task_text_lists_fallbacks_then_concerns() {
+    let fallbacks = vec![blyte_cli::fix_round::ConfirmedFallback {
+        file: "src/app.rs".to_string(),
+        line: 12,
+        text: "let region = cfg.region.unwrap_or(\"us\");".to_string(),
+        reason: "Substitutes a hardcoded default region when missing.".to_string(),
+    }];
+    let concerns = vec![blyte_cli::model_review::Concern {
+        file: "src/net.rs".to_string(),
+        line: Some(44),
+        severity: "high".to_string(),
+        text: "closes socket before flushing".to_string(),
+    }];
+    let original = "Update `src/app.rs` and `src/net.rs`.";
+    let text = blyte_cli::fix_round::task_text(original, &fallbacks, &concerns);
+
+    let fb_idx = text
+        .find("src/app.rs:12 let region = cfg.region.unwrap_or(\"us\");")
+        .expect("missing fallback line");
+    let transition_idx = text
+        .find("The review also raised these concerns. For each one, change the code or the tests so that the concern no longer holds; if one is wrong, leave the code as it is and say why in the final message.")
+        .expect("missing concerns transition line");
+    let concern_idx = text
+        .find("[high] src/net.rs:44 closes socket before flushing")
+        .expect("missing concern line");
+    assert!(
+        fb_idx < transition_idx && transition_idx < concern_idx,
+        "{text}"
+    );
+    assert!(
+        text.contains(blyte_cli::fix_round::CONCERNS_COMMIT_MESSAGE),
+        "{text}"
+    );
+    assert!(
+        !text.contains(blyte_cli::fix_round::COMMIT_MESSAGE),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_old_fixround_record_loads_without_concerns() {
+    let d = tempfile::tempdir().unwrap();
+    let started_path = d.path().join("started.fixround.json");
+    std::fs::write(
+        &started_path,
+        serde_json::json!({
+            "state": "started",
+            "pre_round_sha": "abc123",
+            "fallbacks_sent": [],
+            "started_at": 1700000000u64,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let started = blyte_cli::fix_round::load_record(&started_path)
+        .unwrap()
+        .unwrap();
+    match started {
+        blyte_cli::fix_round::FixRoundRecord::Started { concerns_sent, .. } => {
+            assert!(concerns_sent.is_empty());
+        }
+        other => panic!("expected Started, got {other:?}"),
+    }
+
+    let done_path = d.path().join("done.fixround.json");
+    std::fs::write(
+        &done_path,
+        serde_json::json!({
+            "state": "done",
+            "pre_round_sha": "abc123",
+            "fallbacks_sent": [],
+            "started_at": 1700000000u64,
+            "outcome": "verified",
+            "turns": 1,
+            "cost_usd": 0.01,
+            "seconds": 2,
+            "commits": [],
+            "fallbacks_left": 0,
+            "kept": true,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let done = blyte_cli::fix_round::load_record(&done_path)
+        .unwrap()
+        .unwrap();
+    match done {
+        blyte_cli::fix_round::FixRoundRecord::Done {
+            concerns_sent,
+            summary,
+            ..
+        } => {
+            assert!(concerns_sent.is_empty());
+            assert_eq!(summary.concerns_left, None);
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_review_with_only_concerns_starts_a_fix_round() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    let home = d.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    init_repo(
+        &repo,
+        Some("[dispatch]\ngate = \"true\"\n\n[review]\nrisky = [\"src/**\"]\n"),
+    );
+
+    let task = d.path().join("task.md");
+    std::fs::write(&task, "Update `src/app.rs` to greet the caller.\n").unwrap();
+
+    let first_review = serde_json::json!({
+        "concerns": [{
+            "file": "src/app.rs",
+            "line": 1,
+            "severity": "high",
+            "text": "returns hardcoded greeting instead of caller name"
+        }],
+        "fallbacks": []
+    })
+    .to_string();
+    let second_review = serde_json::json!({
+        "concerns": [],
+        "fallbacks": []
+    })
+    .to_string();
+
+    let server = MockServer::start(
+        vec![
+            ImplementerPass::RunBashThenDone {
+                bash_command: "printf 'pub fn greet(_name: &str) -> &\\x27static str { \"hello\" }\\n' > src/app.rs && git commit -am 'feat: greet'".to_string(),
+                final_message: "pass 1 done".to_string(),
+            },
+            ImplementerPass::RunBashThenDone {
+                bash_command: "printf 'pub fn greet(name: &str) -> String { format!(\"hello {name}\") }\\n' > src/app.rs && git commit -am \"fix: address the review's concerns\"".to_string(),
+                final_message: "addressed concern".to_string(),
+            },
+        ],
+        vec![first_review, second_review],
+    );
+
+    let summary = run_dispatch_ok(&repo, &home, &task, "CONC1", "true", server.port);
+    assert_eq!(summary["outcome"].as_str(), Some("verified"));
+    assert_eq!(server.implementer_starts.load(Ordering::SeqCst), 2);
+    assert_eq!(server.review_calls.load(Ordering::SeqCst), 2);
+
+    let prompts = server.implementer_prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts[1]
+            .contains("[high] src/app.rs:1 returns hardcoded greeting instead of caller name"),
+        "{}",
+        prompts[1]
+    );
+    assert!(
+        prompts[1].contains(blyte_cli::fix_round::CONCERNS_COMMIT_MESSAGE),
+        "{}",
+        prompts[1]
+    );
+
+    let fr = &summary["fix_round"];
+    assert_eq!(fr["kept"].as_bool(), Some(true), "{summary}");
+    assert_eq!(fr["concerns_left"].as_u64(), Some(0), "{summary}");
+
+    let fixround_rec: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join(".wt/CONC1.fixround.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fixround_rec["state"].as_str(), Some("done"));
+    let concerns_sent = fixround_rec["concerns_sent"].as_array().unwrap();
+    assert_eq!(concerns_sent.len(), 1, "{fixround_rec}");
+    assert_eq!(concerns_sent[0]["file"].as_str(), Some("src/app.rs"));
+    assert_eq!(concerns_sent[0]["line"].as_u64(), Some(1));
+    assert_eq!(concerns_sent[0]["severity"].as_str(), Some("high"));
+    assert_eq!(
+        concerns_sent[0]["text"].as_str(),
+        Some("returns hardcoded greeting instead of caller name")
+    );
+}
+
+#[test]
+fn a_commit_with_the_concerns_message_is_not_flagged() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    let home = d.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    init_repo(
+        &repo,
+        Some("[dispatch]\ngate = \"true\"\n\n[review]\nrisky = [\"src/**\"]\n"),
+    );
+
+    let task = d.path().join("task.md");
+    std::fs::write(
+        &task,
+        "Update `src/app.rs` to greet the caller.\n\nCommit message: `feat: greet caller`\n",
+    )
+    .unwrap();
+
+    let first_review = serde_json::json!({
+        "concerns": [{
+            "file": "src/app.rs",
+            "line": 1,
+            "severity": "high",
+            "text": "returns hardcoded greeting instead of caller name"
+        }],
+        "fallbacks": []
+    })
+    .to_string();
+    let second_review = serde_json::json!({
+        "concerns": [],
+        "fallbacks": []
+    })
+    .to_string();
+
+    let server = MockServer::start(
+        vec![
+            ImplementerPass::RunBashThenDone {
+                bash_command: "printf 'pub fn greet(_name: &str) -> &\\x27static str { \"hello\" }\\n' > src/app.rs && git commit -am 'feat: greet caller'".to_string(),
+                final_message: "pass 1 done".to_string(),
+            },
+            ImplementerPass::RunBashThenDone {
+                bash_command: "printf 'pub fn greet(name: &str) -> String { format!(\"hello {name}\") }\\n' > src/app.rs && git commit -am \"fix: address the review's concerns\"".to_string(),
+                final_message: "addressed concern".to_string(),
+            },
+        ],
+        vec![first_review, second_review],
+    );
+
+    let summary = run_dispatch_ok(&repo, &home, &task, "CONC2", "true", server.port);
+    assert_eq!(summary["outcome"].as_str(), Some("verified"));
+    assert_eq!(summary["fix_round"]["kept"].as_bool(), Some(true));
+
+    let checks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(repo.join(".wt/CONC2.checks.json")).unwrap())
+            .unwrap();
+    let flags: Vec<&str> = checks["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !flags
+            .iter()
+            .any(|f| f.contains("commit message not in the task")),
+        "{flags:?}"
+    );
 }

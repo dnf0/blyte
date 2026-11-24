@@ -855,10 +855,7 @@ pub fn run_edit_finish_in(
             return 2;
         }
     };
-    let needs_fix_round = crate::fix_round::should_run(false, "verified", true, review.as_ref())
-        || review
-            .as_ref()
-            .is_some_and(crate::model_review::ModelReviewResult::has_findings);
+    let needs_fix_round = crate::fix_round::should_run(false, "verified", true, review.as_ref());
     if existing_fixround.is_none() && needs_fix_round {
         let mr = review.as_ref().unwrap();
         let pre_round_sha = match git_head_sha(&worktree_dir) {
@@ -879,6 +876,7 @@ pub fn run_edit_finish_in(
         } else {
             Vec::new()
         };
+        let concerns_sent = mr.concerns.clone();
         let started_at = match now_secs() {
             Ok(ts) => ts,
             Err(e) => {
@@ -889,6 +887,7 @@ pub fn run_edit_finish_in(
         let started_record = crate::fix_round::FixRoundRecord::Started {
             pre_round_sha,
             fallbacks_sent,
+            concerns_sent,
             started_at,
         };
         if let Err(e) = crate::fix_round::write_record(&fixround_path, &started_record) {

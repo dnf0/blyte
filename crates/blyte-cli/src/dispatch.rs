@@ -752,10 +752,11 @@ fn execute_fix_round(
     original_task: &str,
     pre_round_sha: String,
     fallbacks_sent: Vec<crate::fix_round::ConfirmedFallback>,
+    concerns_sent: Vec<crate::model_review::Concern>,
     round_started_at: u64,
     warnings: &mut Vec<String>,
 ) -> Result<(crate::fix_round::FixRoundSummary, PassReport), String> {
-    let round_task = crate::fix_round::task_text(original_task, &fallbacks_sent);
+    let round_task = crate::fix_round::task_text(original_task, &fallbacks_sent, &concerns_sent);
     let mut round_prompt = wrap_task(&round_task);
     if let Some(qs) = quick_steps(impl_cfg.gate) {
         round_prompt.push_str("\n\n");
@@ -787,7 +788,7 @@ fn execute_fix_round(
     };
     let round_commits = git_commits_since(impl_cfg.worktree_dir, &pre_round_sha);
 
-    let (kept, round_outcome, done_commits, fallbacks_left) =
+    let (kept, round_outcome, done_commits, fallbacks_left, concerns_left) =
         if round_report.report_outcome == "verified" && !round_commits.is_empty() {
             let second_review = match crate::queue_actions::evaluate_verified_run(root, impl_cfg.id)
             {
@@ -815,8 +816,9 @@ fn execute_fix_round(
             }
             warnings.extend(round_warnings);
             let left = crate::fix_round::fallbacks_left(second_review.as_ref());
+            let c_left = crate::fix_round::concerns_left(second_review.as_ref());
             let commit_shas = round_commits.into_iter().map(|c| c.sha).collect();
-            (true, "verified".to_string(), commit_shas, left)
+            (true, "verified".to_string(), commit_shas, left, c_left)
         } else {
             let round_outcome = if round_report.report_outcome == "verified" {
                 "no_change".to_string()
@@ -831,7 +833,13 @@ fn execute_fix_round(
             git_reset_hard(impl_cfg.worktree_dir, &pre_round_sha)?;
             let flag = crate::fix_round::failure_flag(&round_outcome);
             crate::fix_round::append_check_flag(root, impl_cfg.id, &flag)?;
-            (false, round_outcome, Vec::new(), Some(fallbacks_sent.len()))
+            (
+                false,
+                round_outcome,
+                Vec::new(),
+                Some(fallbacks_sent.len()),
+                Some(concerns_sent.len()),
+            )
         };
 
     let fix_summary = crate::fix_round::FixRoundSummary {
@@ -841,11 +849,13 @@ fn execute_fix_round(
         seconds: round_report.seconds,
         commits: done_commits,
         fallbacks_left,
+        concerns_left,
         kept,
     };
     let done_record = crate::fix_round::FixRoundRecord::Done {
         pre_round_sha: Some(pre_round_sha),
         fallbacks_sent,
+        concerns_sent,
         started_at: Some(round_started_at),
         summary: fix_summary.clone(),
     };
@@ -1379,6 +1389,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         if let Some(crate::fix_round::FixRoundRecord::Started {
             pre_round_sha,
             fallbacks_sent,
+            concerns_sent,
             started_at: round_started_at,
         }) = existing_fixround.clone()
         {
@@ -1468,6 +1479,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     &task_content,
                     pre_round_sha,
                     fallbacks_sent,
+                    concerns_sent,
                     round_started_at,
                     &mut warnings,
                 ) {
@@ -2252,28 +2264,33 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     return finish_summary(&summary, &root);
                 }
             };
-            let fallbacks_sent = match crate::fix_round::collect_confirmed_fallbacks(
-                &root,
-                &args.id,
-                &worktree_dir,
-                review_ref,
-            ) {
-                Ok(fbs) => fbs,
-                Err(err_msg) => {
-                    let summary = build_error_summary(
-                        &args.id,
-                        &worktree_dir,
-                        branch,
-                        err_msg,
-                        pass1.sandbox,
-                        &log_path,
-                        &report_path,
-                        gate_source,
-                        warnings,
-                    );
-                    return finish_summary(&summary, &root);
+            let fallbacks_sent = if crate::fix_round::confirmed_count(review_ref) > 0 {
+                match crate::fix_round::collect_confirmed_fallbacks(
+                    &root,
+                    &args.id,
+                    &worktree_dir,
+                    review_ref,
+                ) {
+                    Ok(fbs) => fbs,
+                    Err(err_msg) => {
+                        let summary = build_error_summary(
+                            &args.id,
+                            &worktree_dir,
+                            branch,
+                            err_msg,
+                            pass1.sandbox,
+                            &log_path,
+                            &report_path,
+                            gate_source,
+                            warnings,
+                        );
+                        return finish_summary(&summary, &root);
+                    }
                 }
+            } else {
+                Vec::new()
             };
+            let concerns_sent = review_ref.concerns.clone();
             let round_started_at =
                 match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                     Ok(d) => d.as_secs(),
@@ -2295,6 +2312,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             let started_record = crate::fix_round::FixRoundRecord::Started {
                 pre_round_sha: pre_round_sha.clone(),
                 fallbacks_sent: fallbacks_sent.clone(),
+                concerns_sent: concerns_sent.clone(),
                 started_at: round_started_at,
             };
             if let Err(err_msg) = crate::fix_round::write_record(&fixround_path, &started_record) {
@@ -2324,6 +2342,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 &task_content,
                 pre_round_sha,
                 fallbacks_sent,
+                concerns_sent,
                 round_started_at,
                 &mut warnings,
             ) {

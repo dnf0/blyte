@@ -2,10 +2,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model_review::ModelReviewResult;
+use crate::model_review::{Concern, ModelReviewResult};
 
-/// Exact commit message instructed for a fix round.
+/// Exact commit message instructed for a fix round with only fallbacks.
 pub const COMMIT_MESSAGE: &str = "fix: fail loudly where review found a fallback";
+
+/// Exact commit message instructed for a fix round that includes review concerns.
+pub const CONCERNS_COMMIT_MESSAGE: &str = "fix: address the review's concerns";
 
 /// A confirmed fallback sent to the implementer during a fix round.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +30,10 @@ pub struct FixRoundSummary {
     /// Confirmed fallbacks in the review that stands; `None` (null) when that review did not
     /// run or failed, so the count is not known.
     pub fallbacks_left: Option<usize>,
+    /// Concerns in the review that stands; `None` (null) when that review did not run or failed,
+    /// so the count is not known.
+    #[serde(default)]
+    pub concerns_left: Option<usize>,
     pub kept: bool,
 }
 
@@ -37,6 +44,8 @@ pub enum FixRoundRecord {
     Started {
         pre_round_sha: String,
         fallbacks_sent: Vec<ConfirmedFallback>,
+        #[serde(default)]
+        concerns_sent: Vec<Concern>,
         started_at: u64,
     },
     Done {
@@ -44,6 +53,8 @@ pub enum FixRoundRecord {
         pre_round_sha: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fallbacks_sent: Vec<ConfirmedFallback>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        concerns_sent: Vec<Concern>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_at: Option<u64>,
         #[serde(flatten)]
@@ -96,6 +107,14 @@ pub fn fallbacks_left(review: Option<&ModelReviewResult>) -> Option<usize> {
     }
 }
 
+/// Count concerns in the standing review; `None` when no review ran or it failed.
+pub fn concerns_left(review: Option<&ModelReviewResult>) -> Option<usize> {
+    match review {
+        Some(mr) if !mr.is_failed() => Some(mr.concerns.len()),
+        _ => None,
+    }
+}
+
 /// Decide whether a fix round should run after the first pass and its review.
 pub fn should_run(
     is_research: bool,
@@ -112,22 +131,54 @@ pub fn should_run(
     if mr.is_failed() {
         return false;
     }
-    confirmed_count(mr) > 0
+    confirmed_count(mr) > 0 || !mr.concerns.is_empty()
 }
 
 /// Build the task text passed to the implementer for a fix round.
-pub fn task_text(original_task: &str, fallbacks: &[ConfirmedFallback]) -> String {
+pub fn task_text(
+    original_task: &str,
+    fallbacks: &[ConfirmedFallback],
+    concerns: &[Concern],
+) -> String {
     let mut out = String::new();
-    out.push_str(
-        "This work passed its check, and a review found the fallbacks listed below.\n\
-         For each one, change the code so that the missing, unknown or unreadable case fails with an error that names what is missing, and update or add a test for that case.\n\
-         If a listed line is not a fallback, leave it and say why in the final message.\n\
-         Change nothing else.\n\
-         Commit with the message `fix: fail loudly where review found a fallback`.\n\n",
-    );
-    for fb in fallbacks {
-        out.push_str(&format!("{}:{} {}\n", fb.file, fb.line, fb.text));
-        out.push_str(&format!("  {}\n", fb.reason));
+    let commit_message = if concerns.is_empty() {
+        COMMIT_MESSAGE
+    } else {
+        CONCERNS_COMMIT_MESSAGE
+    };
+    if fallbacks.is_empty() && !concerns.is_empty() {
+        out.push_str(&format!(
+            "This work passed its check, and a review raised the concerns listed below.\n\
+             For each one, change the code or the tests so that the concern no longer holds.\n\
+             If a listed concern is wrong, leave the code as it is and say why in the final message.\n\
+             Change nothing else.\n\
+             Commit with the message `{commit_message}`.\n\n"
+        ));
+        for c in concerns {
+            out.push_str(&crate::model_review::format_concern(c));
+            out.push('\n');
+        }
+    } else {
+        out.push_str(&format!(
+            "This work passed its check, and a review found the fallbacks listed below.\n\
+             For each one, change the code so that the missing, unknown or unreadable case fails with an error that names what is missing, and update or add a test for that case.\n\
+             If a listed line is not a fallback, leave it and say why in the final message.\n\
+             Change nothing else.\n\
+             Commit with the message `{commit_message}`.\n\n"
+        ));
+        for fb in fallbacks {
+            out.push_str(&format!("{}:{} {}\n", fb.file, fb.line, fb.text));
+            out.push_str(&format!("  {}\n", fb.reason));
+        }
+        if !concerns.is_empty() {
+            out.push_str(
+                "\nThe review also raised these concerns. For each one, change the code or the tests so that the concern no longer holds; if one is wrong, leave the code as it is and say why in the final message.\n",
+            );
+            for c in concerns {
+                out.push_str(&crate::model_review::format_concern(c));
+                out.push('\n');
+            }
+        }
     }
     out.push_str("\n## Original task (for context; already done)\n\n");
     out.push_str(original_task);
