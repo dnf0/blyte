@@ -575,17 +575,10 @@ fn resolve_real_target(fs: &dyn Fs, path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn path_exists(path: &Path) -> Result<bool, String> {
-    match std::fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("cannot check {}: {e}", path.display())),
-    }
-}
-
 /// Reports whether `real_target` lies inside an open direct edit's worktree under
 /// `edit_worktrees`: `<edit_worktrees>/<id>/<rest>` where `<edit_worktrees>/<id>.edit.json`
-/// exists, `<edit_worktrees>/<id>.json` does not, and no path component below `<id>/` is `.git`.
+/// exists, `<edit_worktrees>/<id>.json` does not, `<edit_worktrees>/<id>` is a directory, and no
+/// path component below `<id>/` is `.git`.
 fn is_in_open_edit_worktree(edit_worktrees: &Path, real_target: &Path) -> Result<bool, String> {
     use std::path::Component;
     let Ok(rel) = real_target.strip_prefix(edit_worktrees) else {
@@ -607,16 +600,7 @@ fn is_in_open_edit_worktree(edit_worktrees: &Path, real_target: &Path) -> Result
     if !has_child {
         return Ok(false);
     }
-    let mut edit_name = id.to_os_string();
-    edit_name.push(".edit.json");
-    let edit_marker = edit_worktrees.join(edit_name);
-    if !path_exists(&edit_marker)? {
-        return Ok(false);
-    }
-    let mut summary_name = id.to_os_string();
-    summary_name.push(".json");
-    let summary_marker = edit_worktrees.join(summary_name);
-    Ok(!path_exists(&summary_marker)?)
+    crate::sandbox::is_open_edit_worktree_id(edit_worktrees, id)
 }
 
 fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
