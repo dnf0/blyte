@@ -499,6 +499,11 @@ pub fn run_edit_finish_in(
         return 2;
     }
 
+    if let Err(e) = verify_worktree_git_pointer(root, &worktree_dir, &args.id) {
+        eprintln!("error: {e}");
+        return 2;
+    }
+
     let task_text = match std::fs::read_to_string(&task_path) {
         Ok(s) => s,
         Err(e) => {
@@ -935,6 +940,180 @@ pub fn run_edit_finish_in(
     let json = serde_json::to_string_pretty(&summary).unwrap();
     println!("{json}");
     0
+}
+
+fn git_common_dir(dir: &Path) -> Result<PathBuf, String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to execute git rev-parse --git-common-dir: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rev-parse --git-common-dir failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Err("git rev-parse --git-common-dir returned empty output".to_string());
+    }
+    let path = PathBuf::from(raw);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    })
+}
+
+fn verify_worktree_git_pointer(
+    main_checkout: &Path,
+    worktree_dir: &Path,
+    id: &str,
+) -> Result<(), String> {
+    let git_file = worktree_dir.join(".git");
+    let meta = std::fs::symlink_metadata(&git_file).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be inspected: {e}",
+            git_file.display()
+        )
+    })?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        return Err(format!(
+            "worktree git pointer {} is a symlink, expected a regular file",
+            git_file.display()
+        ));
+    }
+    if ft.is_dir() {
+        return Err(format!(
+            "worktree git pointer {} is a directory, expected a regular file",
+            git_file.display()
+        ));
+    }
+    if !ft.is_file() {
+        return Err(format!(
+            "worktree git pointer {} is not a regular file",
+            git_file.display()
+        ));
+    }
+
+    let content = std::fs::read_to_string(&git_file).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be read: {e}",
+            git_file.display()
+        )
+    })?;
+    let trimmed = content
+        .strip_suffix("\r\n")
+        .or_else(|| content.strip_suffix('\n'))
+        .unwrap_or(&content);
+    let Some(pointed_str) = trimmed.strip_prefix("gitdir: ") else {
+        return Err(format!(
+            "worktree git pointer {} must be a single `gitdir: <path>` line",
+            git_file.display()
+        ));
+    };
+    if pointed_str.is_empty() || pointed_str.contains(['\n', '\r']) {
+        return Err(format!(
+            "worktree git pointer {} must be a single `gitdir: <path>` line",
+            git_file.display()
+        ));
+    }
+
+    let common_dir = git_common_dir(main_checkout).map_err(|e| {
+        format!(
+            "cannot resolve git common dir while verifying {}: {e}",
+            git_file.display()
+        )
+    })?;
+    let expected_worktree_gitdir = common_dir.join("worktrees").join(id);
+    if !expected_worktree_gitdir.is_dir() {
+        return Err(format!(
+            "worktree git pointer {} expects worktree metadata directory {}, which does not exist",
+            git_file.display(),
+            expected_worktree_gitdir.display()
+        ));
+    }
+    let expected_canon = std::fs::canonicalize(&expected_worktree_gitdir).map_err(|e| {
+        format!(
+            "cannot canonicalize {} while verifying {}: {e}",
+            expected_worktree_gitdir.display(),
+            git_file.display()
+        )
+    })?;
+
+    let pointed_path = Path::new(pointed_str);
+    let resolved_pointed = if pointed_path.is_absolute() {
+        pointed_path.to_path_buf()
+    } else {
+        worktree_dir.join(pointed_path)
+    };
+    let pointed_canon = std::fs::canonicalize(&resolved_pointed).map_err(|e| {
+        format!(
+            "worktree git pointer {} points to {}, which cannot be resolved: {e}",
+            git_file.display(),
+            pointed_str
+        )
+    })?;
+    if pointed_canon != expected_canon {
+        return Err(format!(
+            "worktree git pointer {} points to {}, expected {}",
+            git_file.display(),
+            pointed_canon.display(),
+            expected_canon.display()
+        ));
+    }
+
+    let backlink_file = expected_canon.join("gitdir");
+    let backlink_content = std::fs::read_to_string(&backlink_file).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be verified because {} cannot be read: {e}",
+            git_file.display(),
+            backlink_file.display()
+        )
+    })?;
+    let backlink_trimmed = backlink_content
+        .strip_suffix("\r\n")
+        .or_else(|| backlink_content.strip_suffix('\n'))
+        .unwrap_or(&backlink_content);
+    if backlink_trimmed.is_empty() || backlink_trimmed.contains(['\n', '\r']) {
+        return Err(format!(
+            "worktree git pointer {} cannot be verified because {} is malformed",
+            git_file.display(),
+            backlink_file.display()
+        ));
+    }
+    let backlink_path = Path::new(backlink_trimmed);
+    let resolved_backlink = if backlink_path.is_absolute() {
+        backlink_path.to_path_buf()
+    } else {
+        expected_canon.join(backlink_path)
+    };
+    let backlink_canon = std::fs::canonicalize(&resolved_backlink).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be verified because {} points to {}, which cannot be resolved: {e}",
+            git_file.display(),
+            backlink_file.display(),
+            backlink_trimmed
+        )
+    })?;
+    let git_file_canon = std::fs::canonicalize(&git_file).map_err(|e| {
+        format!(
+            "cannot canonicalize worktree git pointer {}: {e}",
+            git_file.display()
+        )
+    })?;
+    if backlink_canon != git_file_canon {
+        return Err(format!(
+            "worktree git pointer {} is not the target of {} (points to {})",
+            git_file.display(),
+            backlink_file.display(),
+            backlink_canon.display()
+        ));
+    }
+
+    Ok(())
 }
 
 fn commit_worktree_changes(worktree_dir: &Path, message: &str) -> Result<(), String> {

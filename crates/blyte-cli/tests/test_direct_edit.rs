@@ -1605,3 +1605,160 @@ fn a_failed_review_is_recorded_not_passed() {
         "{flags:?}"
     );
 }
+
+#[test]
+fn finish_refuses_a_git_pointer_to_another_repository() {
+    let marker_dir = TempDir::new().unwrap();
+    let marker = marker_dir.path().join("gate.ran");
+    let gate_cmd = format!("touch '{}'", marker.display());
+    let repo = setup_repo(&format!("[dispatch]\ngate = \"{gate_cmd}\"\n"));
+    let root = repo.path();
+
+    let other_repo = setup_repo("[dispatch]\ngate = \"true\"\n");
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-ptr-other", "--task", "Update README.md"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-ptr-other");
+    std::fs::write(wt.join("README.md"), "modified\n").unwrap();
+    git(&wt, &["add", "README.md"]);
+    git(&wt, &["commit", "-m", "feat: update readme"]);
+
+    let git_file = wt.join(".git");
+    std::fs::write(
+        &git_file,
+        format!("gitdir: {}\n", other_repo.path().join(".git").display()),
+    )
+    .unwrap();
+
+    let finish_out = run_blyte(root, &["edit-finish", "e-ptr-other"]);
+    assert_eq!(finish_out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&finish_out.stderr);
+    let expected_git_path = std::fs::canonicalize(&wt).unwrap().join(".git");
+    assert!(
+        stderr.contains(&expected_git_path.display().to_string()),
+        "stderr must name {}: {stderr}",
+        expected_git_path.display()
+    );
+    assert!(!marker.exists(), "gate must not run");
+    assert!(root.join(".wt/e-ptr-other.edit.json").is_file());
+    assert!(!root.join(".wt/e-ptr-other.json").exists());
+}
+
+#[test]
+fn finish_refuses_a_git_directory() {
+    let marker_dir = TempDir::new().unwrap();
+    let marker = marker_dir.path().join("gate.ran");
+    let gate_cmd = format!("touch '{}'", marker.display());
+    let repo = setup_repo(&format!("[dispatch]\ngate = \"{gate_cmd}\"\n"));
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-ptr-dir", "--task", "Update README.md"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-ptr-dir");
+    std::fs::write(wt.join("README.md"), "modified\n").unwrap();
+    git(&wt, &["add", "README.md"]);
+    git(&wt, &["commit", "-m", "feat: update readme"]);
+
+    let git_file = wt.join(".git");
+    std::fs::remove_file(&git_file).unwrap();
+    std::fs::create_dir(&git_file).unwrap();
+    std::fs::write(
+        git_file.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n",
+    )
+    .unwrap();
+
+    let finish_out = run_blyte(root, &["edit-finish", "e-ptr-dir"]);
+    assert_eq!(finish_out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&finish_out.stderr);
+    let expected_git_path = std::fs::canonicalize(&wt).unwrap().join(".git");
+    assert!(
+        stderr.contains(&expected_git_path.display().to_string()),
+        "stderr must name {}: {stderr}",
+        expected_git_path.display()
+    );
+    assert!(!marker.exists(), "gate must not run");
+    assert!(root.join(".wt/e-ptr-dir.edit.json").is_file());
+    assert!(!root.join(".wt/e-ptr-dir.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn finish_refuses_a_symlinked_git_pointer() {
+    let marker_dir = TempDir::new().unwrap();
+    let marker = marker_dir.path().join("gate.ran");
+    let gate_cmd = format!("touch '{}'", marker.display());
+    let repo = setup_repo(&format!("[dispatch]\ngate = \"{gate_cmd}\"\n"));
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-ptr-link", "--task", "Update README.md"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-ptr-link");
+    std::fs::write(wt.join("README.md"), "modified\n").unwrap();
+    git(&wt, &["add", "README.md"]);
+    git(&wt, &["commit", "-m", "feat: update readme"]);
+
+    let git_file = wt.join(".git");
+    let original = std::fs::read_to_string(&git_file).unwrap();
+    let copy_path = marker_dir.path().join("git-pointer-copy");
+    std::fs::write(&copy_path, original).unwrap();
+    std::fs::remove_file(&git_file).unwrap();
+    std::os::unix::fs::symlink(&copy_path, &git_file).unwrap();
+
+    let finish_out = run_blyte(root, &["edit-finish", "e-ptr-link"]);
+    assert_eq!(finish_out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&finish_out.stderr);
+    let expected_git_path = std::fs::canonicalize(&wt).unwrap().join(".git");
+    assert!(
+        stderr.contains(&expected_git_path.display().to_string()),
+        "stderr must name {}: {stderr}",
+        expected_git_path.display()
+    );
+    assert!(!marker.exists(), "gate must not run");
+    assert!(root.join(".wt/e-ptr-link.edit.json").is_file());
+    assert!(!root.join(".wt/e-ptr-link.json").exists());
+}
+
+#[test]
+fn finish_accepts_the_pointer_git_wrote() {
+    let repo = setup_repo("[dispatch]\ngate = \"true\"\n");
+    let root = repo.path();
+
+    let start_out = run_blyte(
+        root,
+        &["edit-start", "e-ptr-ok", "--task", "Update README.md"],
+    );
+    assert!(start_out.status.success());
+    let wt = root.join(".wt/e-ptr-ok");
+    std::fs::write(wt.join("README.md"), "untouched pointer\n").unwrap();
+
+    let finish_out = run_blyte(
+        root,
+        &[
+            "edit-finish",
+            "e-ptr-ok",
+            "--message",
+            "feat: update readme",
+        ],
+    );
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&finish_out.stdout),
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+    let summary: serde_json::Value =
+        serde_json::from_slice(&finish_out.stdout).expect("summary json");
+    assert_eq!(summary["outcome"], "verified");
+    assert!(root.join(".wt/e-ptr-ok.json").is_file());
+}
