@@ -1,25 +1,92 @@
 //! The report says where the time went: model and tool time per turn, time per gate attempt,
 //! calls per tool. Shadow run S3 was slower with half the turns and the report could not say why.
 
-use std::sync::Mutex;
-use std::time::Duration;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
-use blyte_agent::shell::{LocalShell, Shell};
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response, ToolCall};
 use serde_json::json;
 
-/// Sleeps 100 ms per call; the first two calls ask for tools, then it stops.
+struct Clock {
+    now: Mutex<Instant>,
+}
+
+impl Clock {
+    fn new() -> Self {
+        Self {
+            now: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn now(&self) -> Instant {
+        *self.now.lock().unwrap()
+    }
+
+    fn advance(&self, d: Duration) {
+        *self.now.lock().unwrap() += d;
+    }
+}
+
+struct TimedShell {
+    clock: Arc<Clock>,
+}
+
+impl Shell for TimedShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        for line in command.lines().map(str::trim) {
+            if let Some(secs) = line
+                .strip_prefix("sleep ")
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                self.clock.advance(Duration::from_secs_f64(secs));
+                return Ok(Output {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                });
+            }
+            if line == "true" {
+                return Ok(Output {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                });
+            }
+        }
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 struct Slow {
     calls: Mutex<u32>,
+    clock: Arc<Clock>,
 }
 
 impl Provider for Slow {
     fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
-        std::thread::sleep(Duration::from_millis(100));
+        self.clock.advance(Duration::from_millis(100));
         let mut n = self.calls.lock().unwrap();
         *n += 1;
         let call = |name: &str, args: serde_json::Value| ToolCall {
@@ -50,20 +117,18 @@ impl Provider for Slow {
 
 fn run(gate: &str) -> (Outcome, blyte_agent::run::RunReport) {
     let d = tempfile::tempdir().unwrap();
-    LocalShell
-        .exec(
-            "git init -q && git config user.email a@b && git config user.name c && \
-             echo 0 > marker && git add -A && git commit -qm base",
-            d.path(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
+    std::fs::write(d.path().join("marker"), "0\n").unwrap();
+    let clock = Arc::new(Clock::new());
+    let shell = TimedShell {
+        clock: Arc::clone(&clock),
+    };
     let p = Slow {
         calls: Mutex::new(0),
+        clock: Arc::clone(&clock),
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &shell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
@@ -78,7 +143,7 @@ fn run(gate: &str) -> (Outcome, blyte_agent::run::RunReport) {
         claim_check: false,
         base_check: blyte_agent::run::BaseCheck::None,
     };
-    r.run(&mut State::new("g", gate))
+    r.run_with_clock(&mut State::new("g", gate), &|| clock.now())
 }
 
 #[test]

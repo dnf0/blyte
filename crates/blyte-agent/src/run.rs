@@ -1163,7 +1163,7 @@ impl<'a> Runner<'a> {
             last_sent = Some(req.messages.clone());
             // A burst rate limit ended a run after 28 calls (2026-09-23). Transient failures are
             // waited out, but never past the deadline: a run that cannot finish in time reports.
-            let model_start = std::time::Instant::now();
+            let model_start = now();
             let mut attempt = 0;
             let mut failed_attempts: Vec<FailedAttempt> = Vec::new();
             let resp = loop {
@@ -1200,7 +1200,8 @@ impl<'a> Runner<'a> {
                                 appended,
                                 new_chars,
                                 fold_budget,
-                                model_ms: model_start.elapsed().as_millis() as u64,
+                                model_ms: now().saturating_duration_since(model_start).as_millis()
+                                    as u64,
                                 tools_ms: 0,
                                 first_data_ms: timing.first_data_ms,
                                 max_gap_ms: timing.max_gap_ms,
@@ -1263,7 +1264,7 @@ impl<'a> Runner<'a> {
                     }
                 }
             };
-            let model_ms = model_start.elapsed().as_millis() as u64;
+            let model_ms = now().saturating_duration_since(model_start).as_millis() as u64;
             let timing: StreamTiming = self.provider.last_stream_timing().unwrap_or_default();
             report.usage.input += resp.usage.input;
             report.usage.cached += resp.usage.cached;
@@ -1311,7 +1312,7 @@ impl<'a> Runner<'a> {
             // --- the model is still working -------------------------------------------------
             if !resp.tool_calls.is_empty() {
                 last_turn_called_tools = true;
-                let tools_start = std::time::Instant::now();
+                let tools_start = now();
                 // A turn's calls are recorded together, then its results together, in call
                 // order. Providers encode one model turn carrying several calls and one reply
                 // carrying their results; interleaving them split a parallel batch into turns
@@ -1337,7 +1338,7 @@ impl<'a> Runner<'a> {
                 for call in &resp.tool_calls {
                     if deadline.is_some_and(|d| now() >= d) {
                         report.turn_usage.last_mut().unwrap().tools_ms =
-                            tools_start.elapsed().as_millis() as u64;
+                            now().saturating_duration_since(tools_start).as_millis() as u64;
                         return (Outcome::BudgetExhausted, report);
                     }
                     report.tool_calls += 1;
@@ -1479,7 +1480,7 @@ impl<'a> Runner<'a> {
                         report.read_loop = true;
                         if !self.research {
                             report.turn_usage.last_mut().unwrap().tools_ms =
-                                tools_start.elapsed().as_millis() as u64;
+                                now().saturating_duration_since(tools_start).as_millis() as u64;
                             return (Outcome::BudgetExhausted, report);
                         }
                         read_loop_turn = Some(turn);
@@ -1491,7 +1492,7 @@ impl<'a> Runner<'a> {
                     ));
                 }
                 report.turn_usage.last_mut().unwrap().tools_ms =
-                    tools_start.elapsed().as_millis() as u64;
+                    now().saturating_duration_since(tools_start).as_millis() as u64;
                 continue;
             }
 
@@ -1533,7 +1534,7 @@ impl<'a> Runner<'a> {
             self.emit(Event::GateStart {
                 attempt: report.gate_attempts,
             });
-            let gate_start = std::time::Instant::now();
+            let gate_start = now();
             let (mut passed, mut output, wait_ms, failing) =
                 self.run_gate(state, &last_failed, &mut deadline, now);
             last_failed = failing;
@@ -1575,7 +1576,9 @@ impl<'a> Runner<'a> {
                     }
                 }
             }
-            report.gate_ms.push(gate_start.elapsed().as_millis() as u64);
+            report
+                .gate_ms
+                .push(now().saturating_duration_since(gate_start).as_millis() as u64);
             report.gate_wait_ms.push(wait_ms);
             self.emit(Event::Gate {
                 attempt: report.gate_attempts,
