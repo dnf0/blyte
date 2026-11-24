@@ -21,8 +21,7 @@ class ScriptError(Exception):
     pass
 
 
-def default_jobs() -> int:
-    return min(4, os.cpu_count() or 1)
+DEFAULT_JOBS = 4
 
 
 def load_cargo_env(root: Path) -> dict[str, str]:
@@ -179,8 +178,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=default_jobs(),
-        help="Number of test binaries to run at a time (default: min(4, CPU count)).",
+        default=DEFAULT_JOBS,
+        help="Number of test binaries to run at a time (default: 4).",
     )
     parser.add_argument(
         "--root",
