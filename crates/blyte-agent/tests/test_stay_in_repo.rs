@@ -1,14 +1,41 @@
 //! The model is told the workspace boundary, and a failed gate asks for a fix to the change, not
 //! to the machine: after a gate failure a model once spent 50 minutes deleting a host cache.
 
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Runner};
-use blyte_agent::shell::{LocalShell, Shell};
+use blyte_agent::shell::{Output, Shell};
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response};
+
+struct StubShell;
+
+impl Shell for StubShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let code = if command.trim() == "true" { 0 } else { 1 };
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: code,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        Vec::new()
+    }
+}
 
 struct Stopper {
     seen: Mutex<Vec<Request>>,
@@ -26,20 +53,12 @@ impl Provider for Stopper {
 
 fn run(gate: &str) -> (String, String) {
     let d = tempfile::tempdir().unwrap();
-    LocalShell
-        .exec(
-            "git init -q && git config user.email a@b && git config user.name t && \
-             touch x && git add -A && git commit -qm base",
-            d.path(),
-            std::time::Duration::from_secs(30),
-        )
-        .unwrap();
     let p = Stopper {
         seen: Mutex::new(Vec::new()),
     };
     let r = Runner {
         provider: &p,
-        shell: &LocalShell,
+        shell: &StubShell,
         fs: &LocalFs,
         context: &Conversational,
         root: d.path().to_path_buf(),
