@@ -10,14 +10,17 @@ pub enum Command {
     /// Serve a local dashboard of running and recent jobs
     Dashboard(DashboardArgs),
     /// Serve a local replay of recent runs
+    #[command(hide = true)]
     Mock(MockArgs),
     /// Combine a request's passed runs on a work branch and run the repository's check
     Combine(CombineArgs),
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
     Dispatch(DispatchArgs),
     /// Start a direct edit in its own git worktree (.wt/<id>, branch wip/<id>)
+    #[command(hide = true)]
     EditStart(EditStartArgs),
     /// Verify and record a direct edit started with `blyte edit-start`
+    #[command(hide = true)]
     EditFinish(EditFinishArgs),
     /// Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
     Review(ReviewArgs),
@@ -59,8 +62,10 @@ pub enum Command {
     /// List a plan's tasks with their state and the command to dispatch each ready one
     Plan(PlanArgs),
     /// Fail when the working tree adds comments since a base commit
+    #[command(hide = true)]
     Comments(CommentsArgs),
     /// Print the instructions the orchestrator is given
+    #[command(hide = true)]
     Instructions(InstructionsArgs),
 }
 

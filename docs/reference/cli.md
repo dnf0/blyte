@@ -20,7 +20,6 @@ Commands:
   cost        Show orchestrator and implementer costs
   statusline  Print Claude Code's status line with blyte costs
   plan        List a plan's tasks with their state and the command to dispatch each ready one
-  comments    Fail when the working tree adds comments since a base commit
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -317,6 +316,8 @@ Options:
 ```
 
 ## blyte comments
+
+Internal command called by blyte itself; omitted from `blyte --help` (along with `instructions`, `mock`, `edit-start`, and `edit-finish`).
 
 ```text
 Fail when the working tree adds comments since a base commit
