@@ -440,3 +440,42 @@ Run: `cargo test -p blyte --test test_cost --test test_fresh_model_review --test
 Run: `cargo test -p blyte --test test_e2e_cli --test test_orchestrator_instructions --test test_orchestrator_sandbox && cargo test -p blyte --lib usage_log`.
 
 **Commit message:** `chore: keep tests off the real usage ledger; drop the old name from the terminal`
+
+---
+
+### Task SH3: `edit-finish` checks the worktree's `.git` before running git in it
+
+**Depends on:** DE and SH2 (both on the branch this is dispatched from). **Siblings (not here):**
+SV2, SV3 (`serve.rs`, `session.rs`).
+
+**Why.** Since SH2 the model's sandboxed shell can write in an open edit worktree. On macOS the
+sandbox denies writes to `<wt>/.git`; on Linux Landlock cannot deny one file inside a writable
+directory, so the shell could replace `.wt/<id>/.git` (a pointer to another repository, or a
+directory with its own `config` and hooks). `edit-finish` then runs git there outside the sandbox.
+
+**Files:** `crates/blyte-cli/src/direct_edit.rs`, `crates/blyte-cli/tests/test_direct_edit.rs`.
+
+**What to build.** In `run_edit_finish_in`, after the check that the worktree directory exists and
+before the first git command or gate step runs in it, call a new
+`fn verify_worktree_git_pointer(main_checkout: &Path, worktree_dir: &Path, id: &str) -> Result<(), String>`:
+- `<wt>/.git` must be a regular file, not a symlink and not a directory (`symlink_metadata`);
+- its whole content, trimmed of one trailing newline, must be exactly `gitdir: <P>`, where `<P>`
+  canonicalizes to the canonical `<main checkout's git common dir>/worktrees/<id>`;
+- that directory must exist and its `gitdir` file must point back at `<wt>/.git` (canonical paths).
+On any mismatch `edit-finish` prints an error that names `<wt>/.git` and what was wrong, runs no
+git command and no gate step in the worktree, leaves the edit open and exits 2. No fallbacks: do
+not repair the file and do not continue. This is a check on every platform, not Linux only.
+
+**Tests** (`test_direct_edit.rs`; existing tests unmodified and passing):
+- `finish_refuses_a_git_pointer_to_another_repository`: overwrite `.wt/<id>/.git` with
+  `gitdir: <another repo>/.git`; a gate that writes a marker file; exit 2, the error names the
+  file, the marker does not exist, `.wt/<id>.edit.json` exists and `.wt/<id>.json` does not.
+- `finish_refuses_a_git_directory`: replace the file with a directory holding a `config`; same
+  assertions.
+- `finish_refuses_a_symlinked_git_pointer`: replace it with a symlink to a copy of the original
+  pointer file; same assertions.
+- `finish_accepts_the_pointer_git_wrote`: an untouched edit finishes as before.
+
+Run: `cargo test -p blyte --test test_direct_edit`.
+
+**Commit message:** `fix(edit): edit-finish refuses a worktree whose .git is not the pointer git wrote`
