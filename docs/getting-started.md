@@ -98,7 +98,7 @@ return an error on empty input, and add `--strict` to the CLI"*. Claude will:
 To watch the dispatches while they run, start `blyte dashboard --open` in another terminal
 ([Dashboard](usage.md#dashboard)).
 
-Your Claude usage goes on steps 1, 3 and 4. [blyte as your implementer](orchestration.md)
+Your Claude usage goes on steps 1, 3 and 4. [blyte as your implementer](workflow.md)
 explains the workflow in full, and [How tasks are written](writing-tasks.md) what makes a task
 succeed first time.
 

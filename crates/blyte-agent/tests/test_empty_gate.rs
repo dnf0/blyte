@@ -86,7 +86,7 @@ fn empty_gate_is_skipped() {
 }
 
 #[test]
-fn orchestrator_empty_gate_reports_finished() {
+fn conversation_empty_gate_reports_finished() {
     let d = tempfile::tempdir().unwrap();
     let runner = Runner {
         provider: &DoneProvider,
@@ -105,8 +105,8 @@ fn orchestrator_empty_gate_reports_finished() {
         claim_check: false,
         base_check: blyte_agent::run::BaseCheck::None,
     };
-    let mut state = State::new("orchestrate plan", "");
-    state.orchestrator.instructions = Some("orchestrator prompt".into());
+    let mut state = State::new("converse plan", "");
+    state.brief.instructions = Some("conversation model prompt".into());
     let (outcome, report) = runner.run(&mut state);
     assert_eq!(outcome, Outcome::Finished);
     assert_eq!(report.gate_attempts, 0);

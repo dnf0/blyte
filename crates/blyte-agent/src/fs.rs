@@ -1,6 +1,6 @@
 //! Where files actually live. The companion seam to [`crate::shell`].
 //!
-//! Routing commands through an executor while reading and writing files on the orchestrator's
+//! Routing commands through an executor while reading and writing files on the conversation model's
 //! own disk is coherent for exactly one deployment -- a bind-mounted workspace, where both
 //! views address the same bytes. For a shell that executes on another machine, or in a
 //! container without a mount, it is silently wrong: the model edits one filesystem and verifies
@@ -11,7 +11,7 @@
 //!
 //! Canonicalisation belongs here too, not in the tools. The workspace-escape check is only
 //! meaningful against the filesystem the write will actually land on -- resolving symlinks on
-//! the orchestrator's disk says nothing about where a path leads inside a container.
+//! the conversation model's disk says nothing about where a path leads inside a container.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

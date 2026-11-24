@@ -23,7 +23,7 @@ background tasks, hooks or polling to wait on. The loop ends when:
    from, so the task cannot pass until that is fixed (`blocked`);
 5. something unrecoverable happens (`error`), for example an exhausted provider quota.
 
-An ungated run (`--orchestrate`) that stops by itself ends `finished`.
+An ungated run (`--converse`) that stops by itself ends `finished`.
 
 Transient provider errors (a burst rate limit, a 5xx, a dropped connection) are waited out with
 backoff, but never past the run's deadline.

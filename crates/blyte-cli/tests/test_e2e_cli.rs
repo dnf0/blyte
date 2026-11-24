@@ -71,7 +71,7 @@ fn test_cli_interactive_repl_stdin_driving() {
     assert!(stdout.contains("Available Slash Commands:"));
     assert!(stdout.contains("Gate set to: cargo test"));
     assert!(stdout.contains("=== blyte state ==="));
-    assert!(stdout.contains("Orchestrator:"));
+    assert!(stdout.contains("Brief:"));
     assert!(stdout.contains("Runtime:"));
 }
 

@@ -45,7 +45,7 @@ flowchart LR
 ## Find what you need
 
 <div class="b-cards">
-<a class="b-card b-card-wide" href="orchestration/"><strong>The workflow: plan, delegate, review</strong><span>How Claude Code (or any orchestrator) hands tasks to blyte, verifies them and merges; when to delegate and when not to.</span></a>
+<a class="b-card b-card-wide" href="workflow/"><strong>The workflow: plan, delegate, review</strong><span>How Claude Code (or any conversation model) hands tasks to blyte, verifies them and merges; when to delegate and when not to.</span></a>
 <a class="b-card" href="getting-started/"><strong>Get set up</strong><span>Install, choose a model, connect Claude Code, delegate a first task.</span></a>
 <a class="b-card" href="writing-tasks/"><strong>What makes a good task</strong><span>What the agent writes for blyte, and why: the template, the tests, checks, sizing.</span></a>
 <a class="b-card" href="usage/"><strong>Tune a run</strong><span>Gates with several steps, budgets, rollback, containers, standalone use.</span></a>
@@ -73,7 +73,7 @@ optionally by wall-clock time (`--max-seconds`) and spend (`--max-cost`).
 read credential stores. See [Security](security.md).
 
 **One job.** blyte implements one task per run. Planning, splitting work and review belong to
-the frontier model or person driving it: see [the workflow](orchestration.md).
+the frontier model or person driving it: see [the workflow](workflow.md).
 
 ## Background
 

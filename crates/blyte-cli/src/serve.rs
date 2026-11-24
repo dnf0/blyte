@@ -535,7 +535,7 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
         &decision.run,
         &action_str,
         decision.note.as_deref(),
-        decision.orchestrator_message.as_deref(),
+        decision.conversation_message.as_deref(),
     ) {
         Ok(s) => s,
         Err(e) => return json_error(500, e),
@@ -560,7 +560,7 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
                 "run": decision.run,
                 "action": action_str,
                 "note": decision.note,
-                "orchestrator_message": decision.orchestrator_message,
+                "conversation_message": decision.conversation_message,
             },
             "seq": seq,
         }),
@@ -1125,8 +1125,8 @@ where
         }
     }
 
-    if !config.orchestrate {
-        config.orchestrate = true;
+    if !config.converse {
+        config.converse = true;
         if config.max_turns == 25 || config.max_turns == 60 {
             config.max_turns = 1000;
         }

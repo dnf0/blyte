@@ -5,13 +5,13 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use blyte_agent::approval::Approval;
-use blyte_agent::orchestrator::Answers;
+use blyte_agent::conversation::Answers;
 use blyte_agent::sandbox;
 use blyte_agent::shell::Shell;
 use blyte_cli::approval_file;
 use blyte_cli::cli::Cli;
+use blyte_cli::conversation_text;
 use blyte_cli::instructions_cmd;
-use blyte_cli::orchestrator_text;
 use blyte_cli::repl::{render_banner_to, ReplConfig, ReplSession};
 use blyte_cli::task_runner::{
     build_local_shell, build_sandbox_profile, run_task_with_state_and_events, TaskConfig,
@@ -109,24 +109,24 @@ fn approval_file_load_handles_missing_valid_and_unreadable() {
 }
 
 #[test]
-fn orchestrate_task_config_sandbox_and_network_defaults() {
-    let cli = Cli::try_parse_from(["blyte", "--orchestrate"]).unwrap();
+fn converse_task_config_sandbox_and_network_defaults() {
+    let cli = Cli::try_parse_from(["blyte", "--converse"]).unwrap();
     let cfg = TaskConfig::from(&cli);
     assert_eq!(cfg.sandbox, "on");
     assert_eq!(cfg.network, "off");
 
-    let cli_net_on = Cli::try_parse_from(["blyte", "--orchestrate", "--network", "on"]).unwrap();
+    let cli_net_on = Cli::try_parse_from(["blyte", "--converse", "--network", "on"]).unwrap();
     let cfg_net_on = TaskConfig::from(&cli_net_on);
     assert_eq!(cfg_net_on.sandbox, "on");
     assert_eq!(cfg_net_on.network, "on");
 
-    let cli_sb_off = Cli::try_parse_from(["blyte", "--orchestrate", "--sandbox", "off"]).unwrap();
+    let cli_sb_off = Cli::try_parse_from(["blyte", "--converse", "--sandbox", "off"]).unwrap();
     let cfg_sb_off = TaskConfig::from(&cli_sb_off);
     assert_eq!(cfg_sb_off.sandbox, "off");
 }
 
 #[test]
-fn orchestrator_shell_allows_wt_tasks_and_blocks_root_git_and_wt_passed() {
+fn conversation_shell_allows_wt_tasks_and_blocks_root_git_and_wt_passed() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let root = tempfile::tempdir_in(tmp_base).unwrap();
@@ -143,7 +143,7 @@ fn orchestrator_shell_allows_wt_tasks_and_blocks_root_git_and_wt_passed() {
     std::fs::create_dir_all(&tasks).unwrap();
     std::fs::create_dir_all(&passed).unwrap();
 
-    let cli = Cli::try_parse_from(["blyte", "--orchestrate"]).unwrap();
+    let cli = Cli::try_parse_from(["blyte", "--converse"]).unwrap();
     let mut cfg = TaskConfig::from(&cli);
     cfg.root = root.path().to_path_buf();
     assert_eq!(cfg.sandbox, "on");
@@ -242,7 +242,7 @@ fn orchestrator_shell_allows_wt_tasks_and_blocks_root_git_and_wt_passed() {
 }
 
 #[test]
-fn orchestrator_shell_in_linked_worktree_allows_only_main_wt_tasks() {
+fn conversation_shell_in_linked_worktree_allows_only_main_wt_tasks() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let main_repo = tempfile::tempdir_in(tmp_base).unwrap();
@@ -294,7 +294,7 @@ fn orchestrator_shell_in_linked_worktree_allows_only_main_wt_tasks() {
         .unwrap()
         .success());
 
-    let cli = Cli::try_parse_from(["blyte", "--orchestrate"]).unwrap();
+    let cli = Cli::try_parse_from(["blyte", "--converse"]).unwrap();
     let mut cfg = TaskConfig::from(&cli);
     cfg.root = linked.clone();
 
@@ -495,7 +495,7 @@ fn start_lines_and_banner_report_sandbox_state() {
         let _guard = EnvGuard::set(xdg.path(), home.path());
 
         let built_on =
-            orchestrator_text::build_with_sandbox(false, Answers::Person, root.path(), true, 2)
+            conversation_text::build_with_sandbox(false, Answers::Person, root.path(), true, 2)
                 .unwrap();
         assert_eq!(
             built_on.start_lines[2],
@@ -504,7 +504,7 @@ fn start_lines_and_banner_report_sandbox_state() {
         assert!(built_on.instructions.contains("The shell is sandboxed:"));
 
         let built_off =
-            orchestrator_text::build_with_sandbox(false, Answers::Person, root.path(), false, 0)
+            conversation_text::build_with_sandbox(false, Answers::Person, root.path(), false, 0)
                 .unwrap();
         assert_eq!(built_off.start_lines[2], "sandbox: off");
         assert!(built_off
@@ -514,7 +514,7 @@ fn start_lines_and_banner_report_sandbox_state() {
 
         let session_on = ReplSession::try_new(&ReplConfig {
             repo_root: root.path().to_path_buf(),
-            orchestrate: true,
+            converse: true,
             ..Default::default()
         })
         .unwrap();
@@ -530,7 +530,7 @@ fn start_lines_and_banner_report_sandbox_state() {
 
         let session_off = ReplSession::try_new(&ReplConfig {
             repo_root: root.path().to_path_buf(),
-            orchestrate: true,
+            converse: true,
             sandbox: "off".to_string(),
             ..Default::default()
         })
@@ -542,7 +542,7 @@ fn start_lines_and_banner_report_sandbox_state() {
     }
 
     let out_on = blyte_cmd(root.path(), home.path(), xdg.path())
-        .args(["--orchestrate", "--", "plan the release"])
+        .args(["--converse", "--", "plan the release"])
         .output()
         .unwrap();
     let stderr_on = String::from_utf8_lossy(&out_on.stderr);
@@ -554,13 +554,7 @@ fn start_lines_and_banner_report_sandbox_state() {
     );
 
     let out_off = blyte_cmd(root.path(), home.path(), xdg.path())
-        .args([
-            "--orchestrate",
-            "--sandbox",
-            "off",
-            "--",
-            "plan the release",
-        ])
+        .args(["--converse", "--sandbox", "off", "--", "plan the release"])
         .output()
         .unwrap();
     let stderr_off = String::from_utf8_lossy(&out_off.stderr);
@@ -568,7 +562,7 @@ fn start_lines_and_banner_report_sandbox_state() {
 }
 
 #[test]
-fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
+fn write_scope_is_set_only_for_converse_with_sandbox_on() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let root = tempfile::tempdir_in(tmp_base).unwrap();
@@ -585,7 +579,7 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
 
     let _session_on = ReplSession::try_new(&ReplConfig {
         repo_root: root.path().to_path_buf(),
-        orchestrate: true,
+        converse: true,
         sandbox: "on".to_string(),
         ..Default::default()
     })
@@ -594,7 +588,7 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
     assert!(tasks_dir.is_dir(), ".wt/tasks must be created on start");
     let tasks_canon = tasks_dir.canonicalize().unwrap();
     let root_canon = root.path().canonicalize().unwrap();
-    let scope = blyte_agent::tools::write_scope().expect("orchestrate + sandbox on must set scope");
+    let scope = blyte_agent::tools::write_scope().expect("converse + sandbox on must set scope");
     assert!(scope.allowed.contains(&tasks_canon), "{:?}", scope.allowed);
     assert!(!scope.allowed.contains(&root_canon), "{:?}", scope.allowed);
     assert!(
@@ -610,7 +604,7 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
 
     let _session_off = ReplSession::try_new(&ReplConfig {
         repo_root: root.path().to_path_buf(),
-        orchestrate: true,
+        converse: true,
         sandbox: "off".to_string(),
         ..Default::default()
     })
@@ -619,7 +613,7 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
 
     let _session_on_again = ReplSession::try_new(&ReplConfig {
         repo_root: root.path().to_path_buf(),
-        orchestrate: true,
+        converse: true,
         sandbox: "on".to_string(),
         ..Default::default()
     })
@@ -631,7 +625,7 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
     let mut impl_cfg = TaskConfig::from(&cli_impl);
     impl_cfg.root = root.path().to_path_buf();
     impl_cfg.sandbox = "on".to_string();
-    assert!(!impl_cfg.orchestrate);
+    assert!(!impl_cfg.converse);
     let _ = run_task_with_state_and_events(&impl_cfg, &mut impl_state, &|_| {});
     assert!(
         blyte_agent::tools::write_scope().is_none(),
@@ -639,24 +633,19 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
     );
 
     let mut orch_state = blyte_agent::state::State::new("orch", String::new());
-    let cli_orch = Cli::try_parse_from([
-        "blyte",
-        "--orchestrate",
-        "--model",
-        "unknown-model-for-test",
-    ])
-    .unwrap();
+    let cli_orch =
+        Cli::try_parse_from(["blyte", "--converse", "--model", "unknown-model-for-test"]).unwrap();
     let mut orch_cfg = TaskConfig::from(&cli_orch);
     orch_cfg.root = root.path().to_path_buf();
     let _ = run_task_with_state_and_events(&orch_cfg, &mut orch_state, &|_| {});
     let scope = blyte_agent::tools::write_scope()
-        .expect("run_task with orchestrate + sandbox on must set scope");
+        .expect("run_task with converse + sandbox on must set scope");
     assert!(scope.allowed.contains(&tasks_canon), "{:?}", scope.allowed);
 
     let mut orch_off_state = blyte_agent::state::State::new("orch-off", String::new());
     let cli_orch_off = Cli::try_parse_from([
         "blyte",
-        "--orchestrate",
+        "--converse",
         "--sandbox",
         "off",
         "--model",
@@ -668,7 +657,7 @@ fn write_scope_is_set_only_for_orchestrate_with_sandbox_on() {
     let _ = run_task_with_state_and_events(&orch_off_cfg, &mut orch_off_state, &|_| {});
     assert!(
         blyte_agent::tools::write_scope().is_none(),
-        "run_task with orchestrate + sandbox off must clear scope"
+        "run_task with converse + sandbox off must clear scope"
     );
 
     blyte_agent::tools::set_write_scope(None);
@@ -706,7 +695,7 @@ fn sandboxed_shell_cannot_write_the_usage_ledger_directory() {
     std::env::remove_var("XDG_STATE_HOME");
 
     for profile in [
-        sandbox::orchestrator_profile(repo.path(), &[]),
+        sandbox::conversation_profile(repo.path(), &[]),
         sandbox::default_profile(repo.path(), &[]),
     ] {
         let sh = blyte_agent::shell::LocalShell::sandboxed(profile);
@@ -789,8 +778,8 @@ fn init_git_repo_in_target_tmp() -> tempfile::TempDir {
     root
 }
 
-fn orchestrator_config(root: &Path) -> TaskConfig {
-    let cli = Cli::try_parse_from(["blyte", "--orchestrate"]).unwrap();
+fn conversation_config(root: &Path) -> TaskConfig {
+    let cli = Cli::try_parse_from(["blyte", "--converse"]).unwrap();
     let mut cfg = TaskConfig::from(&cli);
     cfg.root = root.to_path_buf();
     cfg
@@ -823,7 +812,7 @@ fn shell_writes_in_an_open_edit_worktree_and_nowhere_else_new() {
     let other = root.path().join(".wt/other");
     std::fs::create_dir_all(&other).unwrap();
 
-    let cfg = orchestrator_config(root.path());
+    let cfg = conversation_config(root.path());
     let shell = build_local_shell(&cfg);
 
     let e1_file = e1.join("f.txt");
@@ -923,7 +912,7 @@ fn shell_loses_the_worktree_when_the_edit_finishes() {
     let root = init_git_repo_in_target_tmp();
     let e1 = open_edit_worktree(root.path(), "E1");
 
-    let cfg = orchestrator_config(root.path());
+    let cfg = conversation_config(root.path());
     let shell = build_local_shell(&cfg);
 
     let first_file = e1.join("a.txt");
@@ -978,7 +967,7 @@ fn shell_keeps_its_directory_and_says_when_it_restarted() {
     let sub = root.path().join("subdir");
     std::fs::create_dir_all(&sub).unwrap();
 
-    let cfg = orchestrator_config(root.path());
+    let cfg = conversation_config(root.path());
     let shell = build_local_shell(&cfg);
 
     let setup = shell
@@ -1050,7 +1039,7 @@ fn shell_does_not_restart_when_open_edits_are_unchanged() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let root = init_git_repo_in_target_tmp();
-    let cfg = orchestrator_config(root.path());
+    let cfg = conversation_config(root.path());
     let shell = build_local_shell(&cfg);
 
     let first = shell

@@ -273,7 +273,7 @@ fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
         rollback: true,
         model: Some("gemini-4-neon".to_string()),
         container: None,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         sandbox: "on".to_string(),
@@ -907,7 +907,7 @@ fn decision_errors() {
 }
 
 #[test]
-fn send_back_reaches_the_orchestrator() {
+fn send_back_reaches_the_conversation() {
     let d = tempfile::tempdir().unwrap();
     let repo = d.path().join("demo-repo");
     init_git_repo(&repo);
@@ -929,7 +929,7 @@ fn send_back_reaches_the_orchestrator() {
     );
     assert_eq!(resp.status, 200);
     let body = parse_json(&resp);
-    let expected_msg = body["decision"]["orchestrator_message"]
+    let expected_msg = body["decision"]["conversation_message"]
         .as_str()
         .unwrap()
         .to_string();

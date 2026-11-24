@@ -1,4 +1,4 @@
-//! `blyte skill install --harness codex` sets up Codex CLI as the orchestrator with blyte
+//! `blyte skill install --harness codex` sets up Codex CLI as the conversation model with blyte
 //! underneath: the skill where Codex finds it, the default block in AGENTS.md, and rules that let
 //! `blyte dispatch` run outside Codex's sandbox (2026-09-27). Run end to end against a live Codex on 2026-09-30.
 

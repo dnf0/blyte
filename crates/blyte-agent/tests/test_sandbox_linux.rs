@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use blyte_agent::sandbox::{default_profile, orchestrator_profile, Profile};
+use blyte_agent::sandbox::{conversation_profile, default_profile, Profile};
 
 #[test]
 fn a_string_profile_is_a_seatbelt_profile() {
@@ -37,7 +37,7 @@ fn the_default_profile_matches_the_platform() {
 }
 
 #[test]
-fn orchestrator_profile_allows_only_wt_tasks_for_writes() {
+fn conversation_profile_allows_only_wt_tasks_for_writes() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let d = tempfile::tempdir_in(tmp_base).unwrap();
@@ -55,7 +55,7 @@ fn orchestrator_profile_allows_only_wt_tasks_for_writes() {
     let git_canon = canon(&d.path().join(".git"));
     let wt_canon = canon(&d.path().join(".wt"));
 
-    let p = orchestrator_profile(d.path(), &[]);
+    let p = conversation_profile(d.path(), &[]);
     if cfg!(target_os = "macos") {
         let Profile::Seatbelt(s) = p else {
             panic!("expected Seatbelt");
@@ -107,7 +107,7 @@ mod linux {
     use std::path::Path;
     use std::time::Duration;
 
-    use blyte_agent::sandbox::{available, orchestrator_profile, Profile};
+    use blyte_agent::sandbox::{available, conversation_profile, Profile};
     use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
 
     fn landlock_or_skip() -> bool {
@@ -185,7 +185,7 @@ mod linux {
     }
 
     #[test]
-    fn orchestrator_profile_writes_only_in_wt_tasks_not_root_git_or_wt_passed() {
+    fn conversation_profile_writes_only_in_wt_tasks_not_root_git_or_wt_passed() {
         if !landlock_or_skip() {
             return;
         }
@@ -203,7 +203,7 @@ mod linux {
         std::fs::create_dir_all(&tasks).unwrap();
         std::fs::create_dir_all(&passed).unwrap();
 
-        let sh = LocalShell::sandboxed(orchestrator_profile(repo.path(), &[]));
+        let sh = LocalShell::sandboxed(conversation_profile(repo.path(), &[]));
         let ok_file = tasks.join("task.md");
         let ok = sh
             .exec(

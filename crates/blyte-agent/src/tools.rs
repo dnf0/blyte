@@ -131,7 +131,7 @@ pub fn write_scope() -> Option<WriteScope> {
         .unwrap_or_else(|e| e.into_inner().clone())
 }
 
-/// Set the host dispatch command for the orchestrator's `dispatch` tool.
+/// Set the host dispatch command for the conversation model's `dispatch` tool.
 pub fn set_dispatch_cmd(cmd: Option<String>) {
     match DISPATCH_CMD.write() {
         Ok(mut lock) => *lock = cmd,
@@ -893,7 +893,7 @@ pub fn grep_command(use_rg: bool, pattern: &str, sub: &str, glob: &str) -> Strin
 /// edited the host whenever the instruction went missing.
 ///
 /// `fs` decides WHERE files live. Kept separate from `shell` because the two can differ: a
-/// container with a bind-mounted workspace shares the orchestrator's files while running its
+/// container with a bind-mounted workspace shares the conversation model's files while running its
 /// own commands, and a remote sandbox shares neither. Pairing the wrong two would have the
 /// model editing one filesystem and verifying another.
 pub fn execute(

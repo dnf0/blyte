@@ -111,7 +111,7 @@ fn make_config(root: PathBuf, model: &str) -> TaskConfig {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     }
 }

@@ -1,4 +1,4 @@
-use blyte_cli::cli::{apply_orchestrate_defaults, Cli, SurfaceArgs};
+use blyte_cli::cli::{apply_converse_defaults, Cli, SurfaceArgs};
 use clap::{CommandFactory, FromArgMatches};
 use std::path::PathBuf;
 
@@ -53,7 +53,7 @@ fn main() {
         );
         std::process::exit(2);
     }
-    apply_orchestrate_defaults(&mut cli, &matches);
+    apply_converse_defaults(&mut cli, &matches);
 
     if let Some(cmd) = cli.command {
         match cmd {
@@ -116,7 +116,7 @@ fn main() {
             }
             blyte_cli::cli::Command::Instructions(args) => {
                 if args.default_process {
-                    print!("{}", blyte_cli::orchestrator_text::DEFAULT_PROCESS);
+                    print!("{}", blyte_cli::conversation_text::DEFAULT_PROCESS);
                     std::process::exit(0);
                 }
                 let root = match blyte_cli::instructions_cmd::repo_root() {
@@ -127,9 +127,9 @@ fn main() {
                     }
                 };
                 let answers = if args.one_shot {
-                    blyte_agent::orchestrator::Answers::Nobody
+                    blyte_agent::conversation::Answers::Nobody
                 } else {
-                    blyte_agent::orchestrator::Answers::Person
+                    blyte_agent::conversation::Answers::Person
                 };
                 let sandbox_on = args.sandbox.as_deref().unwrap_or(&cli.sandbox) == "on";
                 match blyte_cli::instructions_cmd::render_with_sandbox(
@@ -275,7 +275,7 @@ fn main() {
         }
     }
 
-    if cli.orchestrate
+    if cli.converse
         && std::env::var("BLYTE_SESSION")
             .map(|v| v.is_empty())
             .unwrap_or(true)
@@ -338,8 +338,8 @@ fn main() {
 
     let use_terminal = cli.terminal;
     if !use_terminal {
-        cli.orchestrate = true;
-        apply_orchestrate_defaults(&mut cli, &matches);
+        cli.converse = true;
+        apply_converse_defaults(&mut cli, &matches);
         let surface_args = SurfaceArgs {
             port: cli.port.unwrap_or(0),
             no_open: cli.no_open,
@@ -361,7 +361,7 @@ fn main() {
             max_turns: cli.max_turns,
             max_gates: cli.max_gates,
             rollback: cli.rollback,
-            orchestrate: cli.orchestrate,
+            converse: cli.converse,
             dispatch_cmd: cli.dispatch_cmd,
             fold_budget: cli.fold_budget,
             sandbox: cli.sandbox,
@@ -381,7 +381,7 @@ fn main() {
         max_turns: cli.max_turns,
         max_gates: cli.max_gates,
         rollback: cli.rollback,
-        orchestrate: cli.orchestrate,
+        converse: cli.converse,
         dispatch_cmd: cli.dispatch_cmd,
         fold_budget: cli.fold_budget,
         sandbox: cli.sandbox,

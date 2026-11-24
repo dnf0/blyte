@@ -1,5 +1,5 @@
 This is blyte's default process. It is a starting point, not a requirement: a file of your own at
-`~/.config/blyte/orchestrator.md` replaces all of it (`blyte instructions --default-process` prints
+`~/.config/blyte/process.md` replaces all of it (`blyte instructions --default-process` prints
 this text to start from). Its measured basis (2026-11-21, one task, three runs each, orchestrator
 and implementer on the same model): an orchestrator that read the code to write a detailed task
 cost USD 1 to 3.7 more per run than passing the request straight on, with no better result. On a

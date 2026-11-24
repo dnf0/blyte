@@ -457,15 +457,15 @@ fn main_checkout_root(root: &Path) -> PathBuf {
 }
 
 /// Returns the `.wt/tasks` directory under the main checkout for `root`.
-pub fn orchestrator_tasks_dir(root: &Path) -> PathBuf {
+pub fn conversation_tasks_dir(root: &Path) -> PathBuf {
     main_checkout_root(root).join(".wt").join("tasks")
 }
 
-/// Returns the writable directories allowed for the orchestrate-mode sandboxed shell:
+/// Returns the writable directories allowed for the `--converse` sandboxed shell:
 /// `.wt/tasks` under the main checkout, system temporary directories, and common developer caches.
-pub fn orchestrator_allowed(root: &Path) -> Vec<PathBuf> {
+pub fn conversation_allowed(root: &Path) -> Vec<PathBuf> {
     let mut allowed = vec![
-        orchestrator_tasks_dir(root),
+        conversation_tasks_dir(root),
         PathBuf::from("/private/tmp"),
         PathBuf::from("/private/var/folders"),
         PathBuf::from("/tmp"),
@@ -577,18 +577,18 @@ fn allow_edit_worktrees(mut base: String, edit_worktrees: &[PathBuf]) -> String 
     base
 }
 
-/// Returns the orchestrate-mode sandbox profile for the current platform.
-pub fn orchestrator_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
-    orchestrator_profile_net(root, allow_read, true)
+/// Returns the `--converse` sandbox profile for the current platform.
+pub fn conversation_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
+    conversation_profile_net(root, allow_read, true)
 }
 
-/// Returns the orchestrate-mode sandbox profile with network configuration.
-pub fn orchestrator_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
-    orchestrator_profile_with_edits(root, allow_read, network, &[])
+/// Returns the `--converse` sandbox profile with network configuration.
+pub fn conversation_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
+    conversation_profile_with_edits(root, allow_read, network, &[])
 }
 
-/// Returns the orchestrate-mode sandbox profile allowing writes in the given open edit worktrees.
-pub fn orchestrator_profile_with_edits(
+/// Returns the `--converse` sandbox profile allowing writes in the given open edit worktrees.
+pub fn conversation_profile_with_edits(
     root: &Path,
     allow_read: &[PathBuf],
     network: bool,
@@ -601,7 +601,7 @@ pub fn orchestrator_profile_with_edits(
             _ => Vec::new(),
         };
         let base = deny_state_blyte_write(allow_edit_worktrees(
-            profile_with(root, &orchestrator_allowed(root), &deny_read, allow_read),
+            profile_with(root, &conversation_allowed(root), &deny_read, allow_read),
             edit_worktrees,
         ));
         if network {
@@ -627,7 +627,7 @@ pub fn orchestrator_profile_with_edits(
             extra_read.push(main_wt);
         }
         extra_read.extend_from_slice(allow_read);
-        let mut write = orchestrator_allowed(root);
+        let mut write = conversation_allowed(root);
         write.extend(edit_worktrees.iter().cloned());
         Profile::LandlockConfined {
             write,
@@ -637,15 +637,15 @@ pub fn orchestrator_profile_with_edits(
     }
 }
 
-/// Builds the orchestrate-mode sandbox profile including all currently open edit worktrees.
-pub fn orchestrator_profile_for_open_edits(
+/// Builds the `--converse` sandbox profile including all currently open edit worktrees.
+pub fn conversation_profile_for_open_edits(
     root: &Path,
     allow_read: &[PathBuf],
     network: bool,
 ) -> Result<Profile, String> {
     let main = main_checkout_root(root);
     let edits = open_edit_worktrees(&main)?;
-    Ok(orchestrator_profile_with_edits(
+    Ok(conversation_profile_with_edits(
         root, allow_read, network, &edits,
     ))
 }
@@ -870,12 +870,12 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn orchestrator_profile_with_edits_denies_worktree_git() {
+    fn conversation_profile_with_edits_denies_worktree_git() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join(".wt/E1");
         std::fs::create_dir_all(&wt).unwrap();
         let Profile::Seatbelt(sbpl) =
-            orchestrator_profile_with_edits(tmp.path(), &[], false, std::slice::from_ref(&wt))
+            conversation_profile_with_edits(tmp.path(), &[], false, std::slice::from_ref(&wt))
         else {
             panic!("expected Seatbelt profile on macOS");
         };

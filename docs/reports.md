@@ -64,7 +64,7 @@ removed; new fields are added without a bump.
 | `context` | `folded` or `conversational` |
 | `gated`, `gate_source` | whether a gate was given; `user` or `none` |
 | `duration_seconds` | wall-clock time of the run |
-| `final_message` | the model's last text: its own report of what it did (what `blyte dispatch` shows the orchestrator) |
+| `final_message` | the model's last text: its own report of what it did (what `blyte dispatch` shows the conversation model) |
 
 **Work**
 
@@ -110,7 +110,7 @@ removed; new fields are added without a bump.
 ## Using reports
 
 Reports are designed to be compared. The evaluation harness that measures blyte reads exactly this
-shape; an orchestrator can read `outcome`, `gate_failures` and `cost_usd` to decide whether to
+shape; a conversation model can read `outcome`, `gate_failures` and `cost_usd` to decide whether to
 merge, retry or escalate. `jq` is enough for most questions:
 
 ```bash

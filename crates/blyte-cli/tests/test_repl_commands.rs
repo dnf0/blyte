@@ -15,7 +15,7 @@ fn test_slash_help() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -28,6 +28,7 @@ fn test_slash_help() {
     assert!(text.contains("/help"));
     assert!(text.contains("/cost"));
     assert!(text.contains("/state"));
+    assert!(text.contains("(Brief, Runtime)"));
     assert!(text.contains("/diff"));
     assert!(text.contains("/gate"));
     assert!(text.contains("/clear"));
@@ -45,7 +46,7 @@ fn test_slash_gate_get_and_set() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -64,7 +65,7 @@ fn test_slash_gate_get_and_set() {
     let res = handle_repl_command(&mut session, "/gate cargo test", &mut out).unwrap();
     assert_eq!(res, ReplControl::Handled);
     assert_eq!(session.gate.as_deref(), Some("cargo test"));
-    assert_eq!(session.state.orchestrator.verification_cmd, "cargo test");
+    assert_eq!(session.state.brief.verification_cmd, "cargo test");
 
     // Inspect updated gate
     let mut out = Vec::new();
@@ -85,7 +86,7 @@ fn test_slash_state_inspection() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -95,7 +96,7 @@ fn test_slash_state_inspection() {
     let res = handle_repl_command(&mut session, "/state", &mut out).unwrap();
     assert_eq!(res, ReplControl::Handled);
     let text = String::from_utf8(out).unwrap();
-    assert!(text.to_lowercase().contains("orchestrator"));
+    assert!(text.contains("Brief:"));
     assert!(text.to_lowercase().contains("runtime"));
     assert!(text.contains("session: "));
 }
@@ -111,7 +112,7 @@ fn test_slash_exit() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -138,7 +139,7 @@ fn test_repl_stream_driving() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -258,7 +259,7 @@ fn test_prompt_submission() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -289,7 +290,7 @@ fn test_clear_starts_new_conversation() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -315,7 +316,7 @@ fn test_state_counts_conversation_messages() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -348,7 +349,7 @@ fn test_slash_cost() {
         max_turns: 60,
         max_gates: 5,
         rollback: true,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         ..Default::default()
@@ -401,5 +402,5 @@ fn test_slash_cost() {
     }
 
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("blyte $0.35 (orchestrator $0.10, implementers $0.25 in 1 runs)"));
+    assert!(text.contains("blyte $0.35 (conversation model $0.10, implementers $0.25 in 1 runs)"));
 }

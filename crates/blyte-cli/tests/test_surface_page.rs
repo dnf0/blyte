@@ -1424,3 +1424,48 @@ const assert = require("node:assert");
 "#;
     run_surface_script(harness);
 }
+
+#[test]
+fn decision_response_requires_conversation_message() {
+    let harness = r#"
+const assert = require("node:assert");
+
+assert.strictEqual(
+  validateDecisionResponse({
+    seq: 1,
+    decision: {
+      run: "T1",
+      action: "send_back",
+      note: "fix edge case",
+      conversation_message: "Send back T1",
+    },
+  }),
+  null
+);
+assert.strictEqual(
+  validateDecisionResponse({
+    seq: 2,
+    decision: {
+      run: "T1",
+      action: "accept",
+      note: null,
+      conversation_message: null,
+    },
+  }),
+  null
+);
+const missingErr = validateDecisionResponse({
+  seq: 3,
+  decision: {
+    run: "T1",
+    action: "accept",
+    note: null,
+  },
+});
+assert.strictEqual(
+  missingErr,
+  "decision response missing field decision.conversation_message"
+);
+"#;
+    run_surface_script(harness);
+}

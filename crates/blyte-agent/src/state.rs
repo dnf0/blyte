@@ -4,7 +4,7 @@
 //!
 //! | region | written by | agent may mutate |
 //! |---|---|---|
-//! | [`Orchestrator`] -- goal, gate | human or calling agent | **never** |
+//! | [`Brief`] -- goal, gate | human or calling agent | **never** |
 //! | [`Runtime`] -- observed facts | the harness | no |
 //!
 //! The first is the load-bearing one. A control plane whose worker can author its own
@@ -13,21 +13,21 @@
 
 use serde::{Deserialize, Serialize};
 
-/// What the orchestrator decided. The worker reads this and can never change it.
+/// What the conversation model decided. The worker reads this and can never change it.
 ///
 /// There is deliberately no `&mut` accessor and no setter. Blyte previously asserted
 /// "the orchestrator states the verification command" as doctrine while the code happily let
 /// the worker's own test become the gate; making it structurally impossible is the difference
 /// between a rule and a property.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Orchestrator {
+pub struct Brief {
     /// What success means, in prose, for the worker.
     pub goal: String,
     /// The shell command whose exit code decides completion. Exit 0 and only exit 0.
     pub verification_cmd: String,
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
-    /// Set for `blyte --orchestrate`: the orchestrator's instructions, which replace the implementer's
+    /// Set for `blyte --converse`: the conversation model's instructions, which replace the implementer's
     /// framing in the system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -47,17 +47,17 @@ pub struct Runtime {
     pub conversation_goal: Option<String>,
 }
 
-/// Execution state across two regions: [`Orchestrator`] and [`Runtime`].
+/// Execution state across two regions: [`Brief`] and [`Runtime`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct State {
-    pub orchestrator: Orchestrator,
+    pub brief: Brief,
     pub runtime: Runtime,
 }
 
 impl State {
     pub fn new(goal: impl Into<String>, verification_cmd: impl Into<String>) -> Self {
         Self {
-            orchestrator: Orchestrator {
+            brief: Brief {
                 goal: goal.into(),
                 verification_cmd: verification_cmd.into(),
                 max_cost_usd: None,

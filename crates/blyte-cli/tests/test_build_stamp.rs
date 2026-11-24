@@ -41,7 +41,7 @@ fn config() -> TaskConfig {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     }
 }

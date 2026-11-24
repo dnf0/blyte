@@ -68,7 +68,7 @@ fn second_prompt_continues_the_conversation() {
     let (outcome1, _) = runner.run(&mut state);
     assert_eq!(outcome1, Outcome::Verified);
 
-    state.orchestrator.goal = "src/a.rs".into();
+    state.brief.goal = "src/a.rs".into();
     let (outcome2, _) = runner.run(&mut state);
     assert_eq!(outcome2, Outcome::Verified);
 
@@ -121,7 +121,7 @@ fn system_prompt_is_stable_across_prompts() {
     state.runtime.conversation = Some(Vec::new());
 
     runner.run(&mut state);
-    state.orchestrator.goal = "src/a.rs".into();
+    state.brief.goal = "src/a.rs".into();
     runner.run(&mut state);
 
     let seen = p.seen.lock().unwrap();
@@ -168,7 +168,7 @@ fn without_conversation_each_run_is_fresh() {
     assert_eq!(state.runtime.conversation, None);
 
     runner.run(&mut state);
-    state.orchestrator.goal = "src/a.rs".into();
+    state.brief.goal = "src/a.rs".into();
     runner.run(&mut state);
 
     let seen = p.seen.lock().unwrap();

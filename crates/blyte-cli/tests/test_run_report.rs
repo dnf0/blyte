@@ -36,7 +36,7 @@ fn config() -> TaskConfig {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     }
 }
@@ -143,7 +143,7 @@ fn a_finished_run_maps_outcome_finished() {
         ..Default::default()
     };
     let mut conf = config();
-    conf.orchestrate = true;
+    conf.converse = true;
     conf.gate = None;
     let r = RunRecord::from_run(
         &conf,

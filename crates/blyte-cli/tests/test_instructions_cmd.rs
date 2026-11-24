@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use blyte_agent::orchestrator::{ANSWERS_NOBODY, ANSWERS_PERSON};
+use blyte_agent::conversation::{ANSWERS_NOBODY, ANSWERS_PERSON};
 use blyte_agent::rules::MAX_RULES_CHARS;
-use blyte_agent::run::ORCHESTRATOR_FIXED;
-use blyte_cli::orchestrator_text::{DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL};
+use blyte_agent::run::CONVERSATION_FIXED;
+use blyte_cli::conversation_text::{DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL};
 
 fn blyte_bin() -> &'static str {
     env!("CARGO_BIN_EXE_blyte")
@@ -37,7 +37,7 @@ fn run_instructions(dir: &Path, xdg: &Path, args: &[&str]) -> Output {
 fn default_process_flag_prints_the_file_exactly() {
     let dir = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let user_file = xdg.path().join("blyte").join("orchestrator.md");
+    let user_file = xdg.path().join("blyte").join("process.md");
     std::fs::create_dir_all(user_file.parent().unwrap()).unwrap();
     std::fs::write(&user_file, "x".repeat(MAX_RULES_CHARS + 100)).unwrap();
 
@@ -95,8 +95,8 @@ fn prints_start_lines_then_the_reference_and_the_default_process() {
         .find("## Always sent\n")
         .expect("stdout should contain ## Always sent");
     let fixed_pos = stdout
-        .find(ORCHESTRATOR_FIXED)
-        .expect("stdout should contain ORCHESTRATOR_FIXED");
+        .find(CONVERSATION_FIXED)
+        .expect("stdout should contain CONVERSATION_FIXED");
     let tools_pos = stdout
         .find("## Tool descriptions\n")
         .expect("stdout should contain ## Tool descriptions");
@@ -117,7 +117,7 @@ fn a_user_file_is_named_and_replaces_the_default() {
     let repo_dir = tempfile::tempdir().unwrap();
     init_git_repo(repo_dir.path());
     let xdg = tempfile::tempdir().unwrap();
-    let user_file = xdg.path().join("blyte").join("orchestrator.md");
+    let user_file = xdg.path().join("blyte").join("process.md");
     std::fs::create_dir_all(user_file.parent().unwrap()).unwrap();
     std::fs::write(&user_file, "Custom process body.\n").unwrap();
 
@@ -146,9 +146,9 @@ fn a_repository_file_is_named_and_included() {
     let repo_dir = tempfile::tempdir().unwrap();
     let repo_root = init_git_repo(repo_dir.path());
     let xdg = tempfile::tempdir().unwrap();
-    let repo_file = repo_root.join(".blyte").join("orchestrator.md");
+    let repo_file = repo_root.join(".blyte").join("process.md");
     std::fs::create_dir_all(repo_file.parent().unwrap()).unwrap();
-    std::fs::write(&repo_file, "Repository-specific orchestrator rule.\n").unwrap();
+    std::fs::write(&repo_file, "Repository-specific conversation model rule.\n").unwrap();
 
     let out = run_instructions(repo_dir.path(), xdg.path(), &[]);
     assert!(
@@ -163,7 +163,7 @@ fn a_repository_file_is_named_and_included() {
         stdout.contains(&expected_line),
         "expected {expected_line:?} in stdout:\n{stdout}"
     );
-    assert!(stdout.contains("Repository-specific orchestrator rule."));
+    assert!(stdout.contains("Repository-specific conversation model rule."));
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn an_oversized_user_file_exits_1_and_names_it() {
     let repo_dir = tempfile::tempdir().unwrap();
     init_git_repo(repo_dir.path());
     let xdg = tempfile::tempdir().unwrap();
-    let user_file = xdg.path().join("blyte").join("orchestrator.md");
+    let user_file = xdg.path().join("blyte").join("process.md");
     std::fs::create_dir_all(user_file.parent().unwrap()).unwrap();
     std::fs::write(&user_file, "x".repeat(MAX_RULES_CHARS + 1)).unwrap();
 

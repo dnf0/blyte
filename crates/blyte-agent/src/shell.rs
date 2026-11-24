@@ -201,7 +201,7 @@ pub trait Shell: Send + Sync {
     /// A worker that knows it is inside a container does not go looking for the host.
     fn describe(&self) -> String;
 
-    /// Which binaries exist **in the execution environment**, not on the orchestrator's host.
+    /// Which binaries exist **in the execution environment**, not on the conversation model's host.
     fn available_binaries(&self, cwd: &Path, candidates: &[&'static str]) -> Vec<String> {
         // One probe rather than N: a remote or containerised shell pays a round trip per call,
         // and sixteen of them before the first turn is a poor way to start.

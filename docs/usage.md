@@ -49,7 +49,7 @@ blyte reads the repository's own rules for agents on every run and puts them in 
 however it was started (a direct `blyte dispatch`, a script, another agent). The first file found
 wins: `.blyte/rules.md` (written for blyte), `.claude/agy-rules.md` (implementer rules kept for
 headless agents), then `AGENTS.md`. `CLAUDE.md` is not read, because it is written for the
-orchestrator. Each is looked for in the working tree, then in the main checkout (a rules file may
+conversation model. Each is looked for in the working tree, then in the main checkout (a rules file may
 be untracked). Rules are capped at 12,000 characters. The run prints which file it used
 (`blyte: repository rules from …`). Container runs read none.
 
@@ -276,7 +276,7 @@ cost, per-call token usage, where the time went, gate failures and the security 
 ## Driving blyte from another agent
 
 blyte is built to be dispatched: one task per run, in its own worktree, with a gate and a report,
-reviewed and merged by whoever dispatched it. [blyte as your implementer](orchestration.md)
+reviewed and merged by whoever dispatched it. [blyte as your implementer](workflow.md)
 describes the pattern, `blyte dispatch` and `blyte review`, and the Claude Code skill.
 `--plan <path>` and `--plan-task <text>` record which plan task the dispatch implements, so the
 dashboard can show plans.

@@ -84,14 +84,14 @@ fn test_blyte_part() {
     // 3. blyte_part with 0 runs is None; with 2 runs and $0.07 and claude cost 2.5 it is
     // blyte $0.07 (2 runs) · total $2.57; with claude cost None there is no total.
     let t_zero = blyte_cli::cost::Totals {
-        orchestrator_usd: 0.0,
+        conversation_usd: 0.0,
         implementers_usd: 0.0,
         runs: 0,
     };
     assert_eq!(blyte_cli::statusline::blyte_part(&t_zero, Some(2.5)), None);
 
     let t_two = blyte_cli::cost::Totals {
-        orchestrator_usd: 0.1,
+        conversation_usd: 0.1,
         implementers_usd: 0.07,
         runs: 2,
     };

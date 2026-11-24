@@ -101,7 +101,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     };
 
@@ -145,7 +145,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     };
 
@@ -178,7 +178,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     };
 
@@ -222,7 +222,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     };
 
@@ -231,8 +231,8 @@ fn test_run_task_with_state_and_writer_preserves_state() {
 
     let result = run_task_with_state_and_writer(&config, &mut state, &mut output);
     assert!(result.is_err());
-    assert_eq!(state.orchestrator.goal, "custom goal");
-    assert_eq!(state.orchestrator.verification_cmd, "echo 1");
+    assert_eq!(state.brief.goal, "custom goal");
+    assert_eq!(state.brief.verification_cmd, "echo 1");
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn test_run_task_with_state_and_events_emits_turn() {
         claim_check: false,
         base_check: false,
         base_check_dir: None,
-        orchestrate: false,
+        converse: false,
         dispatch_cmd: None,
     };
 

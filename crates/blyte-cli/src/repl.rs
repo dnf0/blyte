@@ -13,7 +13,7 @@ pub struct ReplConfig {
     pub max_turns: usize,
     pub max_gates: usize,
     pub rollback: bool,
-    pub orchestrate: bool,
+    pub converse: bool,
     pub dispatch_cmd: Option<String>,
     pub fold_budget: Option<usize>,
     pub sandbox: String,
@@ -33,7 +33,7 @@ impl Default for ReplConfig {
             max_turns: 60,
             max_gates: 5,
             rollback: true,
-            orchestrate: false,
+            converse: false,
             dispatch_cmd: None,
             fold_budget: None,
             sandbox: "on".to_string(),
@@ -55,14 +55,14 @@ pub struct ReplSession {
     pub max_turns: usize,
     pub max_gates: usize,
     pub rollback: bool,
-    pub orchestrate: bool,
+    pub converse: bool,
     pub dispatch_cmd: Option<String>,
     pub fold_budget: Option<usize>,
     pub sandbox: String,
     pub network: String,
     pub allow_read: Vec<PathBuf>,
     pub pass_env: Vec<String>,
-    pub orchestrator_start_lines: Option<[String; 3]>,
+    pub conversation_start_lines: Option<[String; 3]>,
     pub state: blyte_agent::state::State,
     pub session_id: String,
 }
@@ -104,22 +104,22 @@ impl ReplSession {
 
         let network = match &config.network {
             Some(v) => v.clone(),
-            None if config.orchestrate && config.sandbox == "on" && config.container.is_none() => {
+            None if config.converse && config.sandbox == "on" && config.container.is_none() => {
                 "off".to_string()
             }
             None => "on".to_string(),
         };
 
         let sandbox_on = config.sandbox == "on";
-        let allowed_count = crate::task_runner::configure_orchestrate_policy(
-            config.orchestrate,
+        let allowed_count = crate::task_runner::configure_converse_policy(
+            config.converse,
             sandbox_on,
             &config.repo_root,
             approver,
             true,
         )?;
-        let orchestrator_start_lines = if config.orchestrate {
-            Some(crate::orchestrator_text::set_state_instructions(
+        let conversation_start_lines = if config.converse {
+            Some(crate::conversation_text::set_state_instructions(
                 &mut state,
                 config.dispatch_cmd.is_some(),
                 &config.repo_root,
@@ -143,14 +143,14 @@ impl ReplSession {
             max_turns: config.max_turns,
             max_gates: config.max_gates,
             rollback: config.rollback,
-            orchestrate: config.orchestrate,
+            converse: config.converse,
             dispatch_cmd: config.dispatch_cmd.clone(),
             fold_budget: config.fold_budget,
             sandbox: config.sandbox.clone(),
             network,
             allow_read: config.allow_read.clone(),
             pass_env: config.pass_env.clone(),
-            orchestrator_start_lines,
+            conversation_start_lines,
             state,
             session_id,
         })
@@ -185,7 +185,7 @@ impl ReplSession {
             claim_check: false,
             base_check: false,
             base_check_dir: None,
-            orchestrate: self.orchestrate,
+            converse: self.converse,
             dispatch_cmd: self.dispatch_cmd.clone(),
         }
     }
@@ -213,7 +213,7 @@ pub fn format_usage_line_with_session(
     usage: &blyte_provider::Usage,
     totals: &crate::cost::Totals,
 ) -> String {
-    let total = totals.orchestrator_usd + totals.implementers_usd;
+    let total = totals.conversation_usd + totals.implementers_usd;
     format!(
         "{} · session ${:.2} (implementers ${:.2}, {} runs)",
         format_usage_line(turns, usage),
@@ -311,9 +311,9 @@ pub fn render_banner_to<W: Write>(writer: &mut W, session: &ReplSession) -> std:
     writeln!(writer, "  Blyte Interactive Harness v{}", version)?;
     writeln!(writer, "  Repository : {}", repo)?;
     writeln!(writer, "  Model      : {}", model)?;
-    if session.orchestrate {
-        writeln!(writer, "  Mode       : orchestrator")?;
-        if let Some([process_line, repo_line, sandbox_line]) = &session.orchestrator_start_lines {
+    if session.converse {
+        writeln!(writer, "  Mode       : conversation model")?;
+        if let Some([process_line, repo_line, sandbox_line]) = &session.conversation_start_lines {
             let process = process_line
                 .strip_prefix("process: ")
                 .unwrap_or(process_line);
@@ -362,10 +362,10 @@ pub fn handle_repl_command<W: Write>(
 
         match cmd {
             "/help" => {
-                if session.orchestrate {
+                if session.converse {
                     writeln!(
                         writer,
-                        "Mode: orchestrator (plan, dispatch implementers, review and merge)"
+                        "Mode: conversation model (plan, dispatch implementers, review and merge)"
                     )
                     .map_err(|e| e.to_string())?;
                 }
@@ -381,7 +381,7 @@ pub fn handle_repl_command<W: Write>(
                     .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
-                    "  /state        - Inspect blyte state (Orchestrator, Runtime)"
+                    "  /state        - Inspect blyte state (Brief, Runtime)"
                 )
                 .map_err(|e| e.to_string())?;
                 writeln!(
@@ -532,9 +532,8 @@ pub fn handle_repl_command<W: Write>(
             "/state" => {
                 writeln!(writer, "=== blyte state ===").map_err(|e| e.to_string())?;
                 writeln!(writer, "session: {}", session.session_id).map_err(|e| e.to_string())?;
-                // Render orchestrator contract: goal specification and verification gate
                 let mut orch_val =
-                    serde_json::to_value(&session.state.orchestrator).map_err(|e| e.to_string())?;
+                    serde_json::to_value(&session.state.brief).map_err(|e| e.to_string())?;
                 if let Some(map) = orch_val.as_object_mut() {
                     if let Some(serde_json::Value::String(instructions)) =
                         map.get_mut("instructions")
@@ -544,7 +543,7 @@ pub fn handle_repl_command<W: Write>(
                     }
                 }
                 let orch = serde_json::to_string_pretty(&orch_val).map_err(|e| e.to_string())?;
-                writeln!(writer, "Orchestrator:\n{}", orch).map_err(|e| e.to_string())?;
+                writeln!(writer, "Brief:\n{}", orch).map_err(|e| e.to_string())?;
 
                 // Render runtime state including attempt counts, rollback metrics, and action ledger
                 let mut rt_without_conv = session.state.runtime.clone();
@@ -593,8 +592,8 @@ pub fn handle_repl_command<W: Write>(
                 Ok(ReplControl::Handled)
             }
             "/gate" => {
-                if session.orchestrate {
-                    writeln!(writer, "No gate in orchestrate mode.").map_err(|e| e.to_string())?;
+                if session.converse {
+                    writeln!(writer, "No gate in converse mode.").map_err(|e| e.to_string())?;
                 } else if args.is_empty() {
                     match &session.gate {
                         Some(g) => {
@@ -606,7 +605,7 @@ pub fn handle_repl_command<W: Write>(
                     }
                 } else {
                     session.gate = Some(args.to_string());
-                    session.state.orchestrator.verification_cmd = args.to_string();
+                    session.state.brief.verification_cmd = args.to_string();
                     writeln!(writer, "Gate set to: {}", args).map_err(|e| e.to_string())?;
                 }
                 Ok(ReplControl::Handled)
@@ -663,9 +662,9 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
             ReplControl::SubmitPrompt(prompt) => {
                 writeln!(writer, "Dispatching turn for prompt: {}", prompt)
                     .map_err(|e| e.to_string())?;
-                session.state.orchestrator.goal = prompt.clone();
+                session.state.brief.goal = prompt.clone();
                 if let Some(ref g) = session.gate {
-                    session.state.orchestrator.verification_cmd = g.clone();
+                    session.state.brief.verification_cmd = g.clone();
                 }
 
                 // Build task configuration from current session parameters
@@ -681,7 +680,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                         blyte_agent::run::Outcome::Verified | blyte_agent::run::Outcome::Finished,
                         report,
                     )) => {
-                        if session.orchestrate {
+                        if session.converse {
                             let totals = current_session_totals(&session.session_id);
                             writeln!(
                                 writer,
@@ -703,7 +702,7 @@ pub fn run_repl_stream<R: BufRead, W: Write>(
                         }
                     }
                     Ok((outcome, report)) => {
-                        if session.orchestrate {
+                        if session.converse {
                             let totals = current_session_totals(&session.session_id);
                             writeln!(
                                 writer,
@@ -758,7 +757,7 @@ mod tests {
         let config = ReplConfig::default();
         let mut session = ReplSession::new(&config);
         let instructions = "x".repeat(600);
-        session.state.orchestrator.instructions = Some(instructions.clone());
+        session.state.brief.instructions = Some(instructions.clone());
         let mut out = Vec::new();
         let res = handle_repl_command(&mut session, "/state", &mut out).unwrap();
         assert_eq!(res, ReplControl::Handled);
@@ -776,7 +775,7 @@ mod tests {
 
         let config = ReplConfig {
             repo_root: tmp.path().to_path_buf(),
-            orchestrate: true,
+            converse: true,
             ..Default::default()
         };
         let mut session = ReplSession::new(&config);
@@ -834,7 +833,7 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert_eq!(
             text.trim(),
-            "blyte $0.46 (orchestrator $0.12, implementers $0.34 in 1 runs)"
+            "blyte $0.46 (conversation model $0.12, implementers $0.34 in 1 runs)"
         );
     }
 
@@ -847,7 +846,7 @@ mod tests {
             thinking: 0,
         };
         let totals = crate::cost::Totals {
-            orchestrator_usd: 0.15,
+            conversation_usd: 0.15,
             implementers_usd: 0.35,
             runs: 2,
         };
