@@ -4,7 +4,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use blyte_cli::passed_trees::{check_key, has_passed, now_secs, tree_of};
 
@@ -77,6 +77,7 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
         .env("BLYTE_ENV_FILE", "")
         .env("BLYTE_USAGE_LOG", "off")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
@@ -89,33 +90,59 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
     cmd
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let ty = entry.file_type().unwrap();
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn base_repo_template() -> &'static Path {
+    static TEMPLATE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path();
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(p)
+                .output()
+                .unwrap();
+            Command::new("git")
+                .args(["config", "user.email", "test@example.com"])
+                .current_dir(p)
+                .output()
+                .unwrap();
+            Command::new("git")
+                .args(["config", "user.name", "Test User"])
+                .current_dir(p)
+                .output()
+                .unwrap();
+            std::fs::write(p.join("README.md"), "initial").unwrap();
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(p)
+                .output()
+                .unwrap();
+            Command::new("git")
+                .args(["commit", "-m", "initial", "--no-gpg-sign"])
+                .current_dir(p)
+                .output()
+                .unwrap();
+            dir
+        })
+        .path()
+}
+
 fn init_repo(dir: &Path) {
-    Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    std::fs::write(dir.join("README.md"), "initial").unwrap();
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "initial", "--no-gpg-sign"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
+    copy_dir_all(base_repo_template(), dir);
 }
 
 #[test]
@@ -204,7 +231,7 @@ fn test_dispatch_no_base_check_flag_skips_base_check() {
             "exit 3",
             "--no-base-check",
             "--max-turns",
-            "2",
+            "1",
             "--sandbox",
             "off",
         ])
@@ -271,7 +298,7 @@ fn test_dispatch_config_base_check_false_skips_base_check() {
             "--gate",
             "exit 3",
             "--max-turns",
-            "2",
+            "1",
             "--sandbox",
             "off",
         ])
