@@ -163,6 +163,11 @@ reads outside the repository. Add `--diff` for the full diff when
 something is flagged or surprising; otherwise the summary is usually enough, and it keeps your context small.
 If blyte review prints "blyte: <version> is out", tell the user, with that line.
 
+A run whose check passed is reviewed by a second model. If that review confirms a fallback or raises
+concerns, the run gets them back once and may add a commit (`fix: fail loudly where review found a
+fallback` or `fix: address the review's concerns`); neither message is flagged. What the review
+still raises after that round is listed under `== checks` for you to judge.
+
 **When the gate passed (`verified`)**, a light check is enough:
 
 1. **Scope**: only the files the task names changed, in the commit(s) you asked for, with the exact message
