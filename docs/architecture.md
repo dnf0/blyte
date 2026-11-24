@@ -292,7 +292,7 @@ which is what `--max-cost` and the report's `cost_usd` use.
   the budget, and the gate from `--gate`. The run writes a report (`--report`), the machine-readable
   contract that blyte-eval reads (see [Run reports](reports.md)).
 - **The REPL** sends each prompt through the same task runner, keeping the goal and gate between prompts.
-- **`blyte.toml`** (`blyte init`) stores a repository's gate and dispatch defaults, so an
+- **`blyte.toml`** (`blyte init`) stores a repository's gate and dispatch defaults, so a
   conversation model doesn't have to repeat them.
 
 ## Dispatch: blyte under a conversation model
