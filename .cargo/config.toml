@@ -2,3 +2,6 @@
 # turns off blyte's key file (~/.config/blyte/env), so a developer's own key is never loaded by a test.
 [env]
 BLYTE_ENV_FILE = ""
+# Tests never ask GitHub for the latest release: a slow answer adds up to 3 s to every blyte a test starts.
+# A test of the release check itself removes this from the child it starts.
+BLYTE_NO_UPDATE_CHECK = "1"
