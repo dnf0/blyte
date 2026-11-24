@@ -2070,3 +2070,151 @@ fn second_start_fails_loudly_without_the_token_file() {
     stop.store(true, Ordering::Relaxed);
     assert_eq!(handle.join().unwrap(), 0);
 }
+
+fn start_stoppable_surface_with_model(
+    repo: &Path,
+    model: &str,
+) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let repo_bg = repo.to_path_buf();
+    let model_bg = model.to_string();
+    let out_bg = Arc::clone(&out_buf);
+    let err_bg = Arc::clone(&err_buf);
+    let stop_bg = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let args = SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+        };
+        let mut cfg = default_repl_config(repo_bg);
+        cfg.model = Some(model_bg);
+        let mut out = SharedBuf(out_bg);
+        let mut err = SharedBuf(err_bg);
+        let mut opener = |_: &str| {};
+        run_with_hooks(&args, cfg, &mut out, &mut err, &mut opener, stop_bg)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let line = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stderr={}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
+        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        if let Some(found) = stdout.lines().find(|l| l.contains("blyte: surface at ")) {
+            break found.to_string();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    let url = line
+        .split("blyte: surface at ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
+    let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+    let (port_str, fragment) = rest.split_once("/#token=").unwrap();
+    let port: u16 = port_str.parse().unwrap();
+    (port, fragment.to_string(), stop, handle)
+}
+
+fn http_json_body(raw_resp: &str) -> serde_json::Value {
+    let (_, body) = raw_resp
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("invalid HTTP response: {raw_resp}"));
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("invalid JSON body ({e}): {body}"))
+}
+
+#[test]
+fn events_survive_a_restart() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("restart-events-repo");
+    init_git_repo(&repo);
+
+    let (port1, token1, stop1, handle1) =
+        start_stoppable_surface_with_model(&repo, "unknown-model-for-test");
+
+    let msg_body = r#"{"text":"hello before restart"}"#;
+    let post_resp = send_http(
+        port1,
+        &format!(
+            "POST /api/session/messages HTTP/1.1\r\nHost: 127.0.0.1:{port1}\r\nOrigin: http://127.0.0.1:{port1}\r\n{TOKEN_HEADER}: {token1}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg_body}",
+            msg_body.len()
+        ),
+    );
+    assert!(
+        post_resp.starts_with("HTTP/1.1 200"),
+        "POST /api/session/messages failed: {post_resp}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let before_entries = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for idle entry before restart"
+        );
+        let events_resp = send_http(
+            port1,
+            &format!(
+                "GET /api/session/events?after=0 HTTP/1.1\r\nHost: 127.0.0.1:{port1}\r\n{TOKEN_HEADER}: {token1}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            events_resp.starts_with("HTTP/1.1 200"),
+            "GET /api/session/events failed: {events_resp}"
+        );
+        let parsed = http_json_body(&events_resp);
+        let entries = parsed["entries"].as_array().unwrap().clone();
+        if entries.iter().any(|e| e["kind"] == "idle") {
+            break entries;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        before_entries
+            .iter()
+            .any(|e| e["kind"] == "user_message" && e["text"] == "hello before restart"),
+        "expected user_message before restart, got: {before_entries:?}"
+    );
+    assert!(repo.join(".wt/sessions/entries.jsonl").exists());
+
+    stop1.store(true, Ordering::Relaxed);
+    assert_eq!(handle1.join().unwrap(), 0);
+
+    let (port2, token2, stop2, handle2) =
+        start_stoppable_surface_with_model(&repo, "unknown-model-for-test");
+
+    let events2_resp = send_http(
+        port2,
+        &format!(
+            "GET /api/session/events?after=0 HTTP/1.1\r\nHost: 127.0.0.1:{port2}\r\n{TOKEN_HEADER}: {token2}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(
+        events2_resp.starts_with("HTTP/1.1 200"),
+        "GET /api/session/events after restart failed: {events2_resp}"
+    );
+    let parsed2 = http_json_body(&events2_resp);
+    let after_entries = parsed2["entries"].as_array().unwrap();
+    assert_eq!(after_entries.len(), before_entries.len() + 1);
+    assert_eq!(&after_entries[..before_entries.len()], &before_entries[..]);
+
+    let notice = after_entries.last().unwrap();
+    let expected_seq = before_entries.last().unwrap()["seq"].as_u64().unwrap() + 1;
+    assert_eq!(notice["seq"].as_u64(), Some(expected_seq));
+    assert_eq!(notice["kind"].as_str(), Some("error"));
+    assert_eq!(
+        notice["message"].as_str(),
+        Some(
+            "blyte restarted: the entries above are from before; the model does not remember them"
+        )
+    );
+
+    stop2.store(true, Ordering::Relaxed);
+    assert_eq!(handle2.join().unwrap(), 0);
+}

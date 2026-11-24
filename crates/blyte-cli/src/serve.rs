@@ -1135,10 +1135,6 @@ where
         std::env::set_var("BLYTE_SESSION", &session_id);
     }
 
-    let model = resolve_initial_model(&config);
-    let session = Session::start_with(model, |approver| {
-        Box::new(AgentRunner::new(&config, approver))
-    });
     let token = match generate_token() {
         Ok(t) => t,
         Err(e) => {
@@ -1159,6 +1155,23 @@ where
         Ok(a) => a.port(),
         Err(e) => {
             let _ = writeln!(err, "blyte: failed to read listener address: {e}");
+            return 1;
+        }
+    };
+
+    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
+    let entries_log_path = main_checkout
+        .join(".wt")
+        .join("sessions")
+        .join("entries.jsonl");
+    let model = resolve_initial_model(&config);
+    let session = match Session::start_with_log_io(model, Some(entries_log_path), err, |approver| {
+        Box::new(AgentRunner::new(&config, approver))
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            let _ = err.flush();
             return 1;
         }
     };
