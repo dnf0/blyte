@@ -480,3 +480,59 @@ Limits: three trials a cell; both requests were fully specified, and the model c
 edit in all six E trials, so a borderline request was not tested; a direct edit has no fix round
 and no implementer to send review concerns back to; fresh-review cost is in neither figure. The
 default process is unchanged: direct edits are used only where a process file asks for them.
+
+## A working session: one model does everything, against the default process
+
+2026-11-23 and 24, `gemini-4-neon` for every model call. One conversation in the surface was given
+seven requests in turn: a question about the code, five small changes (a truncation marker with a
+test, a `--json` option for `blyte wait` with tests, four more lockfile names, hiding five internal
+commands from `--help` with a test, one sentence in `docs/usage.md`), and a closing question. A
+script stood in for the user: it sent the next request when the last had settled, would have
+answered "no" to any approval and accepted any held run; neither happened in any session.
+
+- **Single model** (S): the process file told the conversation model to make every change itself
+  as a direct edit and not to hand work to a run.
+- **Default process** (R): the conversation model hands each change to one run.
+
+Three sessions each way, twice: first on the build before #407 (the check ran the whole test
+suite, about 8 to 13 minutes), then on `main` at 45c1d08 (the check tests only the crates a change
+affects, and the slow test files are fast). Two sessions ran at a time.
+
+| | Single model, slow check | Default process, slow check | Single model, fast check | Default process, fast check |
+|---|---|---|---|---|
+| Requests settled, changes combined | 7 of 7, 5 of 5, all three | 7 of 7, 5 of 5, all three | 7 of 7, 5 of 5, all three | 7 of 7, 5 of 5, all three |
+| Session wall time (minutes) | 70, 81, 66 | 103, 82, 89 | 48, 64, 60 | 53, 78, 81 |
+| Total model cost (USD) | 2.97, 4.15, 3.57 | 4.33, 3.62, 4.45 | 2.05, 2.89, 1.51 | 3.64, 3.95, 5.44 |
+| Of which the conversation (USD) | all | 1.60, 1.81, 2.17 | all | 1.45, 1.21, 2.41 |
+| Of which the runs (USD) | none | 2.73, 1.81, 2.28 | none | 2.19, 2.75, 3.03 |
+| Largest prompt in the conversation (thousand tokens) | 160, 157, 151 | 76, 82, 100 | 158, 152, 133 | 94, 91, 80 |
+| Check on one code change (seconds) | 449 to 777 | 620 to 1275 for the whole run | 207 to 418 | 408 to 812 for the whole run |
+| Tests added across the five changes | not counted | not counted | 5, 5, 5 | 14, 10, 13 |
+| Runs that needed a fix round | not applicable | 2 of 15 | not applicable | 1 of 15 |
+
+What this does and does not show:
+
+- Both ways finished every request in all twelve sessions.
+- With the fast check the single model cost USD 1.51 to 2.89 a session (mean 2.15) and the
+  default process USD 3.64 to 5.44 (mean 4.34). With the slow check the two overlapped (2.97 to
+  4.15 against 3.62 to 4.45). The single model's conversation cost less in the second round for a
+  reason these trials do not isolate: the build differs by several changes, not only the check.
+- The faster check shortened single-model sessions by 10 to 20 minutes. A direct edit's check on a
+  code change fell from 7 to 13 minutes to 3.5 to 7; the docs change was checked in about 20
+  seconds, because no crate is affected.
+- The single model's conversation grows with every change it makes: its largest prompt was 133 to
+  160 thousand tokens by the fifth change, against 76 to 100 thousand when changes were handed to
+  runs. Seven requests is as far as this went; a longer session was not tested.
+- The single model wrote fewer tests: 5 across the five changes in each session, against 10 to 14
+  from the runs. For `blyte wait --json` it added three unit tests and no test of the command
+  itself in one session of three; the runs added one to four command tests each time. The changes
+  were not read line by line in the second round, so beyond the check passing, their correctness
+  is not established.
+- A direct edit has no fix round and no model review sent back. The one fix round in the second
+  round cost USD 0.74 and about 13 minutes.
+
+Limits: three sessions a cell. Wall times in the second round are not clean: for about 90 minutes
+an unrelated test run loaded the machine during the first four sessions (S1, S2, R1, R2); costs
+are unaffected. Costs are summed from the usage ledger by session; `blyte cost --repo` could not
+separate sessions that ran at the same time in clones of one repository. Fresh-review cost is in
+neither figure. The default process is unchanged.
