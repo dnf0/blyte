@@ -2637,9 +2637,11 @@
 
     let liveRuns = { generated_at: 0, repo: "", running: [], runs: [], skipped: [] };
     let allGroups = [];
+    let runsError = "";
     let runsFetchInFlight = false;
     let runsRefetchNeeded = false;
     let runsPollTimer = null;
+    let eventsPollRunning = false;
 
     let liveRequests = [];
     let requestsError = "";
@@ -2847,6 +2849,27 @@
     }
 
     async function parseErrorPayload(res, route) {
+      if (typeof res.text === "function") {
+        let raw = "";
+        try {
+          raw = await res.text();
+        } catch (_) {
+          return route + " failed with HTTP " + res.status;
+        }
+        try {
+          const data = JSON.parse(raw);
+          if (isPlainObject(data) && typeof data.error === "string") {
+            return data.error;
+          }
+          return route + " failed with HTTP " + res.status + " (missing error field in response)";
+        } catch (_) {
+          const trimmed = raw.trim();
+          if (trimmed) {
+            return route + " failed with HTTP " + res.status + ": " + trimmed;
+          }
+          return route + " failed with HTTP " + res.status + " (response is not JSON with error field)";
+        }
+      }
       try {
         const data = await res.json();
         if (isPlainObject(data) && typeof data.error === "string") {
@@ -3075,6 +3098,22 @@
       };
     }
 
+    function updateReviewTabCounter(undecidedCount) {
+      if (typeof document === "undefined") return;
+      const reviewTab = document.getElementById("mode-review");
+      if (!reviewTab) return;
+      if (runsError) {
+        reviewTab.textContent = "Review (" + undecidedCount + ") !";
+        reviewTab.title = runsError;
+      } else {
+        reviewTab.textContent = "Review (" + undecidedCount + ")";
+        reviewTab.title = "";
+        if (typeof reviewTab.removeAttribute === "function") {
+          reviewTab.removeAttribute("title");
+        }
+      }
+    }
+
     function updateHeaderCounters(state) {
       const wipEl = document.getElementById("wip");
       wipEl.querySelector(".metric-val").textContent = state.inProgress.length + " / " + WIP_CAP;
@@ -3084,8 +3123,7 @@
       waitEl.querySelector(".metric-val").textContent = state.waitingGroupsCount + " / " + QUEUE_BOUND;
       waitEl.classList.toggle("over-limit", state.waitingGroupsCount > QUEUE_BOUND);
 
-      const reviewTab = document.getElementById("mode-review");
-      reviewTab.textContent = "Review (" + state.undecidedArrived.length + ")";
+      updateReviewTabCounter(state.undecidedArrived.length);
     }
 
     function updateWorkingState() {
@@ -5551,6 +5589,7 @@
     }
 
     function setQueueError(msg) {
+      if (typeof document === "undefined") return;
       const el = document.getElementById("queue-error");
       if (!el) return;
       if (!msg) {
@@ -5560,6 +5599,12 @@
         el.hidden = false;
         el.textContent = msg;
       }
+    }
+
+    function setRunsError(msg) {
+      runsError = msg || "";
+      setQueueError(runsError);
+      updateReviewTabCounter(computeState().undecidedArrived.length);
     }
 
     async function fetchRuns() {
@@ -5578,21 +5623,22 @@
         }
         if (!res.ok) {
           const errMsg = await parseErrorPayload(res, "/api/runs");
-          setQueueError(errMsg);
+          setRunsError(errMsg);
           return;
         }
         let data;
         try {
           data = await res.json();
         } catch (err) {
-          setQueueError("/api/runs returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+          setRunsError("/api/runs returned invalid JSON: " + (err && err.message ? err.message : String(err)));
           return;
         }
         const err = validateRuns(data);
         if (err) {
-          setQueueError(err);
+          setRunsError(err);
           return;
         }
+        runsError = "";
         setQueueError("");
         liveRuns = data;
         allGroups = computeGroups();
@@ -6336,37 +6382,45 @@
     }
 
     async function pollEvents() {
-      while (!pollingStopped) {
-        const url = "/api/session/events?after=" + encodeURIComponent(String(lastSeqSeen)) + "&wait_ms=25000";
-        const res = await fetchWithRetry(url);
-        if (res.status === 403 || pollingStopped) {
-          return;
+      if (eventsPollRunning || pollingStopped) {
+        return;
+      }
+      eventsPollRunning = true;
+      try {
+        while (!pollingStopped) {
+          const url = "/api/session/events?after=" + encodeURIComponent(String(lastSeqSeen)) + "&wait_ms=25000";
+          const res = await fetchWithRetry(url);
+          if (res.status === 403 || pollingStopped) {
+            return;
+          }
+          if (!res.ok) {
+            const errMsg = await parseErrorPayload(res, "/api/session/events");
+            appendConversationError(errMsg);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue;
+          }
+          let data;
+          try {
+            data = await res.json();
+          } catch (err) {
+            appendConversationError("/api/session/events returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue;
+          }
+          const validationErr = validateEvents(data);
+          if (validationErr) {
+            appendConversationError(validationErr);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue;
+          }
+          applyLogEntries(data.entries);
+          if (data.last_seq > lastSeqSeen) {
+            lastSeqSeen = data.last_seq;
+          }
+          initialEventsLoaded = true;
         }
-        if (!res.ok) {
-          const errMsg = await parseErrorPayload(res, "/api/session/events");
-          appendConversationError(errMsg);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
-        let data;
-        try {
-          data = await res.json();
-        } catch (err) {
-          appendConversationError("/api/session/events returned invalid JSON: " + (err && err.message ? err.message : String(err)));
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
-        const validationErr = validateEvents(data);
-        if (validationErr) {
-          appendConversationError(validationErr);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
-        applyLogEntries(data.entries);
-        if (data.last_seq > lastSeqSeen) {
-          lastSeqSeen = data.last_seq;
-        }
-        initialEventsLoaded = true;
+      } finally {
+        eventsPollRunning = false;
       }
     }
 
@@ -6419,6 +6473,19 @@
       renderModelsSelect();
     }
 
+    function startPolling() {
+      pollingStopped = false;
+      if (runsPollTimer === null) {
+        fetchRuns();
+        runsPollTimer = setInterval(fetchRuns, RUNS_POLL_MS);
+      }
+      if (requestsPollTimer === null) {
+        fetchRequests();
+        requestsPollTimer = setInterval(fetchRequests, RUNS_POLL_MS);
+      }
+      pollEvents();
+    }
+
     async function init() {
       surfaceToken = readSurfaceToken();
       if (typeof window !== "undefined") {
@@ -6427,6 +6494,9 @@
           if (next) {
             surfaceToken = next;
             updateMissingTokenUI();
+            if (pollingStopped) {
+              startPolling();
+            }
           }
         });
       }
@@ -6438,11 +6508,7 @@
         return;
       }
       loadModels();
-      fetchRuns();
-      runsPollTimer = setInterval(fetchRuns, RUNS_POLL_MS);
-      fetchRequests();
-      requestsPollTimer = setInterval(fetchRequests, RUNS_POLL_MS);
-      pollEvents();
+      startPolling();
     }
 
     if (typeof document !== "undefined") {

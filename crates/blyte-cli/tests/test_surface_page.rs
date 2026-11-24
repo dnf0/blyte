@@ -889,3 +889,538 @@ const assert = require("node:assert");
 "#;
     run_surface_script(harness);
 }
+
+#[test]
+fn polling_restarts_when_a_token_arrives_after_a_403() {
+    let harness = r##"
+const assert = require("node:assert");
+(async () => {
+  const elements = {};
+  function makeStubElement(id) {
+    const attrs = new Map();
+    const classes = new Set();
+    const metricVal = { textContent: "" };
+    return {
+      id,
+      textContent: "",
+      innerHTML: "",
+      hidden: false,
+      disabled: false,
+      placeholder: "",
+      value: "",
+      checked: false,
+      dataset: {},
+      style: {},
+      scrollHeight: 0,
+      scrollTop: 0,
+      clientHeight: 100,
+      children: [],
+      get title() { return attrs.get("title") || ""; },
+      set title(v) {
+        if (v === undefined || v === null) attrs.delete("title");
+        else attrs.set("title", String(v));
+      },
+      classList: {
+        toggle(name, force) {
+          if (force === undefined) {
+            if (classes.has(name)) classes.delete(name);
+            else classes.add(name);
+          } else if (force) {
+            classes.add(name);
+          } else {
+            classes.delete(name);
+          }
+        },
+        add(name) { classes.add(name); },
+        remove(name) { classes.delete(name); },
+        contains(name) { return classes.has(name); },
+      },
+      addEventListener() {},
+      setAttribute(name, val) { attrs.set(name, String(val)); },
+      getAttribute(name) { return attrs.has(name) ? attrs.get(name) : null; },
+      hasAttribute(name) { return attrs.has(name); },
+      removeAttribute(name) { attrs.delete(name); },
+      querySelector(sel) { return sel === ".metric-val" ? metricVal : null; },
+      querySelectorAll() { return []; },
+      appendChild(node) { this.children.push(node); },
+      insertBefore(node, ref) {
+        const idx = this.children.indexOf(ref);
+        if (idx === -1) this.children.push(node);
+        else this.children.splice(idx, 0, node);
+      },
+    };
+  }
+  global.document = {
+    getElementById(id) {
+      if (!elements[id]) elements[id] = makeStubElement(id);
+      return elements[id];
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    addEventListener() {},
+    createElement() {
+      return {
+        _inner: "",
+        set innerHTML(v) { this._inner = v; },
+        get content() { return { firstElementChild: makeStubElement("tpl") }; },
+      };
+    },
+  };
+
+  const windowListeners = {};
+  const storage = new Map();
+  global.window = {
+    location: { pathname: "/", search: "", hash: "" },
+    sessionStorage: {
+      getItem(k) { return storage.has(k) ? storage.get(k) : null; },
+      setItem(k, v) { storage.set(k, String(v)); },
+      removeItem(k) { storage.delete(k); },
+    },
+    history: {
+      replaceState(_state, _title, nextUrl) {
+        const idx = nextUrl.indexOf("#");
+        global.window.location.hash = idx === -1 ? "" : nextUrl.slice(idx);
+      },
+    },
+    addEventListener(type, fn) {
+      if (!windowListeners[type]) windowListeners[type] = [];
+      windowListeners[type].push(fn);
+    },
+  };
+
+  let nextTimerId = 100;
+  global.setInterval = () => {
+    nextTimerId += 1;
+    return nextTimerId;
+  };
+  global.clearInterval = () => {};
+
+  function makeUndecidedRun(id) {
+    return {
+      key: id,
+      id,
+      repo: "demo",
+      title: "Task " + id,
+      task: "Do " + id,
+      outcome: "verified",
+      research: false,
+      checks_recorded: true,
+      started_at: 1000,
+      finished_at: 1010,
+      turns: 1,
+      plan_file: null,
+      plan_task: null,
+      final_message: "done",
+      group: "core",
+      verdict: null,
+      verdict_notes: null,
+      report: null,
+      cost_usd: 0.01,
+      verdict_ts: null,
+      card: "clean",
+      flags: [],
+      changed_files: ["src/lib.rs"],
+      commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
+      hold: null,
+    };
+  }
+
+  let allowRuns = false;
+  let runsFetches = 0;
+  let pendingEventResolve = null;
+  global.fetch = async (url) => {
+    if (url === "/api/session") {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            session_id: "s1",
+            repo: "demo",
+            model: "m1",
+            started_at: 1000,
+            effort: null,
+            effort_supported: false,
+            busy: false,
+            queued: 0,
+            last_seq: 0,
+          };
+        },
+      };
+    }
+    if (url === "/api/models") {
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { models: [{ id: "m1", effort_supported: false }] }; },
+      };
+    }
+    if (url === "/api/requests") {
+      return {
+        ok: true,
+        status: 200,
+        async json() { return []; },
+      };
+    }
+    if (url === "/api/runs") {
+      runsFetches += 1;
+      if (!allowRuns) {
+        return {
+          ok: false,
+          status: 403,
+          async json() { return { error: "missing or invalid surface token" }; },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            generated_at: 1020,
+            repo: "demo",
+            running: [],
+            runs: [makeUndecidedRun("T1")],
+            skipped: [],
+          };
+        },
+      };
+    }
+    if (url.startsWith("/api/session/events?")) {
+      if (!allowRuns) {
+        return {
+          ok: false,
+          status: 403,
+          async json() { return { error: "missing or invalid surface token" }; },
+        };
+      }
+      return await new Promise(resolve => {
+        pendingEventResolve = resolve;
+      });
+    }
+    throw new Error("unexpected fetch url: " + url);
+  };
+
+  async function flush() {
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+    }
+  }
+
+  await init();
+  await flush();
+
+  assert.strictEqual(runsPollTimer, null);
+  assert.strictEqual(pollingStopped, true);
+  assert.strictEqual(runsFetches, 1);
+
+  allowRuns = true;
+  global.window.location.hash = "#token=fresh-surface-token";
+  assert.ok(windowListeners.hashchange && windowListeners.hashchange.length === 1);
+  for (const fn of windowListeners.hashchange) {
+    fn();
+  }
+  await flush();
+
+  assert.notStrictEqual(runsPollTimer, null);
+  assert.strictEqual(pollingStopped, false);
+  assert.strictEqual(runsFetches, 2);
+  assert.strictEqual(document.getElementById("mode-review").textContent, "Review (1)");
+
+  stopAllPolling();
+  if (pendingEventResolve) {
+    pendingEventResolve({
+      ok: true,
+      status: 200,
+      async json() { return { entries: [], last_seq: 0 }; },
+    });
+  }
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"##;
+    run_surface_script(harness);
+}
+
+#[test]
+fn starting_polling_twice_leaves_one_timer() {
+    let harness = r#"
+const assert = require("node:assert");
+(async () => {
+  const elements = {};
+  function makeStubElement(id) {
+    const attrs = new Map();
+    const classes = new Set();
+    const metricVal = { textContent: "" };
+    return {
+      id,
+      textContent: "",
+      innerHTML: "",
+      hidden: false,
+      disabled: false,
+      dataset: {},
+      style: {},
+      scrollHeight: 0,
+      scrollTop: 0,
+      clientHeight: 100,
+      children: [],
+      get title() { return attrs.get("title") || ""; },
+      set title(v) {
+        if (v === undefined || v === null) attrs.delete("title");
+        else attrs.set("title", String(v));
+      },
+      classList: {
+        toggle(name, force) {
+          if (force === undefined) {
+            if (classes.has(name)) classes.delete(name);
+            else classes.add(name);
+          } else if (force) {
+            classes.add(name);
+          } else {
+            classes.delete(name);
+          }
+        },
+        add(name) { classes.add(name); },
+        remove(name) { classes.delete(name); },
+      },
+      setAttribute(name, val) { attrs.set(name, String(val)); },
+      getAttribute(name) { return attrs.has(name) ? attrs.get(name) : null; },
+      hasAttribute(name) { return attrs.has(name); },
+      removeAttribute(name) { attrs.delete(name); },
+      querySelector(sel) { return sel === ".metric-val" ? metricVal : null; },
+      querySelectorAll() { return []; },
+    };
+  }
+  global.document = {
+    getElementById(id) {
+      if (!elements[id]) elements[id] = makeStubElement(id);
+      return elements[id];
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+
+  const intervalCalls = [];
+  let nextTimerId = 500;
+  global.setInterval = (fn, ms) => {
+    nextTimerId += 1;
+    intervalCalls.push({ id: nextTimerId, fn, ms });
+    return nextTimerId;
+  };
+  global.clearInterval = () => {};
+
+  let eventFetches = 0;
+  const eventResolvers = [];
+  global.fetch = async (url) => {
+    if (url === "/api/runs") {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { generated_at: 1, repo: "demo", running: [], runs: [], skipped: [] };
+        },
+      };
+    }
+    if (url === "/api/requests") {
+      return {
+        ok: true,
+        status: 200,
+        async json() { return []; },
+      };
+    }
+    if (url.startsWith("/api/session/events?")) {
+      eventFetches += 1;
+      return await new Promise(resolve => {
+        eventResolvers.push(resolve);
+      });
+    }
+    throw new Error("unexpected fetch url: " + url);
+  };
+
+  startPolling();
+  startPolling();
+
+  for (let i = 0; i < 10; i++) {
+    await Promise.resolve();
+  }
+
+  const runsTimers = intervalCalls.filter(c => c.fn === fetchRuns);
+  const requestsTimers = intervalCalls.filter(c => c.fn === fetchRequests);
+  assert.strictEqual(runsTimers.length, 1);
+  assert.strictEqual(requestsTimers.length, 1);
+  assert.strictEqual(intervalCalls.length, 2);
+  assert.strictEqual(eventFetches, 1);
+
+  eventResolvers.shift()({
+    ok: true,
+    status: 200,
+    async json() { return { entries: [], last_seq: 0 }; },
+  });
+  for (let i = 0; i < 10; i++) {
+    await Promise.resolve();
+  }
+  assert.strictEqual(eventFetches, 2);
+
+  stopAllPolling();
+  while (eventResolvers.length > 0) {
+    eventResolvers.shift()({
+      ok: true,
+      status: 200,
+      async json() { return { entries: [], last_seq: 0 }; },
+    });
+  }
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn a_failed_runs_fetch_marks_the_review_count() {
+    let harness = r#"
+const assert = require("node:assert");
+(async () => {
+  const elements = {};
+  function makeStubElement(id) {
+    const attrs = new Map();
+    const classes = new Set();
+    const metricVal = { textContent: "" };
+    return {
+      id,
+      textContent: "",
+      innerHTML: "",
+      hidden: false,
+      disabled: false,
+      dataset: {},
+      style: {},
+      children: [],
+      get title() { return attrs.get("title") || ""; },
+      set title(v) {
+        if (v === undefined || v === null) attrs.delete("title");
+        else attrs.set("title", String(v));
+      },
+      classList: {
+        toggle(name, force) {
+          if (force === undefined) {
+            if (classes.has(name)) classes.delete(name);
+            else classes.add(name);
+          } else if (force) {
+            classes.add(name);
+          } else {
+            classes.delete(name);
+          }
+        },
+        add(name) { classes.add(name); },
+        remove(name) { classes.delete(name); },
+      },
+      setAttribute(name, val) { attrs.set(name, String(val)); },
+      getAttribute(name) { return attrs.has(name) ? attrs.get(name) : null; },
+      hasAttribute(name) { return attrs.has(name); },
+      removeAttribute(name) { attrs.delete(name); },
+      querySelector(sel) { return sel === ".metric-val" ? metricVal : null; },
+      querySelectorAll() { return []; },
+    };
+  }
+  global.document = {
+    getElementById(id) {
+      if (!elements[id]) elements[id] = makeStubElement(id);
+      return elements[id];
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+
+  function makeUndecidedRun(id) {
+    return {
+      key: id,
+      id,
+      repo: "demo",
+      title: "Task " + id,
+      task: "Do " + id,
+      outcome: "verified",
+      research: false,
+      checks_recorded: true,
+      started_at: 1000,
+      finished_at: 1010,
+      turns: 1,
+      plan_file: null,
+      plan_task: null,
+      final_message: "done",
+      group: "core",
+      verdict: null,
+      verdict_notes: null,
+      report: null,
+      cost_usd: 0.01,
+      verdict_ts: null,
+      card: "clean",
+      flags: [],
+      changed_files: ["src/lib.rs"],
+      commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
+      hold: null,
+    };
+  }
+
+  let failRuns = false;
+  global.fetch = async (url) => {
+    if (url !== "/api/runs") {
+      throw new Error("unexpected fetch url: " + url);
+    }
+    if (failRuns) {
+      return {
+        ok: false,
+        status: 500,
+        async text() { return "runs index exploded"; },
+        async json() { throw new SyntaxError("Unexpected token"); },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          generated_at: 1020,
+          repo: "demo",
+          running: [],
+          runs: [makeUndecidedRun("T1"), makeUndecidedRun("T2")],
+          skipped: [],
+        };
+      },
+    };
+  };
+
+  const reviewTab = document.getElementById("mode-review");
+  const queueError = document.getElementById("queue-error");
+
+  await fetchRuns();
+  assert.strictEqual(reviewTab.textContent, "Review (2)");
+  assert.strictEqual(reviewTab.title, "");
+  assert.strictEqual(reviewTab.hasAttribute("title"), false);
+  assert.strictEqual(queueError.hidden, true);
+
+  failRuns = true;
+  await fetchRuns();
+  assert.strictEqual(reviewTab.textContent, "Review (2) !");
+  assert.ok(reviewTab.title.includes("runs index exploded"), reviewTab.title);
+  assert.strictEqual(reviewTab.hasAttribute("title"), true);
+  assert.strictEqual(queueError.hidden, false);
+  assert.ok(queueError.textContent.includes("runs index exploded"), queueError.textContent);
+
+  renderAll(true);
+  assert.strictEqual(reviewTab.textContent, "Review (2) !");
+  assert.ok(reviewTab.title.includes("runs index exploded"), reviewTab.title);
+
+  failRuns = false;
+  await fetchRuns();
+  assert.strictEqual(reviewTab.textContent, "Review (2)");
+  assert.strictEqual(reviewTab.title, "");
+  assert.strictEqual(reviewTab.hasAttribute("title"), false);
+  assert.strictEqual(queueError.hidden, true);
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
+}

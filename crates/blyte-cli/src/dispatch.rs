@@ -2437,6 +2437,8 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
             eprintln!("{e}");
             return 2;
         }
+        let notify_outcome = crate::surface_notify::notify_runs_changed(&root, &args.id);
+        crate::surface_notify::report(&notify_outcome, &mut std::io::stderr());
         println!("recorded verdict {} for {}", v.as_str(), args.id);
         return 0;
     }
