@@ -13,7 +13,7 @@ fn a_runaway_command_is_killed_at_the_deadline() {
     let d = tempfile::tempdir().unwrap();
     let started = Instant::now();
     let out = LocalShell
-        .exec("sleep 30", d.path(), Duration::from_secs(1))
+        .exec("sleep 30", d.path(), Duration::from_millis(500))
         .unwrap();
     let elapsed = started.elapsed();
     assert!(
@@ -38,7 +38,7 @@ fn output_produced_before_the_kill_is_kept() {
         .exec(
             "echo progress-so-far; sleep 30",
             d.path(),
-            Duration::from_secs(2),
+            Duration::from_millis(800),
         )
         .unwrap();
     assert!(
@@ -108,7 +108,7 @@ fn grandchild_process_tree_is_killed_at_deadline() {
         .exec(
             "sh -c '(sleep 30) & wait'",
             d.path(),
-            Duration::from_secs(1),
+            Duration::from_millis(600),
         )
         .unwrap();
     let elapsed = started.elapsed();
