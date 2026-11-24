@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_cli::cli::ReviewVerdict;
@@ -168,26 +168,99 @@ fn fast_import_commit(
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let ty = entry.file_type().unwrap();
+        if ty.is_dir() {
+            copy_dir_all(&src_path, &dst_path);
+        } else {
+            std::fs::copy(&src_path, &dst_path).unwrap();
+        }
+    }
+}
+
+fn template_repo() -> &'static (tempfile::TempDir, String) {
+    static TEMPLATE: OnceLock<(tempfile::TempDir, String)> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        let cfg_path = root.join(".git/config");
+        let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+        cfg.push_str("\n[user]\n\temail = test@example.com\n\tname = Test User\n");
+        std::fs::write(&cfg_path, cfg).unwrap();
+        let toml = "[dispatch]\ngate = \"true\"\n";
+        let base_sha = fast_import_commit(
+            root,
+            "main",
+            None,
+            &[("README.md", "hello\n"), ("blyte.toml", toml)],
+            "initial commit",
+        );
+        std::fs::write(root.join("README.md"), "hello\n").unwrap();
+        std::fs::write(root.join("blyte.toml"), toml).unwrap();
+        std::fs::create_dir_all(root.join(".wt")).unwrap();
+        (dir, base_sha)
+    })
+}
+
 fn init_repo_with_gate(gate: &str) -> (tempfile::TempDir, String) {
+    let (tmpl, base_sha) = template_repo();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    git(root, &["init", "-q", "-b", "main"]);
-    let cfg_path = root.join(".git/config");
-    let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
-    cfg.push_str("\n[user]\n\temail = test@example.com\n\tname = Test User\n");
-    std::fs::write(&cfg_path, cfg).unwrap();
-    let toml = format!("[dispatch]\ngate = {gate:?}\n");
-    let base_sha = fast_import_commit(
-        root,
-        "main",
-        None,
-        &[("README.md", "hello\n"), ("blyte.toml", &toml)],
-        "initial commit",
+    copy_dir_all(tmpl.path(), root);
+    if gate != "true" {
+        let toml = format!("[dispatch]\ngate = {gate:?}\n");
+        std::fs::write(root.join("blyte.toml"), &toml).unwrap();
+    }
+    (dir, base_sha.clone())
+}
+
+fn create_run_branches(root: &Path, specs: &[(&str, &str, &str, &str, &str)]) -> Vec<String> {
+    use std::io::Write;
+    let mut stream = String::new();
+    for (idx, (id, base_sha, file, content, subject)) in specs.iter().enumerate() {
+        let mark = idx + 1;
+        stream.push_str(&format!("commit refs/heads/wip/{id}\n"));
+        stream.push_str(&format!("mark :{mark}\n"));
+        stream.push_str("committer Test User <test@example.com> 1700000000 +0000\n");
+        stream.push_str(&format!("data {}\n{subject}\n", subject.len()));
+        stream.push_str(&format!("from {base_sha}\n"));
+        stream.push_str(&format!("M 100644 inline {file}\n"));
+        stream.push_str(&format!("data {}\n{content}\n", content.len()));
+        stream.push_str(&format!("get-mark :{mark}\n"));
+    }
+    stream.push_str("done\n");
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "git fast-import failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::write(root.join("README.md"), "hello\n").unwrap();
-    std::fs::write(root.join("blyte.toml"), &toml).unwrap();
-    std::fs::create_dir_all(root.join(".wt")).unwrap();
-    (dir, base_sha)
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn create_run_branch(
@@ -351,12 +424,16 @@ fn parse_json(resp: &Response) -> Value {
 
 fn wait_for_idle_entries(session: &Session, expected_count: usize) {
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut after = 0;
+    let mut count = 0;
     loop {
-        let entries = session.entries_after(0, Duration::from_millis(50));
-        let count = entries
-            .iter()
-            .filter(|e| matches!(e.body, EntryBody::Idle { .. }))
-            .count();
+        let entries = session.entries_after(after, Duration::from_millis(50));
+        for e in &entries {
+            after = after.max(e.seq);
+            if matches!(e.body, EntryBody::Idle { .. }) {
+                count += 1;
+            }
+        }
         if count >= expected_count {
             return;
         }
@@ -475,22 +552,27 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     let root = repo.path();
     let now = now_secs();
 
-    create_run_branch(root, "A1", &base, "a.txt", "a\n", "feat: add a");
+    create_run_branches(
+        root,
+        &[
+            ("A1", &base, "a.txt", "a\n", "feat: add a"),
+            ("B1", &base, "b.txt", "b\n", "feat: add b"),
+            ("C1", &base, "c.txt", "c\n", "feat: add c"),
+            ("D1", &base, "d.txt", "d\n", "feat: add d"),
+        ],
+    );
     write_start_file(root, "A1", Some("req-a"), &base, now, false);
     write_summary(root, "A1", "verified", Some("wip/A1"));
     write_checks(root, "A1", &[]);
 
-    create_run_branch(root, "B1", &base, "b.txt", "b\n", "feat: add b");
     write_start_file(root, "B1", Some("req-b"), &base, now, false);
     write_summary(root, "B1", "verified", Some("wip/B1"));
     write_checks(root, "B1", &["needs review"]);
 
-    create_run_branch(root, "C1", &base, "c.txt", "c\n", "feat: add c");
     write_start_file(root, "C1", None, &base, now, false);
     write_summary(root, "C1", "verified", Some("wip/C1"));
     write_checks(root, "C1", &[]);
 
-    create_run_branch(root, "D1", &base, "d.txt", "d\n", "feat: add d");
     write_start_file(root, "D1", Some("req-poll"), &base, now + 5, false);
     write_summary(root, "D1", "verified", Some("wip/D1"));
     write_checks(root, "D1", &[]);
@@ -541,12 +623,17 @@ fn conflict_queues_once_and_success_queues_none() {
     let (repo, base) = init_repo_with_gate("true");
     let root = repo.path();
 
-    create_run_branch(root, "X1", &base, "shared.txt", "from x1\n", "feat: x1");
+    create_run_branches(
+        root,
+        &[
+            ("X1", &base, "shared.txt", "from x1\n", "feat: x1"),
+            ("X2", &base, "shared.txt", "from x2\n", "feat: x2"),
+        ],
+    );
     write_start_file(root, "X1", Some("req-conflict"), &base, 100, false);
     write_summary(root, "X1", "verified", Some("wip/X1"));
     write_checks(root, "X1", &[]);
 
-    create_run_branch(root, "X2", &base, "shared.txt", "from x2\n", "feat: x2");
     write_start_file(root, "X2", Some("req-conflict"), &base, 101, false);
     write_summary(root, "X2", "verified", Some("wip/X2"));
     write_checks(root, "X2", &[]);
@@ -628,12 +715,17 @@ fn api_requests_shows_waiting_then_combined_with_suggested_pr_fields() {
     let root = repo.path();
     let now = now_secs();
 
-    create_run_branch(root, "R1", &base, "one.txt", "1\n", "feat: first change");
+    create_run_branches(
+        root,
+        &[
+            ("R1", &base, "one.txt", "1\n", "feat: first change"),
+            ("R2", &base, "two.txt", "2\n", "feat: second change"),
+        ],
+    );
     write_start_file(root, "R1", Some("req-multi"), &base, now, false);
     write_summary(root, "R1", "verified", Some("wip/R1"));
     write_checks(root, "R1", &[]);
 
-    create_run_branch(root, "R2", &base, "two.txt", "2\n", "feat: second change");
     write_start_file(root, "R2", Some("req-multi"), &base, now + 1, false);
     write_summary(root, "R2", "verified", Some("wip/R2"));
     write_checks(root, "R2", &["model review flagged"]);
@@ -1234,12 +1326,17 @@ fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file(
     let root = repo.path();
     let now = now_secs();
 
-    create_run_branch(root, "BA1", &base, "ba.txt", "a\n", "feat: ba");
+    create_run_branches(
+        root,
+        &[
+            ("BA1", &base, "ba.txt", "a\n", "feat: ba"),
+            ("BP1", &base, "bp.txt", "p\n", "feat: bp"),
+        ],
+    );
     write_start_file(root, "BA1", Some("req-bad-attempt"), &base, now, false);
     write_summary(root, "BA1", "verified", Some("wip/BA1"));
     write_checks(root, "BA1", &[]);
 
-    create_run_branch(root, "BP1", &base, "bp.txt", "p\n", "feat: bp");
     write_start_file(root, "BP1", Some("req-old-pub"), &base, now + 1, false);
     write_summary(root, "BP1", "verified", Some("wip/BP1"));
     write_checks(root, "BP1", &[]);
@@ -1327,27 +1424,32 @@ fn redone_runs_left_out_regardless_of_outcome_and_reported_in_api() {
     let root = repo.path();
     let now = now_secs();
 
-    create_run_branch(root, "L1", &base, "a.txt", "a\n", "feat: keep a");
+    create_run_branches(
+        root,
+        &[
+            ("L1", &base, "a.txt", "a\n", "feat: keep a"),
+            ("L2", &base, "b.txt", "b\n", "feat: drop verified"),
+            ("L3", &base, "c.txt", "c\n", "feat: drop gate_failed"),
+            ("L4", &base, "d.txt", "d\n", "feat: drop unfinished"),
+            ("N1", &base, "n.txt", "n\n", "feat: normal"),
+        ],
+    );
     write_start_file(root, "L1", Some("req-leftout"), &base, now, false);
     write_summary(root, "L1", "verified", Some("wip/L1"));
     write_checks(root, "L1", &[]);
 
-    create_run_branch(root, "L2", &base, "b.txt", "b\n", "feat: drop verified");
     write_start_file(root, "L2", Some("req-leftout"), &base, now + 1, false);
     write_summary(root, "L2", "verified", Some("wip/L2"));
     write_checks(root, "L2", &[]);
     record_verdict(root, "L2", ReviewVerdict::Redone, "replaced", now + 2).unwrap();
 
-    create_run_branch(root, "L3", &base, "c.txt", "c\n", "feat: drop gate_failed");
     write_start_file(root, "L3", Some("req-leftout"), &base, now + 3, false);
     write_summary(root, "L3", "gate_failed", Some("wip/L3"));
     record_verdict(root, "L3", ReviewVerdict::Redone, "replaced", now + 4).unwrap();
 
-    create_run_branch(root, "L4", &base, "d.txt", "d\n", "feat: drop unfinished");
     write_start_file(root, "L4", Some("req-leftout"), &base, now + 5, false);
     record_verdict(root, "L4", ReviewVerdict::Redone, "replaced", now + 6).unwrap();
 
-    create_run_branch(root, "N1", &base, "n.txt", "n\n", "feat: normal");
     write_start_file(root, "N1", Some("req-normal"), &base, now + 7, false);
     write_summary(root, "N1", "verified", Some("wip/N1"));
     write_checks(root, "N1", &[]);
@@ -1432,13 +1534,18 @@ fn every_run_redone_is_waiting_in_readiness_and_api() {
     let root = repo.path();
     let now = now_secs();
 
-    create_run_branch(root, "AR1", &base, "a.txt", "a\n", "feat: a");
+    create_run_branches(
+        root,
+        &[
+            ("AR1", &base, "a.txt", "a\n", "feat: a"),
+            ("AR2", &base, "b.txt", "b\n", "feat: b"),
+        ],
+    );
     write_start_file(root, "AR1", Some("req-all-redone"), &base, now, false);
     write_summary(root, "AR1", "verified", Some("wip/AR1"));
     write_checks(root, "AR1", &[]);
     record_verdict(root, "AR1", ReviewVerdict::Redone, "redo", now + 1).unwrap();
 
-    create_run_branch(root, "AR2", &base, "b.txt", "b\n", "feat: b");
     write_start_file(root, "AR2", Some("req-all-redone"), &base, now + 2, false);
     record_verdict(root, "AR2", ReviewVerdict::Redone, "redo", now + 3).unwrap();
 
@@ -1467,12 +1574,17 @@ fn recording_redone_on_combined_run_triggers_recombine() {
     let root = repo.path();
     let now = now_secs();
 
-    create_run_branch(root, "RC1", &base, "a.txt", "a\n", "feat: add a");
+    create_run_branches(
+        root,
+        &[
+            ("RC1", &base, "a.txt", "a\n", "feat: add a"),
+            ("RC2", &base, "b.txt", "b\n", "feat: add b"),
+        ],
+    );
     write_start_file(root, "RC1", Some("req-recombine"), &base, now, false);
     write_summary(root, "RC1", "verified", Some("wip/RC1"));
     write_checks(root, "RC1", &[]);
 
-    create_run_branch(root, "RC2", &base, "b.txt", "b\n", "feat: add b");
     write_start_file(root, "RC2", Some("req-recombine"), &base, now + 1, false);
     write_summary(root, "RC2", "verified", Some("wip/RC2"));
     write_checks(root, "RC2", &[]);
@@ -1716,12 +1828,17 @@ fn conflict_failure_message_is_not_queued_while_busy_and_queued_once_after() {
     let root = repo.path();
     let now = now_secs();
 
-    create_run_branch(root, "BC1", &base, "shared.txt", "from bc1\n", "feat: bc1");
+    create_run_branches(
+        root,
+        &[
+            ("BC1", &base, "shared.txt", "from bc1\n", "feat: bc1"),
+            ("BC2", &base, "shared.txt", "from bc2\n", "feat: bc2"),
+        ],
+    );
     write_start_file(root, "BC1", Some("req-busy-conflict"), &base, now, false);
     write_summary(root, "BC1", "verified", Some("wip/BC1"));
     write_checks(root, "BC1", &[]);
 
-    create_run_branch(root, "BC2", &base, "shared.txt", "from bc2\n", "feat: bc2");
     write_start_file(
         root,
         "BC2",
