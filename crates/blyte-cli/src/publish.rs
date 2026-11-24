@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -132,6 +133,16 @@ pub fn open_pull_request(
     title: &str,
     body: &str,
 ) -> Result<String, String> {
+    open_pull_request_with_gh(root, branch, title, body, OsStr::new("gh"))
+}
+
+pub fn open_pull_request_with_gh(
+    root: &Path,
+    branch: &str,
+    title: &str,
+    body: &str,
+    gh_bin: &OsStr,
+) -> Result<String, String> {
     let title = title.trim();
     if title.is_empty() {
         return Err("pull request title must not be empty".to_string());
@@ -146,7 +157,7 @@ pub fn open_pull_request(
     }
     ensure_local_branch(root, branch)?;
 
-    let out = Command::new("gh")
+    let out = Command::new(gh_bin)
         .args([
             "pr",
             "create",

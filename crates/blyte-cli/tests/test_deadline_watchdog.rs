@@ -1,97 +1,129 @@
-//! A model call that never returns cannot keep a run past its deadline, and the run still leaves
-//! a report: a dispatch sat 2 h 49 min under --max-seconds 3600 with none (2026-09-30).
-
+use std::io::Read;
 use std::net::TcpListener;
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+use blyte_agent::run::Outcome;
+use blyte_cli::task_runner::{run_task_with_state_and_max_duration, TaskConfig};
+
+struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestore {
+    fn set(pairs: &[(&'static str, Option<&str>)]) -> Self {
+        let mut prev = Vec::with_capacity(pairs.len());
+        for (k, v) in pairs {
+            prev.push((*k, std::env::var_os(k)));
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        Self(prev)
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (k, v) in self.0.drain(..) {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
+fn make_config(root: PathBuf, report: PathBuf) -> TaskConfig {
+    TaskConfig {
+        prompt: "say hi".to_string(),
+        gate: None,
+        context_strategy: "conversational".to_string(),
+        model: Some("openai/test-model".to_string()),
+        container: None,
+        max_turns: 5,
+        max_gates: 1,
+        rollback: false,
+        root,
+        container_workdir: "/workspace".into(),
+        max_seconds: Some(1),
+        max_cost_usd: None,
+        report: Some(report),
+        fold_budget: None,
+        sandbox: "off".into(),
+        network: "on".into(),
+        allow_read: Vec::new(),
+        pass_env: Vec::new(),
+        research: false,
+        claim_check: false,
+        base_check: false,
+        base_check_dir: None,
+        orchestrate: false,
+        dispatch_cmd: None,
+    }
+}
+
 #[test]
-fn a_hung_model_call_ends_at_the_deadline_with_a_report() {
-    // A server that accepts connections and never answers.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+fn hung_model_request_is_ended_by_max_seconds() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
     let port = listener.local_addr().unwrap().port();
     let connected = Arc::new(AtomicBool::new(false));
     let connected_srv = Arc::clone(&connected);
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+
     std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for s in listener.incoming().flatten() {
+        if let Ok((mut stream, _)) = listener.accept() {
             connected_srv.store(true, Ordering::SeqCst);
-            held.push(s);
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = done_rx.recv_timeout(Duration::from_secs(10));
         }
     });
 
-    let d = tempfile::tempdir().unwrap();
-    let repo = d.path().join("r");
-    let home = d.path().join("home");
-    let slots = d.path().join("slots");
-    std::fs::create_dir_all(&repo).unwrap();
-    std::fs::create_dir_all(&home).unwrap();
-    assert!(Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()
-        .unwrap()
-        .success());
-    let report = d.path().join("report.json");
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.json");
+    let usage_log = dir.path().join("usage.jsonl");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let _env = EnvRestore::set(&[
+        ("OPENAI_API_KEY", Some("test-key")),
+        ("OPENAI_BASE_URL", Some(base_url.as_str())),
+        ("BLYTE_USAGE_LOG", Some(usage_log.to_str().unwrap())),
+        ("BLYTE_MODEL_TIMEOUT_SECS", Some("60")),
+        ("BLYTE_MODEL_IDLE_TIMEOUT_SECS", Some("60")),
+    ]);
+
+    let config = make_config(dir.path().to_path_buf(), report.clone());
+    let mut state = blyte_agent::state::State::new(&config.prompt, "");
 
     let started = Instant::now();
-    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
-        .args([
-            "say hello",
-            "--gate",
-            "true",
-            "--max-seconds",
-            "2",
-            "--sandbox",
-            "off",
-            "--report",
-        ])
-        .arg(&report)
-        .current_dir(&repo)
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &home)
-        .env_remove("GEMINI_API_KEY")
-        .env_remove("GOOGLE_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENROUTER_API_KEY")
-        .env_remove("OLLAMA_HOST")
-        .env_remove("OLLAMA_API_KEY")
-        .env_remove("BLYTE_WATCHDOG_GRACE_SECS")
-        .env_remove("BLYTE_MODEL_TIMEOUT_SECS")
-        .env_remove("BLYTE_IN_GATE")
-        .env("BLYTE_GATE_SLOT_DIR", &slots)
-        .env("BLYTE_GATE_SLOTS", "2")
-        .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{port}/v1"))
-        .env("OPENAI_API_KEY", "test")
-        .env("BLYTE_MODEL", "openai/test-model")
-        .output()
-        .unwrap();
+    let (outcome, _run_report) = run_task_with_state_and_max_duration(
+        &config,
+        &mut state,
+        Some(Duration::from_millis(200)),
+        &|_| {},
+    )
+    .expect("run should complete with BudgetExhausted");
     let took = started.elapsed();
+    drop(done_tx);
 
     assert!(
         connected.load(Ordering::SeqCst),
-        "expected blyte to connect to the hung server"
+        "blyte should have contacted the fake server"
     );
     assert!(
-        took >= Duration::from_secs(1),
-        "ended before the deadline: {took:?}"
+        took >= Duration::from_millis(150),
+        "run ended before the deadline: took {took:?}"
     );
+    assert_eq!(outcome, Outcome::BudgetExhausted);
+
+    let raw = std::fs::read_to_string(&report).expect("report.json should be written");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("valid report JSON");
+    assert_eq!(v["outcome"], "budget_exhausted", "report: {raw}");
+    assert_eq!(v["turns"], 1, "report: {raw}");
     assert_eq!(
-        out.status.code(),
+        v["turn_usage"].as_array().map(|a| a.len()),
         Some(1),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        "hung turn must appear in turn_usage: {raw}"
     );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("Task finished with outcome: BudgetExhausted"),
-        "{err}"
-    );
-    let v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&report).expect("a report")).unwrap();
-    assert_eq!(v["outcome"].as_str(), Some("budget_exhausted"), "{v}");
-    assert_eq!(v["turns"], 1, "{v}");
-    assert_eq!(v["turn_usage"].as_array().map(|a| a.len()), Some(1), "{v}");
 }

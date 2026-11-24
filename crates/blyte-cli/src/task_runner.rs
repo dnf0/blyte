@@ -522,7 +522,17 @@ pub fn run_task_with_state_and_events(
     state: &mut blyte_agent::state::State,
     on_event: &(dyn Fn(&blyte_agent::run::Event<'_>) + Sync),
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
-    run_task_with_event_callback(config, state, None, &|event| on_event(event))
+    let max_duration = config.max_seconds.map(std::time::Duration::from_secs);
+    run_task_with_event_callback(config, state, None, max_duration, &|event| on_event(event))
+}
+
+pub fn run_task_with_state_and_max_duration(
+    config: &TaskConfig,
+    state: &mut blyte_agent::state::State,
+    max_duration: Option<std::time::Duration>,
+    on_event: &(dyn Fn(&blyte_agent::run::Event<'_>) + Sync),
+) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
+    run_task_with_event_callback(config, state, None, max_duration, &|event| on_event(event))
 }
 
 /// Executes an autonomous solver run with an explicit approver override (used by the surface).
@@ -532,7 +542,10 @@ pub fn run_task_with_approver(
     approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
     on_event: &(dyn Fn(&blyte_agent::run::Event<'_>) + Sync),
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
-    run_task_with_event_callback(config, state, approver, &|event| on_event(event))
+    let max_duration = config.max_seconds.map(std::time::Duration::from_secs);
+    run_task_with_event_callback(config, state, approver, max_duration, &|event| {
+        on_event(event)
+    })
 }
 
 /// Executes an autonomous solver run against an existing mutable `State`, streaming events to `writer`
@@ -579,7 +592,8 @@ pub fn run_task_with_state_writer_and_progress<W: Write>(
             }
         }
     };
-    run_task_with_event_callback(config, state, None, &on_event)
+    let max_duration = config.max_seconds.map(std::time::Duration::from_secs);
+    run_task_with_event_callback(config, state, None, max_duration, &on_event)
 }
 
 fn build_usage_entry(
@@ -681,6 +695,7 @@ fn run_task_with_event_callback(
     config: &TaskConfig,
     state: &mut blyte_agent::state::State,
     approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
+    max_duration: Option<std::time::Duration>,
     on_event: &dyn Fn(&blyte_agent::run::Event<'_>),
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
@@ -832,9 +847,7 @@ fn run_task_with_event_callback(
         Some(base_dir)
             if !blyte_agent::run::gate_steps(&state.orchestrator.verification_cmd).is_empty() =>
         {
-            let deadline = config
-                .max_seconds
-                .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+            let deadline = max_duration.map(|d| std::time::Instant::now() + d);
             Some(BackgroundBaseCheck::start(
                 config,
                 state.orchestrator.verification_cmd.clone(),
@@ -861,7 +874,7 @@ fn run_task_with_event_callback(
         budget: blyte_agent::run::Budget {
             max_turns: config.max_turns as u32,
             max_gate_attempts: config.max_gates as u32,
-            max_duration: config.max_seconds.map(std::time::Duration::from_secs),
+            max_duration,
         },
         rollback: config.rollback,
         on_event: Some(&runner_on_event),

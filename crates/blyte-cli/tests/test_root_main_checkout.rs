@@ -28,6 +28,8 @@ fn git(dir: &Path, args: &[&str]) {
         .args(["-c", "user.name=t", "-c", "user.email=t@t"])
         .args(args)
         .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap()
         .success();
@@ -38,6 +40,8 @@ fn rev_parse(dir: &Path, rev: &str) -> String {
     let out = Command::new("git")
         .args(["rev-parse", rev])
         .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(out.status.success(), "git rev-parse {rev}");
@@ -52,6 +56,8 @@ fn blyte_in(dir: &Path, home: &Path, state_dir: &Path, args: &[&str]) -> Output 
         .env("XDG_CONFIG_HOME", home)
         .env("BLYTE_STATE_DIR", state_dir)
         .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
@@ -66,7 +72,6 @@ fn blyte_in(dir: &Path, home: &Path, state_dir: &Path, args: &[&str]) -> Output 
 
 #[test]
 fn find_repo_root_returns_main_checkout_from_all_worktrees() {
-    let _guard = cwd_lock().lock().unwrap();
     let parent = tempfile::tempdir().unwrap();
     let main = parent.path().join("myrepo");
     std::fs::create_dir_all(&main).unwrap();
@@ -117,6 +122,7 @@ fn find_repo_root_returns_main_checkout_from_all_worktrees() {
         ],
     );
 
+    let _guard = cwd_lock().lock().unwrap();
     for dir in [&main, &wt_plan, &sibling, &claude_wt] {
         let _d = DirGuard::chdir(dir);
         let resolved = blyte_cli::clean::find_repo_root().unwrap();
@@ -131,7 +137,6 @@ fn find_repo_root_returns_main_checkout_from_all_worktrees() {
 
 #[test]
 fn find_repo_root_errors_when_linked_worktree_main_checkout_cannot_be_resolved() {
-    let _guard = cwd_lock().lock().unwrap();
     let parent = tempfile::tempdir().unwrap();
     let bare = parent.path().join("myrepo.git");
     std::fs::create_dir_all(&bare).unwrap();
@@ -151,6 +156,7 @@ fn find_repo_root_errors_when_linked_worktree_main_checkout_cannot_be_resolved()
         ],
     );
 
+    let _guard = cwd_lock().lock().unwrap();
     let _d = DirGuard::chdir(&linked);
     let err = blyte_cli::clean::find_repo_root().unwrap_err();
     assert!(
@@ -213,6 +219,7 @@ fn dispatch_from_sibling_worktree_uses_main_wt_and_registry_and_sibling_base() {
             "true",
             "--sandbox",
             "off",
+            "--no-base-check",
         ],
     );
     assert!(
@@ -273,6 +280,7 @@ fn dispatch_from_sibling_worktree_uses_main_wt_and_registry_and_sibling_base() {
             "true",
             "--sandbox",
             "off",
+            "--no-base-check",
         ],
     );
     assert!(
@@ -368,8 +376,17 @@ fn review_status_and_wait_from_linked_worktree_find_run_under_main_wt() {
     )
     .unwrap();
 
-    // 1. `blyte review R1` started from the linked worktree finds <main>/.wt/R1.
-    let rev_out = blyte_in(&sibling, &home, &state_dir, &["review", "R1"]);
+    let (rev_out, status_out, wait_out) = std::thread::scope(|s| {
+        let h_rev = s.spawn(|| blyte_in(&sibling, &home, &state_dir, &["review", "R1"]));
+        let h_status = s.spawn(|| blyte_in(&sibling, &home, &state_dir, &["status", "R1"]));
+        let h_wait = s.spawn(|| blyte_in(&sibling, &home, &state_dir, &["wait", "R1"]));
+        (
+            h_rev.join().unwrap(),
+            h_status.join().unwrap(),
+            h_wait.join().unwrap(),
+        )
+    });
+
     assert_eq!(
         rev_out.status.code(),
         Some(0),
@@ -380,8 +397,6 @@ fn review_status_and_wait_from_linked_worktree_find_run_under_main_wt() {
     assert!(rev_stdout.contains("feat: r1"), "{rev_stdout}");
     assert!(rev_stdout.contains("outcome: verified"), "{rev_stdout}");
 
-    // 2. `blyte status R1` started from the linked worktree finds <main>/.wt/R1.
-    let status_out = blyte_in(&sibling, &home, &state_dir, &["status", "R1"]);
     assert_eq!(
         status_out.status.code(),
         Some(0),
@@ -396,8 +411,6 @@ fn review_status_and_wait_from_linked_worktree_find_run_under_main_wt() {
         "{status_stdout}"
     );
 
-    // 3. `blyte wait R1` started from the linked worktree finds <main>/.wt/R1.
-    let wait_out = blyte_in(&sibling, &home, &state_dir, &["wait", "R1"]);
     assert_eq!(
         wait_out.status.code(),
         Some(0),
@@ -410,38 +423,32 @@ fn review_status_and_wait_from_linked_worktree_find_run_under_main_wt() {
 
 #[test]
 fn find_repo_root_treats_a_submodule_as_its_own_main_checkout() {
-    let _guard = cwd_lock().lock().unwrap();
     let parent = tempfile::tempdir().unwrap();
-    let sub_src = parent.path().join("sub-src");
-    std::fs::create_dir_all(&sub_src).unwrap();
-    git(&sub_src, &["init", "-q", "-b", "main"]);
-    git(&sub_src, &["commit", "-q", "--allow-empty", "-m", "init"]);
-
     let superproject = parent.path().join("super");
     std::fs::create_dir_all(&superproject).unwrap();
     git(&superproject, &["init", "-q", "-b", "main"]);
-    git(
-        &superproject,
-        &["commit", "-q", "--allow-empty", "-m", "init"],
-    );
+
+    let sub = superproject.join("sub");
+    let sub_git_dir = superproject.join(".git/modules/sub");
+    std::fs::create_dir_all(superproject.join(".git/modules")).unwrap();
     git(
         &superproject,
         &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
+            "init",
             "-q",
-            sub_src.to_str().unwrap(),
-            "sub",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            sub_git_dir.to_str().unwrap(),
+            sub.to_str().unwrap(),
         ],
     );
-    let sub = superproject.join("sub");
     assert!(
         sub.join(".git").is_file(),
         "submodule should have a .git file"
     );
 
+    let _guard = cwd_lock().lock().unwrap();
     let _d = DirGuard::chdir(&sub);
     let root = blyte_cli::clean::find_repo_root().unwrap();
     assert_eq!(

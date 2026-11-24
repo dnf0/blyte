@@ -386,12 +386,12 @@ fn run_after(cmd_str: &str, stdin_bytes: &[u8], timeout: Duration) -> Option<Str
     Some(first_line.to_string())
 }
 
-/// Executes the `blyte statusline` subcommand.
-pub fn run(args: &crate::cli::StatuslineArgs) -> i32 {
-    let mut stdin_bytes = Vec::new();
-    let _ = std::io::stdin().read_to_end(&mut stdin_bytes);
-
-    let d: serde_json::Value = serde_json::from_slice(&stdin_bytes)
+pub fn render_statusline(
+    stdin_bytes: &[u8],
+    after: Option<&str>,
+    after_timeout: Duration,
+) -> String {
+    let d: serde_json::Value = serde_json::from_slice(stdin_bytes)
         .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
 
     let resolve = || {
@@ -406,9 +406,10 @@ pub fn run(args: &crate::cli::StatuslineArgs) -> i32 {
         resolve_compact_window(model_id, env_val.as_deref(), &files)
     };
 
-    let base = match args.after {
-        Some(ref cmd) => run_after(cmd, &stdin_bytes, Duration::from_secs(2))
-            .unwrap_or_else(|| base_line(&d, resolve())),
+    let base = match after {
+        Some(cmd) => {
+            run_after(cmd, stdin_bytes, after_timeout).unwrap_or_else(|| base_line(&d, resolve()))
+        }
         None => base_line(&d, resolve()),
     };
 
@@ -433,11 +434,17 @@ pub fn run(args: &crate::cli::StatuslineArgs) -> i32 {
         None => None,
     };
 
-    let line = match blyte_p {
+    match blyte_p {
         Some(part) => format!("{base} · {part}"),
         None => base,
-    };
+    }
+}
 
+/// Executes the `blyte statusline` subcommand.
+pub fn run(args: &crate::cli::StatuslineArgs) -> i32 {
+    let mut stdin_bytes = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut stdin_bytes);
+    let line = render_statusline(&stdin_bytes, args.after.as_deref(), Duration::from_secs(2));
     println!("{line}");
     0
 }
