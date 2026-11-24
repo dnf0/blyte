@@ -157,3 +157,136 @@ Run: `cargo test -p blyte --test test_fix_round --test test_fresh_model_review -
 (leave out a name that is not a test file in `crates/blyte-cli/tests/`, and say so).
 
 **Commit message.** `feat(dispatch): send the review's concerns back in the fix round`
+
+### Task TERM
+
+**Goal.** Bare `blyte` starts the surface whether or not its standard input is a terminal, so it
+can be started by a service manager or with `< /dev/null`. Today `main.rs` sends any start whose
+input is not a terminal to the old terminal session, which reads end of input and exits 0 without
+a word (research RS4, `.wt/RS4.report.md`). The surface itself never reads standard input and
+already runs until SIGINT or SIGTERM. After this change the terminal session is reached only
+with `--terminal`.
+
+**Depends on:** none.
+
+**Siblings.** Task RC changes `assets/surface/index.html`, `dispatch.rs` and
+`tests/test_surface_page.rs`; it is not in this worktree. Do not touch those files, `serve.rs` or
+`repl.rs`.
+
+**Files.** `crates/blyte-cli/src/main.rs`, `crates/blyte-cli/tests/test_serve.rs`,
+`crates/blyte-cli/tests/test_e2e_cli.rs`, any other test file that starts bare `blyte` with piped
+input and expects the terminal session (find them: `grep -rn "Stdio::piped" crates/blyte-cli/tests`),
+`docs/usage.md` and `docs/reference/cli.md` where they describe how `blyte` starts, and the
+`--terminal` help text in `cli.rs` only if it says the terminal session is chosen by piped input.
+
+**What to build.**
+
+1. In `main.rs`, `let use_terminal = cli.terminal || !std::io::stdin().is_terminal();` becomes
+   `let use_terminal = cli.terminal;`. Remove the `IsTerminal` import if nothing else uses it.
+   Nothing else in the start path changes: no check of what standard input is, no new flag.
+2. Tests that drive the terminal session through piped input pass `--terminal`:
+   `test_cli_interactive_repl_stdin_driving` and `the_banner_is_one_line_with_the_name` in
+   `test_e2e_cli.rs`, and any other you find. Their assertions do not change.
+3. In `test_serve.rs`, replace `piped_stdin_still_runs_the_terminal_session` with the two tests
+   below.
+
+No fallbacks: do not add a path that falls back to the terminal session when the surface cannot
+start; a surface that cannot start prints its error and exits non-zero, as it does today.
+
+**Tests** (`test_serve.rs`, running the built binary).
+
+- `the_terminal_flag_runs_the_terminal_session_on_piped_input`: `blyte --terminal` with piped
+  input `/exit\n` prints `Blyte Interactive Harness` and exits 0 (the old test with the flag
+  added).
+- `bare_blyte_starts_the_surface_without_a_terminal` (`#[cfg(unix)]`): in a temporary git
+  repository set up the way this file's other tests set one up (same environment variables, so
+  no real model is called and no real home directory is read), spawn `blyte --no-open --port 0`
+  with `Stdio::null()` as standard input and piped standard output. Read standard output lines
+  until one starts with `blyte: surface at ` (fail the test, killing the child, if none arrives
+  within 30 s or the child exits first, printing its standard error). Assert `.wt/surface.json`
+  exists. Send SIGTERM with `kill -TERM <pid>` (`std::process::Command`; no new dependency).
+  Assert the child exits 0 within 10 s and `.wt/surface.json` is gone.
+
+Run: `cargo test -p blyte --test test_serve --test test_e2e_cli --test test_cli_smoke`.
+
+**Commit message.** `feat(surface): start the surface when standard input is not a terminal`
+
+### Task RC
+
+**Goal.** The `Review (N)` number on the page stops going stale. Research RS4 found the normal
+refresh is sound (the runs list is fetched every 5 s) and three faults:
+
+1. after any API request gets a 403, the page stops all polling for good; when a new `#token=`
+   then arrives in the address (the `hashchange` listener in `init()`), the token is taken but
+   polling never restarts, so the count is frozen until a reload;
+2. when `GET /api/runs` fails for another reason, the error is written to `#queue-error`, which
+   is inside `#review-wrap` and so hidden on the Design tab: the count is stale with nothing
+   said;
+3. `blyte review <id> --verdict ...` does not tell a running surface, so the count is up to 5 s
+   behind (and longer for anything that waits on the surface's own timer).
+
+**Depends on:** none (the branch already has Task FR's change to `dispatch.rs`).
+
+**Siblings.** Task TERM changes `main.rs`, `tests/test_serve.rs` and `tests/test_e2e_cli.rs`; it
+is not in this worktree. Do not touch those files.
+
+**Files.** `crates/blyte-cli/assets/surface/index.html`, `crates/blyte-cli/tests/test_surface_page.rs`,
+`crates/blyte-cli/src/dispatch.rs` (`run_review` only), new
+`crates/blyte-cli/tests/test_review_notify.rs`.
+
+**What to build.**
+
+1. `index.html`: move the three lines of `init()` that start polling
+   (`runsPollTimer = setInterval(fetchRuns, RUNS_POLL_MS)`, the same for `fetchRequests`, and
+   `pollEvents()`) and the first fetches that precede them into one function `startPolling()`
+   that sets `pollingStopped = false`, and call it from `init()` where those lines were. In the
+   `hashchange` listener, when a token is read and `pollingStopped` is true, call
+   `startPolling()` after `updateMissingTokenUI()`. `startPolling()` must not leave two timers
+   or two `pollEvents()` loops running: it does nothing for a timer that is not `null`, and
+   `pollEvents()` must already end when `pollingStopped` is true (check it does; if it does not
+   return on that flag, make it).
+2. `index.html`: when `fetchRuns()` fails (not 403), show the failure where it can be seen from
+   any tab: the header counter reads `Review (N) !` (the last known N, then a space and `!`) and
+   has the error text as its `title`; the next successful `fetchRuns()` removes both. Keep
+   writing the error to `#queue-error` as now. Use the page's existing way of setting text
+   (no `innerHTML` with server text: `no_raw_html_from_the_server` must still pass).
+3. `dispatch.rs` `run_review`: after `record_verdict` succeeds and before it prints
+   `recorded verdict ...`, call `crate::surface_notify::notify_runs_changed(&root, &args.id)` and
+   pass the outcome to `crate::surface_notify::report` exactly as `finish_summary` in the same
+   file does. No surface running is not an error (that is what `NotifyOutcome::NoSurface` is
+   for); a surface that is there and cannot be told is reported by `report`, and the verdict
+   stays recorded and the exit code stays 0.
+
+No fallbacks: do not swallow a fetch error to keep the old number looking current.
+
+**Tests.**
+
+`test_surface_page.rs`, with the file's `run_surface_script` harness (node):
+- `polling_restarts_when_a_token_arrives_after_a_403`: with a stub `fetch` that returns 403 for
+  `/api/runs`, run `init()`, check polling stopped (`runsPollTimer === null`); then set a hash
+  with a token, make the stub return 200 with one run whose `verdict` is `null`, fire the
+  `hashchange` listener, and check `runsPollTimer !== null`, that `/api/runs` was fetched again,
+  and that the header counter reads `Review (1)`.
+- `starting_polling_twice_leaves_one_timer`: call `startPolling()` twice; `setInterval` (stubbed
+  to count) was called once per timer, and one `pollEvents` loop is running (count the event
+  fetches).
+- `a_failed_runs_fetch_marks_the_review_count`: after a good fetch with two undecided runs, the
+  stub returns 500 with a text body; after `fetchRuns()` the counter text is `Review (2) !` and
+  its `title` contains the error; after the next good fetch it is `Review (2)` with no `title`.
+If the harness cannot reach one of these functions as written, expose it the way the file's
+other script tests reach page functions; do not weaken an assertion.
+
+`test_review_notify.rs`, modelled on `tests/test_dispatch_notify.rs` (same stand-in listener and
+`.wt/surface.json` / `.wt/surface.token` setup):
+- `recording_a_verdict_tells_a_running_surface`: with a stand-in surface listening,
+  `blyte review <id> --verdict accepted` exits 0, prints `recorded verdict accepted for <id>`,
+  and the listener got one `POST /api/runs/changed` with the token;
+- `recording_a_verdict_without_a_surface_says_nothing_extra`: with no `.wt/surface.json`, the
+  command exits 0 and standard error is empty;
+- `a_surface_that_cannot_be_told_does_not_undo_the_verdict`: `.wt/surface.json` names a port
+  nothing listens on; the command exits 0, the verdict is in the run's files, and standard error
+  has the message `report` prints.
+
+Run: `cargo test -p blyte --test test_surface_page --test test_review_notify --test test_dispatch_notify --test test_review_reasons`.
+
+**Commit message.** `fix(surface): keep the Review count current after a 403, a failed fetch and a recorded verdict`
