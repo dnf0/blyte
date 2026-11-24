@@ -142,9 +142,11 @@ pub fn load(root: &Path) -> Result<Option<RepoConfig>, String> {
             ));
         }
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let main = main_checkout(root).unwrap_or_else(|| root.to_path_buf());
-    expand_allow_read(&config.dispatch.allow_read, home.as_deref(), &main)?;
+    if !config.dispatch.allow_read.is_empty() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let main = main_checkout(root).unwrap_or_else(|| root.to_path_buf());
+        expand_allow_read(&config.dispatch.allow_read, home.as_deref(), &main)?;
+    }
     if !config.review.risky.is_empty() {
         build_risky_globset(&config.review.risky)
             .map_err(|e| format!("{}: {e}", path.display()))?;

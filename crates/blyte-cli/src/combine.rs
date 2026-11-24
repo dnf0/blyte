@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use blyte_agent::run::{gate_steps, run_gate_steps};
@@ -125,13 +125,93 @@ struct RunMeta {
     branch_hint: Option<String>,
 }
 
+struct RepoDirs {
+    common_dir: Option<PathBuf>,
+    main_checkout: PathBuf,
+}
+
+fn main_checkout_from_common_dir(root: &Path, common_dir: &Path) -> Option<PathBuf> {
+    if common_dir.file_name().and_then(|n| n.to_str()) != Some(".git") {
+        return None;
+    }
+    let parent = common_dir.parent()?;
+    let parent_canon = parent.canonicalize().ok()?;
+    let root_canon = root.canonicalize().ok()?;
+    if parent_canon == root_canon {
+        return None;
+    }
+    Some(parent.to_path_buf())
+}
+
+fn find_combine_repo() -> Result<(PathBuf, RepoDirs), String> {
+    let out = Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .output()
+        .map_err(|e| format!("git not found: {e}"))?;
+    if !out.status.success() {
+        return Err("not a git repository".to_string());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let (Some(toplevel), Some(git_dir), Some(common_dir)) =
+        (lines.next(), lines.next(), lines.next())
+    else {
+        return Err("cannot read git repository paths".to_string());
+    };
+    let toplevel_path = PathBuf::from(toplevel.trim());
+    let common_path = PathBuf::from(common_dir.trim());
+    let root = if git_dir.trim() != common_dir.trim() {
+        main_checkout_from_common_dir(&toplevel_path, &common_path).ok_or_else(|| {
+            format!(
+                "cannot find main checkout for linked worktree {}",
+                toplevel_path.display()
+            )
+        })?
+    } else {
+        toplevel_path
+    };
+    let main_checkout = root.clone();
+    Ok((
+        root,
+        RepoDirs {
+            common_dir: Some(common_path),
+            main_checkout,
+        },
+    ))
+}
+
+fn resolve_repo_dirs(root: &Path) -> RepoDirs {
+    let common_dir = git_cmd(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .map(PathBuf::from);
+    let main_checkout = common_dir
+        .as_deref()
+        .and_then(|cd| main_checkout_from_common_dir(root, cd))
+        .unwrap_or_else(|| root.to_path_buf());
+    RepoDirs {
+        common_dir,
+        main_checkout,
+    }
+}
+
 /// Entry point for `blyte combine <request>`.
 pub fn run(args: &CombineArgs) -> i32 {
     if let Err(msg) = crate::dispatch::validate_request_id(&args.request) {
         eprintln!("error: {msg}");
         return 2;
     }
-    let root = match crate::clean::find_repo_root() {
+    let (root, dirs) = match find_combine_repo() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -140,17 +220,27 @@ pub fn run(args: &CombineArgs) -> i32 {
     };
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    combine_in(&root, &args.request, &mut stdout, &mut stderr)
+    combine_in_with_dirs(&root, Some(dirs), &args.request, &mut stdout, &mut stderr)
 }
 
 /// Combine all passed non-research runs for `request` inside repository `root`.
 pub fn combine_in(root: &Path, request: &str, out: &mut impl Write, err: &mut impl Write) -> i32 {
+    combine_in_with_dirs(root, None, request, out, err)
+}
+
+fn combine_in_with_dirs(
+    root: &Path,
+    dirs: Option<RepoDirs>,
+    request: &str,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> i32 {
     if let Err(msg) = crate::dispatch::validate_request_id(request) {
         let _ = writeln!(err, "error: {msg}");
         return 2;
     }
 
-    match run_combine_inner(root, request) {
+    match run_combine_inner(root, dirs, request) {
         Ok(record) => {
             let json = match serde_json::to_string_pretty(&record) {
                 Ok(j) => j,
@@ -198,34 +288,31 @@ pub fn combine_in(root: &Path, request: &str, out: &mut impl Write, err: &mut im
     }
 }
 
-fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String> {
+fn run_combine_inner(
+    root: &Path,
+    dirs: Option<RepoDirs>,
+    request: &str,
+) -> Result<CombineRecord, String> {
     let wt_dir = root.join(".wt");
     let runs = discover_and_validate_runs(root, request)?;
     let ordered = order_runs(runs)?;
     let run_id_set: BTreeSet<&str> = ordered.iter().map(|r| r.id.as_str()).collect();
-
-    let group_base = resolve_group_base(root, &ordered, &run_id_set)?;
-
-    let mut tips: HashMap<String, String> = HashMap::new();
-    let mut combined_runs: Vec<CombinedRun> = Vec::with_capacity(ordered.len());
-    for run in &ordered {
-        let tip = resolve_run_tip(root, run)?;
-        tips.insert(run.id.clone(), tip.clone());
-        combined_runs.push(CombinedRun {
-            id: run.id.clone(),
-            tip,
-        });
-    }
 
     let branch = format!("blyte/{request}");
     let worktree_dir = wt_dir.join(format!("combine-{request}"));
     let combined_dir = wt_dir.join("combined");
     let record_path = combined_dir.join(format!("{request}.json"));
 
-    let branch_exists = git_branch_exists(root, &branch)?;
+    let repo_dirs = dirs.unwrap_or_else(|| resolve_repo_dirs(root));
+    let starting = resolve_starting_refs(root, &ordered, &run_id_set, &branch)?;
+    let group_base = starting.group_base;
+    let tips = starting.tips;
+    let combined_runs = starting.combined_runs;
+    let existing_branch_tip = starting.existing_branch_tip;
+
     let existing_record = load_record(&record_path)?;
 
-    if branch_exists && existing_record.is_none() {
+    if existing_branch_tip.is_some() && existing_record.is_none() {
         return Err(format!(
             "branch {branch} already exists without a combine record at {}; refusing to overwrite a branch not created by blyte combine",
             record_path.display()
@@ -236,14 +323,11 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
         .as_ref()
         .map(|rec| rec.commits.last().unwrap_or(&rec.base).as_str());
 
-    if let Some(ref rec) = existing_record {
+    if let (Some(ref rec), Some(ref actual_tip)) = (&existing_record, &existing_branch_tip) {
         if rec.state == CombineState::Combined
-            && branch_exists
             && rec.runs == combined_runs
             && rec.base == group_base
         {
-            let actual_tip = git_rev_parse(root, &format!("refs/heads/{branch}^{{commit}}"))
-                .map_err(|e| format!("cannot resolve existing branch {branch}: {e}"))?;
             let expected_tip = rec.commits.last().unwrap_or(&rec.base).as_str();
             if actual_tip == expected_tip {
                 return Ok(rec.clone());
@@ -251,7 +335,7 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
         }
     }
 
-    let dispatch_cfg = load_gate_config(root)?;
+    let dispatch_cfg = load_gate_config(root, &repo_dirs.main_checkout)?;
     let gate = dispatch_cfg
         .gate
         .as_deref()
@@ -259,7 +343,7 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
         .ok_or_else(|| "blyte.toml has no [dispatch].gate configured".to_string())?
         .to_string();
 
-    ensure_wt_excluded(root);
+    ensure_wt_excluded(repo_dirs.common_dir.as_deref());
     std::fs::create_dir_all(&combined_dir)
         .map_err(|e| format!("failed to create {}: {e}", combined_dir.display()))?;
 
@@ -268,11 +352,12 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
         &worktree_dir,
         &branch,
         &group_base,
+        existing_branch_tip.as_deref(),
         expected_existing_tip,
     )?;
 
     let mut last_good_head = group_base.clone();
-    for run in &ordered {
+    for (idx, run) in ordered.iter().enumerate() {
         let tip = &tips[&run.id];
         let parent_base = match parent_run_id(run, &run_id_set) {
             Some(parent_id) => tips[parent_id].as_str(),
@@ -286,7 +371,9 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
             match git_cherry_pick_x(&worktree_dir, &run.id, sha) {
                 Ok(Ok(())) => {}
                 Ok(Err(conflict_files)) => {
-                    let _ = git_cmd(&worktree_dir, &["cherry-pick", "--abort"]);
+                    if has_cherry_pick_head(&worktree_dir) {
+                        let _ = git_cmd(&worktree_dir, &["cherry-pick", "--abort"]);
+                    }
                     git_reset_hard(&worktree_dir, &last_good_head)?;
                     let applied_commits = git_rev_list_range(&worktree_dir, &group_base, "HEAD")?;
                     let record = CombineRecord {
@@ -306,25 +393,27 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
                     return Ok(record);
                 }
                 Err(err_msg) => {
-                    let _ = git_cmd(&worktree_dir, &["cherry-pick", "--abort"]);
+                    if has_cherry_pick_head(&worktree_dir) {
+                        let _ = git_cmd(&worktree_dir, &["cherry-pick", "--abort"]);
+                    }
                     git_reset_hard(&worktree_dir, &last_good_head)?;
                     return Err(err_msg);
                 }
             }
         }
-        last_good_head = git_rev_parse(&worktree_dir, "HEAD")?;
+        if idx + 1 < ordered.len() {
+            last_good_head = git_rev_parse(&worktree_dir, "HEAD")?;
+        }
     }
 
-    let combined_commits = git_rev_list_range(&worktree_dir, &group_base, "HEAD")?;
+    let (combined_commits, last_tree) = git_log_commits_and_tree(&worktree_dir, &group_base)?;
 
     if let Some(ref setup_cmd) = dispatch_cfg.setup {
-        let main_checkout =
-            crate::config::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
         let setup_log_path = wt_dir.join(format!("combine-{request}.setup.log"));
         if let Err(msg) = crate::setup::run_setup(
             setup_cmd,
             &worktree_dir,
-            &main_checkout,
+            &repo_dirs.main_checkout,
             &dispatch_cfg.env,
             &setup_log_path,
             crate::setup::SETUP_TIMEOUT,
@@ -347,12 +436,15 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
         }
     }
 
-    let head_tree = crate::passed_trees::tree_of(&worktree_dir, "HEAD")?;
+    let head_tree = match last_tree {
+        Some(tree) => tree,
+        None => crate::passed_trees::tree_of(&worktree_dir, "HEAD")?,
+    };
     let key = crate::passed_trees::check_key(&gate, &dispatch_cfg.env);
     let clean_before = crate::passed_trees::worktree_is_clean(&worktree_dir)?;
     let already_passed = clean_before
-        && crate::passed_trees::has_passed(
-            root,
+        && crate::passed_trees::has_passed_in_main(
+            &repo_dirs.main_checkout,
             &head_tree,
             &key,
             crate::passed_trees::now_secs(),
@@ -390,7 +482,12 @@ fn run_combine_inner(root: &Path, request: &str) -> Result<CombineRecord, String
 
         if gate_result.passed {
             if crate::passed_trees::worktree_is_clean(&worktree_dir)? {
-                crate::passed_trees::record_passed(root, &head_tree, &key)?;
+                crate::passed_trees::record_passed_in_main(
+                    &repo_dirs.main_checkout,
+                    repo_dirs.common_dir.as_deref(),
+                    &head_tree,
+                    &key,
+                )?;
             }
             CombineRecord {
                 request: request.to_string(),
@@ -668,12 +765,20 @@ fn order_runs(runs: Vec<RunMeta>) -> Result<Vec<RunMeta>, String> {
     Ok(ordered)
 }
 
-fn resolve_group_base(
+struct StartingRefs {
+    group_base: String,
+    tips: HashMap<String, String>,
+    combined_runs: Vec<CombinedRun>,
+    existing_branch_tip: Option<String>,
+}
+
+fn resolve_starting_refs(
     root: &Path,
     ordered: &[RunMeta],
     run_ids: &BTreeSet<&str>,
-) -> Result<String, String> {
-    let mut root_bases: Vec<(String, String)> = Vec::new();
+    branch: &str,
+) -> Result<StartingRefs, String> {
+    let mut root_base_specs: Vec<(&str, &str, String)> = Vec::new();
     for run in ordered {
         if parent_run_id(run, run_ids).is_some() {
             continue;
@@ -683,13 +788,56 @@ fn resolve_group_base(
             .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("run {} has no base_sha in start.json", run.id))?;
-        let sha = git_rev_parse(root, &format!("{spec}^{{commit}}"))
-            .map_err(|e| format!("cannot resolve base_sha {spec} for run {}: {e}", run.id))?;
-        root_bases.push((run.id.clone(), sha));
+        root_base_specs.push((run.id.as_str(), spec, format!("{spec}^{{commit}}")));
     }
 
-    if root_bases.is_empty() {
+    if root_base_specs.is_empty() {
         return Err("no root run found to determine base commit".to_string());
+    }
+
+    let mut run_branch_specs: Vec<(&str, String, String)> = Vec::with_capacity(ordered.len());
+    for run in ordered {
+        let run_branch = match run.branch_hint.as_deref() {
+            Some(b) => b.to_string(),
+            None => format!("wip/{}", run.id),
+        };
+        let rev = format!("refs/heads/{run_branch}^{{commit}}");
+        run_branch_specs.push((run.id.as_str(), run_branch, rev));
+    }
+    let combined_branch_rev = format!("refs/heads/{branch}^{{commit}}");
+
+    let mut unique_revs: Vec<&str> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (_, _, rev) in &root_base_specs {
+        if seen.insert(rev.as_str()) {
+            unique_revs.push(rev.as_str());
+        }
+    }
+    for (_, _, rev) in &run_branch_specs {
+        if seen.insert(rev.as_str()) {
+            unique_revs.push(rev.as_str());
+        }
+    }
+    if seen.insert(combined_branch_rev.as_str()) {
+        unique_revs.push(combined_branch_rev.as_str());
+    }
+
+    let resolved = git_batch_resolve_commits(root, &unique_revs)?;
+
+    let mut root_bases: Vec<(String, String)> = Vec::with_capacity(root_base_specs.len());
+    for (run_id, spec, rev) in &root_base_specs {
+        let sha = match resolved.get(rev.as_str()).and_then(|v| v.as_ref()) {
+            Some(sha) => sha.clone(),
+            None => {
+                let detail = git_rev_parse(root, rev)
+                    .err()
+                    .unwrap_or_else(|| format!("Needed a single revision: {rev}"));
+                return Err(format!(
+                    "cannot resolve base_sha {spec} for run {run_id}: {detail}"
+                ));
+            }
+        };
+        root_bases.push(((*run_id).to_string(), sha));
     }
 
     let first_sha = &root_bases[0].1;
@@ -704,29 +852,119 @@ fn resolve_group_base(
             details.join(", ")
         ));
     }
+    let group_base = first_sha.clone();
 
-    Ok(first_sha.clone())
-}
+    let mut tips: HashMap<String, String> = HashMap::with_capacity(run_branch_specs.len());
+    let mut combined_runs: Vec<CombinedRun> = Vec::with_capacity(run_branch_specs.len());
+    for (run_id, run_branch, rev) in &run_branch_specs {
+        let tip = match resolved.get(rev.as_str()).and_then(|v| v.as_ref()) {
+            Some(sha) => sha.clone(),
+            None => {
+                let detail = git_rev_parse(root, rev)
+                    .err()
+                    .unwrap_or_else(|| format!("Needed a single revision: {rev}"));
+                return Err(format!(
+                    "cannot resolve tip commit for run {run_id} on branch {run_branch}: {detail}"
+                ));
+            }
+        };
+        tips.insert((*run_id).to_string(), tip.clone());
+        combined_runs.push(CombinedRun {
+            id: (*run_id).to_string(),
+            tip,
+        });
+    }
 
-fn resolve_run_tip(root: &Path, run: &RunMeta) -> Result<String, String> {
-    let branch = match run.branch_hint.as_deref() {
-        Some(b) => b.to_string(),
-        None => format!("wip/{}", run.id),
-    };
-    let rev = format!("refs/heads/{branch}^{{commit}}");
-    git_rev_parse(root, &rev).map_err(|e| {
-        format!(
-            "cannot resolve tip commit for run {} on branch {branch}: {e}",
-            run.id
-        )
+    let existing_branch_tip = resolved
+        .get(combined_branch_rev.as_str())
+        .and_then(|v| v.clone());
+
+    Ok(StartingRefs {
+        group_base,
+        tips,
+        combined_runs,
+        existing_branch_tip,
     })
 }
 
-fn load_gate_config(root: &Path) -> Result<crate::config::DispatchConfig, String> {
-    match crate::config::load_with_fallback(root)? {
-        Some((cfg, _)) => Ok(cfg.dispatch),
-        None => Err("no blyte.toml found in repository".to_string()),
+fn git_batch_resolve_commits(
+    dir: &Path,
+    revs: &[&str],
+) -> Result<HashMap<String, Option<String>>, String> {
+    let mut resolved = HashMap::with_capacity(revs.len());
+    let mut query_revs: Vec<&str> = Vec::with_capacity(revs.len());
+    for &rev in revs {
+        if rev.contains(['\n', '\r', ' ', '\t']) {
+            resolved.insert(rev.to_string(), None);
+        } else {
+            query_revs.push(rev);
+        }
     }
+    if query_revs.is_empty() {
+        return Ok(resolved);
+    }
+
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch-check=%(objecttype) %(objectname)"])
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to execute git cat-file --batch-check: {e}"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "failed to open stdin for git cat-file".to_string())?;
+        for rev in &query_revs {
+            writeln!(stdin, "{rev}")
+                .map_err(|e| format!("failed to write to git cat-file stdin: {e}"))?;
+        }
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for git cat-file: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(format!("git cat-file --batch-check failed: {detail}"));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() != query_revs.len() {
+        return Err(format!(
+            "git cat-file --batch-check returned {} lines for {} revisions",
+            lines.len(),
+            query_revs.len()
+        ));
+    }
+    for (rev, line) in query_revs.iter().zip(lines) {
+        let sha = line
+            .trim()
+            .strip_prefix("commit ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        resolved.insert((*rev).to_string(), sha);
+    }
+    Ok(resolved)
+}
+
+fn load_gate_config(
+    root: &Path,
+    main_checkout: &Path,
+) -> Result<crate::config::DispatchConfig, String> {
+    if let Some(cfg) = crate::config::load(root)? {
+        return Ok(cfg.dispatch);
+    }
+    if main_checkout != root {
+        if let Some(cfg) = crate::config::load(main_checkout)? {
+            return Ok(cfg.dispatch);
+        }
+    }
+    Err("no blyte.toml found in repository".to_string())
 }
 
 fn load_record(path: &Path) -> Result<Option<CombineRecord>, String> {
@@ -747,26 +985,46 @@ fn write_record(path: &Path, record: &CombineRecord) -> Result<(), String> {
         .map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
+fn worktree_git_dir(worktree_dir: &Path) -> Option<PathBuf> {
+    let dot_git = worktree_dir.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let content = std::fs::read_to_string(&dot_git).ok()?;
+    let rest = content.trim().strip_prefix("gitdir:")?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(rest);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(worktree_dir.join(path))
+    }
+}
+
+fn has_cherry_pick_head(worktree_dir: &Path) -> bool {
+    worktree_git_dir(worktree_dir).is_some_and(|dir| dir.join("CHERRY_PICK_HEAD").exists())
+}
+
 fn prepare_worktree(
     root: &Path,
     worktree_dir: &Path,
     branch: &str,
     base_commit: &str,
+    actual_existing_tip: Option<&str>,
     expected_existing_tip: Option<&str>,
 ) -> Result<(), String> {
     let wt_str = worktree_dir
         .to_str()
         .ok_or_else(|| format!("non-UTF-8 worktree path: {}", worktree_dir.display()))?;
 
-    let branch_exists = git_branch_exists(root, branch)?;
-    if branch_exists {
+    if let Some(actual) = actual_existing_tip {
         let expected = expected_existing_tip.ok_or_else(|| {
             format!(
                 "branch {branch} already exists without an expected commit from a combine record; refusing to delete it"
             )
         })?;
-        let actual = git_rev_parse(root, &format!("refs/heads/{branch}^{{commit}}"))
-            .map_err(|e| format!("cannot resolve existing branch {branch}: {e}"))?;
         if actual != expected {
             return Err(format!(
                 "branch {branch} has changed since blyte combined it (expected {expected}, actual {actual}); refusing to delete it"
@@ -774,8 +1032,11 @@ fn prepare_worktree(
         }
     }
 
+    let rebuilt = worktree_dir.exists() || actual_existing_tip.is_some();
     if worktree_dir.exists() {
-        let _ = git_cmd(worktree_dir, &["cherry-pick", "--abort"]);
+        if has_cherry_pick_head(worktree_dir) {
+            let _ = git_cmd(worktree_dir, &["cherry-pick", "--abort"]);
+        }
         let _ = git_cmd(root, &["worktree", "remove", "--force", wt_str]);
         if worktree_dir.exists() {
             std::fs::remove_dir_all(worktree_dir).map_err(|e| {
@@ -786,42 +1047,46 @@ fn prepare_worktree(
             })?;
         }
     }
-    let _ = git_cmd(root, &["worktree", "prune"]);
-
-    if branch_exists {
-        git_cmd(root, &["branch", "-D", branch])
-            .map_err(|e| format!("failed to reset branch {branch}: {e}"))?;
+    if rebuilt {
+        let _ = git_cmd(root, &["worktree", "prune"]);
     }
 
-    git_cmd(
+    if let Err(first_err) = git_cmd(
         root,
-        &["worktree", "add", "-b", branch, wt_str, base_commit],
-    )
-    .map_err(|e| format!("failed to create combine worktree {wt_str}: {e}"))?;
+        &["worktree", "add", "-B", branch, wt_str, base_commit],
+    ) {
+        if !rebuilt {
+            let _ = git_cmd(root, &["worktree", "prune"]);
+            git_cmd(
+                root,
+                &["worktree", "add", "-B", branch, wt_str, base_commit],
+            )
+            .map_err(|e| format!("failed to create combine worktree {wt_str}: {e}"))?;
+        } else {
+            return Err(format!(
+                "failed to create combine worktree {wt_str}: {first_err}"
+            ));
+        }
+    }
     Ok(())
 }
 
-fn ensure_wt_excluded(root: &Path) {
-    if let Ok(common) = git_cmd(root, &["rev-parse", "--git-common-dir"]) {
-        let common_path = PathBuf::from(common.trim());
-        let common_dir = if common_path.is_absolute() {
-            common_path
-        } else {
-            root.join(common_path)
-        };
-        let exclude_path = common_dir.join("info").join("exclude");
-        if let Some(parent) = exclude_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+fn ensure_wt_excluded(common_dir: Option<&Path>) {
+    let Some(common_dir) = common_dir else {
+        return;
+    };
+    let exclude_path = common_dir.join("info").join("exclude");
+    if let Some(parent) = exclude_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+    if !content.lines().any(|l| l.trim() == ".wt/") {
+        let mut next = content;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
         }
-        let content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-        if !content.lines().any(|l| l.trim() == ".wt/") {
-            let mut next = content;
-            if !next.is_empty() && !next.ends_with('\n') {
-                next.push('\n');
-            }
-            next.push_str(".wt/\n");
-            let _ = std::fs::write(&exclude_path, next);
-        }
+        next.push_str(".wt/\n");
+        let _ = std::fs::write(&exclude_path, next);
     }
 }
 
@@ -847,18 +1112,26 @@ fn git_rev_parse(dir: &Path, rev: &str) -> Result<String, String> {
         .to_string())
 }
 
-fn git_branch_exists(dir: &Path, branch: &str) -> Result<bool, String> {
-    let out = Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
-        .current_dir(dir)
-        .output()
-        .map_err(|e| format!("failed to check branch {branch}: {e}"))?;
-    Ok(out.status.success())
+fn git_log_commits_and_tree(
+    dir: &Path,
+    base: &str,
+) -> Result<(Vec<String>, Option<String>), String> {
+    let range = format!("{base}..HEAD");
+    let out = git_cmd(dir, &["log", "--reverse", "--format=%H%x20%T", &range])?;
+    let mut commits = Vec::new();
+    let mut last_tree = None;
+    for line in out.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (commit_sha, tree_sha) = trimmed
+            .split_once(' ')
+            .ok_or_else(|| format!("unexpected git log output line: {trimmed}"))?;
+        commits.push(commit_sha.to_string());
+        last_tree = Some(tree_sha.to_string());
+    }
+    Ok((commits, last_tree))
 }
 
 fn git_rev_list_range(dir: &Path, base: &str, tip: &str) -> Result<Vec<String>, String> {
