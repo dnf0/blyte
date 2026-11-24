@@ -253,21 +253,23 @@ def main(argv: list[str] | None = None) -> int:
         print("packages: (all)", flush=True)
         if args.print_only:
             return 0
-        cargo_cmd = ["cargo", "test", "--workspace", "--all-targets"]
+        test_args = ["--workspace", "--all-targets"]
     else:
         sorted_names = sorted(affected)
         print(f"packages: {' '.join(sorted_names)}", flush=True)
         if args.print_only:
             return 0
-        cargo_cmd = ["cargo", "test"]
+        test_args = []
         for name in sorted_names:
-            cargo_cmd.extend(["-p", name])
-        cargo_cmd.append("--all-targets")
+            test_args.extend(["-p", name])
+        test_args.append("--all-targets")
 
+    parallel_script = Path(__file__).resolve().parent / "test-parallel.py"
+    cmd = [sys.executable, str(parallel_script), "--", *test_args]
     try:
-        proc = subprocess.run(cargo_cmd, cwd=repo_root, check=False)
+        proc = subprocess.run(cmd, cwd=repo_root, check=False)
     except OSError as exc:
-        print(f"error: failed to run {' '.join(cargo_cmd)}: {exc}", file=sys.stderr)
+        print(f"error: failed to run {' '.join(cmd)}: {exc}", file=sys.stderr)
         return 2
     return proc.returncode
 
