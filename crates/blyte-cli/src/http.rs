@@ -85,6 +85,35 @@ where
     }
 }
 
+pub fn serve_until<F, S>(listener: TcpListener, should_stop: S, handler: F) -> std::io::Result<()>
+where
+    F: Fn(&Request) -> Response + Send + Sync + 'static,
+    S: Fn() -> bool,
+{
+    let port = listener.local_addr()?.port();
+    listener.set_nonblocking(true)?;
+    let handler = Arc::new(handler);
+    loop {
+        if should_stop() {
+            return Ok(());
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _ = stream.set_nonblocking(false);
+                let handler = Arc::clone(&handler);
+                std::thread::spawn(move || {
+                    handle_connection(stream, port, handler.as_ref());
+                });
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 fn handle_connection<F>(mut stream: TcpStream, port: u16, handler: &F)
 where
     F: Fn(&Request) -> Response,

@@ -388,12 +388,12 @@ fn make_surface(
     (make_surface_with_session(root, session, publisher), prompts)
 }
 
-fn get(path: &str) -> Request {
+fn get(surface: &Surface, path: &str) -> Request {
     Request {
         method: "GET".to_string(),
         path: path.to_string(),
         query: Vec::new(),
-        headers: Vec::new(),
+        headers: vec![(TOKEN_HEADER.to_string(), surface.token.clone())],
         body: Vec::new(),
     }
 }
@@ -594,7 +594,7 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     assert!(!maybe_combine(&surface, "req-b").unwrap());
     assert!(!root.join(".wt/combined/req-b.json").exists());
 
-    let runs_resp = route(&surface, &get("/api/runs"), now + 6);
+    let runs_resp = route(&surface, &get(&surface, "/api/runs"), now + 6);
     assert_eq!(runs_resp.status, 200);
     surface.requests.wait_all_idle();
     assert!(!root.join(".wt/combined/req-b.json").exists());
@@ -605,7 +605,7 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     .unwrap();
     assert_eq!(poll_rec.state, CombineState::Combined);
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 7));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 7));
     let ids: Vec<&str> = reqs
         .as_array()
         .unwrap()
@@ -732,7 +732,7 @@ fn api_requests_shows_waiting_then_combined_with_suggested_pr_fields() {
 
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
 
-    let resp1 = route(&surface, &get("/api/requests"), now);
+    let resp1 = route(&surface, &get(&surface, "/api/requests"), now);
     assert_eq!(resp1.status, 200);
     let arr1 = parse_json(&resp1);
     let items1 = arr1.as_array().unwrap();
@@ -756,7 +756,7 @@ fn api_requests_shows_waiting_then_combined_with_suggested_pr_fields() {
     assert!(maybe_combine(&surface, "req-multi").unwrap());
     surface.requests.wait_for_idle("req-multi");
 
-    let resp2 = route(&surface, &get("/api/requests"), now + 3);
+    let resp2 = route(&surface, &get(&surface, "/api/requests"), now + 3);
     assert_eq!(resp2.status, 200);
     let arr2 = parse_json(&resp2);
     let item = &arr2.as_array().unwrap()[0];
@@ -921,7 +921,7 @@ fn push_and_pull_request_routes_and_error_handling() {
         }]
     );
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["pushed"], true);
     assert_eq!(
@@ -930,7 +930,11 @@ fn push_and_pull_request_routes_and_error_handling() {
     );
 
     let (restarted_surface, _) = make_surface(root.to_path_buf(), fake.clone());
-    let restarted_reqs = parse_json(&route(&restarted_surface, &get("/api/requests"), now));
+    let restarted_reqs = parse_json(&route(
+        &restarted_surface,
+        &get(&restarted_surface, "/api/requests"),
+        now,
+    ));
     let restarted_item = &restarted_reqs.as_array().unwrap()[0];
     assert_eq!(restarted_item["state"], "combined");
     assert_eq!(restarted_item["pushed"], true);
@@ -1019,7 +1023,11 @@ fn check_failed_queues_orchestrator_message_with_step_and_output() {
         recorded[0]
     );
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &surface,
+        &get(&surface, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["state"], "check_failed");
     assert!(item["failing_step"].as_str().is_some());
@@ -1054,7 +1062,11 @@ fn combine_exit_two_reports_error_once_and_surfaces_in_api() {
         assert!(recorded[0].contains("blyte.toml"), "{}", recorded[0]);
     }
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &surface,
+        &get(&surface, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["state"], "error");
     assert!(item["error"].as_str().unwrap().contains("blyte.toml"));
@@ -1168,7 +1180,11 @@ fn error_request_does_not_rerun_and_persists_error_state_after_restart() {
     assert_session_idle(&restarted.session);
     assert!(restarted_prompts.lock().unwrap().is_empty());
 
-    let reqs = parse_json(&route(&restarted, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &restarted,
+        &get(&restarted, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-diffbase");
     assert_eq!(item["state"], "error");
@@ -1213,7 +1229,11 @@ fn changing_run_tip_triggers_combine_again() {
     assert_eq!(attempt.runs.len(), 1);
     assert_eq!(attempt.runs[0].tip, tip2);
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &surface,
+        &get(&surface, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["state"], "combined");
     assert!(!maybe_combine(&surface, "req-tipchange").unwrap());
@@ -1269,7 +1289,7 @@ fn push_then_rebuild_invalidates_pushed_and_blocks_pr_until_repushed() {
     assert!(maybe_combine(&surface, "req-repush").unwrap());
     surface.requests.wait_for_idle("req-repush");
 
-    let reqs_after_rebuild = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs_after_rebuild = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item = &reqs_after_rebuild.as_array().unwrap()[0];
     assert_eq!(item["state"], "combined");
     assert_eq!(item["pushed"], false);
@@ -1300,7 +1320,7 @@ fn push_then_rebuild_invalidates_pushed_and_blocks_pr_until_repushed() {
     );
     assert_eq!(push2.status, 200);
 
-    let reqs_after_repush = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let reqs_after_repush = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 4));
     let item2 = &reqs_after_repush.as_array().unwrap()[0];
     assert_eq!(item2["pushed"], true);
     assert_eq!(
@@ -1372,7 +1392,7 @@ fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file(
     let pub_err = load_published_record(root, "req-old-pub").unwrap_err();
     assert!(pub_err.contains("req-old-pub.published.json"), "{pub_err}");
 
-    let runs_resp = route(&surface, &get("/api/runs"), now + 2);
+    let runs_resp = route(&surface, &get(&surface, "/api/runs"), now + 2);
     assert_eq!(runs_resp.status, 200);
     let session_entries = surface.session.entries_after(0, Duration::ZERO);
     assert!(session_entries.iter().any(|e| matches!(
@@ -1380,7 +1400,7 @@ fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file(
         EntryBody::Error { message } if message.contains("req-bad-attempt.attempt.json")
     )));
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 3));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 3));
     let items = reqs.as_array().unwrap();
     let bad_attempt_item = items
         .iter()
@@ -1463,7 +1483,7 @@ fn redone_runs_left_out_regardless_of_outcome_and_reported_in_api() {
     assert!(maybe_combine(&surface, "req-leftout").unwrap());
     surface.requests.wait_for_idle("req-leftout");
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 10));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 10));
     let items = reqs.as_array().unwrap();
 
     let leftout_item = items
@@ -1516,7 +1536,7 @@ fn run_based_on_left_out_run_is_readiness_and_api_error() {
     assert!(err.contains("D1") && err.contains("D2"), "{err}");
 
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 3));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 3));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-dep-redone");
     assert_eq!(item["state"], "error");
@@ -1559,7 +1579,7 @@ fn every_run_redone_is_waiting_in_readiness_and_api() {
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
     assert!(!maybe_combine(&surface, "req-all-redone").unwrap());
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 4));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-all-redone");
     assert_eq!(item["state"], "waiting");
@@ -1593,7 +1613,7 @@ fn recording_redone_on_combined_run_triggers_recombine() {
     assert!(maybe_combine(&surface, "req-recombine").unwrap());
     surface.requests.wait_for_idle("req-recombine");
 
-    let reqs1 = parse_json(&route(&surface, &get("/api/requests"), now + 2));
+    let reqs1 = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 2));
     let item1 = &reqs1.as_array().unwrap()[0];
     assert_eq!(item1["state"], "combined");
     assert_eq!(item1["left_out"], json!([]));
@@ -1601,7 +1621,7 @@ fn recording_redone_on_combined_run_triggers_recombine() {
 
     record_verdict(root, "RC2", ReviewVerdict::Redone, "replaced", now + 3).unwrap();
 
-    let reqs_stale = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let reqs_stale = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 4));
     let item_stale = &reqs_stale.as_array().unwrap()[0];
     assert_eq!(item_stale["state"], "waiting");
     assert_eq!(item_stale["left_out"], json!(["RC2"]));
@@ -1609,7 +1629,7 @@ fn recording_redone_on_combined_run_triggers_recombine() {
     assert!(maybe_combine(&surface, "req-recombine").unwrap());
     surface.requests.wait_for_idle("req-recombine");
 
-    let reqs2 = parse_json(&route(&surface, &get("/api/requests"), now + 5));
+    let reqs2 = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 5));
     let item2 = &reqs2.as_array().unwrap()[0];
     assert_eq!(item2["state"], "combined");
     assert_eq!(item2["runs"], json!(["RC1", "RC2"]));
@@ -1641,7 +1661,7 @@ fn unreadable_verdict_file_is_error_in_readiness_and_api() {
     assert!(err.contains("BV1.verdict.json"), "{err}");
 
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-bad-verdict");
     assert_eq!(item["state"], "error");
@@ -1737,7 +1757,7 @@ fn ready_request_waits_while_session_busy_then_combines_when_idle() {
     assert!(!root.join(".wt/combined/req-busy.json").exists());
     assert!(!branch_exists(root, "blyte/req-busy"));
 
-    let reqs_busy = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs_busy = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item_busy = &reqs_busy.as_array().unwrap()[0];
     assert_eq!(item_busy["request"], "req-busy");
     assert_eq!(item_busy["state"], "waiting");
@@ -1794,7 +1814,7 @@ fn ready_request_waits_while_session_has_queued_message_then_combines_when_idle(
     assert!(!root.join(".wt/combined/req-queued.json").exists());
     assert!(!branch_exists(root, "blyte/req-queued"));
 
-    let reqs_queued = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs_queued = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item_queued = &reqs_queued.as_array().unwrap()[0];
     assert_eq!(item_queued["request"], "req-queued");
     assert_eq!(item_queued["state"], "waiting");

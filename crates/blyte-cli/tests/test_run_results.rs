@@ -172,12 +172,15 @@ fn wait_for_prompts(prompts: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec<S
     prompts.lock().unwrap().clone()
 }
 
-fn get(path: &str) -> Request {
+fn get(surface: &Surface, path: &str) -> Request {
     Request {
         method: "GET".to_string(),
         path: path.to_string(),
         query: Vec::new(),
-        headers: Vec::new(),
+        headers: vec![(
+            blyte_cli::serve::TOKEN_HEADER.to_string(),
+            surface.token.clone(),
+        )],
         body: Vec::new(),
     }
 }
@@ -501,11 +504,11 @@ fn router_get_api_runs_adds_entry_once_across_two_calls() {
 
     let (surface, prompts) = make_surface(root.to_path_buf());
 
-    let resp1 = route(&surface, &get("/api/runs"), now + 1);
+    let resp1 = route(&surface, &get(&surface, "/api/runs"), now + 1);
     assert_eq!(resp1.status, 200);
     surface.requests.wait_all_idle();
 
-    let resp2 = route(&surface, &get("/api/runs"), now + 2);
+    let resp2 = route(&surface, &get(&surface, "/api/runs"), now + 2);
     assert_eq!(resp2.status, 200);
     surface.requests.wait_all_idle();
 

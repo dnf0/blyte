@@ -2794,26 +2794,46 @@
       if (queueEl) queueEl.classList.toggle("queue-dimmed", lost);
     }
 
+    let pollingStopped = false;
+
+    function stopAllPolling() {
+      pollingStopped = true;
+      runsRefetchNeeded = false;
+      requestsRefetchNeeded = false;
+      if (runsPollTimer !== null) {
+        clearInterval(runsPollTimer);
+        runsPollTimer = null;
+      }
+      if (requestsPollTimer !== null) {
+        clearInterval(requestsPollTimer);
+        requestsPollTimer = null;
+      }
+    }
+
     async function fetchWithRetry(url, options) {
       const isPost = Boolean(
         options &&
         typeof options.method === "string" &&
         options.method.toUpperCase() === "POST"
       );
+      const isApi = typeof url === "string" && url.startsWith("/api/");
       let reqOptions = options;
-      if (isPost) {
-        const headers = Object.assign({}, options.headers || {});
+      if (isApi || isPost) {
+        const headers = Object.assign({}, (options && options.headers) || {});
         if (surfaceToken) {
           headers[TOKEN_HEADER] = surfaceToken;
         }
-        reqOptions = Object.assign({}, options, { headers });
+        reqOptions = Object.assign({}, options || {}, { headers });
       }
       let attempt = 0;
       while (true) {
         try {
           const res = await fetch(url, reqOptions);
           setServerLost(false);
-          if (isPost && res.status === 403) {
+          if (res.status === 403 && (isApi || isPost)) {
+            if (!isPost) {
+              stopAllPolling();
+            }
             clearSurfaceToken();
           }
           return res;
@@ -5543,6 +5563,9 @@
     }
 
     async function fetchRuns() {
+      if (pollingStopped) {
+        return;
+      }
       if (runsFetchInFlight) {
         runsRefetchNeeded = true;
         return;
@@ -5550,6 +5573,9 @@
       runsFetchInFlight = true;
       try {
         const res = await fetchWithRetry("/api/runs");
+        if (res.status === 403) {
+          return;
+        }
         if (!res.ok) {
           const errMsg = await parseErrorPayload(res, "/api/runs");
           setQueueError(errMsg);
@@ -5582,7 +5608,7 @@
         renderAll(true);
       } finally {
         runsFetchInFlight = false;
-        if (runsRefetchNeeded) {
+        if (runsRefetchNeeded && !pollingStopped) {
           runsRefetchNeeded = false;
           fetchRuns();
         }
@@ -5590,6 +5616,9 @@
     }
 
     async function fetchRequests() {
+      if (pollingStopped) {
+        return;
+      }
       if (requestsFetchInFlight) {
         requestsRefetchNeeded = true;
         return;
@@ -5597,6 +5626,9 @@
       requestsFetchInFlight = true;
       try {
         const res = await fetchWithRetry("/api/requests");
+        if (res.status === 403) {
+          return;
+        }
         if (!res.ok) {
           requestsError = await parseErrorPayload(res, "/api/requests");
           renderRequestsPanel(false);
@@ -5620,7 +5652,7 @@
         renderRequestsPanel(false);
       } finally {
         requestsFetchInFlight = false;
-        if (requestsRefetchNeeded) {
+        if (requestsRefetchNeeded && !pollingStopped) {
           requestsRefetchNeeded = false;
           fetchRequests();
         }
@@ -6304,9 +6336,12 @@
     }
 
     async function pollEvents() {
-      while (true) {
+      while (!pollingStopped) {
         const url = "/api/session/events?after=" + encodeURIComponent(String(lastSeqSeen)) + "&wait_ms=25000";
         const res = await fetchWithRetry(url);
+        if (res.status === 403 || pollingStopped) {
+          return;
+        }
         if (!res.ok) {
           const errMsg = await parseErrorPayload(res, "/api/session/events");
           appendConversationError(errMsg);
@@ -6337,6 +6372,9 @@
 
     async function loadInitialSession() {
       const res = await fetchWithRetry("/api/session");
+      if (res.status === 403) {
+        return;
+      }
       if (!res.ok) {
         appendConversationError(await parseErrorPayload(res, "/api/session"));
         return;
@@ -6358,6 +6396,9 @@
 
     async function loadModels() {
       const res = await fetchWithRetry("/api/models");
+      if (res.status === 403) {
+        return;
+      }
       if (!res.ok) {
         setHeaderError(await parseErrorPayload(res, "/api/models"));
         return;
@@ -6393,6 +6434,9 @@
       updateMissingTokenUI();
       renderAll(true);
       await loadInitialSession();
+      if (pollingStopped) {
+        return;
+      }
       loadModels();
       fetchRuns();
       runsPollTimer = setInterval(fetchRuns, RUNS_POLL_MS);

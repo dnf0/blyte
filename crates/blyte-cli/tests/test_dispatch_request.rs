@@ -263,7 +263,10 @@ fn get(path: &str) -> Request {
         method: "GET".to_string(),
         path: path.to_string(),
         query: Vec::new(),
-        headers: Vec::new(),
+        headers: vec![(
+            blyte_cli::serve::TOKEN_HEADER.to_string(),
+            TEST_TOKEN.to_string(),
+        )],
         body: Vec::new(),
     }
 }

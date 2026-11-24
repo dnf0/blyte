@@ -2,9 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -124,6 +126,13 @@ fn parse_json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::
     val.as_object()
         .cloned()
         .ok_or_else(|| json_error(400, "request body must be a JSON object"))
+}
+
+fn health_response(surface: &Surface) -> Response {
+    Response::json(
+        200,
+        &serde_json::json!({ "session_id": surface.session_id }),
+    )
 }
 
 fn session_response(surface: &Surface) -> Response {
@@ -603,8 +612,52 @@ fn handle_request_pull_request(surface: &Surface, id: &str, req: &Request) -> Re
     }
 }
 
+#[derive(Clone, Copy)]
+enum ApiGetHandler {
+    Session,
+    Events,
+    Models,
+    Runs,
+    Requests,
+    Map,
+    RunDiff,
+}
+
+const API_GET_ROUTES: &[(&str, ApiGetHandler)] = &[
+    ("/api/session", ApiGetHandler::Session),
+    ("/api/session/events", ApiGetHandler::Events),
+    ("/api/models", ApiGetHandler::Models),
+    ("/api/runs", ApiGetHandler::Runs),
+    ("/api/requests", ApiGetHandler::Requests),
+    ("/api/map", ApiGetHandler::Map),
+    ("/api/runs/{id}/diff", ApiGetHandler::RunDiff),
+];
+
+pub fn authenticated_api_get_routes() -> Vec<&'static str> {
+    API_GET_ROUTES.iter().map(|(pattern, _)| *pattern).collect()
+}
+
+fn match_api_get_route<'a>(pattern: &str, path: &'a str) -> Option<Option<&'a str>> {
+    if let Some((prefix, suffix)) = pattern.split_once("{id}") {
+        let rest = path.strip_prefix(prefix)?;
+        let id = rest.strip_suffix(suffix)?;
+        if !id.is_empty() && !id.contains('/') {
+            return Some(Some(id));
+        }
+        None
+    } else if pattern == path {
+        Some(None)
+    } else {
+        None
+    }
+}
+
 pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
-    if req.method == "POST" && !has_valid_token(surface, req) {
+    let is_health_get = req.path == "/api/health" && req.method == "GET";
+    if (req.path.starts_with("/api/") || req.method == "POST")
+        && !is_health_get
+        && !has_valid_token(surface, req)
+    {
         return json_error(
             403,
             "missing or invalid surface token; open the page from the URL blyte printed",
@@ -622,36 +675,43 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
         };
     }
 
+    if req.path == "/" || req.path == "/index.html" {
+        if req.method != "GET" {
+            return method_not_allowed(req);
+        }
+        return Response::html(INDEX_HTML.as_bytes().to_vec());
+    }
+
+    if req.path == "/api/health" {
+        if req.method != "GET" {
+            return method_not_allowed(req);
+        }
+        return health_response(surface);
+    }
+
+    for &(pattern, handler) in API_GET_ROUTES {
+        if let Some(id) = match_api_get_route(pattern, &req.path) {
+            if req.method != "GET" {
+                return method_not_allowed(req);
+            }
+            return match handler {
+                ApiGetHandler::Session => session_response(surface),
+                ApiGetHandler::Events => handle_events(surface, req),
+                ApiGetHandler::Models => handle_models(),
+                ApiGetHandler::Runs => handle_runs(surface, now),
+                ApiGetHandler::Requests => handle_requests(surface),
+                ApiGetHandler::Map => handle_map(surface),
+                ApiGetHandler::RunDiff => handle_run_diff(surface, id.unwrap_or("")),
+            };
+        }
+    }
+
     match req.path.as_str() {
-        "/" | "/index.html" => {
-            if req.method != "GET" {
-                return method_not_allowed(req);
-            }
-            Response::html(INDEX_HTML.as_bytes().to_vec())
-        }
-        "/api/session" => {
-            if req.method != "GET" {
-                return method_not_allowed(req);
-            }
-            session_response(surface)
-        }
-        "/api/session/events" => {
-            if req.method != "GET" {
-                return method_not_allowed(req);
-            }
-            handle_events(surface, req)
-        }
         "/api/session/messages" => {
             if req.method != "POST" {
                 return method_not_allowed(req);
             }
             handle_post_message(surface, req)
-        }
-        "/api/models" => {
-            if req.method != "GET" {
-                return method_not_allowed(req);
-            }
-            handle_models()
         }
         "/api/session/model" => {
             if req.method != "POST" {
@@ -665,24 +725,6 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
             }
             handle_post_effort(surface, req)
         }
-        "/api/runs" => {
-            if req.method != "GET" {
-                return method_not_allowed(req);
-            }
-            handle_runs(surface, now)
-        }
-        "/api/requests" => {
-            if req.method != "GET" {
-                return method_not_allowed(req);
-            }
-            handle_requests(surface)
-        }
-        "/api/map" => {
-            if req.method != "GET" {
-                return method_not_allowed(req);
-            }
-            handle_map(surface)
-        }
         path => {
             if let Some(id) = path.strip_prefix("/api/session/approvals/") {
                 if !id.is_empty() && !id.contains('/') {
@@ -693,14 +735,6 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
                 }
             }
             if let Some(rest) = path.strip_prefix("/api/runs/") {
-                if let Some(id) = rest.strip_suffix("/diff") {
-                    if !id.is_empty() && !id.contains('/') {
-                        if req.method != "GET" {
-                            return method_not_allowed(req);
-                        }
-                        return handle_run_diff(surface, id);
-                    }
-                }
                 if let Some(id) = rest.strip_suffix("/decision") {
                     if !id.is_empty() && !id.contains('/') {
                         if req.method != "POST" {
@@ -773,7 +807,7 @@ fn probe_existing_surface(port: u16, expected_session_id: &str) -> bool {
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
     let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
     let req =
-        format!("GET /api/session HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+        format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
@@ -825,16 +859,115 @@ fn resolve_initial_model(config: &ReplConfig) -> String {
     "gemini-3.8-flash-high".to_string()
 }
 
+#[cfg(unix)]
+static SIGNAL_STOP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn handle_shutdown_signal(_: libc::c_int) {
+    SIGNAL_STOP.store(true, Ordering::Relaxed);
+}
+
+fn write_token_file(wt_dir: &Path, token_file_path: &Path, token: &str) -> Result<(), String> {
+    let seq = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = wt_dir.join(format!(".surface.token.{}.{seq}.tmp", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(&tmp_path)
+        .map_err(|e| format!("cannot create {}: {e}", token_file_path.display()))?;
+    if let Err(e) = writeln!(file, "{token}") {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("cannot write {}: {e}", token_file_path.display()));
+    }
+    drop(file);
+    if let Err(e) = std::fs::rename(&tmp_path, token_file_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("cannot write {}: {e}", token_file_path.display()));
+    }
+    Ok(())
+}
+
+fn read_token_file(token_file_path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(token_file_path)
+        .map_err(|e| format!("cannot read {}: {e}", token_file_path.display()))?;
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        return Err(format!("{} is empty", token_file_path.display()));
+    }
+    Ok(token)
+}
+
 pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
-    run_with_io(args, config, &mut std::io::stdout(), &mut std::io::stderr())
+    #[cfg(unix)]
+    {
+        SIGNAL_STOP.store(false, Ordering::Relaxed);
+        unsafe {
+            libc::signal(
+                libc::SIGINT,
+                handle_shutdown_signal as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGTERM,
+                handle_shutdown_signal as *const () as libc::sighandler_t,
+            );
+        }
+    }
+    run_inner(
+        args,
+        config,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+        &mut open_browser,
+        || {
+            #[cfg(unix)]
+            {
+                SIGNAL_STOP.load(Ordering::Relaxed)
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        },
+    )
 }
 
 pub fn run_with_io(
     args: &SurfaceArgs,
-    mut config: ReplConfig,
+    config: ReplConfig,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
+    run_inner(args, config, out, err, &mut open_browser, || false)
+}
+
+pub fn run_with_hooks(
+    args: &SurfaceArgs,
+    config: ReplConfig,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    opener: &mut dyn FnMut(&str),
+    stop: Arc<AtomicBool>,
+) -> i32 {
+    run_inner(args, config, out, err, opener, move || {
+        stop.load(Ordering::Relaxed)
+    })
+}
+
+fn run_inner<S>(
+    args: &SurfaceArgs,
+    mut config: ReplConfig,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    opener: &mut dyn FnMut(&str),
+    should_stop: S,
+) -> i32
+where
+    S: Fn() -> bool,
+{
     let root = match find_git_toplevel(&config.repo_root) {
         Ok(r) => r,
         Err(e) => {
@@ -852,15 +985,24 @@ pub fn run_with_io(
 
     let wt_dir = root.join(".wt");
     let surface_file_path = wt_dir.join("surface.json");
+    let token_file_path = wt_dir.join("surface.token");
     match std::fs::read_to_string(&surface_file_path) {
         Ok(raw) => match serde_json::from_str::<SurfaceFile>(&raw) {
             Ok(existing) => {
                 if probe_existing_surface(existing.port, &existing.session_id) {
-                    let url = format!("http://127.0.0.1:{}/", existing.port);
+                    let token = match read_token_file(&token_file_path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let _ = writeln!(err, "blyte: {e}");
+                            let _ = err.flush();
+                            return 1;
+                        }
+                    };
+                    let url = format!("http://127.0.0.1:{}/#token={token}", existing.port);
                     let _ = writeln!(out, "blyte: surface already running at {url}");
                     let _ = out.flush();
                     if !args.no_open {
-                        open_browser(&url);
+                        opener(&url);
                     }
                     return 0;
                 }
@@ -904,10 +1046,6 @@ pub fn run_with_io(
     }
     config.repo_root = root.clone();
 
-    let model = resolve_initial_model(&config);
-    let session = Session::start_with(model, |approver| {
-        Box::new(AgentRunner::new(&config, approver))
-    });
     let started_dur = match now_duration() {
         Ok(d) => d,
         Err(e) => {
@@ -917,6 +1055,17 @@ pub fn run_with_io(
     };
     let started_at = started_dur.as_secs();
     let session_id = new_session_id(started_dur.as_nanos());
+    if std::env::var("BLYTE_SESSION")
+        .map(|v| v.is_empty())
+        .unwrap_or(true)
+    {
+        std::env::set_var("BLYTE_SESSION", &session_id);
+    }
+
+    let model = resolve_initial_model(&config);
+    let session = Session::start_with(model, |approver| {
+        Box::new(AgentRunner::new(&config, approver))
+    });
     let token = match generate_token() {
         Ok(t) => t,
         Err(e) => {
@@ -945,6 +1094,10 @@ pub fn run_with_io(
         let _ = writeln!(err, "blyte: cannot create {}: {e}", wt_dir.display());
         return 1;
     }
+    if let Err(e) = write_token_file(&wt_dir, &token_file_path, &token) {
+        let _ = writeln!(err, "blyte: {e}");
+        return 1;
+    }
     let record = SurfaceFile {
         pid: std::process::id(),
         port: actual_port,
@@ -954,11 +1107,13 @@ pub fn run_with_io(
     let record_json = match serde_json::to_string_pretty(&record) {
         Ok(s) => s + "\n",
         Err(e) => {
+            let _ = std::fs::remove_file(&token_file_path);
             let _ = writeln!(err, "blyte: cannot serialize surface file: {e}");
             return 1;
         }
     };
     if let Err(e) = std::fs::write(&surface_file_path, record_json) {
+        let _ = std::fs::remove_file(&token_file_path);
         let _ = writeln!(
             err,
             "blyte: cannot write {}: {e}",
@@ -971,7 +1126,7 @@ pub fn run_with_io(
     let _ = writeln!(out, "blyte: surface at {url}");
     let _ = out.flush();
     if !args.no_open {
-        open_browser(&url);
+        opener(&url);
     }
 
     let surface = Arc::new(Surface {
@@ -986,12 +1141,14 @@ pub fn run_with_io(
         publisher: Arc::new(RealPublisher),
     });
 
-    let serve_result = crate::http::serve(listener, move |req| match now_duration() {
-        Ok(d) => route(&surface, req, d.as_secs()),
-        Err(e) => json_error(500, e),
-    });
+    let serve_result =
+        crate::http::serve_until(listener, should_stop, move |req| match now_duration() {
+            Ok(d) => route(&surface, req, d.as_secs()),
+            Err(e) => json_error(500, e),
+        });
 
     let _ = std::fs::remove_file(&surface_file_path);
+    let _ = std::fs::remove_file(&token_file_path);
 
     match serve_result {
         Ok(()) => 0,
