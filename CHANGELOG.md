@@ -1,3 +1,9 @@
+## v0.59.1 (2026-11-24)
+
+### Perf
+
+- fewer processes in clean, combine and shell commands; run test files side by side (#410)
+
 ## v0.59.0 (2026-11-23)
 
 ### Feat
