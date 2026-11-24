@@ -140,6 +140,9 @@ pub fn read(path: &Path) -> Vec<Entry> {
 }
 
 #[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
@@ -317,5 +320,11 @@ mod tests {
         );
         assert_eq!(session_from(Some("  ".into()), None), None);
         assert_eq!(session_from(None, None), None);
+    }
+
+    #[test]
+    fn the_ledger_is_off_under_cargo_test() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(default_path(), None);
     }
 }

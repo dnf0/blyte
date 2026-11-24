@@ -5,3 +5,6 @@ BLYTE_ENV_FILE = ""
 # Tests never ask GitHub for the latest release: a slow answer adds up to 3 s to every blyte a test starts.
 # A test of the release check itself removes this from the child it starts.
 BLYTE_NO_UPDATE_CHECK = "1"
+# Tests never write the developer's usage ledger. A test that needs a ledger points this at a
+# temporary file.
+BLYTE_USAGE_LOG = "off"
