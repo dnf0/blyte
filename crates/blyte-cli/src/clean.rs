@@ -568,6 +568,8 @@ pub struct CleanContext<'a> {
     pub ancestor_cache: HashMap<(String, String), bool>,
     pub contains_target: HashSet<(String, String)>,
     pub merge_base_cache: HashMap<(String, String), Option<String>>,
+    pub cherry_cache: HashMap<(String, String), bool>,
+    pub merge_tree_cache: HashMap<(String, String), bool>,
 }
 
 impl<'a> CleanContext<'a> {
@@ -730,6 +732,8 @@ impl<'a> CleanContext<'a> {
             ancestor_cache,
             contains_target,
             merge_base_cache: HashMap::new(),
+            cherry_cache: HashMap::new(),
+            merge_tree_cache: HashMap::new(),
         }
     }
 
@@ -766,24 +770,6 @@ impl<'a> CleanContext<'a> {
 
     fn resolve_base_targets(&self, base: &str) -> Option<(String, Vec<String>)> {
         resolve_base_targets_with(base, |cand| self.ref_exists(cand))
-    }
-
-    fn is_default_target(&self, target: &str) -> bool {
-        let target_canon = lookup_ref(&self.refs, target).map(|(k, _)| k);
-        let Some(target_canon) = target_canon else {
-            return false;
-        };
-        let default_canon = lookup_ref(&self.refs, &self.default_branch).map(|(k, _)| k);
-        if Some(target_canon) == default_canon {
-            return true;
-        }
-        if let Some(ref origin_def) = self.origin_default {
-            let origin_canon = lookup_ref(&self.refs, origin_def).map(|(k, _)| k);
-            if Some(target_canon) == origin_canon {
-                return true;
-            }
-        }
-        false
     }
 
     fn target_key(&self, target: &str) -> String {
@@ -1219,22 +1205,48 @@ impl<'a> CleanContext<'a> {
         is_squash_merged_with_base(self.root, commit_sha, target, &merge_base)
     }
 
+    fn is_cherry_merged_into_target(&mut self, commit_sha: &str, target: &str) -> bool {
+        let key = (commit_sha.to_string(), self.target_key(target));
+        if let Some(&cached) = self.cherry_cache.get(&key) {
+            return cached;
+        }
+        let merged = is_cherry_merged_into_target(self.root, commit_sha, target);
+        self.cherry_cache.insert(key, merged);
+        merged
+    }
+
+    fn is_merge_tree_merged_into_target(
+        &mut self,
+        commit_sha: &str,
+        target: &str,
+        target_tree: Option<&str>,
+    ) -> bool {
+        let key = (commit_sha.to_string(), self.target_key(target));
+        if let Some(&cached) = self.merge_tree_cache.get(&key) {
+            return cached;
+        }
+        let resolved_tree = match target_tree {
+            Some(t) => Some(t.to_string()),
+            None => self.tree_sha(target),
+        };
+        let merged = match resolved_tree.as_deref() {
+            Some(tree) => {
+                is_merge_tree_merged_into_target(self.root, commit_sha, target, Some(tree))
+            }
+            None => false,
+        };
+        self.merge_tree_cache.insert(key, merged);
+        merged
+    }
+
     fn merged_into(&mut self, commit_sha: &str, target: &str) -> bool {
         if self.is_ancestor_of_target(commit_sha, target) {
             return true;
         }
-        if is_cherry_merged_into_target(self.root, commit_sha, target) {
+        if self.is_cherry_merged_into_target(commit_sha, target) {
             return true;
         }
-        let target_tree = self.tree_sha(target);
-        if target_tree.is_some()
-            && is_merge_tree_merged_into_target(
-                self.root,
-                commit_sha,
-                target,
-                target_tree.as_deref(),
-            )
-        {
+        if self.is_merge_tree_merged_into_target(commit_sha, target, None) {
             return true;
         }
         if self.is_squash_merged_into_target(commit_sha, target) {
@@ -1301,18 +1313,7 @@ impl<'a> CleanContext<'a> {
         });
         let base_targets = base_opt
             .as_deref()
-            .and_then(|b| self.resolve_base_targets(b))
-            .and_then(|(display_name, targets)| {
-                let extra: Vec<String> = targets
-                    .into_iter()
-                    .filter(|t| !self.is_default_target(t))
-                    .collect();
-                if extra.is_empty() {
-                    None
-                } else {
-                    Some((display_name, extra))
-                }
-            });
+            .and_then(|b| self.resolve_base_targets(b));
         let started_at = self
             .start_files
             .get(id)
@@ -1333,16 +1334,10 @@ impl<'a> CleanContext<'a> {
                     if self.is_ancestor_of_target(tip_sha, target) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
-                    if is_cherry_merged_into_target(self.root, tip_sha, target) {
+                    if self.is_cherry_merged_into_target(tip_sha, target) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
-                    let target_tree = self.tree_sha(target);
-                    if is_merge_tree_merged_into_target(
-                        self.root,
-                        tip_sha,
-                        target,
-                        target_tree.as_deref(),
-                    ) {
+                    if self.is_merge_tree_merged_into_target(tip_sha, target, None) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
                 }
@@ -1360,35 +1355,31 @@ impl<'a> CleanContext<'a> {
         }
 
         if let Some(tip_sha) = tip_sha {
-            if is_cherry_merged_into_target(self.root, tip_sha, &self.default_branch) {
+            let def = self.default_branch.clone();
+            if self.is_cherry_merged_into_target(tip_sha, &def) {
                 return Some(RemovalReason::Merged);
             }
-            if let Some(ref origin_def) = self.origin_default {
-                if is_cherry_merged_into_target(self.root, tip_sha, origin_def) {
+            if let Some(origin_def) = self.origin_default.clone() {
+                if self.is_cherry_merged_into_target(tip_sha, &origin_def) {
                     return Some(RemovalReason::Merged);
                 }
             }
 
-            if is_merge_tree_merged_into_target(
-                self.root,
-                tip_sha,
-                &self.default_branch,
-                self.default_tree.as_deref(),
-            ) {
+            let def_tree = self.default_tree.clone();
+            if self.is_merge_tree_merged_into_target(tip_sha, &def, def_tree.as_deref()) {
                 return Some(RemovalReason::Merged);
             }
-            if let Some(ref origin_def) = self.origin_default {
-                if is_merge_tree_merged_into_target(
-                    self.root,
+            if let Some(origin_def) = self.origin_default.clone() {
+                let origin_tree = self.origin_default_tree.clone();
+                if self.is_merge_tree_merged_into_target(
                     tip_sha,
-                    origin_def,
-                    self.origin_default_tree.as_deref(),
+                    &origin_def,
+                    origin_tree.as_deref(),
                 ) {
                     return Some(RemovalReason::Merged);
                 }
             }
 
-            let def = self.default_branch.clone();
             if self.check_history_merged(tip_sha, &def, started_at.as_ref()) {
                 return Some(RemovalReason::Merged);
             }

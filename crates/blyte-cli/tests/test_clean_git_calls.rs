@@ -352,3 +352,142 @@ fn a_base_that_is_a_commit_still_resolves() {
     );
     assert!(!root.join(".wt").join(id).exists());
 }
+
+fn normalize_removed_size(line: &str) -> String {
+    if line.starts_with("removed ") && line.ends_with(')') {
+        if let Some(comma_pos) = line.rfind(", ") {
+            let size_part = &line[comma_pos + 2..line.len() - 1];
+            let valid_size = size_part.split_once(' ').is_some_and(|(num, unit)| {
+                !num.is_empty()
+                    && num.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    && matches!(unit, "B" | "KB" | "MB" | "GB")
+            });
+            if valid_size {
+                return format!("{}, <size>)", &line[..comma_pos]);
+            }
+        }
+    }
+    line.to_string()
+}
+
+#[test]
+fn reasons_match_the_wording_before_the_ref_table() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    write_file(&root.join("README.md"), "initial\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "initial", "--no-gpg-sign"]);
+    git(root, &["branch", "feature"]);
+
+    let wt_dir = root.join(".wt");
+    let create_run = |id: &str, base: &str, commit_msg: &str| {
+        let wt_path = wt_dir.join(id);
+        git(
+            root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &format!("wip/{id}"),
+                wt_path.to_str().unwrap(),
+                base,
+            ],
+        );
+        write_file(
+            &wt_path.join(format!("f_{id}.txt")),
+            &format!("content of {id}\n"),
+        );
+        git(&wt_path, &["add", "."]);
+        git(&wt_path, &["commit", "-qm", commit_msg, "--no-gpg-sign"]);
+        write_file(
+            &wt_dir.join(format!("{id}.start.json")),
+            &serde_json::json!({
+                "id": id,
+                "pid": 999999,
+                "started_at": 1000,
+                "base": base
+            })
+            .to_string(),
+        );
+    };
+
+    for id in ["A", "B", "D", "E", "K"] {
+        create_run(id, "main", &format!("feat: run {id}"));
+    }
+    create_run("C", "feature", "feat: run C");
+    create_run("E2", "wip/E", "fix: follow-up E2");
+
+    write_file(&root.join("advance_main.txt"), "advance main\n");
+    git(root, &["add", "."]);
+    git(
+        root,
+        &["commit", "-qm", "chore: advance main", "--no-gpg-sign"],
+    );
+
+    git(root, &["cherry-pick", "wip/A"]);
+
+    git(root, &["merge", "--squash", "wip/B"]);
+    git(
+        root,
+        &[
+            "commit",
+            "-qm",
+            "squash (#1)\n\n* feat: run B",
+            "--no-gpg-sign",
+        ],
+    );
+
+    write_file(&root.join("f_D.txt"), "content of D\n");
+    git(root, &["add", "."]);
+    git(
+        root,
+        &["commit", "-qm", "unrelated wording", "--no-gpg-sign"],
+    );
+
+    git(root, &["cherry-pick", "wip/E", "wip/E2"]);
+
+    git(root, &["checkout", "-q", "feature"]);
+    write_file(&root.join("advance_feature.txt"), "advance feature\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "advance feature", "--no-gpg-sign"]);
+    git(root, &["cherry-pick", "wip/C"]);
+    git(root, &["checkout", "-q", "main"]);
+
+    let (out, _calls) = run_clean_logged(root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "clean failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let mut lines: Vec<String> = stdout.lines().map(normalize_removed_size).collect();
+    let last = lines.pop().unwrap_or_default();
+    assert!(
+        last.starts_with("freed "),
+        "expected final 'freed ...' line, got '{last}'\nfull stdout:\n{stdout}"
+    );
+
+    let expected: Vec<String> = [
+        "removed .wt/A (merged into main, <size>)",
+        "deleted branch wip/A (merged)",
+        "removed .wt/B (merged into main, <size>)",
+        "deleted branch wip/B (merged)",
+        "removed .wt/C (merged into feature, <size>)",
+        "deleted branch wip/C (merged)",
+        "removed .wt/D (merged into main, <size>)",
+        "deleted branch wip/D (merged)",
+        "removed .wt/E (merged into main, <size>)",
+        "deleted branch wip/E (merged)",
+        "removed .wt/E2 (merged, <size>)",
+        "deleted branch wip/E2 (merged)",
+        "kept .wt/K (no verdict)",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    assert_eq!(lines, expected, "unexpected clean output:\n{stdout}");
+}
