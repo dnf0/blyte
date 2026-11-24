@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -985,6 +985,7 @@ fn make_idle_surface(root: PathBuf) -> Surface {
         token: generate_token().unwrap(),
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
+        reconcile_lock: Mutex::new(()),
     }
 }
 

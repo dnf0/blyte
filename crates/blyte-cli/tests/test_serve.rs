@@ -210,6 +210,7 @@ fn make_surface(
         token: generate_token().unwrap(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
+        reconcile_lock: Mutex::new(()),
     };
     (surface, calls)
 }

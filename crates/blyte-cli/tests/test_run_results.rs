@@ -156,6 +156,7 @@ fn make_surface(root: PathBuf) -> (Surface, Arc<Mutex<Vec<String>>>) {
         token: generate_token().unwrap(),
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
+        reconcile_lock: Mutex::new(()),
     };
     (surface, prompts)
 }

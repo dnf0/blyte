@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
@@ -7,21 +7,23 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::SurfaceArgs;
 use crate::http::{Request, Response};
 use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
 use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsState};
-use crate::session::{AgentRunner, AnswerError, ApprovalAnswer, Attachment, Session};
+use crate::session::{AgentRunner, AnswerError, ApprovalAnswer, Attachment, EntryBody, Session};
 
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
 
 const INDEX_HTML: &str = include_str!("../assets/surface/index.html");
 const MAX_WAIT_MS: u64 = 25_000;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+const RECONCILE_POLL_WAIT: Duration = Duration::from_millis(50);
 const TOKEN_BYTES: usize = 32;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -36,6 +38,7 @@ pub struct Surface {
     pub token: String,
     pub requests: Arc<RequestsState>,
     pub publisher: Arc<dyn Publisher>,
+    pub reconcile_lock: Mutex<()>,
 }
 
 pub fn generate_token() -> Result<String, String> {
@@ -376,42 +379,31 @@ fn handle_post_approval(surface: &Surface, id: &str, req: &Request) -> Response 
     }
 }
 
-fn handle_runs(surface: &Surface, now: u64) -> Response {
-    let mut live = match crate::live_runs::collect(&surface.root, now, surface.days) {
-        Ok(l) => l,
-        Err(e) => return json_error(500, e),
-    };
+fn reconcile_runs(
+    surface: &Surface,
+    now: u64,
+) -> Result<(crate::live_runs::LiveRuns, Vec<String>), String> {
+    let _guard = surface
+        .reconcile_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut live = crate::live_runs::collect(&surface.root, now, surface.days)?;
     let mut any_written = false;
     for run in &live.runs {
         if run.checks_recorded {
             continue;
         }
-        match crate::queue_actions::ensure_checks(&surface.root, &run.id) {
-            Ok(true) => any_written = true,
-            Ok(false) => {}
-            Err(e) => return json_error(500, e),
+        if crate::queue_actions::ensure_checks(&surface.root, &run.id)? {
+            any_written = true;
         }
     }
     if any_written {
-        live = match crate::live_runs::collect(&surface.root, now, surface.days) {
-            Ok(l) => l,
-            Err(e) => return json_error(500, e),
-        };
+        live = crate::live_runs::collect(&surface.root, now, surface.days)?;
     }
 
-    let mut runs_with_hold = Vec::with_capacity(live.runs.len());
-    for run in &live.runs {
-        let hold = match crate::queue_actions::read_hold(&surface.root, &run.id) {
-            Ok(h) => h,
-            Err(e) => return json_error(500, e),
-        };
-        runs_with_hold.push(RunWithHold { run, hold });
-    }
-
+    let mut errors = Vec::new();
     if let Err(e) = crate::run_results::report_finished_runs(surface) {
-        surface
-            .session
-            .record_error(&format!("run report failed: {e}"));
+        errors.push(format!("run report failed: {e}"));
     }
 
     let mut triggered = BTreeSet::new();
@@ -422,12 +414,31 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
         if let Some(ref req_id) = run.request {
             if triggered.insert(req_id.clone()) {
                 if let Err(e) = crate::requests::maybe_combine(surface, req_id) {
-                    surface
-                        .session
-                        .record_error(&format!("combine trigger failed for {req_id}: {e}"));
+                    errors.push(format!("combine trigger failed for {req_id}: {e}"));
                 }
             }
         }
+    }
+
+    Ok((live, errors))
+}
+
+fn handle_runs(surface: &Surface, now: u64) -> Response {
+    let (live, errors) = match reconcile_runs(surface, now) {
+        Ok(res) => res,
+        Err(e) => return json_error(500, e),
+    };
+    for msg in errors {
+        surface.session.record_error(&msg);
+    }
+
+    let mut runs_with_hold = Vec::with_capacity(live.runs.len());
+    for run in &live.runs {
+        let hold = match crate::queue_actions::read_hold(&surface.root, &run.id) {
+            Ok(h) => h,
+            Err(e) => return json_error(500, e),
+        };
+        runs_with_hold.push(RunWithHold { run, hold });
     }
 
     let payload = LiveRunsResponse {
@@ -957,6 +968,68 @@ pub fn run_with_hooks(
     })
 }
 
+struct ReconcileTimerGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ReconcileTimerGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_reconcile_timer(surface: Arc<Surface>) -> ReconcileTimerGuard {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let mut after = surface.session.info().last_seq;
+        let mut next_tick = Instant::now();
+        let mut seen_errors: HashSet<String> = HashSet::new();
+        while !thread_stop.load(Ordering::Acquire) {
+            let wait = next_tick
+                .saturating_duration_since(Instant::now())
+                .min(RECONCILE_POLL_WAIT);
+            let entries = surface.session.entries_after(after, wait);
+            let mut went_idle = false;
+            for entry in entries {
+                after = entry.seq;
+                if matches!(entry.body, EntryBody::Idle { .. }) {
+                    went_idle = true;
+                }
+            }
+            if thread_stop.load(Ordering::Acquire) {
+                break;
+            }
+            if went_idle || Instant::now() >= next_tick {
+                match now_duration().and_then(|d| reconcile_runs(&surface, d.as_secs())) {
+                    Ok((_, errors)) => {
+                        for msg in errors {
+                            if seen_errors.insert(msg.clone()) {
+                                surface.session.record_error(&msg);
+                                eprintln!("blyte: {msg}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if seen_errors.insert(e.clone()) {
+                            eprintln!("blyte: {e}");
+                        }
+                    }
+                }
+                next_tick = Instant::now() + RECONCILE_INTERVAL;
+            }
+        }
+    });
+    ReconcileTimerGuard {
+        stop,
+        handle: Some(handle),
+    }
+}
+
 fn run_inner<S>(
     args: &SurfaceArgs,
     mut config: ReplConfig,
@@ -1139,13 +1212,18 @@ where
         token,
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
+        reconcile_lock: Mutex::new(()),
     });
+
+    let timer_guard = spawn_reconcile_timer(Arc::clone(&surface));
 
     let serve_result =
         crate::http::serve_until(listener, should_stop, move |req| match now_duration() {
             Ok(d) => route(&surface, req, d.as_secs()),
             Err(e) => json_error(500, e),
         });
+
+    drop(timer_guard);
 
     let _ = std::fs::remove_file(&surface_file_path);
     let _ = std::fs::remove_file(&token_file_path);
