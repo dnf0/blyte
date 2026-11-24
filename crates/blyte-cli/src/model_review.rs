@@ -553,6 +553,57 @@ fn sum_costs(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     }
 }
 
+fn read_start_session(root: &Path, id: &str) -> Option<String> {
+    let start_path = root.join(".wt").join(format!("{id}.start.json"));
+    let content = std::fs::read_to_string(&start_path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    val.get("session")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn resolve_review_session(root: &Path, id: &str) -> Option<String> {
+    crate::usage_log::session_from(
+        std::env::var("BLYTE_SESSION").ok(),
+        read_start_session(root, id),
+    )
+}
+
+fn record_model_review_usage(
+    root: &Path,
+    id: &str,
+    session: Option<&str>,
+    model_id: &str,
+    usage: &blyte_provider::Usage,
+    cost_usd: Option<f64>,
+) {
+    let Some(path) = crate::usage_log::default_path() else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = crate::usage_log::Entry {
+        ts,
+        repo: crate::usage_log::repo_of(root),
+        session: session.map(str::to_string),
+        dispatch: Some(id.to_string()),
+        research: false,
+        model: model_id.to_string(),
+        outcome: "model_review".to_string(),
+        turns: 1,
+        input: usage.input,
+        cached: usage.cached,
+        output: usage.output,
+        thinking: usage.thinking,
+        cost_usd,
+    };
+    if let Err(err) = crate::usage_log::append(&path, &entry) {
+        eprintln!("warning: usage log: {err}");
+    }
+}
+
 fn run_with_task_and_provider(
     root: &Path,
     id: &str,
@@ -562,6 +613,7 @@ fn run_with_task_and_provider(
     provider: &dyn blyte_provider::Provider,
 ) -> ModelReviewResult {
     let model_id = provider.model_id();
+    let review_session = resolve_review_session(root, id);
 
     let stat_out = match Command::new("git")
         .args(["diff", "--stat", &format!("{base}..HEAD")])
@@ -658,6 +710,14 @@ fn run_with_task_and_provider(
     };
 
     let cost1 = blyte_provider::pricing(&model_id).map(|p| p.cost(&resp.usage));
+    record_model_review_usage(
+        root,
+        id,
+        review_session.as_deref(),
+        &model_id,
+        &resp.usage,
+        cost1,
+    );
 
     let (parsed, total_cost) = match parse(&resp.text, expect_fallbacks) {
         Ok(p) => (p, cost1),
@@ -681,6 +741,14 @@ fn run_with_task_and_provider(
                 }
             };
             let cost2 = blyte_provider::pricing(&model_id).map(|p| p.cost(&resp2.usage));
+            record_model_review_usage(
+                root,
+                id,
+                review_session.as_deref(),
+                &model_id,
+                &resp2.usage,
+                cost2,
+            );
             let total_cost = sum_costs(cost1, cost2);
             match parse(&resp2.text, expect_fallbacks) {
                 Ok(p) => (p, total_cost),

@@ -5,6 +5,7 @@
 
 use crate::usage_log::Entry;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Aggregated spend and run count.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -24,6 +25,50 @@ impl Default for Totals {
     }
 }
 
+/// Aggregated spend and activity counts for a single session.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SessionTotals {
+    pub session: String,
+    pub first_ts: u64,
+    pub last_ts: u64,
+    pub runs: usize,
+    pub turns: usize,
+    pub model_reviews: usize,
+    pub cost_usd: f64,
+}
+
+/// JSON payload for `blyte cost --by-session --json`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BySessionReport {
+    pub sessions: Vec<SessionTotals>,
+    #[serde(flatten)]
+    pub totals: Totals,
+}
+
+fn matches_filters(
+    entry: &Entry,
+    session: Option<&str>,
+    since: Option<u64>,
+    repo: Option<&str>,
+) -> bool {
+    if let Some(s) = session {
+        if entry.session.as_deref() != Some(s) {
+            return false;
+        }
+    }
+    if let Some(since_ts) = since {
+        if entry.ts < since_ts {
+            return false;
+        }
+    }
+    if let Some(r) = repo {
+        if entry.repo != r {
+            return false;
+        }
+    }
+    true
+}
+
 /// Aggregates usage log entries matching all given filters.
 ///
 /// Filters:
@@ -32,7 +77,7 @@ impl Default for Totals {
 /// - `repo`: entries with matching repository path
 ///
 /// Entries with `dispatch: Some(_)` count toward `implementers_usd`, and toward `runs` unless
-/// `outcome == "turn"`.
+/// `outcome == "turn"` or `outcome == "model_review"`.
 /// Entries without dispatch count toward `orchestrator_usd`.
 /// An entry with `cost_usd: None` adds 0 to cost totals.
 pub fn totals(
@@ -46,26 +91,14 @@ pub fn totals(
     let mut runs = 0;
 
     for entry in entries {
-        if let Some(s) = session {
-            if entry.session.as_deref() != Some(s) {
-                continue;
-            }
-        }
-        if let Some(since_ts) = since {
-            if entry.ts < since_ts {
-                continue;
-            }
-        }
-        if let Some(r) = repo {
-            if entry.repo != r {
-                continue;
-            }
+        if !matches_filters(entry, session, since, repo) {
+            continue;
         }
 
         let cost = entry.cost_usd.unwrap_or(0.0);
         if entry.dispatch.is_some() {
             implementers_usd += cost;
-            if entry.outcome != "turn" {
+            if entry.outcome != "turn" && entry.outcome != "model_review" {
                 runs += 1;
             }
         } else {
@@ -78,6 +111,101 @@ pub fn totals(
         implementers_usd,
         runs,
     }
+}
+
+/// Groups matching usage log entries by session id, ordered by first timestamp.
+///
+/// Entries with no session id (or an empty/whitespace session id) are grouped under `(none)`.
+pub fn by_session(
+    entries: &[Entry],
+    session: Option<&str>,
+    since: Option<u64>,
+    repo: Option<&str>,
+) -> Vec<SessionTotals> {
+    let mut grouped: HashMap<&str, SessionTotals> = HashMap::new();
+
+    for entry in entries {
+        if !matches_filters(entry, session, since, repo) {
+            continue;
+        }
+
+        let key = entry
+            .session
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("(none)");
+
+        let row = grouped.entry(key).or_insert_with(|| SessionTotals {
+            session: key.to_string(),
+            first_ts: entry.ts,
+            last_ts: entry.ts,
+            runs: 0,
+            turns: 0,
+            model_reviews: 0,
+            cost_usd: 0.0,
+        });
+
+        row.first_ts = row.first_ts.min(entry.ts);
+        row.last_ts = row.last_ts.max(entry.ts);
+        row.cost_usd += entry.cost_usd.unwrap_or(0.0);
+
+        if entry.outcome == "model_review" {
+            row.model_reviews += 1;
+        } else {
+            row.turns += entry.turns as usize;
+            if entry.dispatch.is_some() && entry.outcome != "turn" {
+                row.runs += 1;
+            }
+        }
+    }
+
+    let mut rows: Vec<SessionTotals> = grouped.into_values().collect();
+    rows.sort_by(|a, b| {
+        a.first_ts
+            .cmp(&b.first_ts)
+            .then_with(|| a.session.cmp(&b.session))
+    });
+    rows
+}
+
+fn format_utc_ts(ts: u64) -> String {
+    let days = (ts / 86_400) as i64;
+    let secs_of_day = ts % 86_400;
+    let hour = secs_of_day / 3_600;
+    let min = (secs_of_day % 3_600) / 60;
+    let sec = secs_of_day % 60;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+/// Formats the per-session breakdown followed by the existing total line.
+pub fn format_by_session(rows: &[SessionTotals], totals: &Totals) -> String {
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    for row in rows {
+        lines.push(format!(
+            "{}  {} .. {}  {} runs, {} turns, {} model reviews  ${:.2}",
+            row.session,
+            format_utc_ts(row.first_ts),
+            format_utc_ts(row.last_ts),
+            row.runs,
+            row.turns,
+            row.model_reviews,
+            row.cost_usd
+        ));
+    }
+    lines.push(format_totals(totals));
+    lines.join("\n")
 }
 
 /// Formats the totals into the human-readable summary line:
@@ -119,7 +247,24 @@ pub fn run(args: &crate::cli::CostArgs) -> i32 {
         repo_filter.as_deref(),
     );
 
-    if args.json {
+    if args.by_session {
+        let sessions = by_session(
+            &entries,
+            args.session.as_deref(),
+            args.since,
+            repo_filter.as_deref(),
+        );
+        if args.json {
+            let report = BySessionReport {
+                sessions,
+                totals: t,
+            };
+            let json_str = serde_json::to_string_pretty(&report).unwrap();
+            println!("{json_str}");
+        } else {
+            println!("{}", format_by_session(&sessions, &t));
+        }
+    } else if args.json {
         let json_str = serde_json::to_string_pretty(&t).unwrap();
         println!("{json_str}");
     } else {
@@ -273,5 +418,12 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let parsed: Totals = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, t);
+    }
+
+    #[test]
+    fn test_format_utc_ts() {
+        assert_eq!(format_utc_ts(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_utc_ts(1_700_000_100), "2023-11-14T22:15:00Z");
+        assert_eq!(format_utc_ts(1_709_164_800), "2024-02-29T00:00:00Z");
     }
 }

@@ -367,9 +367,13 @@ pub struct CleanArgs {
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
 pub struct CostArgs {
-    /// Session identifier to filter by
+    /// Session identifier to filter by (an unknown session prints zero totals and exits 0)
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
+
+    /// Break down totals by session id
+    #[arg(long)]
+    pub by_session: bool,
 
     /// Filter runs at or after this Unix timestamp in seconds
     #[arg(long, value_name = "UNIX_SECS")]

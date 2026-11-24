@@ -906,8 +906,39 @@ fn parse_validates_object_format_fallbacks_key_and_verdict() {
     assert!(bad_verdict.contains("verdict"), "{bad_verdict}");
 }
 
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestore {
+    fn set(pairs: &[(&'static str, Option<&str>)]) -> Self {
+        let mut prev = Vec::with_capacity(pairs.len());
+        for (k, v) in pairs {
+            prev.push((*k, std::env::var_os(k)));
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        Self(prev)
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (k, v) in self.0.drain(..) {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
 #[test]
 fn fallback_flags_reflect_review_verdicts_and_errors() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvRestore::set(&[("BLYTE_USAGE_LOG", Some("off"))]);
     let d = tempfile::tempdir().unwrap();
     let repo = d.path().join("repo");
     init_repo(&repo, None);
@@ -1096,6 +1127,8 @@ fn fallback_flags_reflect_review_verdicts_and_errors() {
 
 #[test]
 fn cutoff_review_retries_once_and_sums_cost() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvRestore::set(&[("BLYTE_USAGE_LOG", Some("off"))]);
     let d = tempfile::tempdir().unwrap();
     let repo = d.path().join("repo");
     init_repo(&repo, None);
@@ -1200,4 +1233,212 @@ fn old_model_review_json_without_fallbacks_still_loads() {
     assert_eq!(loaded.model.as_deref(), Some("gemini/gemini-3.8-flash"));
     assert_eq!(loaded.concerns.len(), 1);
     assert!(loaded.fallbacks.is_empty());
+}
+
+#[test]
+fn a_review_writes_its_cost_to_the_ledger() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    let log_path = d.path().join("usage.jsonl");
+    init_repo(&repo, None);
+
+    let (base, wt) = setup_worktree_run(
+        &repo,
+        "LEDGER1",
+        "Update `src/app.rs`.\n",
+        &[("src/app.rs", "pub fn greet() -> &'static str { \"hi2\" }\n")],
+    );
+
+    let _env = EnvRestore::set(&[
+        ("BLYTE_USAGE_LOG", Some(log_path.to_str().unwrap())),
+        ("BLYTE_SESSION", Some("sess-env-1")),
+    ]);
+
+    let valid_reply = serde_json::json!({
+        "concerns": [],
+        "fallbacks": []
+    })
+    .to_string();
+    let prov = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![Ok(make_response(
+            &valid_reply,
+            Some("STOP"),
+            200_000,
+            40_000,
+        ))],
+    );
+    let res = blyte_cli::model_review::run_with_provider(&repo, "LEDGER1", &base, &wt, &prov);
+    assert_eq!(res.status, "ok");
+
+    let entries = blyte_cli::usage_log::read(&log_path);
+    assert_eq!(entries.len(), 1, "entries: {entries:?}");
+    let row = &entries[0];
+    assert_eq!(row.outcome, "model_review");
+    assert_eq!(row.dispatch.as_deref(), Some("LEDGER1"));
+    assert_eq!(row.session.as_deref(), Some("sess-env-1"));
+    assert_eq!(row.model, "gemini/gemini-3.8-flash");
+    assert_eq!(row.repo, blyte_cli::usage_log::repo_of(&repo));
+    assert_eq!(row.input, 200_000);
+    assert_eq!(row.output, 40_000);
+
+    let pricing = blyte_provider::pricing("gemini/gemini-3.8-flash").unwrap();
+    let expected_cost = pricing.cost(&blyte_provider::Usage {
+        input: 200_000,
+        cached: 0,
+        output: 40_000,
+        thinking: 0,
+    });
+    assert!((row.cost_usd.unwrap() - expected_cost).abs() < 1e-12);
+    assert!((res.cost_usd.unwrap() - expected_cost).abs() < 1e-12);
+}
+
+#[test]
+fn a_retried_review_writes_two_rows_that_sum_to_its_cost() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    let log_path = d.path().join("usage.jsonl");
+    init_repo(&repo, None);
+
+    let (base, wt) = setup_worktree_run(
+        &repo,
+        "LEDGER2",
+        "Update `src/app.rs`.\n",
+        &[("src/app.rs", "pub fn greet() -> &'static str { \"hi2\" }\n")],
+    );
+
+    let _env = EnvRestore::set(&[
+        ("BLYTE_USAGE_LOG", Some(log_path.to_str().unwrap())),
+        ("BLYTE_SESSION", Some("sess-retry-1")),
+    ]);
+
+    let valid_reply = serde_json::json!({
+        "concerns": [],
+        "fallbacks": []
+    })
+    .to_string();
+    let prov = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![
+            Ok(make_response("", Some("MAX_TOKENS"), 100_000, 100_000)),
+            Ok(make_response(&valid_reply, Some("STOP"), 120_000, 50_000)),
+        ],
+    );
+    let res = blyte_cli::model_review::run_with_provider(&repo, "LEDGER2", &base, &wt, &prov);
+    assert_eq!(res.status, "ok");
+
+    let entries = blyte_cli::usage_log::read(&log_path);
+    assert_eq!(entries.len(), 2, "entries: {entries:?}");
+    for entry in &entries {
+        assert_eq!(entry.outcome, "model_review");
+        assert_eq!(entry.dispatch.as_deref(), Some("LEDGER2"));
+        assert_eq!(entry.session.as_deref(), Some("sess-retry-1"));
+    }
+    assert_eq!(entries[0].input, 100_000);
+    assert_eq!(entries[0].output, 100_000);
+    assert_eq!(entries[1].input, 120_000);
+    assert_eq!(entries[1].output, 50_000);
+
+    let sum_cost: f64 = entries.iter().filter_map(|e| e.cost_usd).sum();
+    assert!((sum_cost - res.cost_usd.unwrap()).abs() < 1e-12);
+
+    let log_bad = d.path().join("usage-unusable.jsonl");
+    let _env2 = EnvRestore::set(&[
+        ("BLYTE_USAGE_LOG", Some(log_bad.to_str().unwrap())),
+        ("BLYTE_SESSION", Some("sess-retry-1")),
+    ]);
+    let prov_bad = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![Ok(make_response(
+            "not valid json",
+            Some("STOP"),
+            50_000,
+            10_000,
+        ))],
+    );
+    let res_bad =
+        blyte_cli::model_review::run_with_provider(&repo, "LEDGER2", &base, &wt, &prov_bad);
+    assert_eq!(res_bad.status, "failed");
+    let bad_entries = blyte_cli::usage_log::read(&log_bad);
+    assert_eq!(bad_entries.len(), 1, "bad_entries: {bad_entries:?}");
+    assert_eq!(bad_entries[0].outcome, "model_review");
+    assert!((bad_entries[0].cost_usd.unwrap() - res_bad.cost_usd.unwrap()).abs() < 1e-12);
+}
+
+#[test]
+fn the_session_comes_from_the_start_record_when_the_environment_has_none() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("repo");
+    let log_path = d.path().join("usage.jsonl");
+    init_repo(&repo, None);
+
+    let (base, wt) = setup_worktree_run(
+        &repo,
+        "LEDGER3",
+        "Update `src/app.rs`.\n",
+        &[("src/app.rs", "pub fn greet() -> &'static str { \"hi2\" }\n")],
+    );
+    std::fs::write(
+        repo.join(".wt/LEDGER3.start.json"),
+        serde_json::json!({
+            "id": "LEDGER3",
+            "base_sha": base,
+            "task_file": "task.md",
+            "session": "sess-from-start",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let _env = EnvRestore::set(&[
+        ("BLYTE_USAGE_LOG", Some(log_path.to_str().unwrap())),
+        ("BLYTE_SESSION", None),
+    ]);
+
+    let valid_reply = serde_json::json!({
+        "concerns": [],
+        "fallbacks": []
+    })
+    .to_string();
+    let prov = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![Ok(make_response(&valid_reply, Some("STOP"), 10_000, 5_000))],
+    );
+    let res = blyte_cli::model_review::run_with_provider(&repo, "LEDGER3", &base, &wt, &prov);
+    assert_eq!(res.status, "ok");
+
+    let entries = blyte_cli::usage_log::read(&log_path);
+    assert_eq!(entries.len(), 1, "entries: {entries:?}");
+    assert_eq!(entries[0].session.as_deref(), Some("sess-from-start"));
+    assert_eq!(entries[0].dispatch.as_deref(), Some("LEDGER3"));
+    assert_eq!(entries[0].outcome, "model_review");
+
+    let log_none = d.path().join("usage-none.jsonl");
+    std::fs::write(
+        repo.join(".wt/LEDGER3.start.json"),
+        serde_json::json!({
+            "id": "LEDGER3",
+            "base_sha": base,
+            "task_file": "task.md",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let _env_none = EnvRestore::set(&[
+        ("BLYTE_USAGE_LOG", Some(log_none.to_str().unwrap())),
+        ("BLYTE_SESSION", None),
+    ]);
+    let prov_none = SequenceProvider::new(
+        "gemini/gemini-3.8-flash",
+        vec![Ok(make_response(&valid_reply, Some("STOP"), 10_000, 5_000))],
+    );
+    let res_none =
+        blyte_cli::model_review::run_with_provider(&repo, "LEDGER3", &base, &wt, &prov_none);
+    assert_eq!(res_none.status, "ok");
+    let entries_none = blyte_cli::usage_log::read(&log_none);
+    assert_eq!(entries_none.len(), 1);
+    assert_eq!(entries_none[0].session, None);
 }
