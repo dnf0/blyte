@@ -918,11 +918,14 @@ impl Drop for BaseWorktreeGuard {
     }
 }
 
-fn finish_summary(summary: &DispatchSummary, wt_parent: &Path) -> i32 {
-    let _ = std::fs::create_dir_all(wt_parent);
+fn finish_summary(summary: &DispatchSummary, root: &Path) -> i32 {
+    let wt_parent = root.join(".wt");
+    let _ = std::fs::create_dir_all(&wt_parent);
     let json_str = serde_json::to_string_pretty(summary).unwrap();
     let summary_path = wt_parent.join(format!("{}.json", summary.id));
     let _ = std::fs::write(&summary_path, format!("{json_str}\n"));
+    let notify_outcome = crate::surface_notify::notify_runs_changed(root, &summary.id);
+    crate::surface_notify::report(&notify_outcome, &mut std::io::stderr());
     println!("{json_str}");
     summary.exit
 }
@@ -1431,7 +1434,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         gate_source,
                         warnings,
                     );
-                    return finish_summary(&summary, &wt_parent);
+                    return finish_summary(&summary, &root);
                 }
                 let impl_cfg = ImplementerConfig {
                     current_exe: &current_exe,
@@ -1481,7 +1484,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                             gate_source,
                             warnings,
                         );
-                        return finish_summary(&summary, &wt_parent);
+                        return finish_summary(&summary, &root);
                     }
                 };
                 let commits = git_commits_since(&worktree_dir, &base_sha);
@@ -1516,7 +1519,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     warnings,
                     fix_round: Some(fix_summary),
                 };
-                return finish_summary(&summary, &wt_parent);
+                return finish_summary(&summary, &root);
             }
         }
 
@@ -1924,7 +1927,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     warnings: Vec::new(),
                     fix_round: None,
                 };
-                return finish_summary(&summary, &wt_parent);
+                return finish_summary(&summary, &root);
             }
         }
     }
@@ -2246,7 +2249,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         gate_source,
                         warnings,
                     );
-                    return finish_summary(&summary, &wt_parent);
+                    return finish_summary(&summary, &root);
                 }
             };
             let fallbacks_sent = match crate::fix_round::collect_confirmed_fallbacks(
@@ -2268,7 +2271,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         gate_source,
                         warnings,
                     );
-                    return finish_summary(&summary, &wt_parent);
+                    return finish_summary(&summary, &root);
                 }
             };
             let round_started_at =
@@ -2286,7 +2289,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                             gate_source,
                             warnings,
                         );
-                        return finish_summary(&summary, &wt_parent);
+                        return finish_summary(&summary, &root);
                     }
                 };
             let started_record = crate::fix_round::FixRoundRecord::Started {
@@ -2306,7 +2309,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     gate_source,
                     warnings,
                 );
-                return finish_summary(&summary, &wt_parent);
+                return finish_summary(&summary, &root);
             }
 
             let fix_report_path = wt_parent.join(format!("{}.fix.report.json", args.id));
@@ -2350,7 +2353,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                         gate_source,
                         warnings,
                     );
-                    return finish_summary(&summary, &wt_parent);
+                    return finish_summary(&summary, &root);
                 }
             }
         }
@@ -2383,7 +2386,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         fix_round: fix_round_summary,
     };
 
-    finish_summary(&summary, &wt_parent)
+    finish_summary(&summary, &root)
 }
 
 pub fn run_review(args: &ReviewArgs) -> i32 {
