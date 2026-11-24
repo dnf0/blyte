@@ -1,3 +1,9 @@
+## v0.60.0 (2026-11-24)
+
+### Feat
+
+- direct edits for small changes, safety fixes, per-session cost (#412)
+
 ## v0.59.1 (2026-11-24)
 
 ### Perf
