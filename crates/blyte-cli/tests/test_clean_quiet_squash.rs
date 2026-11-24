@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -15,6 +16,45 @@ fn git(dir: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
+            std::fs::copy(&src_path, &dst_path).unwrap();
+        }
+    }
+}
+
+fn empty_repo_template() -> &'static Path {
+    static TEMPLATE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let t = tempfile::tempdir().unwrap();
+            git(t.path(), &["init", "-q", "-b", "main"]);
+            t
+        })
+        .path()
+}
+
+fn branch_exists(root: &Path, branch: &str) -> bool {
+    if root.join(".git/refs/heads").join(branch).is_file() {
+        return true;
+    }
+    let packed = root.join(".git/packed-refs");
+    if let Ok(text) = std::fs::read_to_string(packed) {
+        let needle = format!(" refs/heads/{branch}");
+        if text.lines().any(|l| l.ends_with(&needle)) {
+            return true;
+        }
+    }
+    false
 }
 
 fn fast_import(dir: &Path, script: &str) {
@@ -71,7 +111,7 @@ fn write_file(p: &Path, text: &str) {
 fn setup_repo(squash_msg: &str, squash_a_content: &str, include_b1: bool) -> tempfile::TempDir {
     let t = tempfile::tempdir().unwrap();
     let root = t.path();
-    git(root, &["init", "-q", "-b", "main"]);
+    copy_dir_recursive(empty_repo_template(), root);
 
     let mut script = String::new();
     script.push_str(&fi_commit(
@@ -178,13 +218,8 @@ fn test_squash_merged_quiet_clean() {
         !root.join(".wt/A1").exists(),
         ".wt/A1 should be removed by clean_repo"
     );
-    let branch_check = Command::new("git")
-        .args(["rev-parse", "--verify", "refs/heads/wip/A1"])
-        .current_dir(root)
-        .output()
-        .unwrap();
     assert!(
-        !branch_check.status.success(),
+        !branch_exists(root, "wip/A1"),
         "wip/A1 branch should be deleted"
     );
 }
@@ -212,10 +247,16 @@ fn test_review_sweep_removes_squash_merged_other_run() {
     let root = repo.path();
     let wt_b1 = root.join(".wt/B1");
 
+    let home = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", "B1", "--verdict", "accepted"])
         .current_dir(root)
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("BLYTE_STATE_DIR", home.path().join("state"))
+        .env("BLYTE_ENV_FILE", "")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
         .output()
         .unwrap();
     assert!(out.status.success());
