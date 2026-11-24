@@ -369,14 +369,18 @@ fn compute_review_res(
     let is_research = crate::clean::is_research(root, id)
         || root.join(".wt").join(format!("{id}.report.md")).exists();
     let report_file = root.join(".wt").join(format!("{id}.report.json"));
+    let summary_file = root.join(".wt").join(format!("{id}.json"));
     let missing_wt_err = |wt: &Path| -> Option<ReviewError> {
         if !is_research {
+            if !report_file.exists() && summary_file.exists() {
+                return None;
+            }
             return Some(ReviewError::WorktreeGone(format!(
                 "worktree {} does not exist",
                 wt.display()
             )));
         }
-        if !report_file.exists() {
+        if !report_file.exists() && !summary_file.exists() {
             return Some(ReviewError::WorktreeGone(format!(
                 "worktree {} does not exist and {} is missing: nothing to review",
                 wt.display(),
@@ -445,7 +449,12 @@ fn compute_review_res(
 
     let report_val = std::fs::read_to_string(&report_file)
         .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .or_else(|| {
+            std::fs::read_to_string(&summary_file)
+                .ok()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        });
     let outcome = report_val
         .as_ref()
         .and_then(|v| v.get("outcome"))
@@ -578,50 +587,54 @@ fn compute_review_res(
                 }
             }
         }
-        let summary_path = root.join(".wt").join(format!("{id}.json"));
-        match std::fs::read_to_string(&summary_path) {
-            Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
-                Ok(v) => match crate::outside_env::summary_worktree(&v) {
-                    Ok(summary_wt) => {
-                        if let Some(ref log_content) = log_content_opt {
-                            let borrowed =
-                                crate::outside_env::borrowed_env_commands(log_content, &summary_wt);
-                            if let Some(flag) = crate::outside_env::flag(&borrowed) {
-                                checks.flags.push(flag);
+        if wt_exists {
+            match std::fs::read_to_string(&summary_file) {
+                Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
+                    Ok(v) => match crate::outside_env::summary_worktree(&v) {
+                        Ok(summary_wt) => {
+                            if let Some(ref log_content) = log_content_opt {
+                                let borrowed = crate::outside_env::borrowed_env_commands(
+                                    log_content,
+                                    &summary_wt,
+                                );
+                                if let Some(flag) = crate::outside_env::flag(&borrowed) {
+                                    checks.flags.push(flag);
+                                }
                             }
                         }
-                    }
+                        Err(e) => {
+                            checks.flags.push(format!("outside-env check not run: {e}"));
+                        }
+                    },
                     Err(e) => {
-                        checks.flags.push(format!("outside-env check not run: {e}"));
+                        checks.flags.push(format!(
+                            "outside-env check not run: cannot parse {}: {e}",
+                            summary_file.display()
+                        ));
                     }
                 },
-                Err(e) => {
-                    checks.flags.push(format!(
-                        "outside-env check not run: cannot parse {}: {e}",
-                        summary_path.display()
-                    ));
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && log_content_opt.is_none() => {
                 }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && log_content_opt.is_none() => {}
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound
-                    && summary_worktree_fallback.is_some() =>
-            {
-                if let (Some(summary_wt), Some(ref log_content)) =
-                    (summary_worktree_fallback, &log_content_opt)
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && summary_worktree_fallback.is_some() =>
                 {
-                    let borrowed =
-                        crate::outside_env::borrowed_env_commands(log_content, summary_wt);
-                    if let Some(flag) = crate::outside_env::flag(&borrowed) {
-                        checks.flags.push(flag);
+                    if let (Some(summary_wt), Some(ref log_content)) =
+                        (summary_worktree_fallback, &log_content_opt)
+                    {
+                        let borrowed =
+                            crate::outside_env::borrowed_env_commands(log_content, summary_wt);
+                        if let Some(flag) = crate::outside_env::flag(&borrowed) {
+                            checks.flags.push(flag);
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                checks.flags.push(format!(
-                    "outside-env check not run: cannot read {}: {e}",
-                    summary_path.display()
-                ));
+                Err(e) => {
+                    checks.flags.push(format!(
+                        "outside-env check not run: cannot read {}: {e}",
+                        summary_file.display()
+                    ));
+                }
             }
         }
     }

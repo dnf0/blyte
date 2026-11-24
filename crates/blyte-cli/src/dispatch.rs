@@ -141,6 +141,49 @@ pub fn summary_error(outcome: &str, error: Option<&str>) -> Option<String> {
     }
 }
 
+/// Bounds a gate failure entry for `.wt/<id>.json`, keeping its first line and tail.
+pub fn cut_summary_gate_failure(s: &str) -> String {
+    const MAX_CHARS: usize = 1_000;
+    const FIRST_LINE_MAX: usize = 200;
+
+    let total_chars = s.chars().count();
+    if total_chars <= MAX_CHARS {
+        return s.to_string();
+    }
+
+    let first_line = s.lines().next().unwrap_or("");
+    let head_end = first_line
+        .char_indices()
+        .nth(FIRST_LINE_MAX)
+        .map(|(i, _)| i)
+        .unwrap_or(first_line.len());
+    let head = &first_line[..head_end];
+    let head_chars = head.chars().count();
+
+    let tail_budget = MAX_CHARS.saturating_sub(head_chars);
+    let tail_start_byte = s
+        .char_indices()
+        .nth(total_chars.saturating_sub(tail_budget))
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    let tail_cand = &s[tail_start_byte..];
+    let tail = if tail_start_byte > 0 && s.as_bytes()[tail_start_byte - 1] == b'\n' {
+        tail_cand
+    } else if let Some(idx) = tail_cand.find('\n') {
+        let after = &tail_cand[idx + 1..];
+        if after.trim_matches(['\r', '\n']).is_empty() {
+            tail_cand
+        } else {
+            after
+        }
+    } else {
+        tail_cand
+    };
+    let tail_chars = tail.chars().count();
+    let omitted = total_chars.saturating_sub(head_chars + tail_chars);
+    format!("{head}\n[... {omitted} characters left out ...]\n{tail}")
+}
+
 #[derive(Debug, Serialize)]
 pub struct CommitRecord {
     pub sha: String,
@@ -450,13 +493,7 @@ fn parse_pass_report(report_path: &Path, default_sandbox: &str) -> Result<PassRe
         Some(arr) => arr
             .iter()
             .filter_map(|v| v.as_str())
-            .map(|s| {
-                if s.chars().count() > 1000 {
-                    s.chars().take(1000).collect()
-                } else {
-                    s.to_string()
-                }
-            })
+            .map(cut_summary_gate_failure)
             .collect(),
         None => Vec::new(),
     };
@@ -2490,13 +2527,23 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         if let Some(outcome) = v.get("outcome").and_then(|x| x.as_str()) {
             println!("outcome: {outcome}");
         }
+        let final_message = v.get("final_message").and_then(|x| x.as_str());
+        if let Some(err) = v
+            .get("error")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            if !final_message.is_some_and(|m| m.contains(err)) {
+                println!("error: {err}");
+            }
+        }
         if let Some(turns) = v.get("turns").and_then(|x| x.as_u64()) {
             println!("turns: {turns}");
         }
         if let Some(cost) = v.get("cost_usd").and_then(|x| x.as_f64()) {
             println!("cost_usd: {cost}");
         }
-        if let Some(msg) = v.get("final_message").and_then(|x| x.as_str()) {
+        if let Some(msg) = final_message {
             println!("final_message: {msg}");
         }
         if let Some(ref problems) = quote_problems {
@@ -2530,6 +2577,19 @@ pub fn run_review(args: &ReviewArgs) -> i32 {
         }
         if let Some(ref skipped) = claim_check_skipped {
             println!("claim check skipped: {skipped}");
+        }
+    }
+
+    if let Some(ref v) = report_val {
+        if let Some(failures) = v.get("gate_failures").and_then(|x| x.as_array()) {
+            let entries: Vec<&str> = failures.iter().filter_map(|x| x.as_str()).collect();
+            if let Some(last) = entries.last() {
+                println!("== check failures");
+                if entries.len() > 1 {
+                    println!("({} failed attempts; the last one)", entries.len());
+                }
+                println!("{last}");
+            }
         }
     }
 

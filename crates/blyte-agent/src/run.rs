@@ -1667,6 +1667,56 @@ impl<'a> Runner<'a> {
 }
 
 /// A single failing gate step and its bounded output.
+const SANDBOX_DENIAL_HINT: &str = "hint: \"Operation not permitted\" usually means blyte's sandbox denied a path outside the worktree (for example a .env in the main checkout). Make the check independent of files outside the worktree.";
+
+/// Returns a sandbox hint when `output` mentions `operation not permitted` in any letter case.
+pub fn sandbox_denial_hint(output: &str) -> Option<&'static str> {
+    if output
+        .to_ascii_lowercase()
+        .contains("operation not permitted")
+    {
+        Some(SANDBOX_DENIAL_HINT)
+    } else {
+        None
+    }
+}
+
+fn append_hint_line(output: &mut String, hint: &str) {
+    if output.trim_end_matches(['\r', '\n']).ends_with(hint) {
+        return;
+    }
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(hint);
+}
+
+/// Appends the sandbox denial hint to `output` once when applicable.
+pub fn append_sandbox_denial_hint(output: &mut String) {
+    if let Some(hint) = sandbox_denial_hint(output) {
+        append_hint_line(output, hint);
+    }
+}
+
+fn attach_sandbox_denial_hint(result: &mut GateRunResult) {
+    if result.passed {
+        return;
+    }
+    let hint = sandbox_denial_hint(&result.output).or_else(|| {
+        result
+            .failures
+            .iter()
+            .find_map(|f| sandbox_denial_hint(&f.output))
+    });
+    let Some(hint) = hint else {
+        return;
+    };
+    append_hint_line(&mut result.output, hint);
+    if let Some(last) = result.failures.last_mut() {
+        append_hint_line(&mut last.output, hint);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateStepFailure {
     pub step: String,
@@ -1819,12 +1869,14 @@ pub fn run_gate_steps_cancellable(
                 output: output.clone(),
             }]
         };
-        return GateRunResult {
+        let mut result = GateRunResult {
             passed,
             output,
             wait_ms,
             failures,
         };
+        attach_sandbox_denial_hint(&mut result);
+        return result;
     }
     let (first_group, second_group) = {
         let (f, s) = retry_order(&steps, last_failed);
@@ -1866,7 +1918,7 @@ pub fn run_gate_steps_cancellable(
         } else {
             String::new()
         };
-        return GateRunResult {
+        let mut result = GateRunResult {
             passed: false,
             output: format!(
                 "{} of {} steps failed: {}{not_rerun}\n\n{body}",
@@ -1877,6 +1929,8 @@ pub fn run_gate_steps_cancellable(
             wait_ms,
             failures,
         };
+        attach_sandbox_denial_hint(&mut result);
+        return result;
     }
     for &step in &second_group {
         if cancel.is_some_and(crate::shell::CancelHandle::is_cancelled) {
@@ -1906,7 +1960,7 @@ pub fn run_gate_steps_cancellable(
     }
     let body = tools::bound_output(&formatted_failures.join("\n\n"));
     let failed_names: Vec<&str> = failures.iter().map(|f| f.step.as_str()).collect();
-    GateRunResult {
+    let mut result = GateRunResult {
         passed: false,
         output: format!(
             "{} of {} steps failed: {}\n\n{body}",
@@ -1916,7 +1970,9 @@ pub fn run_gate_steps_cancellable(
         ),
         wait_ms,
         failures,
-    }
+    };
+    attach_sandbox_denial_hint(&mut result);
+    result
 }
 
 /// The steps of a gate: its non-blank lines, trimmed.
@@ -2077,7 +2133,14 @@ pub fn cut_gate_output(output: &str) -> String {
     if !tail.is_empty() {
         pieces.push(tail);
     }
-    pieces.join("\n")
+    let mut joined = pieces.join("\n");
+    if output
+        .trim_end_matches(['\r', '\n'])
+        .ends_with(SANDBOX_DENIAL_HINT)
+    {
+        append_hint_line(&mut joined, SANDBOX_DENIAL_HINT);
+    }
+    joined
 }
 
 fn format_blyte_arg(arg: &str) -> String {
