@@ -270,3 +270,124 @@ next to the cause and the change.
 ```
 test: make slow blyte-provider test files fast (P1)
 ```
+
+## Second round (2026-11-24)
+
+After the first round the suite's test time is about 165 s (from 300 s). These files are still slow.
+The machine runs a virus scanner that slows every process a test starts, so times vary between runs:
+the fewer processes and git commands a test starts, the faster and steadier it is.
+
+### Task D1: make these blyte test files fast (second round)
+
+**Depends on:** none.
+
+**Siblings:** tasks D2, D3 do the same for other test files, separately. Their work is not in this
+worktree; do not change their files. Do not touch any test file not listed here.
+
+**Goal.** Make each test file below run in under 1.5 s alone, without weakening it.
+
+| File | Now |
+|---|---|
+| `crates/blyte-cli/tests/test_fix_round.rs` | 7-15 s |
+| `crates/blyte-cli/tests/test_fresh_model_review.rs` | 4-13 s |
+| `crates/blyte-cli/tests/test_direct_edit.rs` | 6.8 s |
+| `crates/blyte-cli/tests/test_dispatch_request.rs` | 5.2 s |
+
+**How.** Read the section "Method" of `docs/plans/2026-11-23-fast-suite.md` first and follow it,
+including its rules. Start with the slowest file and finish and commit one file before starting the
+next, so that nothing is left uncommitted if the budget runs out. Run a file with
+`cargo test -p blyte --test <file>`. If a file cannot get under 1.5 s without breaking a rule
+(for example because the test has to start several real `blyte` processes), stop on that file and
+say in the report what the remaining time is spent on.
+
+**Constraints.** As the Method's rules: every test and assertion kept, production behaviour
+unchanged, no fallbacks, only the listed files. Under `src/` the only change allowed is making an
+existing wait, interval or clock settable with its present value as the default; anything else you
+find there is a finding for the report, not a change.
+
+**Tests.** The listed files themselves, each run alone, with its `finished in` time in your report
+next to the cause and the change.
+
+**Commit message (exact, one commit per file is fine, each with this message):**
+
+```
+test: make slow blyte test files fast (D1)
+```
+
+### Task D2: make these blyte test files fast (second round)
+
+**Depends on:** none.
+
+**Siblings:** tasks D1, D3 do the same for other test files, separately. Their work is not in this
+worktree; do not change their files. Do not touch any test file not listed here.
+
+**Goal.** Make each test file below run in under 1.5 s alone, without weakening it.
+
+| File | Now |
+|---|---|
+| `crates/blyte-cli/tests/test_clean_followups.rs` | 5-17 s |
+| `crates/blyte-cli/tests/test_clean_quiet_squash.rs` | 8.2 s |
+| `crates/blyte-cli/tests/test_map_rust.rs` | 4.3 s |
+| `crates/blyte-cli/tests/test_requests.rs` | 3.9 s |
+| `crates/blyte-cli/tests/test_passed_trees.rs` | 2.5-5.6 s |
+| `crates/blyte-cli/tests/test_dispatch_base_check.rs` | 2.4-7.4 s |
+
+**How.** Read the section "Method" of `docs/plans/2026-11-23-fast-suite.md` first and follow it,
+including its rules. Start with the slowest file and finish and commit one file before starting the
+next, so that nothing is left uncommitted if the budget runs out. Run a file with
+`cargo test -p blyte --test <file>`. If a file cannot get under 1.5 s without breaking a rule
+(for example because the test has to start several real `blyte` processes), stop on that file and
+say in the report what the remaining time is spent on.
+
+**Constraints.** As the Method's rules: every test and assertion kept, production behaviour
+unchanged, no fallbacks, only the listed files. Under `src/` the only change allowed is making an
+existing wait, interval or clock settable with its present value as the default; anything else you
+find there is a finding for the report, not a change.
+
+**Tests.** The listed files themselves, each run alone, with its `finished in` time in your report
+next to the cause and the change.
+
+**Commit message (exact, one commit per file is fine, each with this message):**
+
+```
+test: make slow blyte test files fast (D2)
+```
+
+### Task D3: make these blyte-agent test files fast (second round)
+
+**Depends on:** none.
+
+**Siblings:** tasks D1, D2 do the same for other test files, separately. Their work is not in this
+worktree; do not change their files. Do not touch any test file not listed here.
+
+**Goal.** Make each test file below run in under 1.5 s alone, without weakening it.
+
+| File | Now |
+|---|---|
+| `crates/blyte-agent/tests/test_run_timing.rs` | 5.7 s |
+| `crates/blyte-agent/tests/test_session_protocol.rs` | 3.9 s |
+| `crates/blyte-agent/tests/test_stay_in_repo.rs` | 3.0 s |
+| `crates/blyte-agent/tests/test_tool_event_input.rs` | 2.7 s |
+| `crates/blyte-agent/tests/test_live_events.rs` | 2.6 s |
+| `crates/blyte-agent/tests/test_shell_timeout.rs` | 2.1 s |
+
+**How.** Read the section "Method" of `docs/plans/2026-11-23-fast-suite.md` first and follow it,
+including its rules. Start with the slowest file and finish and commit one file before starting the
+next, so that nothing is left uncommitted if the budget runs out. Run a file with
+`cargo test -p blyte-agent --test <file>`. If a file cannot get under 1.5 s without breaking a rule
+(for example because the test has to start several real `blyte` processes), stop on that file and
+say in the report what the remaining time is spent on.
+
+**Constraints.** As the Method's rules: every test and assertion kept, production behaviour
+unchanged, no fallbacks, only the listed files. Under `src/` the only change allowed is making an
+existing wait, interval or clock settable with its present value as the default; anything else you
+find there is a finding for the report, not a change.
+
+**Tests.** The listed files themselves, each run alone, with its `finished in` time in your report
+next to the cause and the change.
+
+**Commit message (exact, one commit per file is fine, each with this message):**
+
+```
+test: make slow blyte-agent test files fast (D3)
+```
