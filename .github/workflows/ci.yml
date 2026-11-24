@@ -69,7 +69,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Workspace Tests
-        run: cargo test --workspace --all-targets
+        run: python3 scripts/test-parallel.py -- --workspace --all-targets
 
 
   docs-check:

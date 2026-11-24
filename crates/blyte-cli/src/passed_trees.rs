@@ -53,11 +53,36 @@ pub fn record_passed(root: &Path, tree: &str, key: &str) -> Result<(), String> {
     record_passed_at(root, tree, key, now_secs())
 }
 
+pub fn record_passed_in_main(
+    main_checkout: &Path,
+    common_dir: Option<&Path>,
+    tree: &str,
+    key: &str,
+) -> Result<(), String> {
+    record_passed_at_in_main(main_checkout, common_dir, tree, key, now_secs())
+}
+
 pub fn record_passed_at(root: &Path, tree: &str, key: &str, ts: u64) -> Result<(), String> {
-    let dir = passed_dir(root);
+    let main = crate::config::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
     ensure_wt_excluded(root);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    record_passed_in_dir(&main.join(".wt").join("passed"), tree, key, ts)
+}
+
+fn record_passed_at_in_main(
+    main_checkout: &Path,
+    common_dir: Option<&Path>,
+    tree: &str,
+    key: &str,
+    ts: u64,
+) -> Result<(), String> {
+    if let Some(cd) = common_dir {
+        ensure_wt_excluded_at(cd);
+    }
+    record_passed_in_dir(&main_checkout.join(".wt").join("passed"), tree, key, ts)
+}
+
+fn record_passed_in_dir(dir: &Path, tree: &str, key: &str, ts: u64) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
 
     let final_path = dir.join(format!("{tree}.{key}.json"));
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -89,7 +114,20 @@ pub fn record_passed_at(root: &Path, tree: &str, key: &str, ts: u64) -> Result<(
 }
 
 pub fn has_passed(root: &Path, tree: &str, key: &str, now: u64) -> Result<bool, String> {
-    let path = record_path(root, tree, key);
+    let main = crate::config::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
+    has_passed_in_main(&main, tree, key, now)
+}
+
+pub fn has_passed_in_main(
+    main_checkout: &Path,
+    tree: &str,
+    key: &str,
+    now: u64,
+) -> Result<bool, String> {
+    let path = main_checkout
+        .join(".wt")
+        .join("passed")
+        .join(format!("{tree}.{key}.json"));
     let raw = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -146,6 +184,22 @@ pub fn worktree_is_clean(dir: &Path) -> Result<bool, String> {
     Ok(out.stdout.is_empty())
 }
 
+fn ensure_wt_excluded_at(common_dir: &Path) {
+    let exclude_path = common_dir.join("info").join("exclude");
+    if let Some(parent) = exclude_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+    if !content.lines().any(|l| l.trim() == ".wt/") {
+        let mut next = content;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(".wt/\n");
+        let _ = std::fs::write(&exclude_path, next);
+    }
+}
+
 fn ensure_wt_excluded(root: &Path) {
     let Ok(out) = Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
@@ -167,19 +221,7 @@ fn ensure_wt_excluded(root: &Path) {
     } else {
         root.join(common_path)
     };
-    let exclude_path = common_dir.join("info").join("exclude");
-    if let Some(parent) = exclude_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-    if !content.lines().any(|l| l.trim() == ".wt/") {
-        let mut next = content;
-        if !next.is_empty() && !next.ends_with('\n') {
-            next.push('\n');
-        }
-        next.push_str(".wt/\n");
-        let _ = std::fs::write(&exclude_path, next);
-    }
+    ensure_wt_excluded_at(&common_dir);
 }
 
 fn hex_lower(bytes: &[u8; 32]) -> String {

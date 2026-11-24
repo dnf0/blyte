@@ -24,7 +24,7 @@ These are the checks CI runs on the code, on macOS and Linux. A change is ready 
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
-cargo test --workspace --all-targets
+python3 scripts/test-parallel.py -- --workspace --all-targets
 ```
 
 The sandbox has platform-specific code. On macOS you can also compile the Linux path (Landlock)

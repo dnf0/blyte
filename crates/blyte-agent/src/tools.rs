@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::approval::{matching_rule, Approval, ApprovalConfig};
 use crate::fs::Fs;
-use crate::shell::Shell;
+use crate::shell::{poll_backoff, Shell, POLL_START};
 
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
@@ -1458,7 +1458,7 @@ fn run_command_bounded(
     });
 
     let deadline = std::time::Instant::now() + timeout;
-    let mut poll = Duration::from_millis(1);
+    let mut poll = POLL_START;
     let status = loop {
         match child
             .try_wait()
@@ -1486,8 +1486,9 @@ fn run_command_bounded(
             }
             None => {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                std::thread::sleep(poll.min(remaining));
-                poll = (poll * 2).min(Duration::from_millis(50));
+                let (sleep, next) = poll_backoff(poll, remaining);
+                std::thread::sleep(sleep);
+                poll = next;
             }
         }
     };

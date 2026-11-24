@@ -288,6 +288,17 @@ fn kill_child_group(child: &mut Child) {
     let _ = child.wait();
 }
 
+pub const POLL_START: Duration = Duration::from_millis(1);
+
+/// How long to sleep before checking a child again, and the interval to use next time:
+/// 1 ms doubling to 50 ms, never longer than the time left before the deadline.
+pub fn poll_backoff(current: Duration, remaining: Duration) -> (Duration, Duration) {
+    (
+        current.min(remaining),
+        (current * 2).min(Duration::from_millis(50)),
+    )
+}
+
 /// Executes a command with timeout enforcement, pipe draining, and process group isolation.
 ///
 /// # Arguments
@@ -359,6 +370,7 @@ fn exec_command_cancellable(
     });
 
     let deadline = std::time::Instant::now() + timeout;
+    let mut poll = POLL_START;
     let mut was_cancelled = false;
     let status = loop {
         match child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
@@ -372,7 +384,12 @@ fn exec_command_cancellable(
                 kill_child_group(&mut child);
                 break None;
             }
-            None => std::thread::sleep(Duration::from_millis(50)),
+            None => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let (sleep, next) = poll_backoff(poll, remaining);
+                std::thread::sleep(sleep);
+                poll = next;
+            }
         }
     };
 
@@ -932,7 +949,7 @@ impl Session {
         // Recreate tmp before each command so output redirects succeed even if a command deleted it.
         let script = format!(
             "IFS= read -r -d '' __blyte_c <<'{delim}' || true\n{command}\n{delim}\n\
-             mkdir -p {qt} 2>/dev/null; {body} </dev/null >{qo} 2>{qe}; __blyte_r=$?; \
+             [ -d {qt} ] || mkdir -p {qt} 2>/dev/null; {body} </dev/null >{qo} 2>{qe}; __blyte_r=$?; \
              IFS= read -r -d '' __blyte_o <{qo} || true; \
              IFS= read -r -d '' __blyte_e <{qe} || true; \
              __blyte_l=${{LC_ALL-__blyte_unset__}}; LC_ALL=C; \

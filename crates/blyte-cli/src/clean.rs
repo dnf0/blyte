@@ -166,39 +166,43 @@ pub fn is_pid_alive(pid: i64) -> bool {
 /// Finds the root repository (resolving the main checkout if inside a linked worktree).
 pub fn find_repo_root() -> Result<PathBuf, String> {
     let out = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ])
         .output()
         .map_err(|e| format!("git not found: {e}"))?;
     if !out.status.success() {
         return Err("not a git repository".to_string());
     }
-    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    // A linked worktree has its own git dir apart from the shared one. A submodule also has a
-    // `.git` file, but its git dir is the common dir, so it is its own main checkout.
-    let dirs = std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-dir",
-            "--git-common-dir",
-        ])
-        .current_dir(&root)
-        .output()
-        .map_err(|e| format!("git not found: {e}"))?;
-    if !dirs.status.success() {
-        return Err(format!(
-            "cannot read the git dirs of {}: {}",
-            root.display(),
-            String::from_utf8_lossy(&dirs.stderr).trim()
-        ));
-    }
-    let dirs = String::from_utf8_lossy(&dirs.stdout);
-    let mut lines = dirs.lines();
-    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
-        return Err(format!("cannot read the git dirs of {}", root.display()));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let (Some(toplevel), Some(git_dir), Some(common_dir)) =
+        (lines.next(), lines.next(), lines.next())
+    else {
+        return Err("not a git repository".to_string());
     };
+    let root = PathBuf::from(toplevel.trim());
+    let git_dir = git_dir.trim();
+    let common_dir = common_dir.trim();
     if git_dir != common_dir {
-        crate::config::main_checkout(&root).ok_or_else(|| {
+        let common = PathBuf::from(common_dir);
+        let main = (|| -> Option<PathBuf> {
+            if common.file_name()? != ".git" {
+                return None;
+            }
+            let parent = common.parent()?;
+            let parent_canon = parent.canonicalize().ok()?;
+            let root_canon = root.canonicalize().ok()?;
+            if parent_canon == root_canon {
+                return None;
+            }
+            Some(parent.to_path_buf())
+        })();
+        main.ok_or_else(|| {
             format!(
                 "cannot find main checkout for linked worktree {}",
                 root.display()
@@ -327,29 +331,15 @@ fn parse_started_at(val: &serde_json::Value) -> Option<u64> {
     }
 }
 
-fn check_history_merged(
+fn check_history_merged_with_base(
     root: &Path,
     tip_sha: &str,
     target: &str,
+    merge_base: &str,
     started_at: Option<&serde_json::Value>,
 ) -> bool {
-    let mb_out = std::process::Command::new("git")
-        .args(["merge-base", target, tip_sha])
-        .current_dir(root)
-        .output();
-    let Ok(mb_o) = mb_out else {
-        return false;
-    };
-    if !mb_o.status.success() {
-        return false;
-    }
-    let merge_base = String::from_utf8_lossy(&mb_o.stdout).trim().to_string();
-    if merge_base.is_empty() {
-        return false;
-    }
-
     let diff_out = std::process::Command::new("git")
-        .args(["diff", "--name-only", &merge_base, tip_sha])
+        .args(["diff", "--name-only", merge_base, tip_sha])
         .current_dir(root)
         .output();
     let Ok(diff_o) = diff_out else {
@@ -460,11 +450,111 @@ pub fn read_start_record(root: &Path, id: &str) -> Result<Option<serde_json::Val
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RefEntry {
+    pub objectname: String,
+    pub symref: Option<String>,
+    pub tree: Option<String>,
+}
+
+fn load_refs(root: &Path) -> (HashMap<String, RefEntry>, bool) {
+    let mut refs = HashMap::new();
+    let out = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)%09%(objectname)%09%(symref)%09%(tree)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ])
+        .current_dir(root)
+        .output();
+    let Ok(o) = out else {
+        return (refs, false);
+    };
+    if !o.status.success() {
+        return (refs, false);
+    }
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let mut cols = line.split('\t');
+        let Some(refname) = cols.next() else {
+            continue;
+        };
+        let Some(objectname) = cols.next() else {
+            continue;
+        };
+        let symref = cols.next().unwrap_or("");
+        let tree = cols.next().unwrap_or("");
+        if refname.is_empty() || objectname.is_empty() {
+            continue;
+        }
+        refs.insert(
+            refname.to_string(),
+            RefEntry {
+                objectname: objectname.to_string(),
+                symref: if symref.is_empty() {
+                    None
+                } else {
+                    Some(symref.to_string())
+                },
+                tree: if tree.is_empty() {
+                    None
+                } else {
+                    Some(tree.to_string())
+                },
+            },
+        );
+    }
+    (refs, true)
+}
+
+fn lookup_ref<'b>(
+    refs: &'b HashMap<String, RefEntry>,
+    name: &str,
+) -> Option<(&'b str, &'b RefEntry)> {
+    if name.starts_with("refs/") {
+        return refs.get_key_value(name).map(|(k, v)| (k.as_str(), v));
+    }
+    let head_key = format!("refs/heads/{name}");
+    if let Some((k, v)) = refs.get_key_value(&head_key) {
+        return Some((k.as_str(), v));
+    }
+    let remote_key = format!("refs/remotes/{name}");
+    if let Some((k, v)) = refs.get_key_value(&remote_key) {
+        return Some((k.as_str(), v));
+    }
+    None
+}
+
+fn find_default_branch_from_refs(refs: &HashMap<String, RefEntry>) -> String {
+    if let Some(head_entry) = refs.get("refs/remotes/origin/HEAD") {
+        if let Some(ref symref) = head_entry.symref {
+            let target = symref.strip_prefix("refs/remotes/").unwrap_or(symref);
+            let branch_name = target.strip_prefix("origin/").unwrap_or(target);
+            if refs.contains_key(&format!("refs/heads/{branch_name}")) {
+                return branch_name.to_string();
+            }
+            if refs.contains_key(symref) || refs.contains_key(&format!("refs/remotes/{target}")) {
+                return target.to_string();
+            }
+            return branch_name.to_string();
+        }
+    }
+    if refs.contains_key("refs/heads/main") {
+        return "main".to_string();
+    }
+    if refs.contains_key("refs/heads/master") {
+        return "master".to_string();
+    }
+    "main".to_string()
+}
+
 /// Context for cleaning a repository, caching metadata to avoid redundant git calls and disk reads.
 pub struct CleanContext<'a> {
     pub root: &'a Path,
     pub start_files: HashMap<String, serde_json::Value>,
     pub all_run_ids: Vec<String>,
+    pub refs: HashMap<String, RefEntry>,
+    pub refs_loaded: bool,
     pub wip_branch_tips: HashMap<String, String>,
     pub default_branch: String,
     pub origin_default: Option<String>,
@@ -476,6 +566,10 @@ pub struct CleanContext<'a> {
     pub cherry_pick_set: Option<HashSet<String>>,
     pub rev_list_cache: HashMap<String, Vec<String>>,
     pub ancestor_cache: HashMap<(String, String), bool>,
+    pub contains_target: HashSet<(String, String)>,
+    pub merge_base_cache: HashMap<(String, String), Option<String>>,
+    pub cherry_cache: HashMap<(String, String), bool>,
+    pub merge_tree_cache: HashMap<(String, String), bool>,
 }
 
 impl<'a> CleanContext<'a> {
@@ -498,48 +592,133 @@ impl<'a> CleanContext<'a> {
         }
         all_run_ids.sort();
 
+        let (refs, refs_loaded) = load_refs(root);
+
         let mut wip_branch_tips = HashMap::new();
-        let ref_out = std::process::Command::new("git")
-            .args([
-                "for-each-ref",
-                "--format=%(refname:short) %(objectname)",
-                "refs/heads/wip/",
-            ])
-            .current_dir(root)
-            .output();
-        if let Ok(o) = ref_out {
-            if o.status.success() {
-                for line in String::from_utf8_lossy(&o.stdout).lines() {
-                    let mut parts = line.split_whitespace();
-                    if let (Some(refname), Some(sha)) = (parts.next(), parts.next()) {
-                        wip_branch_tips.insert(refname.to_string(), sha.to_string());
-                    }
+        for (refname, entry) in &refs {
+            if let Some(short) = refname.strip_prefix("refs/heads/") {
+                if short.starts_with("wip/") {
+                    wip_branch_tips.insert(short.to_string(), entry.objectname.clone());
                 }
             }
         }
 
-        let default_branch = find_default_branch(root);
+        let default_branch = if refs_loaded {
+            find_default_branch_from_refs(&refs)
+        } else {
+            find_default_branch(root)
+        };
         let name = default_branch
             .strip_prefix("origin/")
             .unwrap_or(&default_branch);
         let remote = format!("origin/{name}");
         let origin_default = if remote != default_branch
-            && git_ok(root, &["rev-parse", "--verify", "--quiet", &remote])
-        {
+            && if refs_loaded {
+                refs.contains_key(&format!("refs/remotes/{remote}"))
+            } else {
+                git_ok(root, &["rev-parse", "--verify", "--quiet", &remote])
+            } {
             Some(remote)
         } else {
             None
         };
 
-        let default_tree = git_tree_sha(root, &default_branch);
-        let origin_default_tree = origin_default
-            .as_deref()
-            .and_then(|r| git_tree_sha(root, r));
+        let default_tree = if refs_loaded {
+            lookup_ref(&refs, &default_branch).and_then(|(_, e)| e.tree.clone())
+        } else {
+            git_tree_sha(root, &default_branch)
+        };
+        let origin_default_tree = origin_default.as_deref().and_then(|r| {
+            if refs_loaded {
+                lookup_ref(&refs, r).and_then(|(_, e)| e.tree.clone())
+            } else {
+                git_tree_sha(root, r)
+            }
+        });
+
+        let mut ancestor_cache = HashMap::new();
+        let mut contains_target = HashSet::new();
+
+        if refs_loaded {
+            let mut default_targets: Vec<String> = Vec::new();
+            if lookup_ref(&refs, &default_branch).is_some() {
+                default_targets.push(default_branch.clone());
+            }
+            if let Some(ref origin_def) = origin_default {
+                if lookup_ref(&refs, origin_def).is_some() {
+                    default_targets.push(origin_def.clone());
+                }
+            }
+
+            let mut seen_target_shas = HashSet::new();
+            for target in &default_targets {
+                let Some((_, target_entry)) = lookup_ref(&refs, target) else {
+                    continue;
+                };
+                let target_sha = target_entry.objectname.clone();
+                if !seen_target_shas.insert(target_sha.clone()) {
+                    continue;
+                }
+
+                let merged_out = std::process::Command::new("git")
+                    .args([
+                        "for-each-ref",
+                        &format!("--merged={target}"),
+                        "--format=%(refname:short)",
+                        "refs/heads",
+                    ])
+                    .current_dir(root)
+                    .output();
+                if let Ok(o) = merged_out {
+                    if o.status.success() {
+                        let merged_set: HashSet<String> = String::from_utf8_lossy(&o.stdout)
+                            .lines()
+                            .map(|l| l.trim().to_string())
+                            .filter(|l| !l.is_empty())
+                            .collect();
+                        for (refname, entry) in &refs {
+                            if let Some(short) = refname.strip_prefix("refs/heads/") {
+                                ancestor_cache.insert(
+                                    (entry.objectname.clone(), target_sha.clone()),
+                                    merged_set.contains(short),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                let contains_out = std::process::Command::new("git")
+                    .args([
+                        "for-each-ref",
+                        &format!("--contains={target}"),
+                        "--format=%(refname:short)",
+                        "refs/heads",
+                    ])
+                    .current_dir(root)
+                    .output();
+                if let Ok(o) = contains_out {
+                    if o.status.success() {
+                        for line in String::from_utf8_lossy(&o.stdout).lines() {
+                            let short = line.trim();
+                            if short.is_empty() {
+                                continue;
+                            }
+                            if let Some(entry) = refs.get(&format!("refs/heads/{short}")) {
+                                contains_target
+                                    .insert((entry.objectname.clone(), target_sha.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Self {
             root,
             start_files,
             all_run_ids,
+            refs,
+            refs_loaded,
             wip_branch_tips,
             default_branch,
             origin_default,
@@ -550,8 +729,82 @@ impl<'a> CleanContext<'a> {
             branch_contains_calls: 0,
             cherry_pick_set: None,
             rev_list_cache: HashMap::new(),
-            ancestor_cache: HashMap::new(),
+            ancestor_cache,
+            contains_target,
+            merge_base_cache: HashMap::new(),
+            cherry_cache: HashMap::new(),
+            merge_tree_cache: HashMap::new(),
         }
+    }
+
+    pub fn remove_branch(&mut self, branch_name: &str) {
+        self.wip_branch_tips.remove(branch_name);
+        self.refs.remove(&format!("refs/heads/{branch_name}"));
+    }
+
+    pub fn tree_sha(&self, ref_name: &str) -> Option<String> {
+        if let Some((_, entry)) = lookup_ref(&self.refs, ref_name) {
+            if entry.tree.is_some() {
+                return entry.tree.clone();
+            }
+        }
+        if self.refs_loaded
+            && (ref_name.starts_with("refs/heads/") || ref_name.starts_with("refs/remotes/origin/"))
+        {
+            return None;
+        }
+        git_tree_sha(self.root, ref_name)
+    }
+
+    fn ref_exists(&self, refname: &str) -> bool {
+        if lookup_ref(&self.refs, refname).is_some() {
+            return true;
+        }
+        if self.refs_loaded
+            && (refname.starts_with("refs/heads/") || refname.starts_with("refs/remotes/origin/"))
+        {
+            return false;
+        }
+        git_ok(self.root, &["rev-parse", "--verify", "--quiet", refname])
+    }
+
+    fn resolve_base_targets(&self, base: &str) -> Option<(String, Vec<String>)> {
+        resolve_base_targets_with(base, |cand| self.ref_exists(cand))
+    }
+
+    fn target_key(&self, target: &str) -> String {
+        lookup_ref(&self.refs, target)
+            .map(|(_, e)| e.objectname.clone())
+            .unwrap_or_else(|| target.to_string())
+    }
+
+    fn target_is_ancestor_of(&self, target: &str, commit_sha: &str) -> bool {
+        let key = (commit_sha.to_string(), self.target_key(target));
+        self.contains_target.contains(&key)
+    }
+
+    fn merge_base(&mut self, target: &str, commit_sha: &str) -> Option<String> {
+        let key = (self.target_key(target), commit_sha.to_string());
+        if let Some(cached) = self.merge_base_cache.get(&key) {
+            return cached.clone();
+        }
+        let mb_out = std::process::Command::new("git")
+            .args(["merge-base", target, commit_sha])
+            .current_dir(self.root)
+            .output();
+        let mb = match mb_out {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
+            _ => None,
+        };
+        self.merge_base_cache.insert(key, mb.clone());
+        mb
     }
 
     fn compute_cherry_pick_set(&self) -> HashSet<String> {
@@ -591,19 +844,32 @@ impl<'a> CleanContext<'a> {
         let mut targets = Vec::new();
         let mut seen = HashSet::new();
 
-        if git_ok(
-            self.root,
-            &["rev-parse", "--verify", "--quiet", &self.default_branch],
-        ) && seen.insert(self.default_branch.clone())
+        if lookup_ref(&self.refs, &self.default_branch).is_some()
+            || (!self.refs_loaded
+                && git_ok(
+                    self.root,
+                    &["rev-parse", "--verify", "--quiet", &self.default_branch],
+                ))
         {
-            targets.push(self.default_branch.clone());
+            let key = lookup_ref(&self.refs, &self.default_branch)
+                .map(|(k, _)| k.to_string())
+                .unwrap_or_else(|| self.default_branch.clone());
+            if seen.insert(key) {
+                targets.push(self.default_branch.clone());
+            }
         }
 
         if let Some(ref origin_def) = self.origin_default {
-            if git_ok(self.root, &["rev-parse", "--verify", "--quiet", origin_def])
-                && seen.insert(origin_def.clone())
+            if lookup_ref(&self.refs, origin_def).is_some()
+                || (!self.refs_loaded
+                    && git_ok(self.root, &["rev-parse", "--verify", "--quiet", origin_def]))
             {
-                targets.push(origin_def.clone());
+                let key = lookup_ref(&self.refs, origin_def)
+                    .map(|(k, _)| k.to_string())
+                    .unwrap_or_else(|| origin_def.clone());
+                if seen.insert(key) {
+                    targets.push(origin_def.clone());
+                }
             }
         }
 
@@ -614,9 +880,12 @@ impl<'a> CleanContext<'a> {
                 .and_then(|s| s.get("base"))
                 .and_then(|b| b.as_str())
             {
-                if let Some((_, base_targets)) = resolve_base_targets(self.root, base_str) {
+                if let Some((_, base_targets)) = self.resolve_base_targets(base_str) {
                     for bt in base_targets {
-                        if seen.insert(bt.clone()) {
+                        let key = lookup_ref(&self.refs, &bt)
+                            .map(|(k, _)| k.to_string())
+                            .unwrap_or_else(|| bt.clone());
+                        if seen.insert(key) {
                             targets.push(bt);
                         }
                     }
@@ -665,7 +934,7 @@ impl<'a> CleanContext<'a> {
     }
 
     fn is_ancestor_of_target(&mut self, commit_sha: &str, target: &str) -> bool {
-        let key = (commit_sha.to_string(), target.to_string());
+        let key = (commit_sha.to_string(), self.target_key(target));
         if let Some(&cached) = self.ancestor_cache.get(&key) {
             return cached;
         }
@@ -714,6 +983,9 @@ impl<'a> CleanContext<'a> {
     }
 
     fn is_in_cherry_pick_record(&mut self, tip_sha: &str) -> bool {
+        if self.get_cherry_pick_set().is_empty() {
+            return false;
+        }
         let commits = self.get_run_commits_against_default(tip_sha);
         if commits.is_empty() {
             return false;
@@ -725,6 +997,12 @@ impl<'a> CleanContext<'a> {
     pub fn get_branch_tip(&self, branch_name: &str) -> Option<String> {
         if let Some(sha) = self.wip_branch_tips.get(branch_name) {
             return Some(sha.clone());
+        }
+        if let Some(entry) = self.refs.get(&format!("refs/heads/{branch_name}")) {
+            return Some(entry.objectname.clone());
+        }
+        if self.refs_loaded {
+            return None;
         }
         get_branch_tip(self.root, branch_name)
     }
@@ -776,7 +1054,6 @@ impl<'a> CleanContext<'a> {
         let mut children = Vec::new();
         let mut seen = HashSet::new();
 
-        // 1. Edges from base fields directly
         for (candidate_id, start_val) in &self.start_files {
             if candidate_id == id {
                 continue;
@@ -792,8 +1069,11 @@ impl<'a> CleanContext<'a> {
             }
         }
 
-        // 2. Edges for runs without base:
-        if !tip_sha.is_empty() {
+        let has_other_without_base = self.start_files.iter().any(|(candidate_id, val)| {
+            candidate_id != id && val.get("base").is_none_or(|b| b.is_null())
+        });
+
+        if !tip_sha.is_empty() && has_other_without_base {
             let tip_sha_owned = tip_sha.to_string();
             let containing_branches = self.get_wip_branches_containing(&tip_sha_owned);
             for b in containing_branches {
@@ -900,6 +1180,126 @@ impl<'a> CleanContext<'a> {
         result
     }
 
+    fn check_history_merged(
+        &mut self,
+        tip_sha: &str,
+        target: &str,
+        started_at: Option<&serde_json::Value>,
+    ) -> bool {
+        if self.target_is_ancestor_of(target, tip_sha) {
+            return false;
+        }
+        let Some(merge_base) = self.merge_base(target, tip_sha) else {
+            return false;
+        };
+        check_history_merged_with_base(self.root, tip_sha, target, &merge_base, started_at)
+    }
+
+    fn is_squash_merged_into_target(&mut self, commit_sha: &str, target: &str) -> bool {
+        if self.target_is_ancestor_of(target, commit_sha) {
+            return false;
+        }
+        let Some(merge_base) = self.merge_base(target, commit_sha) else {
+            return false;
+        };
+        is_squash_merged_with_base(self.root, commit_sha, target, &merge_base)
+    }
+
+    fn is_cherry_merged_into_target(&mut self, commit_sha: &str, target: &str) -> bool {
+        let key = (commit_sha.to_string(), self.target_key(target));
+        if let Some(&cached) = self.cherry_cache.get(&key) {
+            return cached;
+        }
+        let merged = is_cherry_merged_into_target(self.root, commit_sha, target);
+        self.cherry_cache.insert(key, merged);
+        merged
+    }
+
+    fn is_merge_tree_merged_into_target(
+        &mut self,
+        commit_sha: &str,
+        target: &str,
+        target_tree: Option<&str>,
+    ) -> bool {
+        let key = (commit_sha.to_string(), self.target_key(target));
+        if let Some(&cached) = self.merge_tree_cache.get(&key) {
+            return cached;
+        }
+        let resolved_tree = match target_tree {
+            Some(t) => Some(t.to_string()),
+            None => self.tree_sha(target),
+        };
+        let merged = match resolved_tree.as_deref() {
+            Some(tree) => {
+                is_merge_tree_merged_into_target(self.root, commit_sha, target, Some(tree))
+            }
+            None => false,
+        };
+        self.merge_tree_cache.insert(key, merged);
+        merged
+    }
+
+    fn merged_into(&mut self, commit_sha: &str, target: &str) -> bool {
+        if self.is_ancestor_of_target(commit_sha, target) {
+            return true;
+        }
+        if self.is_cherry_merged_into_target(commit_sha, target) {
+            return true;
+        }
+        if self.is_merge_tree_merged_into_target(commit_sha, target, None) {
+            return true;
+        }
+        if self.is_squash_merged_into_target(commit_sha, target) {
+            return true;
+        }
+        false
+    }
+
+    pub fn is_commit_merged_with_targets(
+        &mut self,
+        commit_sha: &str,
+        extra_targets: &[&str],
+    ) -> bool {
+        let def = self.default_branch.clone();
+        if self.merged_into(commit_sha, &def) {
+            return true;
+        }
+        if let Some(origin_def) = self.origin_default.clone() {
+            if self.merged_into(commit_sha, &origin_def) {
+                return true;
+            }
+        }
+        for &extra in extra_targets {
+            if self.ref_exists(extra) && self.merged_into(commit_sha, extra) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn is_commit_merged(&mut self, commit_sha: &str) -> bool {
+        self.is_commit_merged_with_targets(commit_sha, &[])
+    }
+
+    pub fn is_branch_merged_with_targets(
+        &mut self,
+        branch_name: &str,
+        extra_targets: &[&str],
+    ) -> bool {
+        let Some(tip) = self.get_branch_tip(branch_name) else {
+            return false;
+        };
+        self.is_commit_merged_with_targets(&tip, extra_targets)
+    }
+
+    pub fn is_branch_merged(&mut self, branch_name: &str) -> bool {
+        if let Some(id) = branch_name.strip_prefix("wip/") {
+            self.check_run_merged(id).is_some()
+        } else {
+            self.is_branch_merged_with_targets(branch_name, &[])
+        }
+    }
+
     fn decide_run_merged(
         &mut self,
         id: &str,
@@ -913,7 +1313,7 @@ impl<'a> CleanContext<'a> {
         });
         let base_targets = base_opt
             .as_deref()
-            .and_then(|b| resolve_base_targets(self.root, b));
+            .and_then(|b| self.resolve_base_targets(b));
         let started_at = self
             .start_files
             .get(id)
@@ -921,33 +1321,29 @@ impl<'a> CleanContext<'a> {
             .cloned();
 
         if let Some(tip_sha) = tip_sha {
-            // 1. Ancestor (merge-base --is-ancestor)
             if self.is_ancestor_of_default(tip_sha) {
                 return Some(RemovalReason::Merged);
             }
 
-            // 2. The cherry-pick record
             if self.is_in_cherry_pick_record(tip_sha) {
                 return Some(RemovalReason::Merged);
             }
 
-            // 3. The base-branch checks
             if let Some((ref display_name, ref targets)) = base_targets {
                 for target in targets {
                     if self.is_ancestor_of_target(tip_sha, target) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
-                    if is_cherry_merged_into_target(self.root, tip_sha, target) {
+                    if self.is_cherry_merged_into_target(tip_sha, target) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
-                    if is_merge_tree_merged_into_target(self.root, tip_sha, target, None) {
+                    if self.is_merge_tree_merged_into_target(tip_sha, target, None) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
                 }
             }
         }
 
-        // 4. The follow-up rule
         let children = self.get_children_of(id, tip_sha.unwrap_or(""));
         for child in children {
             if visited.contains(&child) {
@@ -959,59 +1355,47 @@ impl<'a> CleanContext<'a> {
         }
 
         if let Some(tip_sha) = tip_sha {
-            // 5. git cherry
-            if is_cherry_merged_into_target(self.root, tip_sha, &self.default_branch) {
+            let def = self.default_branch.clone();
+            if self.is_cherry_merged_into_target(tip_sha, &def) {
                 return Some(RemovalReason::Merged);
             }
-            if let Some(ref origin_def) = self.origin_default {
-                if is_cherry_merged_into_target(self.root, tip_sha, origin_def) {
+            if let Some(origin_def) = self.origin_default.clone() {
+                if self.is_cherry_merged_into_target(tip_sha, &origin_def) {
                     return Some(RemovalReason::Merged);
                 }
             }
 
-            // 6. merge-tree against current tips
-            if is_merge_tree_merged_into_target(
-                self.root,
-                tip_sha,
-                &self.default_branch,
-                self.default_tree.as_deref(),
-            ) {
+            let def_tree = self.default_tree.clone();
+            if self.is_merge_tree_merged_into_target(tip_sha, &def, def_tree.as_deref()) {
                 return Some(RemovalReason::Merged);
             }
-            if let Some(ref origin_def) = self.origin_default {
-                if is_merge_tree_merged_into_target(
-                    self.root,
+            if let Some(origin_def) = self.origin_default.clone() {
+                let origin_tree = self.origin_default_tree.clone();
+                if self.is_merge_tree_merged_into_target(
                     tip_sha,
-                    origin_def,
-                    self.origin_default_tree.as_deref(),
+                    &origin_def,
+                    origin_tree.as_deref(),
                 ) {
                     return Some(RemovalReason::Merged);
                 }
             }
 
-            // 7. history walk (explicit blyte clean only)
-            if check_history_merged(
-                self.root,
-                tip_sha,
-                &self.default_branch,
-                started_at.as_ref(),
-            ) {
+            if self.check_history_merged(tip_sha, &def, started_at.as_ref()) {
                 return Some(RemovalReason::Merged);
             }
-            if let Some(ref origin_def) = self.origin_default {
-                if check_history_merged(self.root, tip_sha, origin_def, started_at.as_ref()) {
+            if let Some(origin_def) = self.origin_default.clone() {
+                if self.check_history_merged(tip_sha, &origin_def, started_at.as_ref()) {
                     return Some(RemovalReason::Merged);
                 }
             }
             if let Some((ref display_name, ref targets)) = base_targets {
                 for target in targets {
-                    if check_history_merged(self.root, tip_sha, target, started_at.as_ref()) {
+                    if self.check_history_merged(tip_sha, target, started_at.as_ref()) {
                         return Some(RemovalReason::MergedInto(display_name.clone()));
                     }
                 }
             }
 
-            // 8. squash-merge subject match
             if let Some(reason) = self.squash_merged_reason(tip_sha, &base_targets) {
                 return Some(reason);
             }
@@ -1021,21 +1405,22 @@ impl<'a> CleanContext<'a> {
     }
 
     fn squash_merged_reason(
-        &self,
+        &mut self,
         tip_sha: &str,
         base_targets: &Option<(String, Vec<String>)>,
     ) -> Option<RemovalReason> {
-        if is_squash_merged_into_target(self.root, tip_sha, &self.default_branch) {
+        let def = self.default_branch.clone();
+        if self.is_squash_merged_into_target(tip_sha, &def) {
             return Some(RemovalReason::Merged);
         }
-        if let Some(ref origin_def) = self.origin_default {
-            if is_squash_merged_into_target(self.root, tip_sha, origin_def) {
+        if let Some(origin_def) = self.origin_default.clone() {
+            if self.is_squash_merged_into_target(tip_sha, &origin_def) {
                 return Some(RemovalReason::Merged);
             }
         }
         if let Some((ref display_name, ref targets)) = base_targets {
             for target in targets {
-                if is_squash_merged_into_target(self.root, tip_sha, target) {
+                if self.is_squash_merged_into_target(tip_sha, target) {
                     return Some(RemovalReason::MergedInto(display_name.clone()));
                 }
             }
@@ -1272,11 +1657,10 @@ fn is_commit_id(s: &str) -> bool {
     (s.len() >= 7 && s.len() <= 64) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Resolves candidate git refs for a run's base branch.
-/// Returns (display_name, targets) if `base` is a branch name that resolves.
-/// Returns None if `base` is not a branch name (e.g. HEAD, commit id, wip/ branch)
-/// or if none of the candidate refs resolve in git.
-pub fn resolve_base_targets(root: &Path, base: &str) -> Option<(String, Vec<String>)> {
+fn resolve_base_targets_with<F>(base: &str, mut ref_exists: F) -> Option<(String, Vec<String>)>
+where
+    F: FnMut(&str) -> bool,
+{
     let base = base.trim();
     if base.is_empty() {
         return None;
@@ -1337,7 +1721,7 @@ pub fn resolve_base_targets(root: &Path, base: &str) -> Option<(String, Vec<Stri
 
     let mut resolved = Vec::new();
     for cand in candidates {
-        if git_ok(root, &["rev-parse", "--verify", "--quiet", &cand]) {
+        if ref_exists(&cand) {
             resolved.push(cand);
         }
     }
@@ -1347,6 +1731,16 @@ pub fn resolve_base_targets(root: &Path, base: &str) -> Option<(String, Vec<Stri
     } else {
         Some((display_name, resolved))
     }
+}
+
+/// Resolves candidate git refs for a run's base branch.
+/// Returns (display_name, targets) if `base` is a branch name that resolves.
+/// Returns None if `base` is not a branch name (e.g. HEAD, commit id, wip/ branch)
+/// or if none of the candidate refs resolve in git.
+pub fn resolve_base_targets(root: &Path, base: &str) -> Option<(String, Vec<String>)> {
+    resolve_base_targets_with(base, |cand| {
+        git_ok(root, &["rev-parse", "--verify", "--quiet", cand])
+    })
 }
 
 /// Reads `base` from `.wt/<id>.start.json` if present.
@@ -1397,11 +1791,7 @@ pub fn get_branch_tip(root: &Path, branch_name: &str) -> Option<String> {
 /// - every commit's subject on <branch> appears as a whole line in the messages of <default>'s commits since the branch forked (a GitHub squash merge lists them).
 pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
     let mut ctx = CleanContext::new(root);
-    if let Some(id) = branch_name.strip_prefix("wip/") {
-        ctx.check_run_merged(id).is_some()
-    } else {
-        is_branch_merged_with_targets(root, branch_name, &[])
-    }
+    ctx.is_branch_merged(branch_name)
 }
 
 /// Checks whether a branch's work is on the default branch or any of the extra target refs.
@@ -1410,11 +1800,8 @@ pub fn is_branch_merged_with_targets(
     branch_name: &str,
     extra_targets: &[&str],
 ) -> bool {
-    let Some(tip_sha) = get_branch_tip(root, branch_name) else {
-        return false;
-    };
-
-    is_commit_merged_with_targets(root, &tip_sha, extra_targets)
+    let mut ctx = CleanContext::new(root);
+    ctx.is_branch_merged_with_targets(branch_name, extra_targets)
 }
 
 /// Checks whether a branch's work is on the default branch or any of the extra target refs.
@@ -1432,7 +1819,8 @@ pub fn is_branch_merged_with_extra_targets(
 /// - merging it would change nothing: `git merge-tree --write-tree <default> <commit>` exits 0
 ///   and the tree id it prints equals `git rev-parse <default>^{tree}`.
 pub fn is_commit_merged(root: &Path, commit_sha: &str) -> bool {
-    is_commit_merged_with_targets(root, commit_sha, &[])
+    let mut ctx = CleanContext::new(root);
+    ctx.is_commit_merged(commit_sha)
 }
 
 /// Checks whether a commit's work is on the default branch or any of the extra target refs.
@@ -1441,25 +1829,8 @@ pub fn is_commit_merged_with_targets(
     commit_sha: &str,
     extra_targets: &[&str],
 ) -> bool {
-    let default_branch = find_default_branch(root);
-    // The local default branch can be far behind the remote one (1,292 commits in one repository,
-    // 2026-10-01), so the remote-tracking branch, as of the last fetch, counts too.
-    let name = default_branch
-        .strip_prefix("origin/")
-        .unwrap_or(&default_branch);
-    let remote = format!("origin/{name}");
-    let mut targets = vec![default_branch.clone()];
-    if remote != default_branch && git_ok(root, &["rev-parse", "--verify", "--quiet", &remote]) {
-        targets.push(remote);
-    }
-    for extra in extra_targets {
-        if git_ok(root, &["rev-parse", "--verify", "--quiet", extra]) {
-            targets.push(extra.to_string());
-        }
-    }
-    targets
-        .iter()
-        .any(|target| merged_into(root, commit_sha, target))
+    let mut ctx = CleanContext::new(root);
+    ctx.is_commit_merged_with_targets(commit_sha, extra_targets)
 }
 
 fn git_ok(root: &Path, args: &[&str]) -> bool {
@@ -1471,83 +1842,7 @@ fn git_ok(root: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the commit's work is already on `default_branch`.
-fn merged_into(root: &Path, commit_sha: &str, default_branch: &str) -> bool {
-    // 1. `git merge-base --is-ancestor <tip> <default>` succeeds
-    let ancestor_check = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", commit_sha, default_branch])
-        .current_dir(root)
-        .output();
-    if ancestor_check.map(|c| c.status.success()).unwrap_or(false) {
-        return true;
-    }
-
-    // 2. every commit `git cherry <default> <commit>` lists is marked `-`
-    let cherry_out = std::process::Command::new("git")
-        .args(["cherry", default_branch, commit_sha])
-        .current_dir(root)
-        .output();
-    if let Ok(o) = cherry_out {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let lines: Vec<&str> = s
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect();
-            if !lines.is_empty() && lines.iter().all(|l| l.starts_with('-')) {
-                return true;
-            }
-        }
-    }
-
-    // 3. merging it would change nothing: `git merge-tree --write-tree <default> <commit>` exits 0
-    // and the tree id it prints equals `git rev-parse <default>^{tree}`
-    let default_tree_out = std::process::Command::new("git")
-        .args(["rev-parse", &format!("{default_branch}^{{tree}}")])
-        .current_dir(root)
-        .output();
-    if let Ok(tree_o) = default_tree_out {
-        if tree_o.status.success() {
-            let default_tree = String::from_utf8_lossy(&tree_o.stdout).trim().to_string();
-            let merge_tree_out = std::process::Command::new("git")
-                .args(["merge-tree", "--write-tree", default_branch, commit_sha])
-                .current_dir(root)
-                .output();
-            if let Ok(mt_o) = merge_tree_out {
-                if mt_o.status.success() {
-                    let mt_stdout = String::from_utf8_lossy(&mt_o.stdout);
-                    if let Some(first_line) = mt_stdout.lines().next() {
-                        if first_line.trim() == default_tree {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 4. every commit's subject on <commit> appears as a whole line in the messages of <default>'s
-    // commits since the branch forked
-    is_squash_merged_into_target(root, commit_sha, default_branch)
-}
-
-fn is_squash_merged_into_target(root: &Path, commit_sha: &str, target: &str) -> bool {
-    let mb_out = std::process::Command::new("git")
-        .args(["merge-base", target, commit_sha])
-        .current_dir(root)
-        .output();
-    let Ok(mb_o) = mb_out else {
-        return false;
-    };
-    if !mb_o.status.success() {
-        return false;
-    }
-    let base = String::from_utf8_lossy(&mb_o.stdout).trim().to_string();
-    if base.is_empty() {
-        return false;
-    }
-
+fn is_squash_merged_with_base(root: &Path, commit_sha: &str, target: &str, base: &str) -> bool {
     let subj_out = std::process::Command::new("git")
         .args([
             "log",
@@ -1797,17 +2092,16 @@ pub fn is_worktree_idle(wt_path: &Path, idle_days: u64) -> Result<bool, String> 
     Ok(true)
 }
 
-/// Evaluates whether a session worktree is removable.
-pub fn check_session_worktree_removable(
-    root: &Path,
+fn check_session_worktree_removable_with_ctx(
+    ctx: &mut CleanContext<'_>,
     wt: &GitWorktreeInfo,
     cwds: &Result<Vec<PathBuf>, String>,
     idle_days: u64,
 ) -> Result<RemovalReason, KeptReason> {
     let is_merged = if let Some(ref branch) = wt.branch {
-        is_branch_merged(root, branch)
+        ctx.is_branch_merged(branch)
     } else if let Some(ref sha) = wt.head_sha {
-        is_commit_merged(root, sha)
+        ctx.is_commit_merged(sha)
     } else {
         false
     };
@@ -1816,7 +2110,7 @@ pub fn check_session_worktree_removable(
     }
 
     if has_dispatched_runs(&wt.path) {
-        let display_path = display_worktree_path(&wt.path, root);
+        let display_path = display_worktree_path(&wt.path, ctx.root);
         return Err(KeptReason::HoldsRuns(display_path));
     }
 
@@ -1852,6 +2146,17 @@ pub fn check_session_worktree_removable(
             .unwrap_or_else(|| "detached".to_string())
     });
     Ok(RemovalReason::SessionMerged(branch_label))
+}
+
+/// Evaluates whether a session worktree is removable.
+pub fn check_session_worktree_removable(
+    root: &Path,
+    wt: &GitWorktreeInfo,
+    cwds: &Result<Vec<PathBuf>, String>,
+    idle_days: u64,
+) -> Result<RemovalReason, KeptReason> {
+    let mut ctx = CleanContext::new(root);
+    check_session_worktree_removable_with_ctx(&mut ctx, wt, cwds, idle_days)
 }
 
 fn branch_checked_out_elsewhere(
@@ -1910,8 +2215,16 @@ pub fn clean_repo_with_options(
     let mut removed_worktrees = 0;
     let mut freed_bytes = 0;
     let mut had_errors = false;
+    let mut needs_worktree_prune = false;
 
     let mut ctx = CleanContext::new(root);
+    let is_linked = is_linked_worktree(root);
+    let all_worktrees = if !is_linked {
+        parse_worktree_list(root)
+    } else {
+        Vec::new()
+    };
+
     let ids = find_blyte_worktrees(root);
     for id in ids {
         if skip_id == Some(&id) {
@@ -1988,10 +2301,7 @@ pub fn clean_repo_with_options(
                             .args(["worktree", "remove", wt_path.to_str().unwrap_or("")])
                             .current_dir(root)
                             .output();
-                        let _ = std::process::Command::new("git")
-                            .args(["worktree", "prune"])
-                            .current_dir(root)
-                            .output();
+                        needs_worktree_prune = true;
                         rm_out.map(|o| o.status.success()).unwrap_or(false)
                     };
 
@@ -2007,7 +2317,7 @@ pub fn clean_repo_with_options(
                                 .current_dir(root)
                                 .output();
                             if del_out.map(|o| o.status.success()).unwrap_or(false) {
-                                ctx.wip_branch_tips.remove(&branch_name);
+                                ctx.remove_branch(&branch_name);
                                 if !quiet {
                                     println!("deleted branch {branch_name} (merged)");
                                 }
@@ -2021,8 +2331,7 @@ pub fn clean_repo_with_options(
         }
     }
 
-    if !is_linked_worktree(root) {
-        let all_worktrees = parse_worktree_list(root);
+    if !is_linked {
         let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let main_canon = all_worktrees
             .first()
@@ -2055,7 +2364,12 @@ pub fn clean_repo_with_options(
             for (display_path, idx) in session_indices {
                 let wt = &all_worktrees[idx];
                 let wt_canon = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
-                match check_session_worktree_removable(root, wt, &cwds, session_idle_days) {
+                match check_session_worktree_removable_with_ctx(
+                    &mut ctx,
+                    wt,
+                    &cwds,
+                    session_idle_days,
+                ) {
                     Err(kept_reason) => {
                         if !quiet {
                             println!("kept {display_path} ({kept_reason})");
@@ -2076,7 +2390,7 @@ pub fn clean_repo_with_options(
                                         &removed_wt_paths,
                                         &wt_canon,
                                         branch_name,
-                                    ) && get_branch_tip(root, branch_name).is_some()
+                                    ) && ctx.get_branch_tip(branch_name).is_some()
                                     {
                                         println!("would delete branch {branch_name} (merged)");
                                     }
@@ -2093,10 +2407,7 @@ pub fn clean_repo_with_options(
                                 .output();
                             match rm_out {
                                 Ok(o) if o.status.success() => {
-                                    let _ = std::process::Command::new("git")
-                                        .args(["worktree", "prune"])
-                                        .current_dir(root)
-                                        .output();
+                                    needs_worktree_prune = true;
                                     removed_wt_paths.insert(wt_canon.clone());
                                     freed_bytes += size;
                                     removed_worktrees += 1;
@@ -2112,7 +2423,7 @@ pub fn clean_repo_with_options(
                                             &removed_wt_paths,
                                             &wt_canon,
                                             branch_name,
-                                        ) && get_branch_tip(root, branch_name).is_some()
+                                        ) && ctx.get_branch_tip(branch_name).is_some()
                                         {
                                             let del_out = std::process::Command::new("git")
                                                 .args(["branch", "-D", branch_name])
@@ -2120,7 +2431,7 @@ pub fn clean_repo_with_options(
                                                 .output();
                                             match del_out {
                                                 Ok(o) if o.status.success() => {
-                                                    ctx.wip_branch_tips.remove(branch_name);
+                                                    ctx.remove_branch(branch_name);
                                                     if !quiet {
                                                         println!(
                                                             "deleted branch {branch_name} (merged)"
@@ -2171,8 +2482,15 @@ pub fn clean_repo_with_options(
         }
     }
 
-    if !quiet {
-        report_other_worktrees(root);
+    if needs_worktree_prune {
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(root)
+            .output();
+    }
+
+    if !quiet && !is_linked {
+        report_other_worktrees_with_ctx(root, &mut ctx, &all_worktrees);
     }
 
     CleanRepoStats {
@@ -2307,31 +2625,29 @@ pub fn display_worktree_path(target: &Path, root: &Path) -> String {
 
 /// Returns true if `root` is a linked worktree (its git-dir differs from its git-common-dir).
 pub fn is_linked_worktree(root: &Path) -> bool {
-    let git_dir_out = std::process::Command::new("git")
-        .args(["rev-parse", "--git-dir"])
+    let out = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
         .current_dir(root)
         .output();
-    let common_dir_out = std::process::Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(root)
-        .output();
-    match (git_dir_out, common_dir_out) {
-        (Ok(gd), Ok(cd)) if gd.status.success() && cd.status.success() => {
-            let gd_str = String::from_utf8_lossy(&gd.stdout).trim().to_string();
-            let cd_str = String::from_utf8_lossy(&cd.stdout).trim().to_string();
+    match out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let mut lines = text.lines();
+            let (Some(gd_str), Some(cd_str)) = (lines.next(), lines.next()) else {
+                return false;
+            };
+            let gd_str = gd_str.trim();
+            let cd_str = cd_str.trim();
             if gd_str == cd_str {
                 return false;
             }
-            let gd_path = if Path::new(&gd_str).is_absolute() {
-                PathBuf::from(&gd_str)
-            } else {
-                root.join(&gd_str)
-            };
-            let cd_path = if Path::new(&cd_str).is_absolute() {
-                PathBuf::from(&cd_str)
-            } else {
-                root.join(&cd_str)
-            };
+            let gd_path = PathBuf::from(gd_str);
+            let cd_path = PathBuf::from(cd_str);
             let gd_canon = gd_path.canonicalize().unwrap_or(gd_path);
             let cd_canon = cd_path.canonicalize().unwrap_or(cd_path);
             gd_canon != cd_canon
@@ -2383,17 +2699,11 @@ pub fn is_worktree_clean(wt_path: &Path) -> bool {
     }
 }
 
-/// Inspects other worktrees (excluding main checkout, linked-worktree roots,
-/// and blyte's `.wt/<id>` runs), and reports any that are both merged and clean.
-/// Never deletes them.
-pub fn report_other_worktrees(root: &Path) {
-    // Only report from the main worktree. If the root being cleaned is a linked worktree,
-    // print nothing about other worktrees for it.
-    if is_linked_worktree(root) {
-        return;
-    }
-
-    let worktrees = parse_worktree_list(root);
+fn report_other_worktrees_with_ctx(
+    root: &Path,
+    ctx: &mut CleanContext<'_>,
+    worktrees: &[GitWorktreeInfo],
+) {
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let main_canon = worktrees
         .first()
@@ -2402,8 +2712,7 @@ pub fn report_other_worktrees(root: &Path) {
     let mut other_count = 0;
     let mut other_bytes = 0;
 
-    for (idx, wt) in worktrees.into_iter().enumerate() {
-        // Never list the main worktree (first entry of git worktree list --porcelain)
+    for (idx, wt) in worktrees.iter().enumerate() {
         if idx == 0 {
             continue;
         }
@@ -2415,14 +2724,12 @@ pub fn report_other_worktrees(root: &Path) {
         }
 
         let wt_canon = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
-        // Skip the main checkout as well as the root itself
         if wt_canon == root_canon || wt.path == root {
             continue;
         }
         if Some(&wt_canon) == main_canon.as_ref() {
             continue;
         }
-        // Never list blyte runs or session worktrees handled by clean_repo
         if has_wt_component(&wt.path)
             || has_wt_component(&wt_canon)
             || is_session_worktree(root, &wt.path)
@@ -2430,11 +2737,10 @@ pub fn report_other_worktrees(root: &Path) {
             continue;
         }
 
-        // Check if merged
         let is_merged = if let Some(ref branch) = wt.branch {
-            is_branch_merged(root, branch)
+            ctx.is_branch_merged(branch)
         } else if let Some(ref sha) = wt.head_sha {
-            is_commit_merged(root, sha)
+            ctx.is_commit_merged(sha)
         } else {
             false
         };
@@ -2443,7 +2749,6 @@ pub fn report_other_worktrees(root: &Path) {
             continue;
         }
 
-        // Check if clean (lists nothing other than .DS_Store files)
         if !is_worktree_clean(&wt.path) {
             continue;
         }
@@ -2472,6 +2777,18 @@ pub fn report_other_worktrees(root: &Path) {
             format_size(other_bytes)
         );
     }
+}
+
+/// Inspects other worktrees (excluding main checkout, linked-worktree roots,
+/// and blyte's `.wt/<id>` runs), and reports any that are both merged and clean.
+/// Never deletes them.
+pub fn report_other_worktrees(root: &Path) {
+    if is_linked_worktree(root) {
+        return;
+    }
+    let worktrees = parse_worktree_list(root);
+    let mut ctx = CleanContext::new(root);
+    report_other_worktrees_with_ctx(root, &mut ctx, &worktrees);
 }
 
 struct CleanLockGuard(PathBuf);
@@ -2717,15 +3034,11 @@ pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, Stri
     }
 
     if ctx.get_branch_tip(&branch_name).is_some() {
-        if !is_branch_merged(root, &branch_name) {
+        let Some(reason) = ctx.check_run_merged(id) else {
             return Ok(None);
-        }
-        let reason = ctx
-            .check_run_merged(id)
-            .unwrap_or(RemovalReason::Merged)
-            .to_string();
+        };
         delete_wip_branch_strict(root, &branch_name)?;
-        return Ok(Some(reason));
+        return Ok(Some(reason.to_string()));
     }
 
     Ok(None)

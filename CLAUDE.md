@@ -9,7 +9,7 @@ Small fixes found during validation, plan edits and docs may be done directly.
 ## Repo basics
 
 - Rust workspace (`crates/`); binary `blyte`.
-- Checks (same as CI): `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --all-targets`
+- Checks (same as CI): `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && python3 scripts/test-parallel.py -- --workspace --all-targets`
 - Faster local test step: python3 scripts/test-changed.py tests only the crates a change affects; CI runs the whole suite.
 - Specs and plans live in `docs/specs/` and `docs/plans/`. `docs/superpowers/` holds the older ones, as written at the time.
 - Worktrees live in `.wt/<task>` (gitignored), not the sibling-directory default.
