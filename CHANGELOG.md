@@ -1,3 +1,9 @@
+## v0.62.0 (2026-11-24)
+
+### Feat
+
+- surface without a terminal, review concerns in the fix round, Review count fixes, internal commands out of the help (#416)
+
 ## v0.61.0 (2026-11-24)
 
 ### Feat
