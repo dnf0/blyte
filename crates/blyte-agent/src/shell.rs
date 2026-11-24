@@ -137,7 +137,16 @@ pub fn withheld_env() -> Vec<String> {
     withheld
 }
 
+pub const MODEL_SHELL_ENV: &str = "BLYTE_MODEL_SHELL";
+
+pub fn model_shell_refusal_message(command: &str) -> String {
+    format!(
+        "error: blyte {command} writes a record only the user or the harness may write, and cannot be run from a model's shell"
+    )
+}
+
 fn scrub_harness(cmd: &mut Command) {
+    cmd.env_remove(MODEL_SHELL_ENV);
     for name in HARNESS_ENV {
         cmd.env_remove(name);
     }
@@ -530,12 +539,19 @@ impl Shell for LocalShell {
         exec_command(cmd, timeout)
     }
 
+    fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let mut cmd = self.build_command(command, cwd)?;
+        cmd.env(MODEL_SHELL_ENV, "1");
+        exec_command(cmd, timeout)
+    }
+
     fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
         let full_command = inherited_path_prefix() + command;
         let mut cmd = Command::new("bash");
         cmd.arg("-lc").arg(&full_command);
         cmd.current_dir(cwd);
         scrub_harness(&mut cmd);
+        cmd.env(MODEL_SHELL_ENV, "1");
         exec_command(cmd, timeout)
     }
 
@@ -557,6 +573,22 @@ impl Shell for CancellableLocalShell {
         exec_command_cancellable(cmd, timeout, Some(&self.cancel))
     }
 
+    fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let mut cmd = self.inner.build_command(command, cwd)?;
+        cmd.env(MODEL_SHELL_ENV, "1");
+        exec_command_cancellable(cmd, timeout, Some(&self.cancel))
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let full_command = inherited_path_prefix() + command;
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc").arg(&full_command);
+        cmd.current_dir(cwd);
+        scrub_harness(&mut cmd);
+        cmd.env(MODEL_SHELL_ENV, "1");
+        exec_command_cancellable(cmd, timeout, Some(&self.cancel))
+    }
+
     fn describe(&self) -> String {
         self.inner.describe()
     }
@@ -574,9 +606,13 @@ pub struct ContainerShell {
 }
 
 impl ContainerShell {
-    fn build_command(&self, command: &str) -> Command {
+    fn build_command(&self, command: &str, model_shell: bool) -> Command {
         let mut cmd = Command::new("docker");
-        cmd.args(["exec", "-i", "-w"])
+        cmd.args(["exec", "-i"]);
+        if model_shell {
+            cmd.args(["-e", "BLYTE_MODEL_SHELL=1"]);
+        }
+        cmd.arg("-w")
             .arg(&self.workdir)
             .arg(&self.container_id)
             .args(["bash", "-lc", command]);
@@ -586,7 +622,11 @@ impl ContainerShell {
 
 impl Shell for ContainerShell {
     fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        exec_command(self.build_command(command), timeout)
+        exec_command(self.build_command(command, false), timeout)
+    }
+
+    fn exec_user(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        exec_command(self.build_command(command, true), timeout)
     }
 
     fn describe(&self) -> String {
@@ -608,7 +648,15 @@ pub struct CancellableContainerShell {
 impl Shell for CancellableContainerShell {
     fn exec(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
         exec_command_cancellable(
-            self.inner.build_command(command),
+            self.inner.build_command(command, false),
+            timeout,
+            Some(&self.cancel),
+        )
+    }
+
+    fn exec_user(&self, command: &str, _cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        exec_command_cancellable(
+            self.inner.build_command(command, true),
             timeout,
             Some(&self.cancel),
         )
@@ -648,7 +696,7 @@ pub enum Launcher {
 }
 
 impl Launcher {
-    fn command(&self) -> std::io::Result<Command> {
+    fn command(&self, model_shell: bool) -> std::io::Result<Command> {
         match self {
             Launcher::Local { root, profile } => {
                 let mut c = match profile {
@@ -725,6 +773,9 @@ impl Launcher {
                 };
                 c.current_dir(root);
                 scrub(&mut c);
+                if model_shell {
+                    c.env(MODEL_SHELL_ENV, "1");
+                }
                 Ok(c)
             }
             Launcher::Container {
@@ -732,12 +783,32 @@ impl Launcher {
                 workdir,
             } => {
                 let mut c = Command::new("docker");
-                c.args(["exec", "-i", "-w"])
+                c.args(["exec", "-i"]);
+                if model_shell {
+                    c.args(["-e", "BLYTE_MODEL_SHELL=1"]);
+                }
+                c.arg("-w")
                     .arg(workdir)
                     .arg(container_id)
                     .args(["bash", "-l"]);
                 Ok(c)
             }
+        }
+    }
+
+    fn with_profile(&self, profile: Profile) -> Self {
+        match self {
+            Launcher::Local { root, .. } => Launcher::Local {
+                root: root.clone(),
+                profile: Some(profile),
+            },
+            Launcher::Container {
+                container_id,
+                workdir,
+            } => Launcher::Container {
+                container_id: container_id.clone(),
+                workdir: workdir.clone(),
+            },
         }
     }
 
@@ -807,8 +878,12 @@ enum ReadErr {
 
 impl Session {
     pub fn start(launcher: &Launcher) -> Result<Session, String> {
+        Self::start_with_marker(launcher, false)
+    }
+
+    fn start_with_marker(launcher: &Launcher, model_shell: bool) -> Result<Session, String> {
         let mut cmd = launcher
-            .command()
+            .command(model_shell)
             .map_err(|e| format!("cannot start a shell session: {e}"))?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1005,6 +1080,16 @@ impl Session {
     }
 }
 
+pub type ProfileBuilder = Arc<dyn Fn() -> Result<Profile, String> + Send + Sync>;
+
+pub const SHELL_RESTART_NOTICE: &str =
+    "blyte: the shell restarted because the open edits changed; exported variables were reset";
+
+struct UserSession {
+    session: Session,
+    profile: Option<Profile>,
+}
+
 /// Commands through persistent sessions instead of a process each: one session for the
 /// harness's own commands (each in a fresh subshell in the directory asked for, never affected
 /// by the model's) and one for the model's `bash` (its `cd` and `export` carry over). Falls back
@@ -1015,8 +1100,9 @@ impl Session {
 /// trip costs a few milliseconds (harness_bench, 2026-09-24).
 pub struct PersistentShell {
     launcher: Launcher,
+    profile_builder: Option<ProfileBuilder>,
     harness: Mutex<Option<Session>>,
-    user: Mutex<Option<Session>>,
+    user: Mutex<Option<UserSession>>,
     fallback: Box<dyn Shell>,
 }
 
@@ -1025,10 +1111,16 @@ impl PersistentShell {
         let fallback = launcher.fallback();
         Self {
             launcher,
+            profile_builder: None,
             harness: Mutex::new(None),
             user: Mutex::new(None),
             fallback,
         }
+    }
+
+    pub fn with_profile_builder(mut self, builder: ProfileBuilder) -> Self {
+        self.profile_builder = Some(builder);
+        self
     }
 
     pub fn local(root: PathBuf) -> Self {
@@ -1065,20 +1157,45 @@ impl PersistentShell {
         g.is_some()
     }
 
-    /// Run through `slot`'s session, starting it if needed. `None` when no session can start.
-    fn run(
+    fn collect_aborted_output(
         &self,
-        slot: &Mutex<Option<Session>>,
+        fallback: &dyn Shell,
+        out: &str,
+        err: &str,
+        note: String,
+        code: i32,
+    ) -> Output {
+        let cat = |p: &str| {
+            fallback
+                .exec(
+                    &format!("cat -- {q} 2>/dev/null; rm -f -- {q}", q = quote(p)),
+                    Path::new("/"),
+                    Duration::from_secs(30),
+                )
+                .map(|o| o.stdout)
+                .unwrap_or_default()
+        };
+        let (stdout, stderr) = (cat(out), cat(err));
+        Output {
+            stdout,
+            stderr: format!("{stderr}{note}"),
+            exit_code: code,
+        }
+    }
+
+    /// Run through `self.harness`, starting it if needed. `None` when no session can start.
+    fn run_harness(
+        &self,
         command: &str,
-        cwd: Option<&Path>,
+        cwd: &Path,
         timeout: Duration,
     ) -> Option<Result<Output, String>> {
-        let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.harness.lock().unwrap_or_else(|e| e.into_inner());
         if g.is_none() {
-            *g = Session::start(&self.launcher).ok();
+            *g = Session::start_with_marker(&self.launcher, false).ok();
         }
         let session = g.as_mut()?;
-        let (out, err, note, code) = match session.run(command, cwd, timeout) {
+        let (out, err, note, code) = match session.run(command, Some(cwd), timeout) {
             RunResult::Done(o) => return Some(Ok(o)),
             RunResult::TimedOut { out, err } => (
                 out,
@@ -1097,35 +1214,131 @@ impl PersistentShell {
         session.kill();
         *g = None;
         drop(g);
-        // What the command wrote before it was cut short, read through a fresh process.
-        let cat = |p: &str| {
-            self.fallback
-                .exec(
-                    &format!("cat -- {q} 2>/dev/null; rm -f -- {q}", q = quote(p)),
-                    Path::new("/"),
-                    Duration::from_secs(30),
-                )
-                .map(|o| o.stdout)
-                .unwrap_or_default()
+        Some(Ok(self.collect_aborted_output(
+            self.fallback.as_ref(),
+            &out,
+            &err,
+            note,
+            code,
+        )))
+    }
+
+    fn run_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        let desired_profile = match &self.profile_builder {
+            Some(builder) => Some(builder()?),
+            None => None,
         };
-        let (stdout, stderr) = (cat(&out), cat(&err));
-        Some(Ok(Output {
-            stdout,
-            stderr: format!("{stderr}{note}"),
-            exit_code: code,
-        }))
+        let launcher = match &desired_profile {
+            Some(profile) => self.launcher.with_profile(profile.clone()),
+            None => self.launcher.clone(),
+        };
+
+        let mut restarted = false;
+        let mut g = self.user.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut saved_cwd = None;
+        if let (Some(desired), Some(existing)) = (&desired_profile, g.as_mut()) {
+            if existing.profile.as_ref() != Some(desired) {
+                if let RunResult::Done(o) =
+                    existing.session.run("pwd", None, Duration::from_secs(5))
+                {
+                    if o.exit_code == 0 {
+                        let dir = o.stdout.trim_end_matches(&['\n', '\r'][..]);
+                        if !dir.is_empty() {
+                            saved_cwd = Some(PathBuf::from(dir));
+                        }
+                    }
+                }
+                existing.session.close();
+                *g = None;
+                restarted = true;
+            }
+        }
+
+        if g.is_none() {
+            match Session::start_with_marker(&launcher, true) {
+                Ok(mut session) => {
+                    if let Some(dir) = saved_cwd {
+                        let _ = session.run(
+                            &format!("cd -- {}", quote(&dir.to_string_lossy())),
+                            None,
+                            Duration::from_secs(5),
+                        );
+                    }
+                    *g = Some(UserSession {
+                        session,
+                        profile: desired_profile,
+                    });
+                }
+                Err(_) => {
+                    drop(g);
+                    let mut out = if self.profile_builder.is_some() {
+                        launcher.fallback().exec_user(command, cwd, timeout)?
+                    } else {
+                        self.fallback.exec_user(command, cwd, timeout)?
+                    };
+                    if restarted {
+                        out.stdout = format!("{SHELL_RESTART_NOTICE}\n{}", out.stdout);
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+
+        let user = g.as_mut().unwrap();
+        let mut output = match user.session.run(command, None, timeout) {
+            RunResult::Done(o) => o,
+            RunResult::TimedOut { out, err } => {
+                user.session.kill();
+                *g = None;
+                drop(g);
+                let fallback = if self.profile_builder.is_some() {
+                    launcher.fallback()
+                } else {
+                    self.launcher.fallback()
+                };
+                self.collect_aborted_output(
+                    fallback.as_ref(),
+                    &out,
+                    &err,
+                    format!("\n[killed by blyte after {}s]", timeout.as_secs()),
+                    124,
+                )
+            }
+            RunResult::Died { out, err } => {
+                user.session.kill();
+                *g = None;
+                drop(g);
+                let fallback = if self.profile_builder.is_some() {
+                    launcher.fallback()
+                } else {
+                    self.launcher.fallback()
+                };
+                self.collect_aborted_output(
+                    fallback.as_ref(),
+                    &out,
+                    &err,
+                    "[the shell exited; the next command starts a fresh shell in the workspace root]"
+                        .to_string(),
+                    1,
+                )
+            }
+        };
+        if restarted {
+            output.stdout = format!("{SHELL_RESTART_NOTICE}\n{}", output.stdout);
+        }
+        Ok(output)
     }
 }
 
 impl Shell for PersistentShell {
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        self.run(&self.harness, command, Some(cwd), timeout)
+        self.run_harness(command, cwd, timeout)
             .unwrap_or_else(|| self.fallback.exec(command, cwd, timeout))
     }
 
     fn exec_user(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
-        self.run(&self.user, command, None, timeout)
-            .unwrap_or_else(|| self.fallback.exec(command, cwd, timeout))
+        self.run_user(command, cwd, timeout)
     }
 
     fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
@@ -1143,10 +1356,34 @@ impl Shell for PersistentShell {
 
 impl Drop for PersistentShell {
     fn drop(&mut self) {
-        for slot in [&self.harness, &self.user] {
-            if let Some(mut s) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                s.close();
-            }
+        if let Some(mut s) = self
+            .harness
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            s.close();
         }
+        if let Some(mut u) = self.user.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            u.session.close();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistent_shell_profile_builder_error_fails_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shell =
+            PersistentShell::local(tmp.path().to_path_buf()).with_profile_builder(Arc::new(|| {
+                Err("cannot read .wt: permission denied".into())
+            }));
+        let err = shell
+            .exec_user("echo hi", tmp.path(), Duration::from_secs(5))
+            .unwrap_err();
+        assert_eq!(err, "cannot read .wt: permission denied");
     }
 }

@@ -1218,3 +1218,399 @@ fn agent_runner_run_keeps_surface_approver_instead_of_tty() {
     assert!(denied_out.is_error, "{}", denied_out.content);
     assert!(!root.path().join("src/denied.rs").exists());
 }
+
+#[test]
+fn entries_are_written_as_they_are_pushed() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("sessions").join("entries.jsonl");
+
+    let (runner, _) = ScriptedRunner::new(vec![ScriptAction::Ok(vec![
+        EntryBody::Turn {
+            n: 1,
+            text: "working".into(),
+            input_tokens: 100,
+            output_tokens: 40,
+            cost_usd: Some(0.004),
+        },
+        EntryBody::ToolStarted {
+            name: "read".into(),
+            input: "README.md".into(),
+        },
+        EntryBody::ToolFinished {
+            name: "read".into(),
+            summary: "ok".into(),
+            is_error: false,
+        },
+    ])]);
+
+    let session = Session::start_with_log("gemini-4-neon".into(), Some(log_path.clone()), |_| {
+        Box::new(runner)
+    })
+    .unwrap();
+
+    let reader_session = session.clone();
+    let reader_log = log_path.clone();
+    let reader = std::thread::spawn(move || {
+        let mut after = 0u64;
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.len() < 6 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "timed out; seen={seen:?}");
+            let batch = reader_session.entries_after(after, remaining);
+            if batch.is_empty() {
+                continue;
+            }
+            let disk = std::fs::read_to_string(&reader_log).unwrap();
+            let disk_entries: Vec<Entry> = disk
+                .lines()
+                .map(|line| serde_json::from_str::<Entry>(line).unwrap())
+                .collect();
+            for entry in batch {
+                assert!(
+                    disk_entries.iter().any(|d| d == &entry),
+                    "entry seq {} returned by entries_after before it was flushed to disk",
+                    entry.seq
+                );
+                after = entry.seq;
+                seen.push(entry);
+            }
+        }
+        seen
+    });
+
+    session.submit("hello", Vec::new()).unwrap();
+    session.record_error("side note");
+
+    let seen = reader.join().unwrap();
+    assert_eq!(seen.len(), 6);
+    let final_disk = std::fs::read_to_string(&log_path).unwrap();
+    let parsed: Vec<Entry> = final_disk
+        .lines()
+        .map(|l| serde_json::from_str::<Entry>(l).unwrap())
+        .collect();
+    assert_eq!(parsed, seen);
+}
+
+#[test]
+fn a_restart_loads_entries_and_continues_numbering() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let (runner1, _) = ScriptedRunner::new(vec![ScriptAction::Ok(vec![EntryBody::Turn {
+        n: 1,
+        text: "first reply".into(),
+        input_tokens: 50,
+        output_tokens: 20,
+        cost_usd: Some(0.001),
+    }])]);
+    let session1 = Session::start_with_log("gemini-4-neon".into(), Some(log_path.clone()), |_| {
+        Box::new(runner1)
+    })
+    .unwrap();
+    session1.submit("before restart", Vec::new()).unwrap();
+    let before = wait_for_entries(&session1, 3);
+    assert_eq!(
+        before.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    drop(session1);
+
+    let (runner2, _) = ScriptedRunner::new(vec![ScriptAction::Ok(vec![EntryBody::Turn {
+        n: 1,
+        text: "after reply".into(),
+        input_tokens: 60,
+        output_tokens: 25,
+        cost_usd: Some(0.002),
+    }])]);
+    let session2 = Session::start_with_log("gemini-4-neon".into(), Some(log_path.clone()), |_| {
+        Box::new(runner2)
+    })
+    .unwrap();
+
+    let loaded = session2.entries_after(0, Duration::ZERO);
+    assert_eq!(loaded.len(), 4);
+    assert_eq!(&loaded[..3], &before[..]);
+    assert_eq!(loaded[3].seq, 4);
+    assert_eq!(
+        loaded[3].body,
+        EntryBody::Error {
+            message: blyte_cli::session::RESTART_NOTICE_TEXT.to_string(),
+        }
+    );
+    assert_eq!(session2.info().last_seq, 4);
+
+    let next_seq = session2.submit("after restart", Vec::new()).unwrap();
+    assert_eq!(next_seq, 5);
+    let all = wait_for_entries(&session2, 7);
+    assert_eq!(
+        all.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6, 7]
+    );
+    assert_eq!(
+        all[3].body,
+        EntryBody::Error {
+            message:
+                "blyte restarted: the entries above are from before; the model does not remember them"
+                    .to_string(),
+        }
+    );
+
+    let disk_lines: Vec<Entry> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<Entry>(l).unwrap())
+        .collect();
+    assert_eq!(disk_lines, all);
+}
+
+#[test]
+fn a_cut_off_last_line_is_dropped_and_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::UserMessage {
+            text: "hello".into(),
+            reports: Vec::new(),
+            queued: false,
+        },
+    };
+    let e2 = Entry {
+        seq: 2,
+        ts: 1_700_000_002,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let raw = format!(
+        "{}\n{}\n{{\"seq\":3,\"ts\":1700000003,\"kind\":\"turn\",\"text\":\"cut off",
+        serde_json::to_string(&e1).unwrap(),
+        serde_json::to_string(&e2).unwrap(),
+    );
+    std::fs::write(&log_path, raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let session = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    )
+    .unwrap();
+
+    let stderr_text = String::from_utf8(err_buf).unwrap();
+    assert!(
+        stderr_text.contains("entries.jsonl"),
+        "expected stderr to name the file, got: {stderr_text}"
+    );
+    assert!(
+        stderr_text.contains("3"),
+        "expected stderr to name line 3, got: {stderr_text}"
+    );
+
+    let entries = session.entries_after(0, Duration::ZERO);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0], e1);
+    assert_eq!(entries[1], e2);
+    assert_eq!(entries[2].seq, 3);
+    assert_eq!(
+        entries[2].body,
+        EntryBody::Error {
+            message: blyte_cli::session::RESTART_NOTICE_TEXT.to_string(),
+        }
+    );
+    drop(session);
+
+    let mut err_buf2 = Vec::new();
+    let (runner2, _) = ScriptedRunner::new(Vec::new());
+    let session2 = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path),
+        &mut err_buf2,
+        |_| Box::new(runner2),
+    )
+    .unwrap();
+    assert!(
+        err_buf2.is_empty(),
+        "expected clean reload after truncation, got: {}",
+        String::from_utf8_lossy(&err_buf2)
+    );
+    assert_eq!(session2.entries_after(0, Duration::ZERO).len(), 4);
+}
+
+#[test]
+fn a_bad_line_in_the_middle_stops_the_start_naming_the_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::UserMessage {
+            text: "first".into(),
+            reports: Vec::new(),
+            queued: false,
+        },
+    };
+    let e3 = Entry {
+        seq: 3,
+        ts: 1_700_000_003,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    let raw = format!(
+        "{}\n{{not valid json\n{}\n",
+        serde_json::to_string(&e1).unwrap(),
+        serde_json::to_string(&e3).unwrap(),
+    );
+    std::fs::write(&log_path, raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let result = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    );
+    let err = match result {
+        Ok(_) => panic!("expected bad line in the middle to fail startup"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("entries.jsonl"),
+        "expected error to name the file, got: {err}"
+    );
+    assert!(
+        err.contains("2"),
+        "expected error to name line 2, got: {err}"
+    );
+}
+
+#[test]
+fn a_loaded_approval_request_is_not_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::UserMessage {
+            text: "do something risky".into(),
+            reports: Vec::new(),
+            queued: false,
+        },
+    };
+    let e2 = Entry {
+        seq: 2,
+        ts: 1_700_000_002,
+        body: EntryBody::ApprovalRequested {
+            id: "approval-1".into(),
+            command: "rm -rf /tmp/old".into(),
+            reason: "outside sandbox".into(),
+        },
+    };
+    let raw = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&e1).unwrap(),
+        serde_json::to_string(&e2).unwrap(),
+    );
+    std::fs::write(&log_path, raw).unwrap();
+
+    let (runner, _) = ScriptedRunner::new(vec![ScriptAction::Ok(vec![EntryBody::Turn {
+        n: 1,
+        text: "still responsive".into(),
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_usd: Some(0.001),
+    }])]);
+    let session =
+        Session::start_with_log("gemini-4-neon".into(), Some(log_path), |_| Box::new(runner))
+            .unwrap();
+
+    let loaded = session.entries_after(0, Duration::ZERO);
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[1], e2);
+    assert_eq!(
+        loaded[2].body,
+        EntryBody::Error {
+            message: blyte_cli::session::RESTART_NOTICE_TEXT.to_string(),
+        }
+    );
+
+    assert_eq!(
+        session.answer_approval("approval-1", ApprovalAnswer::Yes),
+        Err(AnswerError::NotFound)
+    );
+    assert_eq!(
+        session.answer_approval("approval-1", ApprovalAnswer::No),
+        Err(AnswerError::NotFound)
+    );
+
+    session.submit("new prompt", Vec::new()).unwrap();
+    let after_prompt = wait_for_entries(&session, 6);
+    assert!(matches!(after_prompt[5].body, EntryBody::Idle { .. }));
+
+    let approver = session.approver();
+    let (done_tx, done_rx) = mpsc::channel();
+    let t = std::thread::spawn(move || {
+        let _ = done_tx.send(approver.ask("echo fresh", "fresh approval"));
+    });
+    let with_new_approval = wait_for_entries(&session, 7);
+    let new_id = match &with_new_approval[6].body {
+        EntryBody::ApprovalRequested { id, .. } => id.clone(),
+        other => panic!("expected ApprovalRequested, got {other:?}"),
+    };
+    assert_ne!(new_id, "approval-1");
+    session
+        .answer_approval(&new_id, ApprovalAnswer::Yes)
+        .unwrap();
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Approval::Approved
+    );
+    t.join().unwrap();
+}
+
+#[test]
+fn a_complete_bad_last_line_stops_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("entries.jsonl");
+    let e1 = Entry {
+        seq: 1,
+        ts: 1_700_000_001,
+        body: EntryBody::Idle {
+            turns: 0,
+            cost_usd: Some(0.0),
+        },
+    };
+    // The bad line ends in a newline, so it was written whole: not a cut-off write.
+    let raw = format!(
+        "{}\n{{not valid json\n",
+        serde_json::to_string(&e1).unwrap()
+    );
+    std::fs::write(&log_path, &raw).unwrap();
+
+    let mut err_buf = Vec::new();
+    let (runner, _) = ScriptedRunner::new(Vec::new());
+    let result = Session::start_with_log_io(
+        "gemini-4-neon".into(),
+        Some(log_path.clone()),
+        &mut err_buf,
+        |_| Box::new(runner),
+    );
+    let err = match result {
+        Ok(_) => panic!("expected a complete bad last line to fail startup"),
+        Err(err) => err,
+    };
+    assert!(err.contains("entries.jsonl"), "got: {err}");
+    assert!(err.contains("line 2"), "got: {err}");
+    assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
+}

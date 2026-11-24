@@ -177,3 +177,27 @@ fn session_files_write_and_read_exact_bytes() {
     fs.write(&root.join("big.txt"), &big).unwrap();
     assert_eq!(fs.read(&root.join("big.txt")).unwrap(), big);
 }
+
+#[test]
+fn a_models_command_sees_the_marker_and_a_harness_command_does_not() {
+    let (_d, root, p) = setup();
+    let user_out = p
+        .exec_user("echo \"$BLYTE_MODEL_SHELL\"", &root, T)
+        .unwrap();
+    assert_eq!(user_out.stdout, "1\n");
+    let harness_out = p.exec("echo \"$BLYTE_MODEL_SHELL\"", &root, T).unwrap();
+    assert_eq!(harness_out.stdout, "\n");
+
+    let local_user = LocalShell
+        .exec_user("echo \"$BLYTE_MODEL_SHELL\"", &root, T)
+        .unwrap();
+    assert_eq!(local_user.stdout, "1\n");
+    let local_host = LocalShell
+        .exec_host("echo \"$BLYTE_MODEL_SHELL\"", &root, T)
+        .unwrap();
+    assert_eq!(local_host.stdout, "1\n");
+    let local_harness = LocalShell
+        .exec("echo \"$BLYTE_MODEL_SHELL\"", &root, T)
+        .unwrap();
+    assert_eq!(local_harness.stdout, "\n");
+}

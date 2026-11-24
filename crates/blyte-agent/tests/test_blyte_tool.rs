@@ -487,7 +487,9 @@ fn edit_start_and_edit_finish_are_accepted_and_request_injected_on_finish() {
         &json!({"args": ["combine", "r1700000000-42"]}),
     );
     assert!(refused.is_error);
-    assert!(refused.content.contains("the blyte tool runs only:"));
+    assert!(refused.content.contains(
+        "error: blyte combine writes a record only the user or the harness may write, and cannot be run from a model's shell"
+    ));
 
     set_blyte_request(None);
     let finish_no_req = execute(
@@ -558,4 +560,106 @@ fn blyte_tool_passes_edit_finish_message_with_spaces_and_quotes_intact() {
     assert!(!without_req.is_error, "{}", without_req.content);
     let lines: Vec<&str> = without_req.content.lines().collect();
     assert_eq!(lines, vec!["edit-finish", "X", "--message", msg]);
+}
+
+#[test]
+fn the_tool_refuses_verdict_accepted_fixed_combine_and_model_review() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("invoked");
+    let _g = BlyteToolGuard::acquire_script(&format!(
+        "touch '{}'\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+        marker.display()
+    ));
+
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["review", "T1", "--verdict", "accepted"],
+            "error: blyte review --verdict accepted writes a record only the user or the harness may write, and cannot be run from a model's shell",
+        ),
+        (
+            &["review", "T1", "--verdict=accepted"],
+            "error: blyte review --verdict accepted writes a record only the user or the harness may write, and cannot be run from a model's shell",
+        ),
+        (
+            &["review", "T1", "--verdict", "fixed"],
+            "error: blyte review --verdict fixed writes a record only the user or the harness may write, and cannot be run from a model's shell",
+        ),
+        (
+            &["review", "T1", "--verdict=fixed"],
+            "error: blyte review --verdict fixed writes a record only the user or the harness may write, and cannot be run from a model's shell",
+        ),
+        (
+            &["review", "T1", "--model-review"],
+            "error: blyte review --model-review writes a record only the user or the harness may write, and cannot be run from a model's shell",
+        ),
+        (
+            &["combine", "r1700000000-42"],
+            "error: blyte combine writes a record only the user or the harness may write, and cannot be run from a model's shell",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let out = execute(
+            root.path(),
+            &LocalShell,
+            &LocalFs,
+            "blyte",
+            &json!({"args": args}),
+        );
+        assert!(out.is_error, "expected refusal for {args:?}");
+        assert_eq!(out.content, *expected, "for {args:?}");
+        assert!(
+            !marker.exists(),
+            "fake executable must not run for {args:?}"
+        );
+    }
+
+    let redone = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["review", "T1", "--verdict", "redone"]}),
+    );
+    assert!(!redone.is_error, "{}", redone.content);
+    assert!(marker.exists());
+}
+
+#[test]
+fn the_tool_child_does_not_carry_the_marker() {
+    let root = tempfile::tempdir().unwrap();
+    let env_file = root.path().join("child.env");
+    let _g = BlyteToolGuard::acquire_script(&format!(
+        "env > '{}'\nprintf 'marker=%s\\n' \"${{BLYTE_MODEL_SHELL:-UNSET}}\"\n",
+        env_file.display()
+    ));
+
+    struct MarkerGuard(Option<std::ffi::OsString>);
+    impl Drop for MarkerGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("BLYTE_MODEL_SHELL", v),
+                None => std::env::remove_var("BLYTE_MODEL_SHELL"),
+            }
+        }
+    }
+    let _marker = MarkerGuard(std::env::var_os("BLYTE_MODEL_SHELL"));
+    std::env::set_var("BLYTE_MODEL_SHELL", "1");
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["status", "T1"]}),
+    );
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.content.trim(), "marker=UNSET");
+    let recorded = std::fs::read_to_string(&env_file).unwrap();
+    assert!(
+        !recorded
+            .lines()
+            .any(|line| line.starts_with("BLYTE_MODEL_SHELL=")),
+        "BLYTE_MODEL_SHELL leaked to child: {recorded}"
+    );
 }

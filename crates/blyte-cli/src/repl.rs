@@ -276,7 +276,7 @@ pub fn format_event(event: &blyte_agent::run::Event<'_>) -> String {
     }
 }
 
-/// Renders the Blyte ASCII banner and environment summary to a writer.
+/// Renders the blyte banner and environment summary to a writer.
 pub fn render_banner_to<W: Write>(writer: &mut W, session: &ReplSession) -> std::io::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let repo = session.repo_root.display().to_string();
@@ -307,39 +307,8 @@ pub fn render_banner_to<W: Write>(writer: &mut W, session: &ReplSession) -> std:
         toolchains.join(", ")
     };
 
-    writeln!(
-        writer,
-        "╔═══════════════════════════════════════════════════════════╗"
-    )?;
-    writeln!(
-        writer,
-        "║   ____                                _        _          ║"
-    )?;
-    writeln!(
-        writer,
-        "║  / ___| _   _ _ __   ___ _ __ ___   __| |  ___| |_ ___    ║"
-    )?;
-    writeln!(
-        writer,
-        "║  \\___ \\| | | | '_ \\ / _ \\ '__/ __| / _` | / __| __/ _ \\   ║"
-    )?;
-    writeln!(
-        writer,
-        "║   ___) | |_| | |_) |  __/ |  \\__ \\| (_| || (__| ||  __/   ║"
-    )?;
-    writeln!(
-        writer,
-        "║  |____/ \\__,_| .__/ \\___|_|  |___/ \\__,_(_)___|\\__\\___|   ║"
-    )?;
-    writeln!(
-        writer,
-        "║              |_|                                          ║"
-    )?;
-    writeln!(writer, "║  Blyte Interactive Harness v{:<25}║", version)?;
-    writeln!(
-        writer,
-        "╚═══════════════════════════════════════════════════════════╝"
-    )?;
+    writeln!(writer, "blyte")?;
+    writeln!(writer, "  Blyte Interactive Harness v{}", version)?;
     writeln!(writer, "  Repository : {}", repo)?;
     writeln!(writer, "  Model      : {}", model)?;
     if session.orchestrate {
@@ -412,7 +381,7 @@ pub fn handle_repl_command<W: Write>(
                     .map_err(|e| e.to_string())?;
                 writeln!(
                     writer,
-                    "  /state        - Inspect SKILL.state (Orchestrator, Runtime)"
+                    "  /state        - Inspect blyte state (Orchestrator, Runtime)"
                 )
                 .map_err(|e| e.to_string())?;
                 writeln!(
@@ -561,7 +530,7 @@ pub fn handle_repl_command<W: Write>(
                 Ok(ReplControl::Handled)
             }
             "/state" => {
-                writeln!(writer, "=== Blyte SKILL.state ===").map_err(|e| e.to_string())?;
+                writeln!(writer, "=== blyte state ===").map_err(|e| e.to_string())?;
                 writeln!(writer, "session: {}", session.session_id).map_err(|e| e.to_string())?;
                 // Render orchestrator contract: goal specification and verification gate
                 let mut orch_val =
@@ -847,6 +816,9 @@ mod tests {
         crate::usage_log::append(&log_path, &entry1).unwrap();
         crate::usage_log::append(&log_path, &entry2).unwrap();
 
+        let _env_guard = crate::usage_log::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_env = std::env::var_os("BLYTE_USAGE_LOG");
         std::env::set_var("BLYTE_USAGE_LOG", &log_path);
 

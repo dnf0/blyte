@@ -364,6 +364,7 @@ where
         cmd.env(k, v);
     }
     cmd.env("BLYTE_DISPATCH_ID", cfg.id);
+    cmd.env_remove(blyte_agent::shell::MODEL_SHELL_ENV);
 
     cmd.arg("--gate").arg(cfg.gate);
     cmd.arg("--rollback=false");

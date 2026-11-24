@@ -246,6 +246,82 @@ pub fn profile_with(
     out
 }
 
+fn push_home_local_grants(home_path: &Path, allowed: &mut Vec<PathBuf>) {
+    #[cfg(target_os = "macos")]
+    {
+        allowed.push(home_path.join(".local"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let local_dir = home_path.join(".local");
+        if let Ok(entries) = std::fs::read_dir(&local_dir) {
+            let mut paths: Vec<PathBuf> = entries
+                .flatten()
+                .filter(|entry| entry.file_name() != std::ffi::OsStr::new("state"))
+                .map(|entry| entry.path())
+                .collect();
+            paths.sort();
+            allowed.extend(paths);
+        }
+        let state_dir = local_dir.join("state");
+        if let Ok(entries) = std::fs::read_dir(&state_dir) {
+            let mut paths: Vec<PathBuf> = entries
+                .flatten()
+                .filter(|entry| entry.file_name() != std::ffi::OsStr::new("blyte"))
+                .map(|entry| entry.path())
+                .collect();
+            paths.sort();
+            allowed.extend(paths);
+        }
+    }
+}
+
+/// Returns the blyte state directory (`$XDG_STATE_HOME/blyte` when set, else `$HOME/.local/state/blyte`).
+pub fn state_blyte_dir() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("blyte"));
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".local").join("state").join("blyte"))
+}
+
+#[cfg(target_os = "macos")]
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    if let Ok(canon) = path.canonicalize() {
+        return canon;
+    }
+    let mut tail = Vec::new();
+    let mut cur = path;
+    while let Some(name) = cur.file_name() {
+        tail.push(name.to_os_string());
+        match cur.parent() {
+            Some(parent) => {
+                cur = parent;
+                if let Ok(mut canon) = cur.canonicalize() {
+                    for part in tail.into_iter().rev() {
+                        canon.push(part);
+                    }
+                    return canon;
+                }
+            }
+            None => break,
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(target_os = "macos")]
+fn deny_state_blyte_write(mut profile: String) -> String {
+    if let Some(dir) = state_blyte_dir() {
+        let escaped = escape_path(&canonicalize_existing_prefix(&dir));
+        profile.push_str(&format!(r#"(deny file-write* (subpath "{escaped}"))"#));
+    }
+    profile
+}
+
 /// Computes the default list of write-allowed paths for a local workspace run.
 ///
 /// Includes the workspace root, the git common directory (if in a git repo), system temp dirs,
@@ -302,7 +378,6 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
                 ".rustup",
                 ".cache",
                 ".npm",
-                ".local",
                 "Library/Caches",
                 ".gradle",
                 ".m2",
@@ -311,6 +386,7 @@ pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
             ] {
                 allowed.push(home_path.join(sub));
             }
+            push_home_local_grants(&home_path, &mut allowed);
         }
     }
 
@@ -411,7 +487,6 @@ pub fn orchestrator_allowed(root: &Path) -> Vec<PathBuf> {
                 ".rustup",
                 ".cache",
                 ".npm",
-                ".local",
                 "Library/Caches",
                 ".gradle",
                 ".m2",
@@ -420,10 +495,86 @@ pub fn orchestrator_allowed(root: &Path) -> Vec<PathBuf> {
             ] {
                 allowed.push(home_path.join(sub));
             }
+            push_home_local_grants(&home_path, &mut allowed);
         }
     }
 
     allowed
+}
+
+fn path_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot check {}: {e}", path.display())),
+    }
+}
+
+pub(crate) fn is_open_edit_worktree_id(
+    wt_dir: &Path,
+    id: &std::ffi::OsStr,
+) -> Result<bool, String> {
+    let mut edit_name = id.to_os_string();
+    edit_name.push(".edit.json");
+    let edit_marker = wt_dir.join(edit_name);
+    if !path_exists(&edit_marker)? {
+        return Ok(false);
+    }
+    let mut summary_name = id.to_os_string();
+    summary_name.push(".json");
+    let summary_marker = wt_dir.join(summary_name);
+    if path_exists(&summary_marker)? {
+        return Ok(false);
+    }
+    let worktree = wt_dir.join(id);
+    match std::fs::metadata(&worktree) {
+        Ok(m) => Ok(m.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot check {}: {e}", worktree.display())),
+    }
+}
+
+/// Returns the sorted worktree directories `<main_checkout>/.wt/<id>` for currently open direct
+/// edits (where `<id>.edit.json` exists, `<id>.json` does not, and `<id>` is a directory).
+pub fn open_edit_worktrees(main_checkout: &Path) -> Result<Vec<PathBuf>, String> {
+    let wt_dir = main_checkout.join(".wt");
+    let entries = match std::fs::read_dir(&wt_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("cannot read {}: {e}", wt_dir.display())),
+    };
+    let mut worktrees = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {}: {e}", wt_dir.display()))?;
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Some(id) = name_str.strip_suffix(".edit.json") else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        if is_open_edit_worktree_id(&wt_dir, std::ffi::OsStr::new(id))? {
+            worktrees.push(wt_dir.join(id));
+        }
+    }
+    worktrees.sort();
+    Ok(worktrees)
+}
+
+#[cfg(target_os = "macos")]
+fn allow_edit_worktrees(mut base: String, edit_worktrees: &[PathBuf]) -> String {
+    for wt in edit_worktrees {
+        let canon = wt.canonicalize().unwrap_or_else(|_| wt.to_path_buf());
+        let escaped_wt = escape_path(&canon);
+        let escaped_git = escape_path(&canon.join(".git"));
+        base.push_str(&format!(
+            r#"(allow file-write* (subpath "{escaped_wt}"))(deny file-write* (literal "{escaped_git}"))"#
+        ));
+    }
+    base
 }
 
 /// Returns the orchestrate-mode sandbox profile for the current platform.
@@ -433,13 +584,26 @@ pub fn orchestrator_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
 
 /// Returns the orchestrate-mode sandbox profile with network configuration.
 pub fn orchestrator_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
+    orchestrator_profile_with_edits(root, allow_read, network, &[])
+}
+
+/// Returns the orchestrate-mode sandbox profile allowing writes in the given open edit worktrees.
+pub fn orchestrator_profile_with_edits(
+    root: &Path,
+    allow_read: &[PathBuf],
+    network: bool,
+    edit_worktrees: &[PathBuf],
+) -> Profile {
     #[cfg(target_os = "macos")]
     {
         let deny_read = match std::env::var_os("HOME") {
             Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
             _ => Vec::new(),
         };
-        let base = profile_with(root, &orchestrator_allowed(root), &deny_read, allow_read);
+        let base = deny_state_blyte_write(allow_edit_worktrees(
+            profile_with(root, &orchestrator_allowed(root), &deny_read, allow_read),
+            edit_worktrees,
+        ));
         if network {
             Profile::Seatbelt(base)
         } else {
@@ -463,12 +627,27 @@ pub fn orchestrator_profile_net(root: &Path, allow_read: &[PathBuf], network: bo
             extra_read.push(main_wt);
         }
         extra_read.extend_from_slice(allow_read);
+        let mut write = orchestrator_allowed(root);
+        write.extend(edit_worktrees.iter().cloned());
         Profile::LandlockConfined {
-            write: orchestrator_allowed(root),
+            write,
             read: read_allowed(home_path, &extra_read),
             block_tcp: !network,
         }
     }
+}
+
+/// Builds the orchestrate-mode sandbox profile including all currently open edit worktrees.
+pub fn orchestrator_profile_for_open_edits(
+    root: &Path,
+    allow_read: &[PathBuf],
+    network: bool,
+) -> Result<Profile, String> {
+    let main = main_checkout_root(root);
+    let edits = open_edit_worktrees(&main)?;
+    Ok(orchestrator_profile_with_edits(
+        root, allow_read, network, &edits,
+    ))
 }
 
 /// Returns the standard Unix socket paths used by Docker and container runtimes.
@@ -522,12 +701,12 @@ pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
             Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
             _ => Vec::new(),
         };
-        Profile::Seatbelt(profile_with(
+        Profile::Seatbelt(deny_state_blyte_write(profile_with(
             root,
             &default_allowed(root),
             &deny_read,
             allow_read,
-        ))
+        )))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -644,4 +823,68 @@ pub(crate) fn landlock_pre_exec(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_edit_worktrees_empty_when_wt_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            open_edit_worktrees(tmp.path()).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn open_edit_worktrees_sorted_and_filtered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join(".wt");
+        std::fs::create_dir_all(wt.join("B")).unwrap();
+        std::fs::create_dir_all(wt.join("A")).unwrap();
+        std::fs::create_dir_all(wt.join("Done")).unwrap();
+        std::fs::create_dir_all(wt.join("NoMarker")).unwrap();
+        std::fs::write(wt.join("NotADir"), "file\n").unwrap();
+
+        std::fs::write(wt.join("B.edit.json"), "{}\n").unwrap();
+        std::fs::write(wt.join("A.edit.json"), "{}\n").unwrap();
+        std::fs::write(wt.join("Done.edit.json"), "{}\n").unwrap();
+        std::fs::write(wt.join("Done.json"), "{}\n").unwrap();
+        std::fs::write(wt.join("MissingDir.edit.json"), "{}\n").unwrap();
+        std::fs::write(wt.join("NotADir.edit.json"), "{}\n").unwrap();
+
+        let got = open_edit_worktrees(tmp.path()).unwrap();
+        assert_eq!(got, vec![wt.join("A"), wt.join("B")]);
+    }
+
+    #[test]
+    fn open_edit_worktrees_errors_on_unreadable_wt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join(".wt");
+        std::fs::write(&wt, "not a directory\n").unwrap();
+        let err = open_edit_worktrees(tmp.path()).unwrap_err();
+        assert!(err.contains(&wt.display().to_string()), "{err}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn orchestrator_profile_with_edits_denies_worktree_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join(".wt/E1");
+        std::fs::create_dir_all(&wt).unwrap();
+        let Profile::Seatbelt(sbpl) =
+            orchestrator_profile_with_edits(tmp.path(), &[], false, std::slice::from_ref(&wt))
+        else {
+            panic!("expected Seatbelt profile on macOS");
+        };
+        let canon = wt.canonicalize().unwrap();
+        let escaped_wt = escape_path(&canon);
+        let escaped_git = escape_path(&canon.join(".git"));
+        let expected = format!(
+            r#"(allow file-write* (subpath "{escaped_wt}"))(deny file-write* (literal "{escaped_git}"))"#
+        );
+        assert!(sbpl.contains(&expected), "{sbpl}");
+    }
 }

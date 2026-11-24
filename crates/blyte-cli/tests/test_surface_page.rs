@@ -783,3 +783,109 @@ const assert = require("assert");
 "#;
     run_surface_script(harness);
 }
+
+#[test]
+fn get_requests_send_the_token_and_a_403_stops_polling() {
+    let harness = r#"
+const assert = require("node:assert");
+(async () => {
+  const missingTokenBar = { hidden: true };
+  const lostServerBar = { hidden: true };
+  const elements = {
+    "missing-token": missingTokenBar,
+    "lost-server": lostServerBar,
+  };
+  global.document = {
+    getElementById(id) { return elements[id] || null; },
+    querySelectorAll() { return []; },
+  };
+  const clearedIntervals = [];
+  let nextTimerId = 100;
+  global.setInterval = () => {
+    nextTimerId += 1;
+    return nextTimerId;
+  };
+  global.clearInterval = (id) => {
+    clearedIntervals.push(id);
+  };
+
+  surfaceToken = "tok-abc-999";
+  updateMissingTokenUI();
+  assert.strictEqual(missingTokenBar.hidden, true);
+
+  const seen = [];
+  global.fetch = async (url, options) => {
+    seen.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      async json() { return {}; },
+    };
+  };
+
+  for (const url of [
+    "/api/session",
+    "/api/runs",
+    "/api/requests",
+    "/api/map",
+    "/api/models",
+    "/api/runs/T1/diff",
+  ]) {
+    const res = await fetchWithRetry(url);
+    assert.strictEqual(res.status, 200);
+  }
+  assert.strictEqual(seen.length, 6);
+  for (const call of seen) {
+    assert.ok(call.options && call.options.headers, "missing headers for " + call.url);
+    assert.strictEqual(
+      call.options.headers["X-Blyte-Token"],
+      "tok-abc-999",
+      "wrong token header on GET " + call.url
+    );
+  }
+
+  runsPollTimer = setInterval(fetchRuns, RUNS_POLL_MS);
+  requestsPollTimer = setInterval(fetchRequests, RUNS_POLL_MS);
+  const runsTimerId = runsPollTimer;
+  const reqsTimerId = requestsPollTimer;
+
+  const pollCalls = [];
+  let timeoutCalls = 0;
+  const origSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, ms) => {
+    timeoutCalls += 1;
+    return origSetTimeout(fn, ms);
+  };
+  global.fetch = async (url, options) => {
+    pollCalls.push({ url, options });
+    return {
+      ok: false,
+      status: 403,
+      async json() { return { error: "missing or invalid surface token" }; },
+    };
+  };
+
+  await pollEvents();
+
+  assert.strictEqual(pollCalls.length, 1);
+  assert.ok(pollCalls[0].url.startsWith("/api/session/events?"));
+  assert.strictEqual(pollCalls[0].options.headers["X-Blyte-Token"], "tok-abc-999");
+  assert.strictEqual(timeoutCalls, 0);
+  assert.strictEqual(pollingStopped, true);
+  assert.strictEqual(runsPollTimer, null);
+  assert.strictEqual(requestsPollTimer, null);
+  assert.ok(clearedIntervals.includes(runsTimerId));
+  assert.ok(clearedIntervals.includes(reqsTimerId));
+  assert.strictEqual(surfaceToken, null);
+  assert.strictEqual(missingTokenBar.hidden, false);
+
+  await fetchRuns();
+  await fetchRequests();
+  assert.strictEqual(pollCalls.length, 1);
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
+}

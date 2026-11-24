@@ -360,7 +360,22 @@ pub fn build_local_shell(config: &TaskConfig) -> blyte_agent::shell::PersistentS
                     );
                 }
             }
-            blyte_agent::shell::PersistentShell::local_sandboxed(config.root.clone(), profile)
+            let shell =
+                blyte_agent::shell::PersistentShell::local_sandboxed(config.root.clone(), profile);
+            if config.orchestrate {
+                let root = config.root.clone();
+                let allow_read = config.allow_read.clone();
+                let network = config.network == "on";
+                shell.with_profile_builder(Arc::new(move || {
+                    blyte_agent::sandbox::orchestrator_profile_for_open_edits(
+                        &root,
+                        &allow_read,
+                        network,
+                    )
+                }))
+            } else {
+                shell
+            }
         } else {
             eprintln!("warning: sandbox unavailable; running unsandboxed");
             blyte_agent::shell::PersistentShell::local(config.root.clone())

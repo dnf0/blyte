@@ -263,7 +263,10 @@ fn get(path: &str) -> Request {
         method: "GET".to_string(),
         path: path.to_string(),
         query: Vec::new(),
-        headers: Vec::new(),
+        headers: vec![(
+            blyte_cli::serve::TOKEN_HEADER.to_string(),
+            TEST_TOKEN.to_string(),
+        )],
         body: Vec::new(),
     }
 }
@@ -328,6 +331,7 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
         token: TEST_TOKEN.to_string(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
+        reconcile_lock: Mutex::new(()),
     };
 
     let r1 = route(
@@ -468,6 +472,7 @@ fn make_test_surface(repo: &Path, now: u64) -> Surface {
         token: TEST_TOKEN.to_string(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
+        reconcile_lock: Mutex::new(()),
     }
 }
 

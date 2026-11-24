@@ -1,18 +1,22 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use blyte_cli::cli::ReviewVerdict;
+use blyte_cli::cli::{ReviewVerdict, SurfaceArgs};
 use blyte_cli::combine::{CombineRecord, CombineState};
 use blyte_cli::http::{Request, Response};
-use blyte_cli::queue_actions::{record_verdict, set_hold};
+use blyte_cli::queue_actions::{decide, record_verdict, set_hold, Action};
+use blyte_cli::repl::ReplConfig;
 use blyte_cli::requests::{
     load_attempt_record, load_published_record, maybe_combine, request_readiness,
     write_attempt_record, AttemptResult, Publisher, Readiness, RealPublisher, RequestsState,
 };
-use blyte_cli::serve::{generate_token, route, Surface, TOKEN_HEADER};
+use blyte_cli::serve::{generate_token, route, run_with_hooks, Surface, TOKEN_HEADER};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
 use serde_json::{json, Value};
 
@@ -376,6 +380,7 @@ fn make_surface_with_session(
         token: generate_token().unwrap(),
         requests: Arc::new(RequestsState::new()),
         publisher,
+        reconcile_lock: Mutex::new(()),
     }
 }
 
@@ -388,12 +393,12 @@ fn make_surface(
     (make_surface_with_session(root, session, publisher), prompts)
 }
 
-fn get(path: &str) -> Request {
+fn get(surface: &Surface, path: &str) -> Request {
     Request {
         method: "GET".to_string(),
         path: path.to_string(),
         query: Vec::new(),
-        headers: Vec::new(),
+        headers: vec![(TOKEN_HEADER.to_string(), surface.token.clone())],
         body: Vec::new(),
     }
 }
@@ -594,7 +599,7 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     assert!(!maybe_combine(&surface, "req-b").unwrap());
     assert!(!root.join(".wt/combined/req-b.json").exists());
 
-    let runs_resp = route(&surface, &get("/api/runs"), now + 6);
+    let runs_resp = route(&surface, &get(&surface, "/api/runs"), now + 6);
     assert_eq!(runs_resp.status, 200);
     surface.requests.wait_all_idle();
     assert!(!root.join(".wt/combined/req-b.json").exists());
@@ -605,7 +610,7 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     .unwrap();
     assert_eq!(poll_rec.state, CombineState::Combined);
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 7));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 7));
     let ids: Vec<&str> = reqs
         .as_array()
         .unwrap()
@@ -732,7 +737,7 @@ fn api_requests_shows_waiting_then_combined_with_suggested_pr_fields() {
 
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
 
-    let resp1 = route(&surface, &get("/api/requests"), now);
+    let resp1 = route(&surface, &get(&surface, "/api/requests"), now);
     assert_eq!(resp1.status, 200);
     let arr1 = parse_json(&resp1);
     let items1 = arr1.as_array().unwrap();
@@ -756,7 +761,7 @@ fn api_requests_shows_waiting_then_combined_with_suggested_pr_fields() {
     assert!(maybe_combine(&surface, "req-multi").unwrap());
     surface.requests.wait_for_idle("req-multi");
 
-    let resp2 = route(&surface, &get("/api/requests"), now + 3);
+    let resp2 = route(&surface, &get(&surface, "/api/requests"), now + 3);
     assert_eq!(resp2.status, 200);
     let arr2 = parse_json(&resp2);
     let item = &arr2.as_array().unwrap()[0];
@@ -921,7 +926,7 @@ fn push_and_pull_request_routes_and_error_handling() {
         }]
     );
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["pushed"], true);
     assert_eq!(
@@ -930,7 +935,11 @@ fn push_and_pull_request_routes_and_error_handling() {
     );
 
     let (restarted_surface, _) = make_surface(root.to_path_buf(), fake.clone());
-    let restarted_reqs = parse_json(&route(&restarted_surface, &get("/api/requests"), now));
+    let restarted_reqs = parse_json(&route(
+        &restarted_surface,
+        &get(&restarted_surface, "/api/requests"),
+        now,
+    ));
     let restarted_item = &restarted_reqs.as_array().unwrap()[0];
     assert_eq!(restarted_item["state"], "combined");
     assert_eq!(restarted_item["pushed"], true);
@@ -1019,7 +1028,11 @@ fn check_failed_queues_orchestrator_message_with_step_and_output() {
         recorded[0]
     );
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &surface,
+        &get(&surface, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["state"], "check_failed");
     assert!(item["failing_step"].as_str().is_some());
@@ -1054,7 +1067,11 @@ fn combine_exit_two_reports_error_once_and_surfaces_in_api() {
         assert!(recorded[0].contains("blyte.toml"), "{}", recorded[0]);
     }
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &surface,
+        &get(&surface, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["state"], "error");
     assert!(item["error"].as_str().unwrap().contains("blyte.toml"));
@@ -1168,7 +1185,11 @@ fn error_request_does_not_rerun_and_persists_error_state_after_restart() {
     assert_session_idle(&restarted.session);
     assert!(restarted_prompts.lock().unwrap().is_empty());
 
-    let reqs = parse_json(&route(&restarted, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &restarted,
+        &get(&restarted, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-diffbase");
     assert_eq!(item["state"], "error");
@@ -1213,7 +1234,11 @@ fn changing_run_tip_triggers_combine_again() {
     assert_eq!(attempt.runs.len(), 1);
     assert_eq!(attempt.runs[0].tip, tip2);
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now_secs()));
+    let reqs = parse_json(&route(
+        &surface,
+        &get(&surface, "/api/requests"),
+        now_secs(),
+    ));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["state"], "combined");
     assert!(!maybe_combine(&surface, "req-tipchange").unwrap());
@@ -1269,7 +1294,7 @@ fn push_then_rebuild_invalidates_pushed_and_blocks_pr_until_repushed() {
     assert!(maybe_combine(&surface, "req-repush").unwrap());
     surface.requests.wait_for_idle("req-repush");
 
-    let reqs_after_rebuild = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs_after_rebuild = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item = &reqs_after_rebuild.as_array().unwrap()[0];
     assert_eq!(item["state"], "combined");
     assert_eq!(item["pushed"], false);
@@ -1300,7 +1325,7 @@ fn push_then_rebuild_invalidates_pushed_and_blocks_pr_until_repushed() {
     );
     assert_eq!(push2.status, 200);
 
-    let reqs_after_repush = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let reqs_after_repush = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 4));
     let item2 = &reqs_after_repush.as_array().unwrap()[0];
     assert_eq!(item2["pushed"], true);
     assert_eq!(
@@ -1372,7 +1397,7 @@ fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file(
     let pub_err = load_published_record(root, "req-old-pub").unwrap_err();
     assert!(pub_err.contains("req-old-pub.published.json"), "{pub_err}");
 
-    let runs_resp = route(&surface, &get("/api/runs"), now + 2);
+    let runs_resp = route(&surface, &get(&surface, "/api/runs"), now + 2);
     assert_eq!(runs_resp.status, 200);
     let session_entries = surface.session.entries_after(0, Duration::ZERO);
     assert!(session_entries.iter().any(|e| matches!(
@@ -1380,7 +1405,7 @@ fn unparseable_attempt_and_old_shape_published_files_are_errors_naming_the_file(
         EntryBody::Error { message } if message.contains("req-bad-attempt.attempt.json")
     )));
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 3));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 3));
     let items = reqs.as_array().unwrap();
     let bad_attempt_item = items
         .iter()
@@ -1463,7 +1488,7 @@ fn redone_runs_left_out_regardless_of_outcome_and_reported_in_api() {
     assert!(maybe_combine(&surface, "req-leftout").unwrap());
     surface.requests.wait_for_idle("req-leftout");
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 10));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 10));
     let items = reqs.as_array().unwrap();
 
     let leftout_item = items
@@ -1516,7 +1541,7 @@ fn run_based_on_left_out_run_is_readiness_and_api_error() {
     assert!(err.contains("D1") && err.contains("D2"), "{err}");
 
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 3));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 3));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-dep-redone");
     assert_eq!(item["state"], "error");
@@ -1559,7 +1584,7 @@ fn every_run_redone_is_waiting_in_readiness_and_api() {
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
     assert!(!maybe_combine(&surface, "req-all-redone").unwrap());
 
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 4));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-all-redone");
     assert_eq!(item["state"], "waiting");
@@ -1593,7 +1618,7 @@ fn recording_redone_on_combined_run_triggers_recombine() {
     assert!(maybe_combine(&surface, "req-recombine").unwrap());
     surface.requests.wait_for_idle("req-recombine");
 
-    let reqs1 = parse_json(&route(&surface, &get("/api/requests"), now + 2));
+    let reqs1 = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 2));
     let item1 = &reqs1.as_array().unwrap()[0];
     assert_eq!(item1["state"], "combined");
     assert_eq!(item1["left_out"], json!([]));
@@ -1601,7 +1626,7 @@ fn recording_redone_on_combined_run_triggers_recombine() {
 
     record_verdict(root, "RC2", ReviewVerdict::Redone, "replaced", now + 3).unwrap();
 
-    let reqs_stale = parse_json(&route(&surface, &get("/api/requests"), now + 4));
+    let reqs_stale = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 4));
     let item_stale = &reqs_stale.as_array().unwrap()[0];
     assert_eq!(item_stale["state"], "waiting");
     assert_eq!(item_stale["left_out"], json!(["RC2"]));
@@ -1609,7 +1634,7 @@ fn recording_redone_on_combined_run_triggers_recombine() {
     assert!(maybe_combine(&surface, "req-recombine").unwrap());
     surface.requests.wait_for_idle("req-recombine");
 
-    let reqs2 = parse_json(&route(&surface, &get("/api/requests"), now + 5));
+    let reqs2 = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 5));
     let item2 = &reqs2.as_array().unwrap()[0];
     assert_eq!(item2["state"], "combined");
     assert_eq!(item2["runs"], json!(["RC1", "RC2"]));
@@ -1641,7 +1666,7 @@ fn unreadable_verdict_file_is_error_in_readiness_and_api() {
     assert!(err.contains("BV1.verdict.json"), "{err}");
 
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
-    let reqs = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item = &reqs.as_array().unwrap()[0];
     assert_eq!(item["request"], "req-bad-verdict");
     assert_eq!(item["state"], "error");
@@ -1737,7 +1762,7 @@ fn ready_request_waits_while_session_busy_then_combines_when_idle() {
     assert!(!root.join(".wt/combined/req-busy.json").exists());
     assert!(!branch_exists(root, "blyte/req-busy"));
 
-    let reqs_busy = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs_busy = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item_busy = &reqs_busy.as_array().unwrap()[0];
     assert_eq!(item_busy["request"], "req-busy");
     assert_eq!(item_busy["state"], "waiting");
@@ -1794,7 +1819,7 @@ fn ready_request_waits_while_session_has_queued_message_then_combines_when_idle(
     assert!(!root.join(".wt/combined/req-queued.json").exists());
     assert!(!branch_exists(root, "blyte/req-queued"));
 
-    let reqs_queued = parse_json(&route(&surface, &get("/api/requests"), now + 1));
+    let reqs_queued = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
     let item_queued = &reqs_queued.as_array().unwrap()[0];
     assert_eq!(item_queued["request"], "req-queued");
     assert_eq!(item_queued["state"], "waiting");
@@ -1891,4 +1916,253 @@ fn conflict_failure_message_is_not_queued_while_busy_and_queued_once_after() {
     assert!(!maybe_combine(&surface, "req-busy-conflict").unwrap());
     assert_session_idle(&surface.session);
     assert_eq!(handle.prompts.lock().unwrap().len(), 2);
+}
+
+struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
+    ReplConfig {
+        repo_root,
+        gate: None,
+        context_strategy: "folded".to_string(),
+        max_turns: 25,
+        max_gates: 5,
+        rollback: true,
+        model: Some("gemini-4-neon".to_string()),
+        container: None,
+        orchestrate: false,
+        fold_budget: None,
+        dispatch_cmd: None,
+        sandbox: "on".to_string(),
+        network: None,
+        allow_read: Vec::new(),
+        pass_env: Vec::new(),
+    }
+}
+
+fn start_stoppable_surface(
+    repo: &Path,
+) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let repo_bg = repo.to_path_buf();
+    let out_bg = Arc::clone(&out_buf);
+    let err_bg = Arc::clone(&err_buf);
+    let stop_bg = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let args = SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+        };
+        let mut out = SharedBuf(out_bg);
+        let mut err = SharedBuf(err_bg);
+        let mut opener = |_url: &str| {};
+        run_with_hooks(
+            &args,
+            default_repl_config(repo_bg),
+            &mut out,
+            &mut err,
+            &mut opener,
+            stop_bg,
+        )
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let url = loop {
+        let s = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
+        if let Some(rest) = s.split("blyte: surface at ").nth(1) {
+            if let Some(line) = rest.lines().next() {
+                if !line.trim().is_empty() {
+                    break line.trim().to_string();
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "surface failed to start; stdout={s:?} stderr={:?}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    let after_scheme = url.strip_prefix("http://127.0.0.1:").expect("loopback url");
+    let (port_str, token_part) = after_scheme.split_once("/#token=").expect("port and token");
+    let port: u16 = port_str.parse().expect("port u16");
+    (port, token_part.to_string(), stop, handle)
+}
+
+fn http_get_json(port: u16, token: &str, path: &str) -> (u16, Value) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect surface");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text.split_once("\r\n\r\n").expect("http response split");
+    let status: u16 = head
+        .lines()
+        .next()
+        .expect("status line")
+        .split_whitespace()
+        .nth(1)
+        .expect("status code")
+        .parse()
+        .expect("status u16");
+    let val: Value = serde_json::from_str(body).expect("json response body");
+    (status, val)
+}
+
+fn write_reportable_summary(root: &Path, id: &str, outcome: &str, branch: Option<&str>) {
+    let wt = root.join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let mut obj = json!({
+        "id": id,
+        "outcome": outcome,
+        "turns": 3,
+        "seconds": 12,
+        "cost_usd": 0.05,
+        "final_message": "done"
+    });
+    if let Some(b) = branch {
+        obj["branch"] = json!(b);
+    }
+    std::fs::write(
+        wt.join(format!("{id}.json")),
+        serde_json::to_string_pretty(&obj).unwrap() + "\n",
+    )
+    .unwrap();
+    std::fs::write(wt.join(format!("{id}.report.json")), "{\"turns\":3}\n").unwrap();
+}
+
+#[test]
+fn a_ready_request_is_combined_with_no_page_request() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "TM1", &base, "timer.txt", "timer\n", "feat: timer");
+    write_start_file(root, "TM1", Some("req-timer"), &base, now, false);
+    write_reportable_summary(root, "TM1", "verified", Some("wip/TM1"));
+    write_checks(root, "TM1", &["needs review"]);
+    decide(root, "TM1", Action::Accept, None, now + 1).unwrap();
+
+    let (_port, _token, stop, handle) = start_stoppable_surface(root);
+
+    let rec_path = root.join(".wt/combined/req-timer.json");
+    let attempt_path = root.join(".wt/combined/req-timer.attempt.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (!rec_path.is_file() || !attempt_path.is_file()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
+
+    assert!(
+        rec_path.is_file(),
+        "expected {} to exist",
+        rec_path.display()
+    );
+    let rec: CombineRecord =
+        serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
+    assert_eq!(rec.state, CombineState::Combined);
+    assert_eq!(rec.branch, "blyte/req-timer");
+}
+
+#[test]
+fn timer_and_page_requests_do_not_report_a_run_twice() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "RACE1", &base, "r1.txt", "r1\n", "feat: r1");
+    create_run_branch(root, "RACE2", &base, "r2.txt", "r2\n", "feat: r2");
+    write_start_file(root, "RACE1", Some("req-race-1"), &base, now, false);
+    write_reportable_summary(root, "RACE1", "verified", Some("wip/RACE1"));
+    write_checks(root, "RACE1", &["needs review"]);
+
+    let (port, token, stop, handle) = start_stoppable_surface(root);
+
+    let hammer_stop = Arc::new(AtomicBool::new(false));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let tok = token.clone();
+        let done = Arc::clone(&hammer_stop);
+        workers.push(std::thread::spawn(move || {
+            let mut calls = 0usize;
+            while !done.load(Ordering::Relaxed) {
+                let (status, _) = http_get_json(port, &tok, "/api/runs");
+                assert_eq!(status, 200);
+                calls += 1;
+            }
+            calls
+        }));
+    }
+
+    std::thread::sleep(Duration::from_millis(1200));
+    write_start_file(root, "RACE2", Some("req-race-2"), &base, now + 1, false);
+    write_reportable_summary(root, "RACE2", "verified", Some("wip/RACE2"));
+    write_checks(root, "RACE2", &["needs review"]);
+    std::thread::sleep(Duration::from_millis(1300));
+
+    hammer_stop.store(true, Ordering::Relaxed);
+    for w in workers {
+        assert!(w.join().unwrap() > 0);
+    }
+
+    let (status, events) = http_get_json(port, &token, "/api/session/events?after=0");
+    assert_eq!(status, 200);
+
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
+
+    let entries = events["entries"].as_array().expect("entries array");
+    let count_reports = |run_id: &str| {
+        entries
+            .iter()
+            .filter(|e| e["kind"] == "decision" && e["run"] == run_id && e["action"] == "finished")
+            .count()
+    };
+    assert_eq!(count_reports("RACE1"), 1, "entries: {entries:?}");
+    assert_eq!(count_reports("RACE2"), 1, "entries: {entries:?}");
+}
+
+#[test]
+fn the_timer_thread_ends_with_the_server() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    let (_port, _token, stop, handle) = start_stoppable_surface(root);
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
+
+    create_run_branch(root, "AFTER1", &base, "after.txt", "after\n", "feat: after");
+    write_start_file(root, "AFTER1", Some("req-after-stop"), &base, now, false);
+    write_reportable_summary(root, "AFTER1", "verified", Some("wip/AFTER1"));
+    write_checks(root, "AFTER1", &["needs review"]);
+    decide(root, "AFTER1", Action::Accept, None, now + 1).unwrap();
+
+    std::thread::sleep(Duration::from_secs(5));
+
+    assert!(!root.join(".wt/combined/req-after-stop.json").exists());
+    assert!(!branch_exists(root, "blyte/req-after-stop"));
 }

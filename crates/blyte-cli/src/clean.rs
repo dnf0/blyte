@@ -3061,6 +3061,7 @@ pub fn spawn_background_clean(root: &Path, skip_id: Option<&str>) {
             cmd.arg("--skip").arg(id);
         }
         cmd.current_dir(root)
+            .env_remove(blyte_agent::shell::MODEL_SHELL_ENV)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(stderr_file));

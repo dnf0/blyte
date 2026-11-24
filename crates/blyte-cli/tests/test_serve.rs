@@ -1,8 +1,11 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,7 +14,8 @@ use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::{
-    constant_time_eq, generate_token, route, run_with_io, Surface, TOKEN_HEADER,
+    authenticated_api_get_routes, constant_time_eq, generate_token, route, run_with_hooks,
+    run_with_io, Surface, TOKEN_HEADER,
 };
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
 
@@ -206,11 +210,16 @@ fn make_surface(
         token: generate_token().unwrap(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
+        reconcile_lock: Mutex::new(()),
     };
     (surface, calls)
 }
 
-fn get(path: &str, query: Vec<(&str, &str)>) -> Request {
+fn get(surface: &Surface, path: &str, query: Vec<(&str, &str)>) -> Request {
+    get_headers(path, query, vec![(TOKEN_HEADER, &surface.token)])
+}
+
+fn get_headers(path: &str, query: Vec<(&str, &str)>, headers: Vec<(&str, &str)>) -> Request {
     Request {
         method: "GET".to_string(),
         path: path.to_string(),
@@ -218,7 +227,10 @@ fn get(path: &str, query: Vec<(&str, &str)>) -> Request {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
-        headers: Vec::new(),
+        headers: headers
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         body: Vec::new(),
     }
 }
@@ -277,7 +289,7 @@ fn index_is_the_surface_page() {
     init_git_repo(&repo);
     let (surface, _) = make_surface(repo, Vec::new());
 
-    let resp = route(&surface, &get("/", vec![]), 1_700_000_100);
+    let resp = route(&surface, &get(&surface, "/", vec![]), 1_700_000_100);
     assert_eq!(resp.status, 200);
     assert!(resp.content_type.starts_with("text/html"));
     let html = String::from_utf8(resp.body).unwrap();
@@ -291,7 +303,11 @@ fn session_info_shape() {
     init_git_repo(&repo);
     let (surface, _) = make_surface(repo, Vec::new());
 
-    let resp = route(&surface, &get("/api/session", vec![]), 1_700_000_100);
+    let resp = route(
+        &surface,
+        &get(&surface, "/api/session", vec![]),
+        1_700_000_100,
+    );
     assert_eq!(resp.status, 200);
     let val = parse_json(&resp);
     let obj = val.as_object().unwrap();
@@ -369,6 +385,7 @@ fn message_then_events() {
         let ev_resp = route(
             &surface,
             &get(
+                &surface,
                 "/api/session/events",
                 vec![("after", &after_str), ("wait_ms", "2000")],
             ),
@@ -423,14 +440,18 @@ fn events_parameter_errors() {
     init_git_repo(&repo);
     let (surface, _) = make_surface(repo, Vec::new());
 
-    let missing = route(&surface, &get("/api/session/events", vec![]), 1_700_000_100);
+    let missing = route(
+        &surface,
+        &get(&surface, "/api/session/events", vec![]),
+        1_700_000_100,
+    );
     assert_eq!(missing.status, 400);
     let missing_err = parse_json(&missing)["error"].as_str().unwrap().to_string();
     assert!(missing_err.contains("after"), "got: {missing_err}");
 
     let bad_after = route(
         &surface,
-        &get("/api/session/events", vec![("after", "x")]),
+        &get(&surface, "/api/session/events", vec![("after", "x")]),
         1_700_000_100,
     );
     assert_eq!(bad_after.status, 400);
@@ -443,6 +464,7 @@ fn events_parameter_errors() {
     let high_wait = route(
         &surface,
         &get(
+            &surface,
             "/api/session/events",
             vec![("after", "0"), ("wait_ms", "25001")],
         ),
@@ -468,6 +490,7 @@ fn events_wait_returns_empty() {
     let resp = route(
         &surface,
         &get(
+            &surface,
             "/api/session/events",
             vec![("after", &last_seq), ("wait_ms", "50")],
         ),
@@ -646,7 +669,7 @@ fn runs_carry_hold_and_checks() {
 
     let (surface, _) = make_surface(repo.clone(), Vec::new());
 
-    let runs_resp = route(&surface, &get("/api/runs", vec![]), t);
+    let runs_resp = route(&surface, &get(&surface, "/api/runs", vec![]), t);
     assert_eq!(
         runs_resp.status,
         200,
@@ -660,7 +683,7 @@ fn runs_carry_hold_and_checks() {
     assert_eq!(runs[0]["id"], "T1");
     assert_eq!(runs[0]["hold"], serde_json::Value::Null);
 
-    let diff_resp = route(&surface, &get("/api/runs/T1/diff", vec![]), t);
+    let diff_resp = route(&surface, &get(&surface, "/api/runs/T1/diff", vec![]), t);
     assert_eq!(diff_resp.status, 200);
     assert!(diff_resp.content_type.starts_with("text/plain"));
     let diff_text = String::from_utf8(diff_resp.body).unwrap();
@@ -695,7 +718,7 @@ fn runs_carry_hold_and_checks() {
         }
     );
 
-    let runs_after = route(&surface, &get("/api/runs", vec![]), t + 1);
+    let runs_after = route(&surface, &get(&surface, "/api/runs", vec![]), t + 1);
     assert_eq!(runs_after.status, 200);
     let runs_after_val = parse_json(&runs_after);
     assert_eq!(runs_after_val["runs"][0]["hold"]["note"], "later");
@@ -718,7 +741,7 @@ fn run_without_a_worktree_is_still_listed() {
     assert!(!repo.join(".wt/T2").exists());
 
     let (surface, _) = make_surface(repo.clone(), Vec::new());
-    let resp = route(&surface, &get("/api/runs", vec![]), t);
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), t);
     assert_eq!(
         resp.status,
         200,
@@ -750,7 +773,7 @@ fn run_with_a_worktree_gets_its_checks() {
     assert!(!repo.join(".wt/T1.checks.json").exists());
 
     let (surface, _) = make_surface(repo.clone(), Vec::new());
-    let resp = route(&surface, &get("/api/runs", vec![]), t);
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), t);
     assert_eq!(
         resp.status,
         200,
@@ -789,7 +812,7 @@ fn one_cleaned_run_does_not_hide_the_others() {
     assert!(!repo.join(".wt/T2").exists());
 
     let (surface, _) = make_surface(repo.clone(), Vec::new());
-    let resp = route(&surface, &get("/api/runs", vec![]), t);
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), t);
     assert_eq!(
         resp.status,
         200,
@@ -983,11 +1006,15 @@ fn wrong_method_and_unknown_path() {
     assert_eq!(wrong.status, 405);
     assert!(parse_json(&wrong)["error"].is_string());
 
-    let nope = route(&surface, &get("/api/nope", vec![]), 1_700_000_100);
+    let nope = route(&surface, &get(&surface, "/api/nope", vec![]), 1_700_000_100);
     assert_eq!(nope.status, 404);
     assert!(parse_json(&nope)["error"].is_string());
 
-    let unknown_diff = route(&surface, &get("/api/runs/NOPE/diff", vec![]), 1_700_000_100);
+    let unknown_diff = route(
+        &surface,
+        &get(&surface, "/api/runs/NOPE/diff", vec![]),
+        1_700_000_100,
+    );
     assert_eq!(unknown_diff.status, 404);
     assert!(parse_json(&unknown_diff)["error"].is_string());
 }
@@ -1004,7 +1031,7 @@ fn map_is_served() {
     write_file(&repo.join("src/lib.rs"), "pub fn answer() -> u32 { 42 }\n");
     let (surface, _) = make_surface(repo, Vec::new());
 
-    let resp = route(&surface, &get("/api/map", vec![]), 1_700_000_100);
+    let resp = route(&surface, &get(&surface, "/api/map", vec![]), 1_700_000_100);
     assert_eq!(resp.status, 200);
     let val = parse_json(&resp);
     let groups = val["groups"].as_array().unwrap();
@@ -1208,7 +1235,7 @@ fn second_start_attaches() {
 
     let mut stream = TcpStream::connect(("127.0.0.1", new_port)).unwrap();
     let req = format!(
-        "GET /api/session HTTP/1.1\r\nHost: 127.0.0.1:{new_port}\r\nConnection: close\r\n\r\n"
+        "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{new_port}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).unwrap();
     let mut raw_resp = String::new();
@@ -1404,15 +1431,24 @@ fn secret_never_leaks_and_origin_check_stays() {
         .bytes()
         .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
 
-    for path in [
-        "/",
-        "/api/session",
-        "/api/session/events?after=0",
-        "/api/runs",
-    ] {
+    for path in ["/", "/api/health"] {
         let resp = send_http(
             port,
             &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "GET {path} failed: {resp}"
+        );
+        assert!(!resp.contains(&token), "secret leaked in GET {path}");
+    }
+
+    for path in ["/api/session", "/api/session/events?after=0", "/api/runs"] {
+        let resp = send_http(
+            port,
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nConnection: close\r\n\r\n"
+            ),
         );
         assert!(
             resp.starts_with("HTTP/1.1 200"),
@@ -1474,7 +1510,9 @@ fn secret_never_leaks_and_origin_check_stays() {
     for path in ["/api/session", "/api/session/events?after=0"] {
         let resp = send_http(
             port,
-            &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"),
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nConnection: close\r\n\r\n"
+            ),
         );
         assert!(resp.starts_with("HTTP/1.1 200"));
         assert!(
@@ -1487,7 +1525,7 @@ fn secret_never_leaks_and_origin_check_stays() {
     assert!(wt_dir.join("surface.json").exists());
     for entry in std::fs::read_dir(&wt_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.is_file() {
+        if path.is_file() && path.file_name().and_then(|n| n.to_str()) != Some("surface.token") {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             assert!(
                 !content.contains(&token),
@@ -1546,7 +1584,7 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
 
     let wrong_method = route(
         &surface,
-        &get("/api/session/approvals/approval-1", vec![]),
+        &get(&surface, "/api/session/approvals/approval-1", vec![]),
         t,
     );
     assert_eq!(wrong_method.status, 405);
@@ -1601,6 +1639,7 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
     let ev_resp = route(
         &surface,
         &get(
+            &surface,
             "/api/session/events",
             vec![("after", "0"), ("wait_ms", "2000")],
         ),
@@ -1662,6 +1701,7 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
     let ev_after = route(
         &surface,
         &get(
+            &surface,
             "/api/session/events",
             vec![("after", "1"), ("wait_ms", "0")],
         ),
@@ -1685,6 +1725,7 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
     let ev2_resp = route(
         &surface,
         &get(
+            &surface,
             "/api/session/events",
             vec![("after", "2"), ("wait_ms", "2000")],
         ),
@@ -1708,4 +1749,472 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
         blyte_agent::approval::Approval::Denied
     );
     ask_thread2.join().unwrap();
+}
+
+fn start_stoppable_surface(
+    repo: &Path,
+) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let repo_bg = repo.to_path_buf();
+    let out_bg = Arc::clone(&out_buf);
+    let err_bg = Arc::clone(&err_buf);
+    let stop_bg = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let args = SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+        };
+        let mut out = SharedBuf(out_bg);
+        let mut err = SharedBuf(err_bg);
+        let mut opener = |_: &str| {};
+        run_with_hooks(
+            &args,
+            default_repl_config(repo_bg),
+            &mut out,
+            &mut err,
+            &mut opener,
+            stop_bg,
+        )
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let line = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stderr={}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
+        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        if let Some(found) = stdout.lines().find(|l| l.contains("blyte: surface at ")) {
+            break found.to_string();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    let url = line
+        .split("blyte: surface at ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
+    let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+    let (port_str, fragment) = rest.split_once("/#token=").unwrap();
+    let port: u16 = port_str.parse().unwrap();
+    (port, fragment.to_string(), stop, handle)
+}
+
+#[test]
+fn every_api_get_rejects_a_missing_or_wrong_token() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo-crate");
+    init_git_repo(&repo);
+    write_file(
+        &repo.join("Cargo.toml"),
+        "[package]\nname = \"demo-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write_file(&repo.join("src/lib.rs"), "pub fn answer() -> u32 { 42 }\n");
+    write_file(&repo.join("README.md"), "hello\n");
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let base_sha = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let t = now_secs();
+    add_run_worktree(&repo, "T1");
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/t1.md"),
+        "T1",
+        &base_sha,
+        t - 600,
+    );
+
+    let (surface, _) = make_surface(repo, Vec::new());
+    let wrong = flip_last_hex_char(&surface.token);
+    let routes = authenticated_api_get_routes();
+    assert!(!routes.is_empty());
+
+    for pattern in routes {
+        let path = pattern.replace("{id}", "T1");
+        let query = if pattern == "/api/session/events" {
+            vec![("after", "0"), ("wait_ms", "0")]
+        } else {
+            vec![]
+        };
+
+        let missing = route(&surface, &get_headers(&path, query.clone(), vec![]), t);
+        assert_eq!(
+            missing.status, 403,
+            "GET {path} without token must return 403, got {}",
+            missing.status
+        );
+        assert!(parse_json(&missing)["error"].is_string());
+
+        let bad = route(
+            &surface,
+            &get_headers(&path, query.clone(), vec![(TOKEN_HEADER, wrong.as_str())]),
+            t,
+        );
+        assert_eq!(
+            bad.status, 403,
+            "GET {path} with wrong token must return 403, got {}",
+            bad.status
+        );
+        assert!(parse_json(&bad)["error"].is_string());
+
+        let ok = route(&surface, &get(&surface, &path, query), t);
+        if pattern == "/api/models" {
+            assert!(
+                (200..300).contains(&ok.status) || ok.status == 502,
+                "GET {path} with right token returned unexpected status {}",
+                ok.status
+            );
+        } else {
+            assert!(
+                (200..300).contains(&ok.status),
+                "GET {path} with right token must return 2xx, got {} ({})",
+                ok.status,
+                String::from_utf8_lossy(&ok.body)
+            );
+        }
+    }
+
+    for public_path in ["/", "/index.html", "/favicon.svg", "/fonts/archivo.woff2"] {
+        let resp = route(&surface, &get_headers(public_path, vec![], vec![]), t);
+        assert_eq!(
+            resp.status, 200,
+            "GET {public_path} must remain unauthenticated, got {}",
+            resp.status
+        );
+    }
+}
+
+#[test]
+fn health_answers_without_a_token_and_gives_only_the_session_id() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("demo-repo");
+    init_git_repo(&repo);
+    let (surface, _) = make_surface(repo, Vec::new());
+
+    let resp = route(
+        &surface,
+        &get_headers("/api/health", vec![], vec![]),
+        1_700_000_100,
+    );
+    assert_eq!(resp.status, 200);
+    let val = parse_json(&resp);
+    let obj = val.as_object().unwrap();
+    let keys: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+    assert_eq!(keys, BTreeSet::from(["session_id"]));
+    assert_eq!(obj["session_id"], surface.session_id);
+
+    let post_unauth = route(
+        &surface,
+        &post_json_headers("/api/health", &serde_json::json!({}), vec![]),
+        1_700_000_100,
+    );
+    assert_eq!(post_unauth.status, 403);
+
+    let post_auth = route(
+        &surface,
+        &post_json(&surface, "/api/health", &serde_json::json!({})),
+        1_700_000_100,
+    );
+    assert_eq!(post_auth.status, 405);
+}
+
+#[test]
+fn second_start_opens_the_page_with_the_token() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("attach-token-repo");
+    init_git_repo(&repo);
+
+    let (port, token, stop, handle) = start_stoppable_surface(&repo);
+
+    let mut out2 = Vec::new();
+    let mut err2 = Vec::new();
+    let mut opened = Vec::new();
+    let args2 = SurfaceArgs {
+        port: 0,
+        no_open: false,
+        days: 14,
+    };
+    let mut opener = |url: &str| opened.push(url.to_string());
+    let code2 = run_with_hooks(
+        &args2,
+        default_repl_config(repo.clone()),
+        &mut out2,
+        &mut err2,
+        &mut opener,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(
+        code2,
+        0,
+        "second start failed: stderr={}",
+        String::from_utf8_lossy(&err2)
+    );
+    assert_eq!(opened.len(), 1);
+    let expected_url = format!("http://127.0.0.1:{port}/#token={token}");
+    assert_eq!(opened[0], expected_url);
+    assert!(opened[0].ends_with(&format!("#token={token}")));
+
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
+}
+
+#[test]
+fn token_file_is_private_and_removed_on_shutdown() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("token-file-repo");
+    init_git_repo(&repo);
+
+    let (_port, token, stop, handle) = start_stoppable_surface(&repo);
+
+    let token_path = repo.join(".wt/surface.token");
+    let surface_path = repo.join(".wt/surface.json");
+    assert!(
+        token_path.exists(),
+        "expected {} to exist",
+        token_path.display()
+    );
+    assert!(surface_path.exists());
+
+    let stored_token = std::fs::read_to_string(&token_path).unwrap();
+    assert_eq!(stored_token.trim(), token);
+
+    let surface_json = std::fs::read_to_string(&surface_path).unwrap();
+    assert!(!surface_json.contains(&token));
+
+    #[cfg(unix)]
+    {
+        let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected mode 0600, got {:o}", mode);
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
+
+    assert!(
+        !token_path.exists(),
+        "expected {} to be deleted on shutdown",
+        token_path.display()
+    );
+    assert!(
+        !surface_path.exists(),
+        "expected {} to be deleted on shutdown",
+        surface_path.display()
+    );
+}
+
+#[test]
+fn second_start_fails_loudly_without_the_token_file() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("missing-token-file-repo");
+    init_git_repo(&repo);
+
+    let (_port, _token, stop, handle) = start_stoppable_surface(&repo);
+    let token_path = repo.join(".wt/surface.token");
+    assert!(token_path.exists());
+    std::fs::remove_file(&token_path).unwrap();
+
+    let mut out2 = Vec::new();
+    let mut err2 = Vec::new();
+    let mut opened = Vec::new();
+    let args2 = SurfaceArgs {
+        port: 0,
+        no_open: false,
+        days: 14,
+    };
+    let mut opener = |url: &str| opened.push(url.to_string());
+    let code2 = run_with_hooks(
+        &args2,
+        default_repl_config(repo.clone()),
+        &mut out2,
+        &mut err2,
+        &mut opener,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(code2, 1);
+    let err2_str = String::from_utf8(err2).unwrap();
+    assert!(
+        err2_str.contains("surface.token"),
+        "expected stderr to name the token file, got: {err2_str}"
+    );
+    assert!(
+        opened.is_empty(),
+        "must not open a tab without the token, opened: {opened:?}"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
+}
+
+fn start_stoppable_surface_with_model(
+    repo: &Path,
+    model: &str,
+) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let repo_bg = repo.to_path_buf();
+    let model_bg = model.to_string();
+    let out_bg = Arc::clone(&out_buf);
+    let err_bg = Arc::clone(&err_buf);
+    let stop_bg = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let args = SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+        };
+        let mut cfg = default_repl_config(repo_bg);
+        cfg.model = Some(model_bg);
+        let mut out = SharedBuf(out_bg);
+        let mut err = SharedBuf(err_bg);
+        let mut opener = |_: &str| {};
+        run_with_hooks(&args, cfg, &mut out, &mut err, &mut opener, stop_bg)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let line = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stderr={}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
+        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        if let Some(found) = stdout.lines().find(|l| l.contains("blyte: surface at ")) {
+            break found.to_string();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    let url = line
+        .split("blyte: surface at ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
+    let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+    let (port_str, fragment) = rest.split_once("/#token=").unwrap();
+    let port: u16 = port_str.parse().unwrap();
+    (port, fragment.to_string(), stop, handle)
+}
+
+fn http_json_body(raw_resp: &str) -> serde_json::Value {
+    let (_, body) = raw_resp
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("invalid HTTP response: {raw_resp}"));
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("invalid JSON body ({e}): {body}"))
+}
+
+#[test]
+fn events_survive_a_restart() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("restart-events-repo");
+    init_git_repo(&repo);
+
+    let (port1, token1, stop1, handle1) =
+        start_stoppable_surface_with_model(&repo, "unknown-model-for-test");
+
+    let msg_body = r#"{"text":"hello before restart"}"#;
+    let post_resp = send_http(
+        port1,
+        &format!(
+            "POST /api/session/messages HTTP/1.1\r\nHost: 127.0.0.1:{port1}\r\nOrigin: http://127.0.0.1:{port1}\r\n{TOKEN_HEADER}: {token1}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg_body}",
+            msg_body.len()
+        ),
+    );
+    assert!(
+        post_resp.starts_with("HTTP/1.1 200"),
+        "POST /api/session/messages failed: {post_resp}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let before_entries = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for idle entry before restart"
+        );
+        let events_resp = send_http(
+            port1,
+            &format!(
+                "GET /api/session/events?after=0 HTTP/1.1\r\nHost: 127.0.0.1:{port1}\r\n{TOKEN_HEADER}: {token1}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            events_resp.starts_with("HTTP/1.1 200"),
+            "GET /api/session/events failed: {events_resp}"
+        );
+        let parsed = http_json_body(&events_resp);
+        let entries = parsed["entries"].as_array().unwrap().clone();
+        if entries.iter().any(|e| e["kind"] == "idle") {
+            break entries;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        before_entries
+            .iter()
+            .any(|e| e["kind"] == "user_message" && e["text"] == "hello before restart"),
+        "expected user_message before restart, got: {before_entries:?}"
+    );
+    assert!(repo.join(".wt/sessions/entries.jsonl").exists());
+
+    stop1.store(true, Ordering::Relaxed);
+    assert_eq!(handle1.join().unwrap(), 0);
+
+    let (port2, token2, stop2, handle2) =
+        start_stoppable_surface_with_model(&repo, "unknown-model-for-test");
+
+    let events2_resp = send_http(
+        port2,
+        &format!(
+            "GET /api/session/events?after=0 HTTP/1.1\r\nHost: 127.0.0.1:{port2}\r\n{TOKEN_HEADER}: {token2}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(
+        events2_resp.starts_with("HTTP/1.1 200"),
+        "GET /api/session/events after restart failed: {events2_resp}"
+    );
+    let parsed2 = http_json_body(&events2_resp);
+    let after_entries = parsed2["entries"].as_array().unwrap();
+    assert_eq!(after_entries.len(), before_entries.len() + 1);
+    assert_eq!(&after_entries[..before_entries.len()], &before_entries[..]);
+
+    let notice = after_entries.last().unwrap();
+    let expected_seq = before_entries.last().unwrap()["seq"].as_u64().unwrap() + 1;
+    assert_eq!(notice["seq"].as_u64(), Some(expected_seq));
+    assert_eq!(notice["kind"].as_str(), Some("error"));
+    assert_eq!(
+        notice["message"].as_str(),
+        Some(
+            "blyte restarted: the entries above are from before; the model does not remember them"
+        )
+    );
+
+    stop2.store(true, Ordering::Relaxed);
+    assert_eq!(handle2.join().unwrap(), 0);
 }

@@ -35,6 +35,38 @@ pub struct WriteScope {
     pub edit_worktrees: Option<PathBuf>,
 }
 
+fn refused_blyte_tool_command(args: &[String]) -> Option<&'static str> {
+    let first = args.first().map(|s| s.as_str())?;
+    if first == "combine" {
+        return Some("combine");
+    }
+    if first == "review" {
+        let mut iter = args[1..].iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--" {
+                break;
+            }
+            if arg == "--model-review" {
+                return Some("review --model-review");
+            }
+            let verdict_val = if arg == "--verdict" {
+                iter.next().map(|s| s.as_str())
+            } else {
+                arg.strip_prefix("--verdict=")
+            };
+            if let Some(val) = verdict_val {
+                if val.eq_ignore_ascii_case("accepted") {
+                    return Some("review --verdict accepted");
+                }
+                if val.eq_ignore_ascii_case("fixed") {
+                    return Some("review --verdict fixed");
+                }
+            }
+        }
+    }
+    None
+}
+
 pub const BLYTE_TOOL_COMMANDS: [&str; 9] = [
     "dispatch",
     "wait",
@@ -543,17 +575,10 @@ fn resolve_real_target(fs: &dyn Fs, path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn path_exists(path: &Path) -> Result<bool, String> {
-    match std::fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("cannot check {}: {e}", path.display())),
-    }
-}
-
 /// Reports whether `real_target` lies inside an open direct edit's worktree under
 /// `edit_worktrees`: `<edit_worktrees>/<id>/<rest>` where `<edit_worktrees>/<id>.edit.json`
-/// exists, `<edit_worktrees>/<id>.json` does not, and no path component below `<id>/` is `.git`.
+/// exists, `<edit_worktrees>/<id>.json` does not, `<edit_worktrees>/<id>` is a directory, and no
+/// path component below `<id>/` is `.git`.
 fn is_in_open_edit_worktree(edit_worktrees: &Path, real_target: &Path) -> Result<bool, String> {
     use std::path::Component;
     let Ok(rel) = real_target.strip_prefix(edit_worktrees) else {
@@ -575,16 +600,7 @@ fn is_in_open_edit_worktree(edit_worktrees: &Path, real_target: &Path) -> Result
     if !has_child {
         return Ok(false);
     }
-    let mut edit_name = id.to_os_string();
-    edit_name.push(".edit.json");
-    let edit_marker = edit_worktrees.join(edit_name);
-    if !path_exists(&edit_marker)? {
-        return Ok(false);
-    }
-    let mut summary_name = id.to_os_string();
-    summary_name.push(".json");
-    let summary_marker = edit_worktrees.join(summary_name);
-    Ok(!path_exists(&summary_marker)?)
+    crate::sandbox::is_open_edit_worktree_id(edit_worktrees, id)
 }
 
 fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
@@ -1307,6 +1323,9 @@ fn execute_unbounded(
                     BLYTE_TOOL_COMMANDS.join(", ")
                 ));
             };
+            if let Some(refused) = refused_blyte_tool_command(&cmd_args) {
+                return ToolOutcome::err(crate::shell::model_shell_refusal_message(refused));
+            }
             if !BLYTE_TOOL_COMMANDS.contains(&first) {
                 return ToolOutcome::err(format!(
                     "the blyte tool runs only: {}",
@@ -1346,6 +1365,7 @@ fn execute_unbounded(
             cmd_builder
                 .args(&exec_args)
                 .env("BLYTE_DISPATCH_PARENT", &parent_session)
+                .env_remove(crate::shell::MODEL_SHELL_ENV)
                 .stdin(std::process::Stdio::null());
             if root.is_dir() {
                 cmd_builder.current_dir(root);

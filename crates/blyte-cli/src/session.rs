@@ -1,12 +1,18 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub const RESTART_NOTICE_TEXT: &str =
+    "blyte restarted: the entries above are from before; the model does not remember them";
+
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub seq: u64,
     pub ts: u64,
@@ -14,7 +20,7 @@ pub struct Entry {
     pub body: EntryBody,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EntryBody {
     UserMessage {
@@ -274,8 +280,145 @@ struct QueuedMessage {
     prompt: String,
 }
 
+struct EntryLog {
+    path: PathBuf,
+    file: File,
+}
+
+impl EntryLog {
+    fn open(path: PathBuf, err: &mut dyn Write) -> Result<(Self, Vec<Entry>), String> {
+        let (entries, truncate_to, needs_newline) = load_entries_file(&path, err)?;
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
+            }
+        }
+        if let Some(len) = truncate_to {
+            let f = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("failed to truncate {}: {e}", path.display()))?;
+            f.set_len(len)
+                .map_err(|e| format!("failed to truncate {}: {e}", path.display()))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+        if needs_newline {
+            file.write_all(b"\n")
+                .and_then(|_| file.flush())
+                .map_err(|e| format!("failed to write to {}: {e}", path.display()))?;
+        }
+        Ok((Self { path, file }, entries))
+    }
+
+    fn append(&mut self, entry: &Entry) {
+        let mut line = match serde_json::to_string(entry) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "blyte: failed to serialize entry for {}: {e}",
+                    self.path.display()
+                );
+                return;
+            }
+        };
+        line.push('\n');
+        if let Err(e) = self
+            .file
+            .write_all(line.as_bytes())
+            .and_then(|_| self.file.flush())
+        {
+            eprintln!("blyte: failed to write to {}: {e}", self.path.display());
+        }
+    }
+}
+
+fn load_entries_file(
+    path: &Path,
+    err: &mut dyn Write,
+) -> Result<(Vec<Entry>, Option<u64>, bool), String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok((Vec::new(), None, false)),
+        Err(e) => return Err(format!("failed to read {}: {e}", path.display())),
+    };
+    if bytes.is_empty() {
+        return Ok((Vec::new(), None, false));
+    }
+
+    let mut entries = Vec::new();
+    let mut pos = 0usize;
+    let mut line_no = 0usize;
+    let mut truncate_to = None;
+    let mut valid_end = 0usize;
+
+    while pos < bytes.len() {
+        line_no += 1;
+        let start = pos;
+        let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
+            Some(rel) => pos + rel + 1,
+            None => bytes.len(),
+        };
+        // A cut-off write never ends in a newline; a complete bad line is corruption.
+        let is_last = end == bytes.len() && !bytes[start..end].ends_with(b"\n");
+        let line_slice = &bytes[start..end];
+        let parsed = std::str::from_utf8(line_slice)
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::from_str::<Entry>(s).map_err(|e| e.to_string()));
+        match parsed {
+            Ok(entry) => {
+                entries.push(entry);
+                valid_end = end;
+            }
+            Err(reason) => {
+                if is_last {
+                    let _ = writeln!(
+                        err,
+                        "blyte: dropping truncated last line in {} at line {}: {}",
+                        path.display(),
+                        line_no,
+                        reason
+                    );
+                    let _ = err.flush();
+                    truncate_to = Some(start as u64);
+                } else {
+                    return Err(format!(
+                        "invalid entry in {} at line {}: {}",
+                        path.display(),
+                        line_no,
+                        reason
+                    ));
+                }
+            }
+        }
+        pos = end;
+    }
+
+    let needs_newline = valid_end > 0 && bytes[valid_end - 1] != b'\n';
+    Ok((entries, truncate_to, needs_newline))
+}
+
+fn max_approval_id(entries: &[Entry]) -> u64 {
+    entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::ApprovalRequested { id, .. } | EntryBody::ApprovalAnswered { id, .. } => {
+                id.strip_prefix("approval-")?.parse::<u64>().ok()
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 struct SessionState {
     entries: Vec<Entry>,
+    last_seq: u64,
+    log: Option<EntryLog>,
     queue: VecDeque<QueuedMessage>,
     session_prefix: String,
     request_seq: u64,
@@ -289,9 +432,14 @@ struct SessionState {
 
 impl SessionState {
     fn push_entry(&mut self, body: EntryBody) -> u64 {
-        let seq = self.entries.len() as u64 + 1;
+        self.last_seq += 1;
+        let seq = self.last_seq;
         let ts = now_secs();
-        self.entries.push(Entry { seq, ts, body });
+        let entry = Entry { seq, ts, body };
+        if let Some(log) = &mut self.log {
+            log.append(&entry);
+        }
+        self.entries.push(entry);
         seq
     }
 
@@ -346,6 +494,8 @@ impl Shared {
         Self {
             state: Mutex::new(SessionState {
                 entries: Vec::new(),
+                last_seq: 0,
+                log: None,
                 queue: VecDeque::new(),
                 session_prefix: new_session_prefix(),
                 request_seq: 0,
@@ -360,6 +510,49 @@ impl Shared {
             work_cv: Condvar::new(),
             approval_cv: Condvar::new(),
         }
+    }
+
+    fn new_with_log(
+        model: String,
+        effort: Option<String>,
+        log_path: Option<PathBuf>,
+        err: &mut dyn Write,
+    ) -> Result<Self, String> {
+        let (log, entries) = match log_path {
+            Some(path) => {
+                let (log, entries) = EntryLog::open(path, err)?;
+                (Some(log), entries)
+            }
+            None => (None, Vec::new()),
+        };
+        let last_seq = entries.iter().map(|e| e.seq).max().unwrap_or(0);
+        let next_approval_id = max_approval_id(&entries);
+        let had_entries = !entries.is_empty();
+        let mut state = SessionState {
+            entries,
+            last_seq,
+            log,
+            queue: VecDeque::new(),
+            session_prefix: new_session_prefix(),
+            request_seq: 0,
+            model,
+            effort,
+            busy: false,
+            closed: false,
+            approvals: HashMap::new(),
+            next_approval_id,
+        };
+        if had_entries {
+            state.push_entry(EntryBody::Error {
+                message: RESTART_NOTICE_TEXT.to_string(),
+            });
+        }
+        Ok(Self {
+            state: Mutex::new(state),
+            log_cv: Condvar::new(),
+            work_cv: Condvar::new(),
+            approval_cv: Condvar::new(),
+        })
     }
 
     fn lock_state(&self) -> MutexGuard<'_, SessionState> {
@@ -412,6 +605,40 @@ impl Session {
         Session {
             guard: Arc::new(SessionGuard { shared }),
         }
+    }
+
+    pub fn start_with_log<F>(
+        model: String,
+        log_path: Option<PathBuf>,
+        build_runner: F,
+    ) -> Result<Session, String>
+    where
+        F: FnOnce(Arc<SurfaceApprover>) -> Box<dyn PromptRunner>,
+    {
+        let mut stderr = std::io::stderr();
+        Self::start_with_log_io(model, log_path, &mut stderr, build_runner)
+    }
+
+    pub fn start_with_log_io<F>(
+        model: String,
+        log_path: Option<PathBuf>,
+        err: &mut dyn Write,
+        build_runner: F,
+    ) -> Result<Session, String>
+    where
+        F: FnOnce(Arc<SurfaceApprover>) -> Box<dyn PromptRunner>,
+    {
+        let (base_model, effort) = parse_model_and_effort(&model);
+        let shared = Arc::new(Shared::new_with_log(base_model, effort, log_path, err)?);
+        let approver = Arc::new(SurfaceApprover {
+            shared: Arc::clone(&shared),
+        });
+        let runner = build_runner(approver);
+        let worker_shared = Arc::clone(&shared);
+        std::thread::spawn(move || worker_loop(runner, worker_shared));
+        Ok(Session {
+            guard: Arc::new(SessionGuard { shared }),
+        })
     }
 
     #[doc(hidden)]
@@ -495,9 +722,9 @@ impl Session {
 
     pub fn entries_after(&self, after: u64, wait: Duration) -> Vec<Entry> {
         let mut state = self.guard.shared.lock_state();
-        if (state.entries.len() as u64) <= after && !wait.is_zero() {
+        if state.last_seq <= after && !wait.is_zero() {
             let deadline = Instant::now() + wait;
-            while (state.entries.len() as u64) <= after {
+            while state.last_seq <= after {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     break;
@@ -511,12 +738,12 @@ impl Session {
                 state = guard;
             }
         }
-        let start = usize::try_from(after).unwrap_or(usize::MAX);
-        if start >= state.entries.len() {
-            Vec::new()
-        } else {
-            state.entries[start..].to_vec()
-        }
+        state
+            .entries
+            .iter()
+            .filter(|e| e.seq > after)
+            .cloned()
+            .collect()
     }
 
     pub fn info(&self) -> SessionInfo {
@@ -527,7 +754,7 @@ impl Session {
             effort: state.effort.clone(),
             busy: state.busy,
             queued: state.queue.len(),
-            last_seq: state.entries.len() as u64,
+            last_seq: state.last_seq,
         }
     }
 

@@ -40,6 +40,57 @@ pub struct EditGateFailedOutput {
     pub output_tail: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct EditOutOfScopeOutput {
+    pub id: String,
+    pub outcome: &'static str,
+    pub changed_files: Vec<String>,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EditReviewFinding {
+    pub file: String,
+    pub line: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EditReviewFindingsOutput {
+    pub id: String,
+    pub outcome: &'static str,
+    pub findings: Vec<EditReviewFinding>,
+}
+
+pub fn direct_edit_scope(changed: &[String]) -> Result<(), String> {
+    if changed.len() <= 1 || changed.iter().all(|p| is_documentation_path(p)) {
+        return Ok(());
+    }
+    Err(format!(
+        "direct edits are for documentation or a change confined to one file; this edit changes {} files ({}): hand it to a run with blyte dispatch",
+        changed.len(),
+        changed.join(", ")
+    ))
+}
+
+fn is_documentation_path(path: &str) -> bool {
+    if path.starts_with("docs/") {
+        return true;
+    }
+    let p = Path::new(path);
+    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+        if matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "md" | "mdx" | "rst" | "txt" | "adoc"
+        ) {
+            return true;
+        }
+    }
+    p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+        name.starts_with("README") || name.starts_with("CHANGELOG") || name.starts_with("LICENSE")
+    })
+}
+
 struct StepOutput {
     command: String,
     output: String,
@@ -448,6 +499,11 @@ pub fn run_edit_finish_in(
         return 2;
     }
 
+    if let Err(e) = verify_worktree_git_pointer(root, &worktree_dir, &args.id) {
+        eprintln!("error: {e}");
+        return 2;
+    }
+
     let task_text = match std::fs::read_to_string(&task_path) {
         Ok(s) => s,
         Err(e) => {
@@ -511,6 +567,18 @@ pub fn run_edit_finish_in(
             return 2;
         }
     };
+
+    if let Err(error) = direct_edit_scope(&changed_files) {
+        let out = EditOutOfScopeOutput {
+            id: args.id.clone(),
+            outcome: "out_of_scope",
+            changed_files,
+            error,
+        };
+        let json = serde_json::to_string_pretty(&out).unwrap();
+        println!("{json}");
+        return 2;
+    }
 
     let (repo_config, from_main) = match crate::config::load_with_fallback(start_dir) {
         Ok(Some((cfg, from_main))) => (Some(cfg), from_main),
@@ -763,11 +831,79 @@ pub fn run_edit_finish_in(
         }
     }
 
-    if let Err(e) = crate::queue_actions::evaluate_verified_run(root, &args.id) {
-        eprintln!(
-            "warning: post-edit review check failed for {}: {e}",
-            args.id
-        );
+    let review = match crate::queue_actions::evaluate_verified_run_with(
+        root,
+        &args.id,
+        true,
+        crate::model_review::run,
+    ) {
+        Ok(mr) => mr,
+        Err(e) => {
+            eprintln!(
+                "warning: post-edit review check failed for {}: {e}",
+                args.id
+            );
+            None
+        }
+    };
+
+    let fixround_path = crate::fix_round::record_path(&wt_parent, &args.id);
+    let existing_fixround = match crate::fix_round::load_record(&fixround_path) {
+        Ok(rec) => rec,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let needs_fix_round = crate::fix_round::should_run(false, "verified", true, review.as_ref())
+        || review
+            .as_ref()
+            .is_some_and(crate::model_review::ModelReviewResult::has_findings);
+    if existing_fixround.is_none() && needs_fix_round {
+        let mr = review.as_ref().unwrap();
+        let pre_round_sha = match git_head_sha(&worktree_dir) {
+            Ok(sha) => sha,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+        let fallbacks_sent = if crate::fix_round::confirmed_count(mr) > 0 {
+            match crate::fix_round::collect_confirmed_fallbacks(root, &args.id, &worktree_dir, mr) {
+                Ok(fbs) => fbs,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let started_at = match now_secs() {
+            Ok(ts) => ts,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+        let started_record = crate::fix_round::FixRoundRecord::Started {
+            pre_round_sha,
+            fallbacks_sent,
+            started_at,
+        };
+        if let Err(e) = crate::fix_round::write_record(&fixround_path, &started_record) {
+            eprintln!("error: {e}");
+            return 2;
+        }
+        let findings = collect_review_findings(mr);
+        let findings_out = EditReviewFindingsOutput {
+            id: args.id.clone(),
+            outcome: "review_findings",
+            findings,
+        };
+        let json = serde_json::to_string_pretty(&findings_out).unwrap();
+        println!("{json}");
+        return 1;
     }
 
     let summary = DispatchSummary {
@@ -787,7 +923,6 @@ pub fn run_edit_finish_in(
         model: None,
         seconds,
         sandbox: "none".to_string(),
-        // A direct edit has no implementer to send fallbacks back to.
         fix_round: None,
         log: log_path.display().to_string(),
         report: report_path.display().to_string(),
@@ -805,6 +940,180 @@ pub fn run_edit_finish_in(
     let json = serde_json::to_string_pretty(&summary).unwrap();
     println!("{json}");
     0
+}
+
+fn git_common_dir(dir: &Path) -> Result<PathBuf, String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to execute git rev-parse --git-common-dir: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rev-parse --git-common-dir failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Err("git rev-parse --git-common-dir returned empty output".to_string());
+    }
+    let path = PathBuf::from(raw);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    })
+}
+
+fn verify_worktree_git_pointer(
+    main_checkout: &Path,
+    worktree_dir: &Path,
+    id: &str,
+) -> Result<(), String> {
+    let git_file = worktree_dir.join(".git");
+    let meta = std::fs::symlink_metadata(&git_file).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be inspected: {e}",
+            git_file.display()
+        )
+    })?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        return Err(format!(
+            "worktree git pointer {} is a symlink, expected a regular file",
+            git_file.display()
+        ));
+    }
+    if ft.is_dir() {
+        return Err(format!(
+            "worktree git pointer {} is a directory, expected a regular file",
+            git_file.display()
+        ));
+    }
+    if !ft.is_file() {
+        return Err(format!(
+            "worktree git pointer {} is not a regular file",
+            git_file.display()
+        ));
+    }
+
+    let content = std::fs::read_to_string(&git_file).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be read: {e}",
+            git_file.display()
+        )
+    })?;
+    let trimmed = content
+        .strip_suffix("\r\n")
+        .or_else(|| content.strip_suffix('\n'))
+        .unwrap_or(&content);
+    let Some(pointed_str) = trimmed.strip_prefix("gitdir: ") else {
+        return Err(format!(
+            "worktree git pointer {} must be a single `gitdir: <path>` line",
+            git_file.display()
+        ));
+    };
+    if pointed_str.is_empty() || pointed_str.contains(['\n', '\r']) {
+        return Err(format!(
+            "worktree git pointer {} must be a single `gitdir: <path>` line",
+            git_file.display()
+        ));
+    }
+
+    let common_dir = git_common_dir(main_checkout).map_err(|e| {
+        format!(
+            "cannot resolve git common dir while verifying {}: {e}",
+            git_file.display()
+        )
+    })?;
+    let expected_worktree_gitdir = common_dir.join("worktrees").join(id);
+    if !expected_worktree_gitdir.is_dir() {
+        return Err(format!(
+            "worktree git pointer {} expects worktree metadata directory {}, which does not exist",
+            git_file.display(),
+            expected_worktree_gitdir.display()
+        ));
+    }
+    let expected_canon = std::fs::canonicalize(&expected_worktree_gitdir).map_err(|e| {
+        format!(
+            "cannot canonicalize {} while verifying {}: {e}",
+            expected_worktree_gitdir.display(),
+            git_file.display()
+        )
+    })?;
+
+    let pointed_path = Path::new(pointed_str);
+    let resolved_pointed = if pointed_path.is_absolute() {
+        pointed_path.to_path_buf()
+    } else {
+        worktree_dir.join(pointed_path)
+    };
+    let pointed_canon = std::fs::canonicalize(&resolved_pointed).map_err(|e| {
+        format!(
+            "worktree git pointer {} points to {}, which cannot be resolved: {e}",
+            git_file.display(),
+            pointed_str
+        )
+    })?;
+    if pointed_canon != expected_canon {
+        return Err(format!(
+            "worktree git pointer {} points to {}, expected {}",
+            git_file.display(),
+            pointed_canon.display(),
+            expected_canon.display()
+        ));
+    }
+
+    let backlink_file = expected_canon.join("gitdir");
+    let backlink_content = std::fs::read_to_string(&backlink_file).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be verified because {} cannot be read: {e}",
+            git_file.display(),
+            backlink_file.display()
+        )
+    })?;
+    let backlink_trimmed = backlink_content
+        .strip_suffix("\r\n")
+        .or_else(|| backlink_content.strip_suffix('\n'))
+        .unwrap_or(&backlink_content);
+    if backlink_trimmed.is_empty() || backlink_trimmed.contains(['\n', '\r']) {
+        return Err(format!(
+            "worktree git pointer {} cannot be verified because {} is malformed",
+            git_file.display(),
+            backlink_file.display()
+        ));
+    }
+    let backlink_path = Path::new(backlink_trimmed);
+    let resolved_backlink = if backlink_path.is_absolute() {
+        backlink_path.to_path_buf()
+    } else {
+        expected_canon.join(backlink_path)
+    };
+    let backlink_canon = std::fs::canonicalize(&resolved_backlink).map_err(|e| {
+        format!(
+            "worktree git pointer {} cannot be verified because {} points to {}, which cannot be resolved: {e}",
+            git_file.display(),
+            backlink_file.display(),
+            backlink_trimmed
+        )
+    })?;
+    let git_file_canon = std::fs::canonicalize(&git_file).map_err(|e| {
+        format!(
+            "cannot canonicalize worktree git pointer {}: {e}",
+            git_file.display()
+        )
+    })?;
+    if backlink_canon != git_file_canon {
+        return Err(format!(
+            "worktree git pointer {} is not the target of {} (points to {})",
+            git_file.display(),
+            backlink_file.display(),
+            backlink_canon.display()
+        ));
+    }
+
+    Ok(())
 }
 
 fn commit_worktree_changes(worktree_dir: &Path, message: &str) -> Result<(), String> {
@@ -865,6 +1174,46 @@ fn collect_commits(worktree_dir: &Path, base_sha: &str) -> Result<Vec<CommitReco
         }
     }
     Ok(commits)
+}
+
+fn git_head_sha(worktree_dir: &Path) -> Result<String, String> {
+    let out = Command::new("git")
+        .current_dir(worktree_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("failed to run git rev-parse HEAD: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() {
+        return Err("git rev-parse HEAD returned empty output".to_string());
+    }
+    Ok(sha)
+}
+
+fn collect_review_findings(
+    review: &crate::model_review::ModelReviewResult,
+) -> Vec<EditReviewFinding> {
+    let mut out = Vec::new();
+    for c in &review.concerns {
+        out.push(EditReviewFinding {
+            file: c.file.clone(),
+            line: c.line,
+            text: c.text.clone(),
+        });
+    }
+    for f in review.fallbacks.iter().filter(|f| f.verdict == "fallback") {
+        out.push(EditReviewFinding {
+            file: f.file.clone(),
+            line: Some(f.line as u64),
+            text: f.reason.clone(),
+        });
+    }
+    out
 }
 
 fn collect_changed_files(worktree_dir: &Path, base_sha: &str) -> Result<Vec<String>, String> {

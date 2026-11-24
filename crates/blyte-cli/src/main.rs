@@ -29,6 +29,24 @@ fn main() {
 
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if std::env::var(blyte_agent::shell::MODEL_SHELL_ENV).as_deref() == Ok("1") {
+        let refused = match &cli.command {
+            Some(blyte_cli::cli::Command::Combine(_)) => Some("combine"),
+            Some(blyte_cli::cli::Command::Review(args)) if args.model_review => {
+                Some("review --model-review")
+            }
+            Some(blyte_cli::cli::Command::Review(args)) => match args.verdict {
+                Some(blyte_cli::cli::ReviewVerdict::Accepted) => Some("review --verdict accepted"),
+                Some(blyte_cli::cli::ReviewVerdict::Fixed) => Some("review --verdict fixed"),
+                Some(blyte_cli::cli::ReviewVerdict::Redone) | None => None,
+            },
+            _ => None,
+        };
+        if let Some(cmd) = refused {
+            eprintln!("{}", blyte_agent::shell::model_shell_refusal_message(cmd));
+            std::process::exit(2);
+        }
+    }
     let has_surface_flags = cli.port.is_some() || cli.no_open || cli.days.is_some();
     if has_surface_flags && (cli.terminal || cli.prompt.is_some() || cli.command.is_some()) {
         eprintln!(
