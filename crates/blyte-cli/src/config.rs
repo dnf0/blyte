@@ -16,7 +16,8 @@ pub struct DispatchConfig {
     pub setup: Option<String>,
     pub base_check: Option<bool>,
     pub comments: Option<String>,
-    /// Whether to run one fix round when the fresh review confirms fallbacks. Defaults to `true`.
+    /// Whether to run one fix round when the fresh review confirms fallbacks or raises concerns.
+    /// Defaults to `true`.
     #[serde(default = "default_fix_round")]
     pub fix_round: bool,
     pub model: Option<String>,

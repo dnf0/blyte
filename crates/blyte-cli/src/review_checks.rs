@@ -185,7 +185,9 @@ pub fn build(
         let unexpected = unexpected_subjects(t, subjects);
         for subj in unexpected {
             // The fix round's commit is asked for by blyte, not by the task.
-            if subj == crate::fix_round::COMMIT_MESSAGE {
+            if subj == crate::fix_round::COMMIT_MESSAGE
+                || subj == crate::fix_round::CONCERNS_COMMIT_MESSAGE
+            {
                 continue;
             }
             flags.push(format!("commit message not in the task: {subj}"));
@@ -242,6 +244,7 @@ mod tests {
         let subjects = vec![
             "feat: add x".to_string(),
             crate::fix_round::COMMIT_MESSAGE.to_string(),
+            crate::fix_round::CONCERNS_COMMIT_MESSAGE.to_string(),
             "fix: y".to_string(),
         ];
         let checks = build(Some(task), &[], &subjects, 0, 0, Some("verified"));

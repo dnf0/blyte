@@ -4,12 +4,14 @@ The output of `blyte --help` and of each subcommand's `--help`. Behaviour is des
 
 ```text
 A lean coding-agent harness with a sealed verification gate
+Bare `blyte` starts the live surface for the current repository.
 
 Usage: blyte [OPTIONS] [PROMPT] [COMMAND]
 
 Commands:
   init        Detect this repository's checks and write blyte.toml
   dashboard   Serve a local dashboard of running and recent jobs
+  combine     Combine a request's passed runs on a work branch and run the repository's check
   dispatch    Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
   review      Show what a dispatched run did: commits, files, tree state, report, and optionally the diff
   clean       Remove finished worktrees and merged branches
@@ -20,7 +22,6 @@ Commands:
   cost        Show orchestrator and implementer costs
   statusline  Print Claude Code's status line with blyte costs
   plan        List a plan's tasks with their state and the command to dispatch each ready one
-  comments    Fail when the working tree adds comments since a base commit
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -58,7 +59,7 @@ Options:
       --sandbox <SANDBOX>
           Sandbox the commands blyte runs on this machine (macOS Seatbelt, Linux Landlock): 'on' or 'off' [default: on] [possible values: on, off]
       --network <NETWORK>
-          Let commands blyte runs connect out: 'on' or 'off' (default 'on'). 'off' needs the sandbox [default: on] [possible values: on, off]
+          Let commands blyte runs connect out: 'on' or 'off' (default 'on', or 'off' under --orchestrate). 'off' needs the sandbox [possible values: on, off]
       --allow-read <ALLOW_READ>
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
@@ -71,11 +72,25 @@ Options:
           Whether this is a research run: periodically remind the model to keep report.md updated
       --claim-check
           Research run: check report.md's claims against their cited lines
+      --base-check
+          Run the verification gate once before the first model call and stop as blocked if it fails
+      --base-check-dir <DIR>
+          Directory containing an untouched checkout of the base commit for running the base check beside the model's first turns
+      --terminal
+          Run the interactive terminal session instead of starting the live surface
+      --port <N>
+          Port for the live surface (0 picks a free port)
+      --no-open
+          Do not open the live surface in the browser
+      --days <N>
+          How many days back to include finished runs in the live surface (1 to 31, default 14)
   -h, --help
           Print help
   -V, --version
           Print version
 ```
+
+Bare `blyte` starts the live surface for the current repository whether or not standard input is a terminal (so it can be started by a service manager or with `< /dev/null`) and serves until `SIGINT` or `SIGTERM`. Pass `--terminal` to start the interactive terminal session instead.
 
 ## blyte init
 
@@ -317,6 +332,8 @@ Options:
 ```
 
 ## blyte comments
+
+Internal command called by blyte itself; omitted from `blyte --help` (along with `instructions`, `mock`, `edit-start`, and `edit-finish`).
 
 ```text
 Fail when the working tree adds comments since a base commit

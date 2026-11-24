@@ -98,6 +98,11 @@ One JSON object, also saved to `.wt/<id>.json`: `outcome`, `exit` (0 only for `v
 added lines that look like a fallback, added comments, host commands and reads outside the
 repository. `nothing flagged` means none of these. `--diff` adds the full diff.
 
+A run whose check passed is reviewed by a second model. If that review confirms a fallback or raises
+concerns, the run gets them back once and may add a commit (`fix: fail loudly where review found a
+fallback` or `fix: address the review's concerns`); neither message is flagged. What the review
+still raises after that round is listed under `== checks`.
+
 - `== host commands` lists logged commands that may have changed things outside the worktree.
 - "the gate may have run in an environment from outside the worktree" means the implementer copied
   or linked a `.venv`, `node_modules` or cache entry from elsewhere, so the gate's pass does not

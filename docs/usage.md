@@ -1,5 +1,13 @@
 # Running tasks
 
+## Live surface
+
+```bash
+blyte [--port N] [--no-open] [--days N]
+```
+
+Running bare `blyte` inside a git repository starts the live surface for that repository, prints `blyte: surface at http://127.0.0.1:<port>/#token=<token>`, opens it in the browser unless `--no-open` is passed, and serves until `SIGINT` or `SIGTERM`. It starts the surface whether or not standard input is a terminal (so it can be run under a service manager or with `< /dev/null`). Pass `blyte --terminal` to run the interactive terminal session instead.
+
 ## Headless runs
 
 ```bash
@@ -87,7 +95,7 @@ max_turns = 300
 | `setup` | string | a command run once in each new dispatch worktree before the implementer starts, outside the sandbox, with `[dispatch.env]` and `BLYTE_MAIN_CHECKOUT` set; a failure ends the run as `blocked` |
 | `base_check` | boolean | default `true`: the gate is run once on the untouched worktree before the implementer starts, and a failure ends the run as `blocked` with no model call; set `false` (or pass `--no-base-check`) for a task meant to fix a check that already fails |
 | `comments` | string | default `"gate"`: the gate starts with `blyte comments --base <sha>`, which fails on any comment the run added, and `blyte review` flags them; `"review"` flags them in review only; `"off"` does neither. Any other value is an error |
-| `fix_round` | boolean | default `true`: when a verified run's fresh model review confirms fallbacks, run the implementer once more in the same worktree to remove them and review again before writing the summary |
+| `fix_round` | boolean | default `true`: when a verified run's fresh model review confirms fallbacks or raises concerns, run the implementer once more in the same worktree to address them and review again before writing the summary |
 | `allow_read` | array of strings | extra paths the sandbox may read, for every dispatch; `~/` and `$BLYTE_MAIN_CHECKOUT/` are expanded, otherwise absolute |
 | `model` | string | model identifier or provider selection |
 | `max_seconds` | integer | wall-clock budget in seconds (default 3600) |
@@ -100,7 +108,7 @@ max_turns = 300
 
 **Fresh model review on flagged or risky runs.** When a dispatched run finishes `verified`, blyte computes its built-in review checks and saves `.wt/<id>.checks.json`. If those checks flag anything (`files not named in the task` applies only to a task with a files section), or if any changed file matches `[review] risky`, blyte runs a fresh model review (`model_review::run`) that sees only the task and the diff and stores its result under `model_review` in `.wt/<id>.checks.json`. A clean run starts no model review. If the review raises findings, or if the review run itself fails, the failure or findings are recorded in `.wt/<id>.checks.json` and the run waits in the review queue as an exception until the user accepts it.
 
-**One fix round on confirmed fallbacks.** When `[dispatch] fix_round` is `true` (the default) and a verified non-research run's fresh review succeeds with at least one verdict `"fallback"`, `blyte dispatch` runs the implementer once more in the same worktree on the same branch to replace those fallbacks with explicit errors and tests, then re-runs the checks and fresh review before writing `.wt/<id>.json`. If the fix round fails its gate, exhausts its budget, errors, or makes no commit, the worktree is reset to the pre-round tip, the first review's flags stand with an extra flag noting the failed round, and the run still finishes `verified`. Progress is saved in `.wt/<id>.fixround.json` so re-running `blyte dispatch <id>` after an interrupted round resumes the round without repeating the first pass.
+**One fix round on confirmed fallbacks or concerns.** When `[dispatch] fix_round` is `true` (the default) and a verified non-research run's fresh review succeeds with at least one verdict `"fallback"` or at least one concern, `blyte dispatch` runs the implementer once more in the same worktree on the same branch to replace those fallbacks with explicit errors and tests or address those concerns, then re-runs the checks and fresh review before writing `.wt/<id>.json`. If the fix round fails its gate, exhausts its budget, errors, or makes no commit, the worktree is reset to the pre-round tip, the first review's flags stand with an extra flag noting the failed round, and the run still finishes `verified`. Progress is saved in `.wt/<id>.fixround.json` so re-running `blyte dispatch <id>` after an interrupted round resumes the round without repeating the first pass.
 
 **The environment is checked before the model starts.** After `setup`, a dispatch runs the gate once on the untouched worktree. If a step fails (dependencies that cannot be installed, a missing service, a base commit that is already broken), the run ends as `blocked` with zero turns and names the step and the end of its output. The implementer is also told never to copy, link or use a dependency environment from outside the worktree, and `blyte review` flags a run whose log shows it did: its gate may have passed in a borrowed environment, so do not accept it on the gate alone.
 

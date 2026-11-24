@@ -1099,9 +1099,10 @@ fn terminal_flag_conflicts() {
 }
 
 #[test]
-fn piped_stdin_still_runs_the_terminal_session() {
+fn the_terminal_flag_runs_the_terminal_session_on_piped_input() {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("--terminal")
         .env("HOME", home.path())
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .stdin(Stdio::piped())
@@ -1114,6 +1115,174 @@ fn piped_stdin_still_runs_the_terminal_session() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Blyte Interactive Harness"));
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_blyte_starts_the_surface_without_a_terminal() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+
+    struct ChildGuard(Option<std::process::Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    init_repo_with_commit(repo_dir.path());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["--no-open", "--port", "0"])
+        .current_dir(repo_dir.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("BLYTE_ENV_FILE", "")
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_USAGE_LOG", "off")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut guard = ChildGuard(Some(child));
+
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
+
+    let (tx, rx) = mpsc::channel::<String>();
+    let stdout_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let start_deadline = Instant::now() + Duration::from_secs(30);
+    let mut seen_stdout = Vec::new();
+    let mut started = false;
+    let mut exited_early = None;
+    loop {
+        let remaining = start_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(line) => {
+                let is_ready = line.starts_with("blyte: surface at ");
+                seen_stdout.push(line);
+                if is_ready {
+                    started = true;
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(status) = guard.0.as_mut().unwrap().try_wait().unwrap() {
+                    exited_early = Some(status);
+                    guard.0 = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    if !started {
+        let status = match exited_early {
+            Some(status) => status,
+            None => {
+                let mut child = guard.0.take().unwrap();
+                match child.try_wait().unwrap() {
+                    Some(status) => status,
+                    None => {
+                        let _ = child.kill();
+                        child.wait().unwrap()
+                    }
+                }
+            }
+        };
+        let stderr_text = stderr_handle.join().unwrap_or_default();
+        drop(rx);
+        let _ = stdout_handle.join();
+        panic!(
+            "surface did not print readiness line within 30s (status: {status:?})\nstdout:\n{}\nstderr:\n{stderr_text}",
+            seen_stdout.join("\n")
+        );
+    }
+
+    let surface_file = repo_dir.path().join(".wt/surface.json");
+    assert!(
+        surface_file.exists(),
+        "expected {} to exist after surface startup",
+        surface_file.display()
+    );
+
+    let pid = guard.0.as_ref().unwrap().id().to_string();
+    let kill_status = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+    assert!(
+        kill_status.success(),
+        "kill -TERM {pid} failed: {kill_status:?}"
+    );
+
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    let exit_status = loop {
+        if let Some(status) = guard.0.as_mut().unwrap().try_wait().unwrap() {
+            guard.0 = None;
+            break Some(status);
+        }
+        if Instant::now() >= exit_deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let Some(status) = exit_status else {
+        let mut child = guard.0.take().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let stderr_text = stderr_handle.join().unwrap_or_default();
+        drop(rx);
+        let _ = stdout_handle.join();
+        panic!("surface did not exit within 10s of SIGTERM\nstderr:\n{stderr_text}");
+    };
+
+    let stderr_text = stderr_handle.join().unwrap_or_default();
+    drop(rx);
+    let _ = stdout_handle.join();
+
+    assert!(
+        status.success(),
+        "expected surface to exit 0 after SIGTERM, got {status:?}\nstderr:\n{stderr_text}"
+    );
+    assert!(
+        !surface_file.exists(),
+        "expected {} to be removed on shutdown",
+        surface_file.display()
+    );
 }
 
 #[test]

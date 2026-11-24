@@ -50,6 +50,7 @@ fn test_cli_headless_missing_api_key() {
 #[test]
 fn test_cli_interactive_repl_stdin_driving() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("--terminal")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -77,6 +78,7 @@ fn test_cli_interactive_repl_stdin_driving() {
 #[test]
 fn the_banner_is_one_line_with_the_name() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("--terminal")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

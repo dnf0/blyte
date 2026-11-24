@@ -473,7 +473,7 @@ fn flagged_run_triggers_fresh_review_and_findings_wait_in_queue() {
     let repo = d.path().join("repo");
     let home = d.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    init_repo(&repo, None);
+    init_repo(&repo, Some("[dispatch]\nfix_round = false\n"));
     let head_before = git_head(&repo);
 
     let task = d.path().join("task.md");
@@ -573,7 +573,7 @@ fn risky_path_triggers_review_and_findings_put_run_in_queue() {
     std::fs::create_dir_all(&home).unwrap();
     init_repo(
         &repo,
-        Some("[dispatch]\ngate = \"true\"\n\n[review]\nrisky = [\"migrations/**\"]\n"),
+        Some("[dispatch]\ngate = \"true\"\nfix_round = false\n\n[review]\nrisky = [\"migrations/**\"]\n"),
     );
 
     let task = d.path().join("task.md");
