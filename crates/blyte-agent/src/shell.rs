@@ -63,7 +63,12 @@ const CREDENTIAL_SEGMENTS: &[&str] = &[
 
 /// Whole names that select credentials without looking like one: the AWS profile variables pick a
 /// profile in ~/.aws, which the sandbox denies (a passed profile makes boto fail on it).
-const CREDENTIAL_NAMES: &[&str] = &["AWS_PROFILE", "AWS_DEFAULT_PROFILE"];
+const CREDENTIAL_NAMES: &[&str] = &[
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+];
 
 static PASS_ENV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
@@ -110,9 +115,15 @@ pub fn set_pass_env(names: Vec<String>) {
     let _ = PASS_ENV.set(names);
 }
 
+/// Returns true when `name` is in the process-wide pass-through list set by [`set_pass_env`].
+pub fn is_pass_env(name: &str) -> bool {
+    PASS_ENV
+        .get()
+        .is_some_and(|passed| passed.iter().any(|p| p == name))
+}
+
 /// The sorted names of current process environment variables withheld by the credential filter.
 pub fn withheld_env() -> Vec<String> {
-    let pass_env = PASS_ENV.get();
     let mut withheld = Vec::new();
     for (key, val) in std::env::vars_os() {
         let name = key.to_string_lossy();
@@ -122,10 +133,8 @@ pub fn withheld_env() -> Vec<String> {
         if name.starts_with("BLYTE_") {
             continue;
         }
-        if let Some(passed) = pass_env {
-            if passed.iter().any(|p| p == name.as_ref()) {
-                continue;
-            }
+        if is_pass_env(&name) {
+            continue;
         }
         let value = val.to_string_lossy();
         if credential_like(&name, &value) {

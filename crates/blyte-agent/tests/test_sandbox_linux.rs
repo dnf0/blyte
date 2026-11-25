@@ -312,12 +312,16 @@ mod linux {
     fn landlock_profiles_cannot_read_surface_token_or_blyte_env() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !landlock_or_skip() {
+            eprintln!("skipped: sandbox cannot nest here");
             return;
         }
         let real_home = std::env::var("HOME").unwrap();
         let fake_home = tempfile::tempdir_in(&real_home).unwrap();
         let repo = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set(Some(fake_home.path()), None);
+
+        let benign = repo.path().join("benign.txt");
+        std::fs::write(&benign, "benign-ok\n").unwrap();
 
         let token_path = surface_token_path(repo.path()).unwrap();
         std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
@@ -333,6 +337,20 @@ mod linux {
             default_profile_net(repo.path(), &[], true),
         ] {
             let sh = LocalShell::sandboxed(profile);
+            let benign_res = sh
+                .exec(
+                    &format!("cat '{}'", benign.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_eq!(benign_res.exit_code, 0, "{}", benign_res.merged());
+            assert!(
+                benign_res.merged().contains("benign-ok"),
+                "{}",
+                benign_res.merged()
+            );
+
             let token_res = sh
                 .exec(
                     &format!("cat '{}'", token_path.display()),

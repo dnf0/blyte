@@ -290,12 +290,25 @@ mod macos {
         assert!(out.contains("s3cret"), "{out}");
     }
 
+    fn assert_benign_read(sh: &LocalShell, benign: &Path, cwd: &Path) -> bool {
+        let Some((code, out)) = cat(sh, benign, cwd) else {
+            eprintln!("skipped: sandbox cannot nest here");
+            return false;
+        };
+        assert_eq!(code, 0, "benign read failed: {out}");
+        assert!(out.contains("benign-ok"), "benign read output: {out}");
+        true
+    }
+
     #[test]
     fn conversation_profile_offline_cannot_read_surface_token_or_blyte_env() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set(Some(home.path()), None);
+
+        let benign = ws.path().join("benign.txt");
+        std::fs::write(&benign, "benign-ok\n").unwrap();
 
         let token_path = surface_token_path(ws.path()).unwrap();
         std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
@@ -306,9 +319,11 @@ mod macos {
         std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-conv-secret\n").unwrap();
 
         let sh = LocalShell::sandboxed(conversation_profile_net(ws.path(), &[], false));
-        let Some((code, out)) = cat(&sh, &token_path, ws.path()) else {
+        if !assert_benign_read(&sh, &benign, ws.path()) {
             return;
-        };
+        }
+
+        let (code, out) = cat(&sh, &token_path, ws.path()).unwrap();
         assert_ne!(code, 0, "{out}");
         assert!(!out.contains("surface-token-conv-secret"), "{out}");
 
@@ -324,6 +339,9 @@ mod macos {
         let ws = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set(Some(home.path()), None);
 
+        let benign = ws.path().join("benign.txt");
+        std::fs::write(&benign, "benign-ok\n").unwrap();
+
         let token_path = surface_token_path(ws.path()).unwrap();
         std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
         std::fs::write(&token_path, "surface-token-default-secret\n").unwrap();
@@ -333,9 +351,11 @@ mod macos {
         std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-default-secret\n").unwrap();
 
         let sh = LocalShell::sandboxed(default_profile_net(ws.path(), &[], true));
-        let Some((code, out)) = cat(&sh, &token_path, ws.path()) else {
+        if !assert_benign_read(&sh, &benign, ws.path()) {
             return;
-        };
+        }
+
+        let (code, out) = cat(&sh, &token_path, ws.path()).unwrap();
         assert_ne!(code, 0, "{out}");
         assert!(!out.contains("surface-token-default-secret"), "{out}");
 
@@ -351,6 +371,9 @@ mod macos {
         let ws = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set(Some(home.path()), None);
 
+        let benign = ws.path().join("benign.txt");
+        std::fs::write(&benign, "benign-ok\n").unwrap();
+
         let token_path = surface_token_path(ws.path()).unwrap();
         let token_dir = surface_token_dir().unwrap();
         std::fs::create_dir_all(&token_dir).unwrap();
@@ -361,11 +384,43 @@ mod macos {
             default_profile_net(ws.path(), std::slice::from_ref(&token_dir), true),
         ] {
             let sh = LocalShell::sandboxed(profile);
-            let Some((code, out)) = cat(&sh, &token_path, ws.path()) else {
+            if !assert_benign_read(&sh, &benign, ws.path()) {
                 return;
-            };
+            }
+            let (code, out) = cat(&sh, &token_path, ws.path()).unwrap();
             assert_ne!(code, 0, "{out}");
             assert!(!out.contains("surface-token-grant-secret"), "{out}");
+        }
+    }
+
+    #[test]
+    fn allow_read_grant_cannot_expose_blyte_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(Some(home.path()), None);
+
+        let benign = ws.path().join("benign.txt");
+        std::fs::write(&benign, "benign-ok\n").unwrap();
+
+        let config_dir = home.path().join(".config/blyte");
+        let env_path = config_dir.join("env");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-grant-secret\n").unwrap();
+
+        for grant in [&config_dir, &env_path] {
+            for profile in [
+                conversation_profile_net(ws.path(), std::slice::from_ref(grant), false),
+                default_profile_net(ws.path(), std::slice::from_ref(grant), true),
+            ] {
+                let sh = LocalShell::sandboxed(profile);
+                if !assert_benign_read(&sh, &benign, ws.path()) {
+                    return;
+                }
+                let (code, out) = cat(&sh, &env_path, ws.path()).unwrap();
+                assert_ne!(code, 0, "grant {} leaked: {out}", grant.display());
+                assert!(!out.contains("blyte-env-grant-secret"), "{out}");
+            }
         }
     }
 }

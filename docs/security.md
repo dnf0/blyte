@@ -59,7 +59,9 @@ A variable is withheld when a `_`-separated part of its name is one of `TOKEN`, 
 `SESSION` (so `GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY` and `SSH_AUTH_SOCK` are withheld, while
 `TOKENIZERS_PARALLELISM` and `PATH` are not), or when its value contains a URL with an inline
 password (`postgres://user:pass@host`). blyte prints the withheld names (never values) once at
-start, and `--pass-env NAME` keeps one.
+start, and `--pass-env NAME` keeps one. Passing `--pass-env SSH_AUTH_SOCK` also lifts the macOS
+sandbox's deny on that socket, which lets a run push over ssh (on Linux Landlock cannot block unix
+sockets by path, so only environment scrubbing applies).
 
 ## Network (`--network=off`)
 

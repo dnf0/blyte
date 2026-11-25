@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use blyte_cli::serve::TOKEN_HEADER;
 
@@ -63,20 +63,19 @@ fn surface_listener(verdict_path: PathBuf) -> (u16, Arc<Mutex<Vec<RecordedNotify
     (port, recorded)
 }
 
-fn token_path_for(repo_dir: &Path, state_home: &Path) -> PathBuf {
-    static LOCK: Mutex<()> = Mutex::new(());
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var_os("XDG_STATE_HOME");
-    std::env::set_var("XDG_STATE_HOME", state_home);
-    let path = blyte_agent::sandbox::surface_token_path(repo_dir).unwrap();
-    match prev {
-        Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-        None => std::env::remove_var("XDG_STATE_HOME"),
-    }
-    path
+fn state_home() -> &'static Path {
+    static STATE_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    STATE_HOME
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::env::set_var("XDG_STATE_HOME", dir.path());
+            dir
+        })
+        .path()
 }
 
-fn write_surface_files(repo_dir: &Path, state_home: &Path, port: u16, token: &str) {
+fn write_surface_files(repo_dir: &Path, port: u16, token: &str) {
+    let _ = state_home();
     let wt_dir = repo_dir.join(".wt");
     std::fs::create_dir_all(&wt_dir).unwrap();
     std::fs::write(
@@ -84,7 +83,7 @@ fn write_surface_files(repo_dir: &Path, state_home: &Path, port: u16, token: &st
         format!("{{\"port\": {port}}}\n"),
     )
     .unwrap();
-    let token_path = token_path_for(repo_dir, state_home);
+    let token_path = blyte_agent::sandbox::surface_token_path(repo_dir).unwrap();
     std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
     std::fs::write(&token_path, format!("{token}\n")).unwrap();
 }
@@ -124,16 +123,11 @@ fn seed_run(repo_dir: &Path, id: &str) {
     .unwrap();
 }
 
-fn run_review_verdict(
-    repo_dir: &Path,
-    state_home: &Path,
-    id: &str,
-    verdict: &str,
-) -> std::process::Output {
+fn run_review_verdict(repo_dir: &Path, id: &str, verdict: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["review", id, "--verdict", verdict])
         .current_dir(repo_dir)
-        .env("XDG_STATE_HOME", state_home)
+        .env("XDG_STATE_HOME", state_home())
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap()
@@ -142,15 +136,14 @@ fn run_review_verdict(
 #[test]
 fn recording_a_verdict_tells_a_running_surface() {
     let repo = init_repo();
-    let state_home = tempfile::tempdir().unwrap();
     let id = "R_NOTIFY_OK";
     seed_run(repo.path(), id);
 
     let verdict_path = repo.path().join(".wt").join(format!("{id}.verdict.json"));
     let (port, recorded) = surface_listener(verdict_path);
-    write_surface_files(repo.path(), state_home.path(), port, "review-secret-token");
+    write_surface_files(repo.path(), port, "review-secret-token");
 
-    let out = run_review_verdict(repo.path(), state_home.path(), id, "accepted");
+    let out = run_review_verdict(repo.path(), id, "accepted");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
@@ -174,11 +167,10 @@ fn recording_a_verdict_tells_a_running_surface() {
 #[test]
 fn recording_a_verdict_without_a_surface_says_nothing_extra() {
     let repo = init_repo();
-    let state_home = tempfile::tempdir().unwrap();
     let id = "R_NO_SURFACE";
     seed_run(repo.path(), id);
 
-    let out = run_review_verdict(repo.path(), state_home.path(), id, "accepted");
+    let out = run_review_verdict(repo.path(), id, "accepted");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
@@ -193,21 +185,15 @@ fn recording_a_verdict_without_a_surface_says_nothing_extra() {
 #[test]
 fn a_surface_that_cannot_be_told_does_not_undo_the_verdict() {
     let repo = init_repo();
-    let state_home = tempfile::tempdir().unwrap();
     let id = "R_DEAD_SURFACE";
     seed_run(repo.path(), id);
 
     let closed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
-    write_surface_files(
-        repo.path(),
-        state_home.path(),
-        closed_port,
-        "dead-review-token",
-    );
+    write_surface_files(repo.path(), closed_port, "dead-review-token");
 
-    let out = run_review_verdict(repo.path(), state_home.path(), id, "accepted");
+    let out = run_review_verdict(repo.path(), id, "accepted");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
