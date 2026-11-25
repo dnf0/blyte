@@ -208,3 +208,95 @@ fn the_hint_survives_the_base_check_tail() {
     let tail = base_check_tail(&raw);
     assert_eq!(tail.lines().last(), Some(hint));
 }
+
+fn dropped_middle_gate() -> &'static str {
+    "i=1; while [ $i -le 300 ]; do echo \"before $i\"; i=$((i + 1)); done; echo \"test middle ... FAILED\"; i=1; while [ $i -le 300 ]; do echo \"after $i\"; i=$((i + 1)); done; exit 1"
+}
+
+#[test]
+fn a_failure_in_the_dropped_middle_is_kept() {
+    let d = tempfile::tempdir().unwrap();
+    let mut deadline = None;
+    let res = run_gate_steps(
+        &LocalShell,
+        dropped_middle_gate(),
+        d.path(),
+        &[],
+        &mut deadline,
+        |_| {},
+        &std::time::Instant::now,
+    );
+    assert!(!res.passed);
+    let out = &res.failures[0].output;
+    assert!(
+        out.contains("Failing, in lines blyte left out:"),
+        "missing block header:\n{out}"
+    );
+    assert!(
+        out.contains("test middle ... FAILED"),
+        "missing dropped failing line:\n{out}"
+    );
+}
+
+#[test]
+fn a_failure_within_the_kept_lines_adds_no_block() {
+    let d = tempfile::tempdir().unwrap();
+    let mut deadline = None;
+    let res = run_gate_steps(
+        &LocalShell,
+        "i=1; while [ $i -le 10 ]; do echo \"line $i\"; i=$((i + 1)); done; echo \"test near ... FAILED\"; exit 1",
+        d.path(),
+        &[],
+        &mut deadline,
+        |_| {},
+        &std::time::Instant::now,
+    );
+    assert!(!res.passed);
+    let out = &res.failures[0].output;
+    assert!(!out.contains("Failing, in lines blyte left out:"));
+    let mut expected = String::from("exit 1\n");
+    for i in 1..=10 {
+        expected.push_str(&format!("line {i}\n"));
+    }
+    expected.push_str("test near ... FAILED");
+    assert_eq!(out, &expected);
+}
+
+#[test]
+fn a_long_passing_step_adds_no_block() {
+    let d = tempfile::tempdir().unwrap();
+    let mut deadline = None;
+    let res = run_gate_steps(
+        &LocalShell,
+        "i=1; while [ $i -le 350 ]; do echo \"before $i\"; i=$((i + 1)); done; echo \"test x ... FAILED\"; i=1; while [ $i -le 350 ]; do echo \"after $i\"; i=$((i + 1)); done; exit 0",
+        d.path(),
+        &[],
+        &mut deadline,
+        |_| {},
+        &std::time::Instant::now,
+    );
+    assert!(res.passed);
+    assert!(res.failures.is_empty());
+    assert!(!res.output.contains("Failing, in lines blyte left out:"));
+}
+
+#[test]
+fn the_cut_still_names_a_failure_from_the_dropped_middle() {
+    let d = tempfile::tempdir().unwrap();
+    let mut deadline = None;
+    let res = run_gate_steps(
+        &LocalShell,
+        dropped_middle_gate(),
+        d.path(),
+        &[],
+        &mut deadline,
+        |_| {},
+        &std::time::Instant::now,
+    );
+    assert!(!res.passed);
+    let cut = cut_gate_output(&res.failures[0].output);
+    assert!(
+        cut.contains("test middle ... FAILED"),
+        "cut lost dropped failing line:\n{cut}"
+    );
+}

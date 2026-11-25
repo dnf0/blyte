@@ -1752,17 +1752,38 @@ pub fn run_gate_step(
     let wrapped = format!("(export {}=1\n{cmd}\n)", gate_slots::IN_GATE_ENV);
     match shell.exec(&wrapped, dir, timeout) {
         Ok(o) => {
-            let body = tools::bound_output(o.merged().trim_end());
-            if o.exit_code != 0 && deadline.is_some_and(|d| now() >= d) {
+            let merged = o.merged();
+            let raw = merged.trim_end();
+            let body = tools::bound_output(raw);
+            let dropped: Vec<&str> = if o.exit_code != 0 {
+                let kept: std::collections::HashSet<&str> = body.lines().map(str::trim).collect();
+                summary_lines(raw)
+                    .into_iter()
+                    .filter(|l| !kept.contains(l))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let content = if dropped.is_empty() {
+                body
+            } else {
+                let block = format!("Failing, in lines blyte left out:\n{}", dropped.join("\n"));
                 if body.is_empty() {
+                    block
+                } else {
+                    format!("{block}\n\n{body}")
+                }
+            };
+            if o.exit_code != 0 && deadline.is_some_and(|d| now() >= d) {
+                if content.is_empty() {
                     return (false, format!("exit {}\ngate ran out of time", o.exit_code));
                 }
                 return (
                     false,
-                    format!("exit {}\ngate ran out of time\n{body}", o.exit_code),
+                    format!("exit {}\ngate ran out of time\n{content}", o.exit_code),
                 );
             }
-            (o.exit_code == 0, format!("exit {}\n{body}", o.exit_code))
+            (o.exit_code == 0, format!("exit {}\n{content}", o.exit_code))
         }
         Err(e) => {
             if deadline.is_some_and(|d| now() >= d) {
