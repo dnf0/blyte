@@ -122,3 +122,68 @@ Run: `python3 scripts/test-changed.py`.
 **Siblings.** Task RV's `run_is_combined`, the `combined` field and `isUndecided` are already in this worktree; leave them as they are.
 
 **Commit messages** (two commits): `fix(agent): failing lines survive the 400-line bound on a check step's output` for item 4 and its tests, then `fix(surface): a failed combine shows the failing output and names every failing step` for the rest.
+
+### Task TK
+
+**Goal.** Code run by a model (the conversation model's shell, an implementer's shell, and the
+`read`/`grep` tools) must not be able to read the surface's token or blyte's API key file. Today the
+token is written to `<main checkout>/.wt/surface.token`, which every sandbox profile lets the model
+read, and on macOS the sandbox allows connections to `localhost`, so the model can call the surface's
+routes that push a branch, open a pull request, answer an approval and record a decision. The rule this
+restores: the model cannot push or open a pull request without the user's say-so.
+
+**Depends on:** none. **Siblings:** other tasks of this plan are not in this worktree; do not add them.
+
+**Files:** `crates/blyte-agent/src/sandbox.rs`, `crates/blyte-cli/src/serve.rs`,
+`crates/blyte-cli/src/surface_notify.rs`, their tests (`crates/blyte-agent/tests/test_sandbox_read_deny.rs`,
+`test_sandbox_linux.rs`, `crates/blyte-cli/tests/test_serve.rs`, `test_surface_notify.rs`,
+`test_conversation_sandbox.rs`), and any doc that names `.wt/surface.token`.
+
+**What to build.**
+
+1. `pub fn surface_token_dir() -> Option<PathBuf>` in `sandbox.rs`: `state_blyte_dir()` joined with
+   `surface`. `pub fn surface_token_path(main_checkout: &Path) -> Result<PathBuf, String>`:
+   `<surface_token_dir>/<key>.token`, where `<key>` is the first 16 hex characters of a hash of the
+   canonical main-checkout path that is the same in every process and every blyte version (SHA-256 if
+   the workspace already depends on it, otherwise FNV-1a 64-bit written inline; never
+   `std::collections::hash_map::DefaultHasher`). No state directory (no `HOME` and no `XDG_STATE_HOME`)
+   is an error that names both variables. No fallbacks: never fall back to `.wt/`.
+2. `serve.rs` writes the token only to `surface_token_path` (directory created with mode 0700, file
+   0600, same atomic write as now) and removes it on exit as it removes the old file now. It no longer
+   writes `.wt/surface.token`; on start it deletes a leftover `.wt/surface.token` if one exists.
+   `.wt/surface.json` (the port) stays where it is. `surface_notify.rs` reads the token from
+   `surface_token_path`; its `NoSurface`/`Failed` behaviour is unchanged.
+3. Seatbelt (macOS): every profile blyte builds for model-run commands (`conversation_profile*`,
+   `default_profile*`, network on or off) denies `file-read*` on `surface_token_dir()` (subpath) and on
+   `$HOME/.config/blyte/env` (add it to `read_denied`). The deny must win over any `allow_read` grant:
+   emit it after the allow rules, and test it.
+4. Landlock (Linux): the read allow-list must not include the state directory or `~/.config/blyte`.
+   If it does not today, change nothing and prove it with the test below.
+5. The `read` and `grep` tools already refuse paths outside the workspace; add a test that reading the
+   token path through the `read` tool is refused.
+
+**Tests** (real sandbox; skip only where the existing sandbox tests skip, in the same way):
+
+- macOS, conversation profile with network off: `cat <token path>` exits non-zero and its output does
+  not contain the token. Same for `cat $HOME/.config/blyte/env`.
+- macOS, default (implementer) profile with network on: the same two assertions.
+- macOS: with the token directory passed as an `allow_read` grant, the read is still denied.
+- Linux, `LandlockConfined` built by `conversation_profile_net` and by `default_profile_net`: the same
+  two reads fail.
+- Surface end to end (`test_serve.rs`): start the surface in a temporary repository with a temporary
+  `HOME`; assert `.wt/surface.token` does not exist, that no file under `.wt/` contains the token
+  string, and that `POST /api/requests/x/push`, `POST /api/requests/x/pull-request`,
+  `POST /api/session/approvals/x` and `POST /api/runs/x/decision` without the token are refused with
+  the existing "missing or invalid surface token" answer.
+- `test_surface_notify.rs`: notifying works with the token at the new path; a leftover
+  `.wt/surface.token` alone gives `NoSurface`.
+- `surface_token_path` with neither `HOME` nor `XDG_STATE_HOME` set is an `Err` naming both; two calls
+  for the same checkout give the same path; two checkouts give different paths.
+
+Run: `cargo test -p blyte-agent --test test_sandbox_read_deny --test test_sandbox_linux` and
+`cargo test -p blyte-cli --test test_serve --test test_surface_notify --test test_conversation_sandbox`.
+
+**Constraints.** Existing tests pass; change a test only where it names the old token path. No
+fallbacks. Do not change which network destinations the sandbox allows (a separate decision).
+
+**Commit message:** `fix(sandbox): model-run commands cannot read the surface token or blyte's API key file`
