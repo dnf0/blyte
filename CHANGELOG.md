@@ -1,3 +1,9 @@
+## v0.66.0 (2026-11-25)
+
+### Feat
+
+- surfaces message each other with tell, behind a credential that can only deliver a message (#429)
+
 ## v0.65.0 (2026-11-25)
 
 ### Feat
