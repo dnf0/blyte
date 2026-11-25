@@ -1,7 +1,8 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
-use crate::surface_registry::{find_by_name, live_entries};
+use crate::surface_registry::{find_by_name, live_entries, RegistryEntry};
 
 fn repository_name(root: &Path) -> String {
     root.file_name()
@@ -9,38 +10,21 @@ fn repository_name(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-pub fn run_surfaces(dir: &Path, json: bool, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let entries = match live_entries(dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            let _ = writeln!(err, "blyte: {e}");
-            return 1;
-        }
-    };
-
-    if json {
-        match serde_json::to_string_pretty(&entries) {
-            Ok(text) => {
-                let _ = writeln!(out, "{text}");
-                return 0;
-            }
-            Err(e) => {
-                let _ = writeln!(err, "blyte: failed to serialize surfaces: {e}");
-                return 1;
-            }
-        }
-    }
-
+pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>) -> String {
     if entries.is_empty() {
-        let _ = writeln!(out, "no surfaces are running");
-        return 0;
+        return "no surfaces are running\n".to_string();
     }
 
-    let rows: Vec<(&str, String, &str, &str)> = entries
+    let rows: Vec<(String, String, &str, &str)> = entries
         .iter()
         .map(|entry| {
+            let name = if current_id == Some(entry.id.as_str()) {
+                format!("{} (this surface)", entry.name)
+            } else {
+                entry.name.clone()
+            };
             (
-                entry.name.as_str(),
+                name,
                 repository_name(&entry.root),
                 entry.branch.as_str(),
                 entry.doing.as_str(),
@@ -67,6 +51,7 @@ pub fn run_surfaces(dir: &Path, json: bool, out: &mut dyn Write, err: &mut dyn W
         .unwrap_or(0)
         .max("BRANCH".len());
 
+    let mut out = String::new();
     let _ = writeln!(
         out,
         "{:<name_w$}  {:<repo_w$}  {:<branch_w$}  DOING",
@@ -78,6 +63,32 @@ pub fn run_surfaces(dir: &Path, json: bool, out: &mut dyn Write, err: &mut dyn W
             "{name:<name_w$}  {repo:<repo_w$}  {branch:<branch_w$}  {doing}"
         );
     }
+    out
+}
+
+pub fn run_surfaces(dir: &Path, json: bool, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let entries = match live_entries(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+
+    if json {
+        match serde_json::to_string_pretty(&entries) {
+            Ok(text) => {
+                let _ = writeln!(out, "{text}");
+                return 0;
+            }
+            Err(e) => {
+                let _ = writeln!(err, "blyte: failed to serialize surfaces: {e}");
+                return 1;
+            }
+        }
+    }
+
+    let _ = write!(out, "{}", format_surfaces_table(&entries, None));
     0
 }
 

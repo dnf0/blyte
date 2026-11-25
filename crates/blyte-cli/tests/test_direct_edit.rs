@@ -987,6 +987,7 @@ fn make_idle_surface(root: PathBuf) -> Surface {
         started_at: now_epoch(),
         days: 14,
         token: generate_token().unwrap(),
+        message_credential: generate_token().unwrap(),
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),

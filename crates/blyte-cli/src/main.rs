@@ -140,6 +140,24 @@ fn main() {
                     &mut err,
                 ));
             }
+            blyte_cli::cli::Command::Tell {
+                name,
+                message,
+                from,
+            } => {
+                let dir = match blyte_cli::surface_registry::registry_dir() {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        eprintln!("blyte: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let mut out = std::io::stdout();
+                let mut err = std::io::stderr();
+                std::process::exit(blyte_cli::tell::run_tell(
+                    &dir, &name, &message, &from, &mut out, &mut err,
+                ));
+            }
             blyte_cli::cli::Command::Comments(args) => {
                 let dir = match std::env::current_dir() {
                     Ok(dir) => dir,

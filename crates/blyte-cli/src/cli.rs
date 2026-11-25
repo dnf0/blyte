@@ -68,6 +68,13 @@ pub enum Command {
     },
     /// Open a running surface's page by name
     Open { name: String },
+    /// Send a message to a running surface
+    Tell {
+        name: String,
+        message: String,
+        #[arg(long, default_value = "terminal", value_name = "LABEL", value_parser = parse_from_label)]
+        from: String,
+    },
     /// Fail when the working tree adds comments since a base commit
     #[command(hide = true)]
     Comments(CommentsArgs),
@@ -708,6 +715,11 @@ pub struct Cli {
         help = "Restart a stopped surface, by name or id, with its transcript"
     )]
     pub resume: Option<String>,
+}
+
+fn parse_from_label(raw: &str) -> Result<String, String> {
+    crate::surface_dir::validate_surface_name(raw)?;
+    Ok(raw.to_string())
 }
 
 /// Turn and context defaults for `--converse`. A flag the user gave explicitly wins.

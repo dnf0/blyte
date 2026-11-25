@@ -16,17 +16,21 @@ use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
 use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsState};
 use crate::session::{
-    AgentRunner, AnswerError, ApprovalAnswer, Attachment, EntryBody, PromptRunner, Session,
+    AgentRunner, AnswerError, ApprovalAnswer, Attachment, EntryBody, PeerDelivery, PromptRunner,
+    Session,
 };
 use crate::surface_dir::SurfaceRecord;
 
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
+pub const MESSAGE_HEADER: &str = "X-Blyte-Message-Credential";
 pub const RECONCILE_SAFETY_NET_INTERVAL: Duration = Duration::from_secs(30);
 
 const INDEX_HTML: &str = include_str!("../assets/surface/index.html");
 const MAX_WAIT_MS: u64 = 25_000;
 const RECONCILE_POLL_WAIT: Duration = Duration::from_millis(50);
 const TOKEN_BYTES: usize = 32;
+const MAX_PEER_TEXT_BYTES: usize = 16_384;
+const MAX_PEER_REPO_CHARS: usize = 200;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -40,6 +44,7 @@ pub struct Surface {
     pub started_at: u64,
     pub days: u64,
     pub token: String,
+    pub message_credential: String,
     pub requests: Arc<RequestsState>,
     pub publisher: Arc<dyn Publisher>,
     pub reconcile_lock: Mutex<()>,
@@ -82,6 +87,20 @@ fn has_valid_token(surface: &Surface, req: &Request) -> bool {
         return false;
     }
     constant_time_eq(provided.as_bytes(), surface.token.as_bytes())
+}
+
+fn has_valid_message_credential(surface: &Surface, req: &Request) -> bool {
+    if surface.message_credential.is_empty() {
+        return false;
+    }
+    let mut values = req.header_values(MESSAGE_HEADER);
+    let Some(provided) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    constant_time_eq(provided.as_bytes(), surface.message_credential.as_bytes())
 }
 
 #[derive(Serialize)]
@@ -257,6 +276,69 @@ fn handle_post_message(surface: &Surface, req: &Request) -> Response {
 
     match surface.session.submit(&text, attachments) {
         Ok(seq) => Response::json(200, &serde_json::json!({ "seq": seq })),
+        Err(e) => json_error(400, e),
+    }
+}
+
+fn handle_post_peer_message(surface: &Surface, req: &Request) -> Response {
+    let obj = match parse_json_object(&req.body) {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    for key in obj.keys() {
+        if !matches!(key.as_str(), "from_name" | "from_repository" | "text") {
+            return json_error(400, format!("unexpected field: {key}"));
+        }
+    }
+    let from_name = match obj.get("from_name") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(_) => return json_error(400, "field from_name must be a string"),
+        None => return json_error(400, "missing required field: from_name"),
+    };
+    if let Err(e) = crate::surface_dir::validate_surface_name(&from_name) {
+        return json_error(400, format!("invalid from_name: {e}"));
+    }
+    let from_repository = match obj.get("from_repository") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(_) => return json_error(400, "field from_repository must be a string"),
+        None => return json_error(400, "missing required field: from_repository"),
+    };
+    let repo_chars = from_repository.chars().count();
+    if repo_chars == 0 || repo_chars > MAX_PEER_REPO_CHARS {
+        return json_error(
+            400,
+            format!("field from_repository must be 1 to {MAX_PEER_REPO_CHARS} characters"),
+        );
+    }
+    if from_repository.chars().any(char::is_control) {
+        return json_error(
+            400,
+            "field from_repository must not contain control characters",
+        );
+    }
+    let text = match obj.get("text") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(_) => return json_error(400, "field text must be a string"),
+        None => return json_error(400, "missing required field: text"),
+    };
+    if text.trim().is_empty() {
+        return json_error(400, "field text must not be blank");
+    }
+    if text.len() > MAX_PEER_TEXT_BYTES {
+        return json_error(
+            400,
+            format!("field text must be at most {MAX_PEER_TEXT_BYTES} bytes"),
+        );
+    }
+
+    match surface
+        .session
+        .submit_peer(&from_name, &from_repository, &text)
+    {
+        Ok(PeerDelivery::Delivered) => {
+            Response::json(200, &serde_json::json!({ "status": "delivered" }))
+        }
+        Ok(PeerDelivery::Held) => Response::json(200, &serde_json::json!({ "status": "held" })),
         Err(e) => json_error(400, e),
     }
 }
@@ -713,6 +795,13 @@ fn match_api_get_route<'a>(pattern: &str, path: &'a str) -> Option<Option<&'a st
 }
 
 pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
+    if req.path == "/api/peer/messages" && req.method == "POST" {
+        if !has_valid_message_credential(surface, req) {
+            return json_error(403, "missing or invalid message credential");
+        }
+        return handle_post_peer_message(surface, req);
+    }
+
     let is_health_get = req.path == "/api/health" && req.method == "GET";
     if (req.path.starts_with("/api/") || req.method == "POST")
         && !is_health_get
@@ -1391,6 +1480,13 @@ where
             return 1;
         }
     };
+    let message_credential = match generate_token() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
 
     let bind_addr = format!("127.0.0.1:{}", args.port);
     let listener = match TcpListener::bind(&bind_addr) {
@@ -1421,6 +1517,21 @@ where
     }
     let _token_guard = TokenFileGuard {
         path: token_file_path,
+    };
+
+    let message_file_path = match blyte_agent::sandbox::surface_message_path_for_id(&surface_id) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = write_token_file(&message_file_path, &message_credential) {
+        let _ = writeln!(err, "blyte: {e}");
+        return 1;
+    }
+    let _message_guard = TokenFileGuard {
+        path: message_file_path,
     };
 
     // The record is written as soon as the directory exists: another start lists
@@ -1455,6 +1566,12 @@ where
         dir: registry_dir.clone(),
         id: surface_id.clone(),
     };
+    blyte_agent::tools::set_peer_tools(Some(Arc::new(crate::tell::SurfacePeerTools {
+        registry_dir: registry_dir.clone(),
+        surface_id: surface_id.clone(),
+        surface_name: surface_name.clone(),
+        repository: repo.clone(),
+    })));
     let entries_log_path = crate::surface_dir::entries_path(&main_checkout, &surface_id);
     blyte_agent::tools::set_blyte_surface(Some(surface_id.clone()));
     let model = resolve_initial_model(&config);
@@ -1510,6 +1627,7 @@ where
         started_at,
         days: args.days,
         token,
+        message_credential,
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),

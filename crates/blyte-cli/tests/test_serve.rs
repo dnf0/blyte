@@ -10,15 +10,16 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_agent::approval::Approver;
-use blyte_agent::sandbox::surface_token_path_for_id;
+use blyte_agent::sandbox::{surface_message_path_for_id, surface_token_path_for_id};
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::{
     authenticated_api_get_routes, constant_time_eq, generate_token, route, run_with_hooks,
-    run_with_io, run_with_runner, Surface, RECONCILE_SAFETY_NET_INTERVAL, TOKEN_HEADER,
+    run_with_io, run_with_runner, Surface, MESSAGE_HEADER, RECONCILE_SAFETY_NET_INTERVAL,
+    TOKEN_HEADER,
 };
-use blyte_cli::session::{EntryBody, PromptRunner, Session};
+use blyte_cli::session::{peer_prompt, EntryBody, PromptRunner, Session};
 use blyte_cli::surface_dir::{entries_path, list_records, record_path, surfaces_dir};
 use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
 
@@ -213,6 +214,7 @@ fn make_surface(
         started_at: 1_700_000_000,
         days: 14,
         token: generate_token().unwrap(),
+        message_credential: generate_token().unwrap(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
         reconcile_lock: Mutex::new(()),
@@ -2794,6 +2796,7 @@ fn make_busy_surface(root: PathBuf) -> (Surface, BlockingHandle) {
         started_at: 1_700_000_000,
         days: 14,
         token: generate_token().unwrap(),
+        message_credential: generate_token().unwrap(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
         reconcile_lock: Mutex::new(()),
@@ -3508,25 +3511,41 @@ fn surface_keeps_token_out_of_wt_and_rejects_unauthenticated_actions() {
     assert_no_file_under_contains(&repo.join(".wt"), &token);
 
     let token_dir = fake_home.join(".local/state/blyte/surface");
-    let token_files: Vec<PathBuf> = std::fs::read_dir(&token_dir)
+    let mut state_files: Vec<PathBuf> = std::fs::read_dir(&token_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
         .collect();
-    assert_eq!(token_files.len(), 1, "{token_files:?}");
+    state_files.sort();
+    assert_eq!(state_files.len(), 2, "{state_files:?}");
+    let token_files: Vec<&PathBuf> = state_files
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("token"))
+        .collect();
+    let message_files: Vec<&PathBuf> = state_files
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("message"))
+        .collect();
+    assert_eq!(token_files.len(), 1, "{state_files:?}");
+    assert_eq!(message_files.len(), 1, "{state_files:?}");
     assert_eq!(
-        std::fs::read_to_string(&token_files[0]).unwrap().trim(),
+        std::fs::read_to_string(token_files[0]).unwrap().trim(),
         token
     );
+    let msg_cred = std::fs::read_to_string(message_files[0])
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(!msg_cred.is_empty());
+    assert_ne!(msg_cred, token);
+    assert_no_file_under_contains(&repo.join(".wt"), &msg_cred);
     #[cfg(unix)]
     {
         let dir_mode = std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "dir mode {:o}", dir_mode);
-        let file_mode = std::fs::metadata(&token_files[0])
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(file_mode, 0o600, "file mode {:o}", file_mode);
+        for file in &state_files {
+            let file_mode = std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(file_mode, 0o600, "file mode {:o}", file_mode);
+        }
     }
 
     for path in [
@@ -4060,6 +4079,419 @@ fn registry_doing_tracks_running_turn_first_line_and_returns_to_idle() {
     }
 
     assert_eq!(read_registry_entry(&reg_dir, &surface_id).doing, "idle");
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+struct PeerRecordingRunner {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl PromptRunner for PeerRecordingRunner {
+    fn run(
+        &mut self,
+        prompt: &str,
+        _model: &str,
+        emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        emit(EntryBody::Turn {
+            n: 1,
+            text: "ack".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cost_usd: None,
+        });
+        Ok(())
+    }
+}
+
+fn start_recording_surface(
+    repo: &Path,
+    name: Option<&str>,
+) -> (RunningSurface, String, Arc<Mutex<Vec<String>>>) {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let runner = PeerRecordingRunner {
+        prompts: Arc::clone(&prompts),
+    };
+    let running = start_stoppable_surface_with_runner(
+        repo,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: name.map(String::from),
+            resume: None,
+        },
+        Box::new(runner),
+    );
+    let records = list_records(repo).unwrap();
+    assert_eq!(records.len(), 1);
+    let surface_id = records[0].id.clone();
+    (running, surface_id, prompts)
+}
+
+fn parse_http_status_and_body(raw: &str) -> (u16, String) {
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("malformed HTTP response: {raw:?}"));
+    let status = head
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    (status, body.to_string())
+}
+
+fn post_peer_raw(port: u16, headers: &[(&str, &str)], body: &str) -> (u16, String) {
+    let mut req = format!("POST /api/peer/messages HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str(&format!(
+        "Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    ));
+    let raw = send_http(port, &req);
+    parse_http_status_and_body(&raw)
+}
+
+fn fetch_events_json(port: u16, token: &str) -> serde_json::Value {
+    let raw = send_http(
+        port,
+        &format!(
+            "GET /api/session/events?after=0&wait_ms=0 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    let (status, body) = parse_http_status_and_body(&raw);
+    assert_eq!(status, 200, "events fetch failed: {body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+#[test]
+fn the_message_credential_file_is_written_and_removed_on_exit() {
+    let _reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("peer-cred-repo");
+    init_git_repo(&repo);
+
+    let (running, surface_id, _prompts) = start_recording_surface(&repo, Some("peer-cred-file"));
+    let token_path = surface_token_path_for_id(&surface_id).unwrap();
+    let cred_path = surface_message_path_for_id(&surface_id).unwrap();
+    assert!(cred_path.exists(), "missing {}", cred_path.display());
+
+    #[cfg(unix)]
+    {
+        let mode = std::fs::metadata(&cred_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    let token_val = std::fs::read_to_string(&token_path).unwrap();
+    let cred_val = std::fs::read_to_string(&cred_path).unwrap();
+    assert_eq!(token_val.trim(), running.token);
+    assert!(!cred_val.trim().is_empty());
+    assert_ne!(cred_val.trim(), running.token);
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+    assert!(!cred_path.exists());
+    assert!(!token_path.exists());
+}
+
+#[test]
+fn the_peer_endpoint_takes_only_the_message_credential() {
+    let _reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("peer-auth-repo");
+    init_git_repo(&repo);
+
+    let (running, surface_id, _prompts) = start_recording_surface(&repo, Some("peer-auth"));
+    let cred_path = surface_message_path_for_id(&surface_id).unwrap();
+    let cred = std::fs::read_to_string(&cred_path)
+        .unwrap()
+        .trim()
+        .to_string();
+    let payload = serde_json::json!({
+        "from_name": "sender",
+        "from_repository": "shop",
+        "text": "hello",
+    })
+    .to_string();
+
+    let (status, body) = post_peer_raw(running.port, &[(MESSAGE_HEADER, &cred)], &payload);
+    assert_eq!(status, 200, "body={body}");
+    let val: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(val["status"], "delivered");
+
+    let (status, body) = post_peer_raw(running.port, &[(MESSAGE_HEADER, &running.token)], &payload);
+    assert_eq!(status, 403, "body={body}");
+    assert!(body.contains("missing or invalid message credential"));
+
+    let (status, body) = post_peer_raw(running.port, &[(TOKEN_HEADER, &running.token)], &payload);
+    assert_eq!(status, 403, "body={body}");
+    assert!(body.contains("missing or invalid message credential"));
+
+    let (status, body) = post_peer_raw(running.port, &[], &payload);
+    assert_eq!(status, 403, "body={body}");
+    assert!(body.contains("missing or invalid message credential"));
+
+    let (status, body) = post_peer_raw(
+        running.port,
+        &[(MESSAGE_HEADER, &cred), (MESSAGE_HEADER, &cred)],
+        &payload,
+    );
+    assert_eq!(status, 403, "body={body}");
+    assert!(body.contains("missing or invalid message credential"));
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn the_message_credential_opens_nothing_else() {
+    let _reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("peer-isolated-repo");
+    init_git_repo(&repo);
+
+    let (running, surface_id, _prompts) = start_recording_surface(&repo, Some("peer-isolated"));
+    let cred_path = surface_message_path_for_id(&surface_id).unwrap();
+    let cred = std::fs::read_to_string(&cred_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let get_runs = send_http(
+        running.port,
+        &format!(
+            "GET /api/runs HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{TOKEN_HEADER}: {cred}\r\nConnection: close\r\n\r\n",
+            running.port
+        ),
+    );
+    let (status, _) = parse_http_status_and_body(&get_runs);
+    assert_eq!(status, 403);
+
+    for (path, body) in [
+        ("/api/session/messages", r#"{"text":"hi"}"#),
+        ("/api/requests/req-1/push", "{}"),
+        ("/api/session/approvals/appr-1", r#"{"answer":"yes"}"#),
+    ] {
+        let raw = send_http(
+            running.port,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{TOKEN_HEADER}: {cred}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                running.port,
+                body.len()
+            ),
+        );
+        let (status, resp_body) = parse_http_status_and_body(&raw);
+        assert_eq!(status, 403, "POST {path} must reject cred: {resp_body}");
+    }
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn the_peer_endpoint_rejects_a_bad_body() {
+    let _reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("peer-bad-body-repo");
+    init_git_repo(&repo);
+
+    let (running, surface_id, prompts) = start_recording_surface(&repo, Some("peer-bad-body"));
+    let cred_path = surface_message_path_for_id(&surface_id).unwrap();
+    let cred = std::fs::read_to_string(&cred_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let too_long = "a".repeat(16_385);
+    let cases = [
+        (
+            serde_json::json!({
+                "from_name": "sender",
+                "from_repository": "shop",
+            }),
+            "text",
+        ),
+        (
+            serde_json::json!({
+                "from_name": "sender",
+                "from_repository": "shop",
+                "text": "   \n\t ",
+            }),
+            "text",
+        ),
+        (
+            serde_json::json!({
+                "from_name": "sender",
+                "from_repository": "shop",
+                "text": too_long,
+            }),
+            "text",
+        ),
+        (
+            serde_json::json!({
+                "from_name": "../x",
+                "from_repository": "shop",
+                "text": "hello",
+            }),
+            "from_name",
+        ),
+        (
+            serde_json::json!({
+                "from_name": "sender",
+                "from_repository": "shop\nevil",
+                "text": "hello",
+            }),
+            "from_repository",
+        ),
+    ];
+
+    for (payload, field) in cases {
+        let (status, body) = post_peer_raw(
+            running.port,
+            &[(MESSAGE_HEADER, &cred)],
+            &payload.to_string(),
+        );
+        assert_eq!(status, 400, "field={field}, body={body}");
+        assert!(
+            body.contains(field),
+            "expected error naming {field}, got: {body}"
+        );
+    }
+
+    let events = fetch_events_json(running.port, &running.token);
+    assert!(events["entries"].as_array().unwrap().is_empty());
+    assert!(prompts.lock().unwrap().is_empty());
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn a_peer_message_reaches_the_runner_marked() {
+    let _reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("peer-marked-repo");
+    init_git_repo(&repo);
+
+    let (running, surface_id, prompts) = start_recording_surface(&repo, Some("peer-marked"));
+    let cred_path = surface_message_path_for_id(&surface_id).unwrap();
+    let cred = std::fs::read_to_string(&cred_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let payload = serde_json::json!({
+        "from_name": "api",
+        "from_repository": "shop",
+        "text": "schema changed",
+    })
+    .to_string();
+    let (status, body) = post_peer_raw(running.port, &[(MESSAGE_HEADER, &cred)], &payload);
+    assert_eq!(status, 200, "body={body}");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for runner");
+        if !prompts.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        prompts.lock().unwrap()[0],
+        peer_prompt("api", "shop", "schema changed")
+    );
+
+    let events = fetch_events_json(running.port, &running.token);
+    let entries = events["entries"].as_array().unwrap();
+    let peer_entry = entries
+        .iter()
+        .find(|e| e["kind"] == "peer_message")
+        .expect("expected peer_message entry");
+    assert_eq!(peer_entry["from_name"], "api");
+    assert_eq!(peer_entry["from_repository"], "shop");
+    assert_eq!(peer_entry["text"], "schema changed");
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn the_sixth_peer_message_is_answered_held() {
+    let _reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("peer-held-repo");
+    init_git_repo(&repo);
+
+    let (running, surface_id, _prompts) = start_recording_surface(&repo, Some("peer-held"));
+    let cred_path = surface_message_path_for_id(&surface_id).unwrap();
+    let cred = std::fs::read_to_string(&cred_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    for i in 1..=5 {
+        let payload = serde_json::json!({
+            "from_name": "api",
+            "from_repository": "shop",
+            "text": format!("msg {i}"),
+        })
+        .to_string();
+        let (status, body) = post_peer_raw(running.port, &[(MESSAGE_HEADER, &cred)], &payload);
+        assert_eq!(status, 200, "i={i} body={body}");
+        let val: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(val["status"], "delivered", "i={i}");
+    }
+
+    let payload = serde_json::json!({
+        "from_name": "api",
+        "from_repository": "shop",
+        "text": "msg 6",
+    })
+    .to_string();
+    let (status, body) = post_peer_raw(running.port, &[(MESSAGE_HEADER, &cred)], &payload);
+    assert_eq!(status, 200, "body={body}");
+    let val: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(val["status"], "held");
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn health_does_not_show_the_message_credential() {
+    let _reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("peer-health-repo");
+    init_git_repo(&repo);
+
+    let (running, surface_id, _prompts) = start_recording_surface(&repo, Some("peer-health"));
+    let cred_path = surface_message_path_for_id(&surface_id).unwrap();
+    let cred = std::fs::read_to_string(&cred_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let raw = send_http(
+        running.port,
+        &format!(
+            "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            running.port
+        ),
+    );
+    let (status, body) = parse_http_status_and_body(&raw);
+    assert_eq!(status, 200);
+    assert!(!body.contains(&cred));
+    assert!(!body.contains(&running.token));
 
     running.stop.store(true, Ordering::Relaxed);
     assert_eq!(running.handle.join().unwrap(), 0);

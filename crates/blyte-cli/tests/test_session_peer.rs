@@ -390,3 +390,68 @@ fn the_peer_message_entry_round_trips() {
     let entries2 = session2.entries_after(0, Duration::ZERO);
     assert_eq!(entries2[0], original);
 }
+
+type ObservedTurns = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+struct StartedByRunner {
+    observed: ObservedTurns,
+}
+
+impl PromptRunner for StartedByRunner {
+    fn run(
+        &mut self,
+        prompt: &str,
+        _model: &str,
+        emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push((prompt.to_string(), blyte_agent::tools::blyte_started_by()));
+        emit(EntryBody::Turn {
+            n: 1,
+            text: "ok".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cost_usd: None,
+        });
+        Ok(())
+    }
+}
+
+#[test]
+fn a_peer_turn_marks_its_runs_started_by_the_sender() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let after_turn = Arc::new(Mutex::new(Vec::new()));
+    let runner = StartedByRunner {
+        observed: Arc::clone(&observed),
+    };
+    let session = Session::start(Box::new(runner), "test-model".to_string());
+    let after_hook = Arc::clone(&after_turn);
+    session.set_activity_hook(Box::new(move |prompt| {
+        if prompt.is_none() {
+            after_hook
+                .lock()
+                .unwrap()
+                .push(blyte_agent::tools::blyte_started_by());
+        }
+    }));
+
+    assert_eq!(
+        session.submit_peer("api", "shop", "check schema").unwrap(),
+        PeerDelivery::Delivered
+    );
+    wait_for_idle_count(&session, 1);
+
+    session.submit("user follow-up", Vec::new()).unwrap();
+    wait_for_idle_count(&session, 2);
+
+    let seen = observed.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].1.as_deref(), Some("api"));
+    assert_eq!(seen[1].1, None);
+
+    let after = after_turn.lock().unwrap().clone();
+    assert_eq!(after, vec![None, None]);
+    assert_eq!(blyte_agent::tools::blyte_started_by(), None);
+}

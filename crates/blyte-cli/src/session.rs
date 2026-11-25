@@ -1057,8 +1057,9 @@ impl Session {
 struct RequestGuard;
 
 impl RequestGuard {
-    fn enter(request_id: String) -> Self {
+    fn enter(request_id: String, peer: Option<String>) -> Self {
         blyte_agent::tools::set_blyte_request(Some(request_id));
+        blyte_agent::tools::set_blyte_started_by(peer);
         Self
     }
 }
@@ -1066,6 +1067,7 @@ impl RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         blyte_agent::tools::set_blyte_request(None);
+        blyte_agent::tools::set_blyte_started_by(None);
     }
 }
 
@@ -1127,7 +1129,7 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
         };
 
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            let _req_guard = RequestGuard::enter(msg.request_id);
+            let _req_guard = RequestGuard::enter(msg.request_id, msg.peer);
             runner.run(&msg.prompt, &effective_model, &emit)
         }));
 
