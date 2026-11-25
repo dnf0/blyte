@@ -420,3 +420,60 @@ this worktree; do not touch those files.
 Run: `cargo test -p blyte-agent`.
 
 **Commit message:** `fix(agent): a failed rollback and a malformed shell result header are errors`
+
+### Task SA
+
+**Goal:** a command run for a model cannot use the user's ssh agent. Today the model's shell inherits
+`SSH_AUTH_SOCK`, and the macOS profile allows every unix socket, so a run with network access can
+`git push` over ssh whenever the agent holds a key. The user's rule is that a model cannot push
+without their say-so. Checked on 2026-11-25 under a profile like the implementer's: key files,
+the keychain and the GitHub CLI login are already out of reach; the agent socket is not.
+
+**Depends on:** Task TK (same file, `sandbox.rs`). **Siblings:** none running.
+
+**Files:** `crates/blyte-agent/src/sandbox.rs`, `crates/blyte-agent/src/shell.rs`, their tests under
+`crates/blyte-agent/tests/` (or the files' own test modules), `README.md` only where it documents the
+sandbox or `pass_env`.
+
+**What to build**
+
+1. `sandbox.rs`: `pub fn agent_sockets(home: &Path, ssh_auth_sock: Option<&Path>) -> Vec<PathBuf>`
+   returning, in this order and without duplicates: `ssh_auth_sock` when given;
+   `home/.gnupg/S.gpg-agent.ssh`; `home/.gnupg/S.gpg-agent`; `home/.1password/agent.sock`;
+   `home/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`.
+2. macOS: every Seatbelt profile blyte builds for a model's command (conversation, implementer,
+   research, with the network on or off) carries
+   `(deny network-outbound (remote unix-socket (path-literal "<path>")) ...)` for each of these paths
+   and for its canonical path when different, the same way `offline` already denies the Docker
+   sockets. Factor the path list handling out of `offline` into one helper used by both; do not copy it.
+   The deny must come after any `allow network-outbound` so it wins.
+3. `shell.rs`: `SSH_AUTH_SOCK` and `SSH_AGENT_PID` are removed from the environment of every command
+   run for a model, in `scrub`, and are listed by `withheld_env()` when set.
+4. Opt-in: when the existing pass-through list (`PASS_ENV`, the same list `withheld_env` already
+   honours) names `SSH_AUTH_SOCK`, the variable is kept and the path from `SSH_AUTH_SOCK` is not
+   denied (the four fixed paths still are). That is the user's say-so; there is no other way to turn
+   it on. Read how the list is configured and document the opt-in in the same place the list is
+   documented, in one sentence, saying that it lets a run push over ssh.
+5. Linux: Landlock does not control connecting to a unix socket by path, so only item 3 applies.
+   Say so in the doc comment of `agent_sockets` and in the README sentence. Do not add anything that
+   pretends to block it.
+6. No fallbacks: when `HOME` is unset the profiles already fail or skip in a defined way; follow what
+   the Docker-socket code does there and do not invent a default home.
+
+**Tests** (macOS ones behind `#[cfg(target_os = "macos")]`, using real `sandbox-exec` the way the
+existing sandbox tests do):
+
+- `agent_sockets` returns the five paths in order, and four when no socket path is given.
+- A unix listener is bound in a temp directory; a child run under the implementer profile with that
+  path passed as the agent socket cannot connect (the connect fails), and can connect to a second
+  listener that is not listed. Same for the conversation profile and for a profile with the network off.
+- With `SSH_AUTH_SOCK` set in the parent, a model command sees it unset and `withheld_env()` lists it;
+  with it named in the pass-through list, the command sees it and the profile has no deny for that path.
+- Existing sandbox tests pass unmodified.
+
+Run: `cargo test -p blyte-agent`.
+
+**Constraints:** do not change which network hosts are allowed; do not touch the surface token code
+from Task TK; no new dependencies.
+
+**Commit:** `fix(sandbox): a model-run command cannot reach the ssh agent unless SSH_AUTH_SOCK is passed through`
