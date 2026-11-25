@@ -706,7 +706,7 @@ pub const TOOLCHAINS: &[&str] = &[
 ];
 
 /// What is reachable in the execution environment, probed through the seam.
-pub fn available_binaries(shell: &dyn Shell, root: &Path) -> Vec<String> {
+pub fn available_binaries(shell: &dyn Shell, root: &Path) -> Result<Vec<String>, String> {
     let mut all: Vec<&'static str> = ACCELERATORS.to_vec();
     all.extend_from_slice(TOOLCHAINS);
     shell.available_binaries(root, &all)
@@ -1251,6 +1251,10 @@ fn execute_unbounded(
             let Some(cmd) = dispatch_cmd() else {
                 return ToolOutcome::err("unknown tool: dispatch");
             };
+            let json_bytes = match serialize_dispatch_args(args) {
+                Ok(bytes) => bytes,
+                Err(msg) => return ToolOutcome::err(msg),
+            };
             let parent_session = dispatch_parent_session();
             let mut cmd_builder = std::process::Command::new("sh");
             cmd_builder
@@ -1268,10 +1272,20 @@ fn execute_unbounded(
                 Err(e) => return ToolOutcome::err(format!("dispatch failed to spawn: {e}")),
             };
 
-            if let Some(mut stdin) = child.stdin.take() {
-                let json_bytes = serde_json::to_vec(args).unwrap_or_default();
-                let _ = std::io::Write::write_all(&mut stdin, &json_bytes);
+            let Some(mut stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ToolOutcome::err("dispatch failed: stdin pipe unavailable");
+            };
+            if let Err(e) = std::io::Write::write_all(&mut stdin, &json_bytes) {
+                drop(stdin);
+                let _ = child.kill();
+                let _ = child.wait();
+                return ToolOutcome::err(format!(
+                    "dispatch failed to write arguments to stdin: {e}"
+                ));
             }
+            drop(stdin);
 
             match child.wait_with_output() {
                 Ok(output) => {
@@ -1525,6 +1539,10 @@ fn run_background_dispatch(
     }
 }
 
+fn serialize_dispatch_args<T: serde::Serialize>(args: &T) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(args).map_err(|e| format!("dispatch failed to serialize arguments: {e}"))
+}
+
 fn dispatch_parent_session() -> String {
     std::env::var("BLYTE_SESSION")
         .ok()
@@ -1650,5 +1668,20 @@ mod tests {
             !desc.contains("there is no background mode"),
             "got {desc:?}"
         );
+    }
+
+    #[test]
+    fn serialize_dispatch_args_surfaces_serialization_error() {
+        struct FailingSerialize;
+
+        impl serde::Serialize for FailingSerialize {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("unsupported map key"))
+            }
+        }
+
+        let err = serialize_dispatch_args(&FailingSerialize).unwrap_err();
+        assert!(err.contains("serialize"), "got: {err}");
+        assert!(err.contains("unsupported map key"), "got: {err}");
     }
 }

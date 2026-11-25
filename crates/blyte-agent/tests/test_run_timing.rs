@@ -74,8 +74,12 @@ impl Shell for TimedShell {
         String::new()
     }
 
-    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
-        Vec::new()
+    fn available_binaries(
+        &self,
+        _cwd: &Path,
+        _candidates: &[&'static str],
+    ) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
     }
 }
 
