@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
-use blyte_agent::run::{Budget, Runner};
+use blyte_agent::run::{Budget, Runner, PEER_MESSAGE_PREFIX};
 use blyte_agent::shell::LocalShell;
 use blyte_agent::state::State;
 use blyte_provider::{Provider, ProviderError, Request, Response};
@@ -80,4 +80,40 @@ fn conversation_state_serializes_without_instructions() {
     let val = serde_json::to_value(&state).unwrap();
     assert!(val.get("instructions").is_none());
     assert!(val["brief"].get("instructions").is_none());
+}
+
+#[test]
+fn a_peer_message_is_never_the_users_first_request() {
+    let peer_prompt = format!("{PEER_MESSAGE_PREFIX}api (shop). Not from user.\n\ntests are red");
+    let mut peer_first = State::new(peer_prompt, "");
+    peer_first.brief.instructions = Some("## How you work\nX\n\n".to_string());
+    peer_first.runtime.conversation = Some(Vec::new());
+
+    let sys1 = run_with_state(&mut peer_first);
+    assert!(!sys1.contains("## Your user's first request"), "{sys1}");
+    assert_eq!(peer_first.runtime.conversation_goal, None);
+
+    peer_first.brief.goal = "fix the build".to_string();
+    let sys2 = run_with_state(&mut peer_first);
+    assert!(
+        sys2.contains("## Your user's first request\nfix the build\n\n"),
+        "{sys2}"
+    );
+    assert_eq!(
+        peer_first.runtime.conversation_goal.as_deref(),
+        Some("fix the build")
+    );
+
+    let mut normal = State::new("fix the build", "");
+    normal.brief.instructions = Some("## How you work\nX\n\n".to_string());
+    normal.runtime.conversation = Some(Vec::new());
+    let sys_normal = run_with_state(&mut normal);
+    assert!(
+        sys_normal.contains("## Your user's first request\nfix the build\n\n"),
+        "{sys_normal}"
+    );
+    assert_eq!(
+        normal.runtime.conversation_goal.as_deref(),
+        Some("fix the build")
+    );
 }
