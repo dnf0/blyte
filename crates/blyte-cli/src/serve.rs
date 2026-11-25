@@ -906,9 +906,39 @@ extern "C" fn handle_shutdown_signal(_: libc::c_int) {
     SIGNAL_STOP.store(true, Ordering::Relaxed);
 }
 
-fn write_token_file(wt_dir: &Path, token_file_path: &Path, token: &str) -> Result<(), String> {
+fn ensure_token_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| format!("cannot set permissions on {}: {e}", dir.display()))?;
+            }
+            Err(e) => return Err(format!("cannot create {}: {e}", dir.display())),
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))
+    }
+}
+
+fn write_token_file(token_file_path: &Path, token: &str) -> Result<(), String> {
+    let token_dir = token_file_path
+        .parent()
+        .ok_or_else(|| format!("invalid token path {}", token_file_path.display()))?;
+    ensure_token_dir(token_dir)?;
     let seq = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = wt_dir.join(format!(".surface.token.{}.{seq}.tmp", std::process::id()));
+    let tmp_path = token_dir.join(format!(".surface.token.{}.{seq}.tmp", std::process::id()));
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -1091,7 +1121,15 @@ where
 
     let wt_dir = root.join(".wt");
     let surface_file_path = wt_dir.join("surface.json");
-    let token_file_path = wt_dir.join("surface.token");
+    let _ = std::fs::remove_file(wt_dir.join("surface.token"));
+    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
+    let token_file_path = match blyte_agent::sandbox::surface_token_path(&main_checkout) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
     match std::fs::read_to_string(&surface_file_path) {
         Ok(raw) => match serde_json::from_str::<SurfaceFile>(&raw) {
             Ok(existing) => {
@@ -1192,7 +1230,6 @@ where
         }
     };
 
-    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
     let entries_log_path = main_checkout
         .join(".wt")
         .join("sessions")
@@ -1213,7 +1250,7 @@ where
         let _ = writeln!(err, "blyte: cannot create {}: {e}", wt_dir.display());
         return 1;
     }
-    if let Err(e) = write_token_file(&wt_dir, &token_file_path, &token) {
+    if let Err(e) = write_token_file(&token_file_path, &token) {
         let _ = writeln!(err, "blyte: {e}");
         return 1;
     }

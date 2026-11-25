@@ -96,7 +96,6 @@ fn post_runs_changed(port: u16, token: &str) -> Result<u16, String> {
 pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
     let wt_dir = main_checkout.join(".wt");
     let surface_path = wt_dir.join("surface.json");
-    let token_path = wt_dir.join("surface.token");
 
     let surface_raw = match std::fs::read_to_string(&surface_path) {
         Ok(s) => s,
@@ -110,6 +109,11 @@ pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
         Err(e) => {
             return NotifyOutcome::Failed(format!("cannot parse {}: {e}", surface_path.display()));
         }
+    };
+
+    let token_path = match blyte_agent::sandbox::surface_token_path(main_checkout) {
+        Ok(p) => p,
+        Err(e) => return NotifyOutcome::Failed(e),
     };
 
     let token_raw = match std::fs::read_to_string(&token_path) {

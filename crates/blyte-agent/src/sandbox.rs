@@ -95,7 +95,6 @@ fn escape_path(path: &Path) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Canonicalises when possible and escapes a path for inclusion in an SBPL subpath rule.
 fn escape_subpath(path: &Path) -> String {
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     escape_path(&canon)
@@ -134,6 +133,7 @@ pub fn read_denied(home: &Path) -> Vec<PathBuf> {
         ".ssh",
         ".aws",
         ".azure",
+        ".config/blyte/env",
         ".config/gcloud",
         ".config/gh",
         ".kube",
@@ -288,7 +288,31 @@ pub fn state_blyte_dir() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".local").join("state").join("blyte"))
 }
 
-#[cfg(target_os = "macos")]
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Returns the directory holding surface authentication tokens (`<state_blyte_dir>/surface`).
+pub fn surface_token_dir() -> Option<PathBuf> {
+    state_blyte_dir().map(|d| d.join("surface"))
+}
+
+/// Returns the path to the surface authentication token for `main_checkout`.
+pub fn surface_token_path(main_checkout: &Path) -> Result<PathBuf, String> {
+    let dir = surface_token_dir().ok_or_else(|| {
+        "cannot determine surface token directory: neither XDG_STATE_HOME nor HOME is set"
+            .to_string()
+    })?;
+    let canon = canonicalize_existing_prefix(main_checkout);
+    let key = format!("{:016x}", fnv1a64(canon.as_os_str().as_encoded_bytes()));
+    Ok(dir.join(format!("{key}.token")))
+}
+
 fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     if let Ok(canon) = path.canonicalize() {
         return canon;
@@ -318,6 +342,15 @@ fn deny_state_blyte_write(mut profile: String) -> String {
     if let Some(dir) = state_blyte_dir() {
         let escaped = escape_path(&canonicalize_existing_prefix(&dir));
         profile.push_str(&format!(r#"(deny file-write* (subpath "{escaped}"))"#));
+    }
+    if let Some(dir) = surface_token_dir() {
+        let escaped = escape_path(&canonicalize_existing_prefix(&dir));
+        profile.push_str(&format!(r#"(deny file-read* (subpath "{escaped}"))"#));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let env_path = PathBuf::from(home).join(".config/blyte/env");
+        let escaped = escape_path(&canonicalize_existing_prefix(&env_path));
+        profile.push_str(&format!(r#"(deny file-read* (subpath "{escaped}"))"#));
     }
     profile
 }

@@ -1,9 +1,54 @@
 //! blyte's sandboxed shell refuses to read credential stores and `.env` files: the write sandbox
 //! stopped host damage, but a command could still read ~/.aws or ~/.ssh and print it (2026-09-27).
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use blyte_agent::sandbox::{profile, profile_with, read_denied};
+use blyte_agent::fs::LocalFs;
+use blyte_agent::sandbox::{
+    profile, profile_with, read_denied, surface_token_dir, surface_token_path,
+};
+use blyte_agent::shell::LocalShell;
+use blyte_agent::tools;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvGuard {
+    home: Option<OsString>,
+    xdg_state: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set(home: Option<&Path>, xdg_state: Option<&Path>) -> Self {
+        let prev = Self {
+            home: std::env::var_os("HOME"),
+            xdg_state: std::env::var_os("XDG_STATE_HOME"),
+        };
+        match home {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        match xdg_state {
+            Some(p) => std::env::set_var("XDG_STATE_HOME", p),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        prev
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match &self.xdg_state {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+    }
+}
 
 #[test]
 fn the_deny_list_covers_the_usual_credential_stores() {
@@ -12,6 +57,7 @@ fn the_deny_list_covers_the_usual_credential_stores() {
     for sub in [
         ".ssh",
         ".aws",
+        ".config/blyte/env",
         ".config/gh",
         ".codex",
         "Library/Keychains",
@@ -22,6 +68,62 @@ fn the_deny_list_covers_the_usual_credential_stores() {
             "{sub} missing from {denied:?}"
         );
     }
+}
+
+#[test]
+fn surface_token_path_errors_without_state_dir_and_hashes_checkouts_deterministically() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let _guard = EnvGuard::set(None, None);
+        assert!(surface_token_dir().is_none());
+        let err = surface_token_path(Path::new("/tmp/repo")).unwrap_err();
+        assert!(err.contains("HOME"), "{err}");
+        assert!(err.contains("XDG_STATE_HOME"), "{err}");
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let repo_a = tempfile::tempdir().unwrap();
+    let repo_b = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None);
+
+    let p1 = surface_token_path(repo_a.path()).unwrap();
+    let p2 = surface_token_path(repo_a.path()).unwrap();
+    let p3 = surface_token_path(repo_b.path()).unwrap();
+    assert_eq!(p1, p2);
+    assert_ne!(p1, p3);
+    assert_eq!(p1.parent(), surface_token_dir().as_deref());
+    let stem = p1.file_stem().unwrap().to_str().unwrap();
+    assert_eq!(stem.len(), 16, "{p1:?}");
+    assert!(stem.chars().all(|c| c.is_ascii_hexdigit()), "{p1:?}");
+    assert_eq!(p1.extension().and_then(|e| e.to_str()), Some("token"));
+}
+
+#[test]
+fn read_tool_refuses_surface_token_path() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None);
+
+    let token_path = surface_token_path(repo.path()).unwrap();
+    std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    std::fs::write(&token_path, "surface-secret-token-value\n").unwrap();
+
+    let shell = LocalShell::new();
+    let fs = LocalFs;
+    let outcome = tools::execute(
+        repo.path(),
+        &shell,
+        &fs,
+        "read",
+        &serde_json::json!({ "path": token_path.to_str().unwrap() }),
+    );
+    assert!(outcome.is_error, "{}", outcome.content);
+    assert!(
+        !outcome.content.contains("surface-secret-token-value"),
+        "{}",
+        outcome.content
+    );
 }
 
 #[test]
@@ -91,8 +193,13 @@ mod macos {
     use std::path::Path;
     use std::time::Duration;
 
-    use blyte_agent::sandbox::profile_with;
+    use blyte_agent::sandbox::{
+        conversation_profile_net, default_profile_net, profile_with, surface_token_dir,
+        surface_token_path,
+    };
     use blyte_agent::shell::{LocalShell, Shell};
+
+    use super::{EnvGuard, ENV_LOCK};
 
     fn cat(sh: &LocalShell, file: &Path, cwd: &Path) -> Option<(i32, String)> {
         let out = sh
@@ -175,5 +282,84 @@ mod macos {
         };
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("s3cret"), "{out}");
+    }
+
+    #[test]
+    fn conversation_profile_offline_cannot_read_surface_token_or_blyte_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(Some(home.path()), None);
+
+        let token_path = surface_token_path(ws.path()).unwrap();
+        std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        std::fs::write(&token_path, "surface-token-conv-secret\n").unwrap();
+
+        let env_path = home.path().join(".config/blyte/env");
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-conv-secret\n").unwrap();
+
+        let sh = LocalShell::sandboxed(conversation_profile_net(ws.path(), &[], false));
+        let Some((code, out)) = cat(&sh, &token_path, ws.path()) else {
+            return;
+        };
+        assert_ne!(code, 0, "{out}");
+        assert!(!out.contains("surface-token-conv-secret"), "{out}");
+
+        let (code, out) = cat(&sh, &env_path, ws.path()).unwrap();
+        assert_ne!(code, 0, "{out}");
+        assert!(!out.contains("blyte-env-conv-secret"), "{out}");
+    }
+
+    #[test]
+    fn default_profile_online_cannot_read_surface_token_or_blyte_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(Some(home.path()), None);
+
+        let token_path = surface_token_path(ws.path()).unwrap();
+        std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        std::fs::write(&token_path, "surface-token-default-secret\n").unwrap();
+
+        let env_path = home.path().join(".config/blyte/env");
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-default-secret\n").unwrap();
+
+        let sh = LocalShell::sandboxed(default_profile_net(ws.path(), &[], true));
+        let Some((code, out)) = cat(&sh, &token_path, ws.path()) else {
+            return;
+        };
+        assert_ne!(code, 0, "{out}");
+        assert!(!out.contains("surface-token-default-secret"), "{out}");
+
+        let (code, out) = cat(&sh, &env_path, ws.path()).unwrap();
+        assert_ne!(code, 0, "{out}");
+        assert!(!out.contains("blyte-env-default-secret"), "{out}");
+    }
+
+    #[test]
+    fn allow_read_grant_cannot_expose_surface_token_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(Some(home.path()), None);
+
+        let token_path = surface_token_path(ws.path()).unwrap();
+        let token_dir = surface_token_dir().unwrap();
+        std::fs::create_dir_all(&token_dir).unwrap();
+        std::fs::write(&token_path, "surface-token-grant-secret\n").unwrap();
+
+        for profile in [
+            conversation_profile_net(ws.path(), std::slice::from_ref(&token_dir), false),
+            default_profile_net(ws.path(), std::slice::from_ref(&token_dir), true),
+        ] {
+            let sh = LocalShell::sandboxed(profile);
+            let Some((code, out)) = cat(&sh, &token_path, ws.path()) else {
+                return;
+            };
+            assert_ne!(code, 0, "{out}");
+            assert!(!out.contains("surface-token-grant-secret"), "{out}");
+        }
     }
 }

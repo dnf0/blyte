@@ -13,7 +13,7 @@ apply to every command the model runs on the host: `bash`, and the gate.
 | layer | macOS | Linux | turn off / adjust |
 |---|---|---|---|
 | **Writes** only inside the workspace, its git directory, temp directories and tool caches | Seatbelt | Landlock (kernel 5.13+) | `--sandbox=off` |
-| **Credential reads** refused: `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.kube`, `~/.gnupg`, `~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`, `~/.pypirc`, cargo credentials, `~/.codex`, keychains, cookies and browser profiles, and any file named `.env` | Seatbelt | Landlock: reads are confined to an allow-list that leaves these out (see below) | `--allow-read PATH` grants one back |
+| **Credential reads** refused: `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.config/blyte/env`, the surface token directory (`$XDG_STATE_HOME/blyte/surface` or `~/.local/state/blyte/surface`), `~/.kube`, `~/.gnupg`, `~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`, `~/.pypirc`, cargo credentials, `~/.codex`, keychains, cookies and browser profiles, and any file named `.env` | Seatbelt | Landlock: reads are confined to an allow-list that leaves these out (see below) | `--allow-read PATH` grants one back (except blyte's own surface token directory and `~/.config/blyte/env`) |
 | **Environment**: variables that look like credentials, and the AWS profile variables, are withheld from commands | yes | yes | `--pass-env NAME` keeps one |
 | **Network**: commands cannot connect out | Seatbelt | Landlock (kernel 6.7+) | opt in with `--network=off` |
 

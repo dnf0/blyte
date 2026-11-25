@@ -1953,9 +1953,21 @@ fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
     }
 }
 
+fn ensure_isolated_state_home() {
+    static STATE_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let dir = STATE_HOME.get_or_init(|| {
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("test-requests-state-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    });
+    std::env::set_var("XDG_STATE_HOME", dir);
+}
+
 fn start_stoppable_surface(
     repo: &Path,
 ) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
+    ensure_isolated_state_home();
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));

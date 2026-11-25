@@ -1,15 +1,16 @@
 use std::collections::{BTreeSet, VecDeque};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_agent::approval::Approver;
+use blyte_agent::sandbox::surface_token_path;
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
@@ -263,7 +264,19 @@ fn parse_json(resp: &Response) -> serde_json::Value {
     })
 }
 
+fn ensure_isolated_state_home() {
+    static STATE_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    STATE_HOME.get_or_init(|| {
+        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::create_dir_all(base).unwrap();
+        let dir = tempfile::tempdir_in(base).unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        dir
+    });
+}
+
 fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
+    ensure_isolated_state_home();
     ReplConfig {
         repo_root,
         gate: None,
@@ -1705,9 +1718,10 @@ fn secret_never_leaks_and_origin_check_stays() {
 
     let wt_dir = repo.join(".wt");
     assert!(wt_dir.join("surface.json").exists());
+    assert!(!wt_dir.join("surface.token").exists());
     for entry in std::fs::read_dir(&wt_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.is_file() && path.file_name().and_then(|n| n.to_str()) != Some("surface.token") {
+        if path.is_file() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             assert!(
                 !content.contains(&token),
@@ -2174,8 +2188,12 @@ fn token_file_is_private_and_removed_on_shutdown() {
 
     let (_port, token, stop, handle) = start_stoppable_surface(&repo);
 
-    let token_path = repo.join(".wt/surface.token");
+    let token_path = surface_token_path(&repo).unwrap();
     let surface_path = repo.join(".wt/surface.json");
+    assert!(
+        !repo.join(".wt/surface.token").exists(),
+        ".wt/surface.token must not be created"
+    );
     assert!(
         token_path.exists(),
         "expected {} to exist",
@@ -2193,6 +2211,16 @@ fn token_file_is_private_and_removed_on_shutdown() {
     {
         let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected mode 0600, got {:o}", mode);
+        let dir_mode = std::fs::metadata(token_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "expected dir mode 0700, got {:o}",
+            dir_mode
+        );
     }
 
     stop.store(true, Ordering::Relaxed);
@@ -2217,7 +2245,7 @@ fn second_start_fails_loudly_without_the_token_file() {
     init_git_repo(&repo);
 
     let (_port, _token, stop, handle) = start_stoppable_surface(&repo);
-    let token_path = repo.join(".wt/surface.token");
+    let token_path = surface_token_path(&repo).unwrap();
     assert!(token_path.exists());
     std::fs::remove_file(&token_path).unwrap();
 
@@ -2241,8 +2269,9 @@ fn second_start_fails_loudly_without_the_token_file() {
     assert_eq!(code2, 1);
     let err2_str = String::from_utf8(err2).unwrap();
     assert!(
-        err2_str.contains("surface.token"),
-        "expected stderr to name the token file, got: {err2_str}"
+        err2_str.contains(&token_path.display().to_string()),
+        "expected stderr to name the token file {}, got: {err2_str}",
+        token_path.display()
     );
     assert!(
         opened.is_empty(),
@@ -3048,4 +3077,135 @@ fn polling_a_done_request_records_no_session_error_and_refuses_push_and_pr() {
         pr_body.contains("already merged and removed"),
         "pr body: {pr_body}"
     );
+
+fn assert_no_file_under_contains(dir: &Path, needle: &str) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            assert_no_file_under_contains(&path, needle);
+        } else if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                !text.contains(needle),
+                "token leaked into {}",
+                path.display()
+            );
+        }
+    }
+}
+
+struct ChildKillGuard(std::process::Child);
+
+impl Drop for ChildKillGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn surface_keeps_token_out_of_wt_and_rejects_unauthenticated_actions() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("e2e-repo");
+    let fake_home = d.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    init_git_repo(&repo);
+
+    let stale_token = repo.join(".wt/surface.token");
+    write_file(&stale_token, "stale-old-token\n");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["--no-open", "--port", "0"])
+        .current_dir(&repo)
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .env_remove("XDG_STATE_HOME")
+        .env("BLYTE_ENV_FILE", "")
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_USAGE_LOG", "off")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut guard = ChildKillGuard(child);
+
+    let stdout = guard.0.stdout.take().unwrap();
+    let mut stderr = guard.0.stderr.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).unwrap();
+        if n == 0 {
+            let mut err_text = String::new();
+            let _ = stderr.read_to_string(&mut err_text);
+            panic!("blyte exited before printing URL; stderr={err_text}");
+        }
+        if line.contains("blyte: surface at ") {
+            break;
+        }
+    }
+    let url = line
+        .split("blyte: surface at ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
+    let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+    let (port_str, token) = rest.split_once("/#token=").unwrap();
+    let port: u16 = port_str.parse().unwrap();
+
+    assert!(
+        !stale_token.exists(),
+        ".wt/surface.token must not exist after surface start"
+    );
+    assert!(repo.join(".wt/surface.json").exists());
+    assert_no_file_under_contains(&repo.join(".wt"), token);
+
+    let token_dir = fake_home.join(".local/state/blyte/surface");
+    let token_files: Vec<PathBuf> = std::fs::read_dir(&token_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(token_files.len(), 1, "{token_files:?}");
+    assert_eq!(
+        std::fs::read_to_string(&token_files[0]).unwrap().trim(),
+        token
+    );
+    #[cfg(unix)]
+    {
+        let dir_mode = std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "dir mode {:o}", dir_mode);
+        let file_mode = std::fs::metadata(&token_files[0])
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "file mode {:o}", file_mode);
+    }
+
+    for path in [
+        "/api/requests/x/push",
+        "/api/requests/x/pull-request",
+        "/api/session/approvals/x",
+        "/api/runs/x/decision",
+    ] {
+        let resp = send_http(
+            port,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            ),
+        );
+        assert!(
+            resp.starts_with("HTTP/1.1 403"),
+            "POST {path} without token must return 403, got: {resp}"
+        );
+        assert!(
+            resp.contains("missing or invalid surface token"),
+            "POST {path} without token must report missing or invalid surface token, got: {resp}"
+        );
+    }
 }
