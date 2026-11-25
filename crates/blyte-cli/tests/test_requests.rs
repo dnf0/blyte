@@ -406,6 +406,7 @@ fn make_surface_with_session(
         started_at: 1_700_000_000,
         days: 14,
         token: generate_token().unwrap(),
+        message_credential: generate_token().unwrap(),
         requests: Arc::new(RequestsState::new()),
         publisher,
         reconcile_lock: Mutex::new(()),
@@ -2738,4 +2739,181 @@ fn non_string_surface_in_start_record_returns_error_naming_file() {
         make_surface(root.to_path_buf(), FakePublisher::ok("https://example/bad"));
     let err = list_requests(&surface).unwrap_err();
     assert!(err.contains("BADSURF.start.json"), "err={err}");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_start_file_with_started_by(
+    root: &Path,
+    id: &str,
+    request: Option<&str>,
+    base_sha: &str,
+    started_at: u64,
+    started_by: Option<Value>,
+) {
+    let mut obj = json!({
+        "id": id,
+        "base": "main",
+        "base_sha": base_sha,
+        "started_at": started_at,
+        "research": false,
+        "surface": "s00000000000000aa",
+    });
+    if let Some(req) = request {
+        obj["request"] = Value::String(req.to_string());
+    }
+    if let Some(sb) = started_by {
+        obj["started_by"] = sb;
+    }
+    std::fs::write(
+        root.join(".wt").join(format!("{id}.start.json")),
+        serde_json::to_string_pretty(&obj).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_request_list_reports_started_by() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "SB1", &base, "sb1.txt", "1\n", "feat: sb1");
+    create_run_branch(root, "SB2", &base, "sb2.txt", "2\n", "feat: sb2");
+    write_start_file_with_started_by(
+        root,
+        "SB1",
+        Some("req-from-api"),
+        &base,
+        now + 2,
+        Some(Value::String("api-2".to_string())),
+    );
+    write_start_file_with_started_by(root, "SB2", Some("req-from-user"), &base, now + 1, None);
+    for id in ["SB1", "SB2"] {
+        write_summary(root, id, "verified", Some(&format!("wip/{id}")));
+        write_checks(root, id, &[]);
+    }
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/sb"));
+    let reqs = list_requests(&surface).unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[0].request, "req-from-api");
+    assert_eq!(reqs[0].started_by.as_deref(), Some("api-2"));
+    assert_eq!(reqs[1].request, "req-from-user");
+    assert_eq!(reqs[1].started_by, None);
+
+    let resp = route(&surface, &get(&surface, "/api/requests"), now + 3);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let list = body.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["request"], "req-from-api");
+    assert_eq!(list[0]["started_by"], "api-2");
+    assert_eq!(list[1]["request"], "req-from-user");
+    assert!(
+        list[1].get("started_by").is_some_and(|v| v.is_null()),
+        "expected started_by: null in {}",
+        list[1]
+    );
+}
+
+#[test]
+fn a_request_with_mixed_started_by_is_an_error() {
+    let (repo1, base1) = init_repo_with_gate("true");
+    let root1 = repo1.path();
+    let now = now_secs();
+
+    create_run_branch(root1, "MS1", &base1, "ms1.txt", "1\n", "feat: ms1");
+    create_run_branch(root1, "MS2", &base1, "ms2.txt", "2\n", "feat: ms2");
+    write_start_file_with_started_by(
+        root1,
+        "MS1",
+        Some("req-mix-none"),
+        &base1,
+        now,
+        Some(Value::String("api".to_string())),
+    );
+    write_start_file_with_started_by(root1, "MS2", Some("req-mix-none"), &base1, now + 1, None);
+
+    let (surface1, _) = make_surface(
+        root1.to_path_buf(),
+        FakePublisher::ok("https://example/mix1"),
+    );
+    let list_err1 = list_requests(&surface1).unwrap_err();
+    assert_eq!(
+        list_err1,
+        "request req-mix-none has runs started by different surfaces"
+    );
+    let push_err1 = push_request(&surface1, "req-mix-none").unwrap_err();
+    assert_eq!(
+        push_err1,
+        RequestActionError::BadRequest(
+            "request req-mix-none has runs started by different surfaces".to_string()
+        )
+    );
+    let combine_err1 = maybe_combine(&surface1, "req-mix-none").unwrap_err();
+    assert_eq!(
+        combine_err1,
+        "request req-mix-none has runs started by different surfaces"
+    );
+
+    let (repo2, base2) = init_repo_with_gate("true");
+    let root2 = repo2.path();
+    create_run_branch(root2, "MD1", &base2, "md1.txt", "1\n", "feat: md1");
+    create_run_branch(root2, "MD2", &base2, "md2.txt", "2\n", "feat: md2");
+    write_start_file_with_started_by(
+        root2,
+        "MD1",
+        Some("req-mix-names"),
+        &base2,
+        now,
+        Some(Value::String("api".to_string())),
+    );
+    write_start_file_with_started_by(
+        root2,
+        "MD2",
+        Some("req-mix-names"),
+        &base2,
+        now + 1,
+        Some(Value::String("web".to_string())),
+    );
+
+    let (surface2, _) = make_surface(
+        root2.to_path_buf(),
+        FakePublisher::ok("https://example/mix2"),
+    );
+    let list_err2 = list_requests(&surface2).unwrap_err();
+    assert_eq!(
+        list_err2,
+        "request req-mix-names has runs started by different surfaces"
+    );
+    let push_err2 = push_request(&surface2, "req-mix-names").unwrap_err();
+    assert_eq!(
+        push_err2,
+        RequestActionError::BadRequest(
+            "request req-mix-names has runs started by different surfaces".to_string()
+        )
+    );
+}
+
+#[test]
+fn a_start_record_with_a_bad_started_by_is_an_error() {
+    let now = now_secs();
+
+    for (id, bad_val) in [("BADNUM", json!(3)), ("BADEMPTY", json!(""))] {
+        let (repo, base) = init_repo_with_gate("true");
+        let root = repo.path();
+        write_start_file_with_started_by(root, id, Some("req-badsb"), &base, now, Some(bad_val));
+        let start_path = root.join(".wt").join(format!("{id}.start.json"));
+        let (surface, _) =
+            make_surface(root.to_path_buf(), FakePublisher::ok("https://example/bad"));
+        let err = list_requests(&surface).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "{}: started_by must be a surface name",
+                start_path.display()
+            )
+        );
+    }
 }

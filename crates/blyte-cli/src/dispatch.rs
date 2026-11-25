@@ -1184,6 +1184,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             return 2;
         }
     }
+    if let Some(ref started_by) = args.started_by {
+        if let Err(e) = crate::surface_dir::validate_surface_name(started_by) {
+            eprintln!("blyte: {e}");
+            return 2;
+        }
+    }
     if let Ok(home) = crate::skill::home_dir() {
         if let Ok(Some(path)) = crate::skill::ensure_context_block(&home) {
             eprintln!(
@@ -1768,6 +1774,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "surface": args.surface,
         "base": args.base,
     });
+    if let Some(ref started_by) = args.started_by {
+        initial_start["started_by"] = serde_json::json!(started_by);
+    }
     if let Some(ref s) = session {
         initial_start["session"] = serde_json::json!(s);
     }
@@ -2223,6 +2232,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 "base_check": base_check_decision.as_json(),
                 "comments": comments_str,
             });
+            if let Some(ref started_by) = args.started_by {
+                start_json["started_by"] = serde_json::json!(started_by);
+            }
             if let Some(ref session) = session {
                 start_json["session"] = serde_json::json!(session);
             }

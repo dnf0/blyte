@@ -10,6 +10,7 @@
 //! Blocking makes the failure unrepresentable rather than merely discouraged.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use blyte_provider::ToolSpec;
@@ -19,14 +20,23 @@ use crate::approval::{matching_rule, Approval, ApprovalConfig};
 use crate::fs::Fs;
 use crate::shell::{poll_backoff, Shell, POLL_START};
 
+pub trait PeerTools: Send + Sync {
+    /// The running surfaces on this machine, as text for the model.
+    fn surfaces(&self) -> Result<String, String>;
+    /// Sends `message` to the surface named `name`; the text says delivered or held.
+    fn tell(&self, name: &str, message: &str) -> Result<String, String>;
+}
+
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static BLYTE_SURFACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
+static PEER_TOOLS: std::sync::RwLock<Option<Arc<dyn PeerTools>>> = std::sync::RwLock::new(None);
 static WRITE_SCOPE: std::sync::RwLock<Option<WriteScope>> = std::sync::RwLock::new(None);
 thread_local! {
     static BLYTE_REQUEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static BLYTE_STARTED_BY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Absolute, canonical directories where `write` and `edit` may write without user approval.
@@ -90,6 +100,16 @@ pub fn blyte_request() -> Option<String> {
     BLYTE_REQUEST.with(|slot| slot.borrow().clone())
 }
 
+pub fn set_blyte_started_by(name: Option<String>) {
+    BLYTE_STARTED_BY.with(|slot| {
+        *slot.borrow_mut() = name;
+    });
+}
+
+pub fn blyte_started_by() -> Option<String> {
+    BLYTE_STARTED_BY.with(|slot| slot.borrow().clone())
+}
+
 pub fn set_blyte_tool(exe: Option<std::path::PathBuf>) {
     match BLYTE_TOOL.write() {
         Ok(mut lock) => *lock = exe,
@@ -127,6 +147,20 @@ pub fn set_approval(config: Option<ApprovalConfig>) {
 
 pub fn approval() -> Option<ApprovalConfig> {
     APPROVAL
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_peer_tools(tools: Option<Arc<dyn PeerTools>>) {
+    match PEER_TOOLS.write() {
+        Ok(mut lock) => *lock = tools,
+        Err(poisoned) => *poisoned.into_inner() = tools,
+    }
+}
+
+pub fn peer_tools() -> Option<Arc<dyn PeerTools>> {
+    PEER_TOOLS
         .read()
         .map(|r| r.clone())
         .unwrap_or_else(|e| e.into_inner().clone())
@@ -862,6 +896,34 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         });
     }
+    if peer_tools().is_some() {
+        tools.push(ToolSpec {
+            name: "surfaces".into(),
+            description: "List the surfaces running on this machine: name, repository, branch and what each is doing.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        });
+        tools.push(ToolSpec {
+            name: "tell".into(),
+            description: "Send a message to another running surface by name. Its model reads it between turns as a message from this surface, not from its user. Returns delivered or held.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the target surface"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Message to send"
+                    }
+                },
+                "required": ["name", "message"]
+            }),
+        });
+    }
     tools
 }
 
@@ -1370,6 +1432,15 @@ fn execute_unbounded(
                 {
                     return ToolOutcome::err("do not pass --surface; blyte sets it automatically");
                 }
+                if cmd_args
+                    .iter()
+                    .skip(1)
+                    .any(|a| a == "--started-by" || a.starts_with("--started-by="))
+                {
+                    return ToolOutcome::err(
+                        "do not pass --started-by; blyte sets it automatically",
+                    );
+                }
                 if let Some(req_id) = blyte_request() {
                     if let Some(pos) = exec_args.iter().position(|a| a == "--") {
                         exec_args.insert(pos, req_id);
@@ -1386,6 +1457,15 @@ fn execute_unbounded(
                     } else {
                         exec_args.push("--surface".to_string());
                         exec_args.push(surface_id);
+                    }
+                }
+                if let Some(started_by) = blyte_started_by() {
+                    if let Some(pos) = exec_args.iter().position(|a| a == "--") {
+                        exec_args.insert(pos, started_by);
+                        exec_args.insert(pos, "--started-by".to_string());
+                    } else {
+                        exec_args.push("--started-by".to_string());
+                        exec_args.push(started_by);
                     }
                 }
             }
@@ -1443,6 +1523,38 @@ fn execute_unbounded(
                     ToolOutcome::err(parts.join("\n"))
                 }
                 Err(e) => ToolOutcome::err(e),
+            }
+        }
+        "surfaces" => {
+            let Some(peer) = peer_tools() else {
+                return ToolOutcome::err("the surfaces tool is not available here");
+            };
+            match peer.surfaces() {
+                Ok(text) => ToolOutcome::ok(text),
+                Err(text) => ToolOutcome::err(text),
+            }
+        }
+        "tell" => {
+            let Some(peer) = peer_tools() else {
+                return ToolOutcome::err("the tell tool is not available here");
+            };
+            let Some(target) = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+            else {
+                return ToolOutcome::err("tell needs a name and a message");
+            };
+            let Some(message) = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+            else {
+                return ToolOutcome::err("tell needs a name and a message");
+            };
+            match peer.tell(target, message) {
+                Ok(text) => ToolOutcome::ok(text),
+                Err(text) => ToolOutcome::err(text),
             }
         }
         other => ToolOutcome::err(format!("unknown tool: {other}")),

@@ -157,6 +157,7 @@ fn make_surface(root: PathBuf) -> (Surface, Arc<Mutex<Vec<String>>>) {
         started_at: 1_700_000_000,
         days: 14,
         token: generate_token().unwrap(),
+        message_credential: generate_token().unwrap(),
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),

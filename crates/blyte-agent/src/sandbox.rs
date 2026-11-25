@@ -338,6 +338,16 @@ pub fn surface_token_path_for_id(surface_id: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{surface_id}.token")))
 }
 
+/// `<surface_token_dir()>/<id>.message`. Errors if the id is invalid or the directory is unknown.
+pub fn surface_message_path_for_id(surface_id: &str) -> Result<PathBuf, String> {
+    validate_surface_id(surface_id)?;
+    let dir = surface_token_dir().ok_or_else(|| {
+        "cannot determine surface token directory: neither XDG_STATE_HOME nor HOME is set"
+            .to_string()
+    })?;
+    Ok(dir.join(format!("{surface_id}.message")))
+}
+
 fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     if let Ok(canon) = path.canonicalize() {
         return canon;

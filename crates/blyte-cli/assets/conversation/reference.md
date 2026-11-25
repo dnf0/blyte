@@ -147,6 +147,14 @@ when it has written a report whose cited lines and quoted code match the files, 
   failed. `broad research run` in `blyte review` marks such a run, and review lists the directories
   a run that ran out of budget read from.
 
+### Other surfaces
+
+- `surfaces` (no arguments) lists the currently running blyte surfaces, their repository, branch and
+  what each is doing, with `(this surface)` after this surface's name.
+- `tell` (`name`, `message`) sends a message to another running surface. It delivers the message to
+  that surface's conversation or reports that the message is held until that surface's user writes
+  again. A surface cannot tell itself.
+
 ### Measured limits of an implementer run
 
 - Measured 2026-09-28 and 2026-10-02 (Gemini 3.8 Flash): a rename edited file by file across 72

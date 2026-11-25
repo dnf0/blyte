@@ -150,6 +150,7 @@ pub struct RequestStatus {
     pub suggested_body: Option<String>,
     pub pushed: bool,
     pub pull_request_url: Option<String>,
+    pub started_by: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,6 +165,7 @@ struct StartRunInfo {
     id: String,
     request: Option<String>,
     surface: Option<String>,
+    started_by: Option<String>,
     base: Option<String>,
     started_at: u64,
     is_research: bool,
@@ -225,6 +227,16 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartRunInfo, String> 
             ));
         }
     };
+    let started_by = match val.get("started_by") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => {
+            return Err(format!(
+                "{}: started_by must be a surface name",
+                path.display()
+            ));
+        }
+    };
     let base = match val.get("base") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) => Some(s.clone()),
@@ -246,6 +258,7 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartRunInfo, String> 
         id: file_id.to_string(),
         request,
         surface,
+        started_by,
         base,
         started_at,
         is_research,
@@ -294,10 +307,12 @@ fn check_request_ownership(
     let wt_dir = surface.root.join(".wt");
     let entries = list_start_files(&wt_dir).map_err(RequestOwnershipError::IoOrParse)?;
     let mut owners: HashSet<Option<String>> = HashSet::new();
+    let mut started_bys: HashSet<Option<String>> = HashSet::new();
     for path in entries {
         let info = parse_start_file(&wt_dir, &path).map_err(RequestOwnershipError::IoOrParse)?;
         if info.request.as_deref() == Some(request) {
             owners.insert(info.surface);
+            started_bys.insert(info.started_by);
         }
     }
     if owners.is_empty() {
@@ -306,6 +321,11 @@ fn check_request_ownership(
     if owners.len() > 1 {
         return Err(RequestOwnershipError::Mixed(format!(
             "request {request} has runs from more than one surface"
+        )));
+    }
+    if started_bys.len() > 1 {
+        return Err(RequestOwnershipError::Mixed(format!(
+            "request {request} has runs started by different surfaces"
         )));
     }
     match owners.into_iter().next().flatten() {
@@ -1242,6 +1262,7 @@ struct RequestGroup {
     max_started_at: u64,
     runs: Vec<(u64, String)>,
     owners: HashSet<Option<String>>,
+    started_bys: HashSet<Option<String>>,
 }
 
 pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
@@ -1260,8 +1281,10 @@ pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
                 max_started_at: 0,
                 runs: Vec::new(),
                 owners: HashSet::new(),
+                started_bys: HashSet::new(),
             });
         entry.owners.insert(info.surface);
+        entry.started_bys.insert(info.started_by);
         if info.is_research {
             continue;
         }
@@ -1276,6 +1299,12 @@ pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
         if group.owners.len() > 1 {
             return Err(format!(
                 "request {} has runs from more than one surface",
+                group.request
+            ));
+        }
+        if group.started_bys.len() > 1 {
+            return Err(format!(
+                "request {} has runs started by different surfaces",
                 group.request
             ));
         }
@@ -1301,7 +1330,14 @@ pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
             .runs
             .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         let run_ids: Vec<String> = group.runs.into_iter().map(|(_, id)| id).collect();
-        result.push(build_request_status(surface, group.request, run_ids, busy));
+        let started_by = group.started_bys.into_iter().next().flatten();
+        result.push(build_request_status(
+            surface,
+            group.request,
+            run_ids,
+            started_by,
+            busy,
+        ));
     }
     Ok(result)
 }
@@ -1310,6 +1346,7 @@ fn build_request_status(
     surface: &Surface,
     request: String,
     runs: Vec<String>,
+    started_by: Option<String>,
     conversation_busy: bool,
 ) -> RequestStatus {
     let is_combining = surface.requests.is_combining(&request);
@@ -1357,6 +1394,7 @@ fn build_request_status(
         suggested_body: None,
         pushed,
         pull_request_url,
+        started_by,
     };
 
     if is_combining {

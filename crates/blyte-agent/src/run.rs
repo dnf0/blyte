@@ -232,6 +232,8 @@ pub enum Event<'e> {
 /// Retries allowed for one model call before a transient failure ends the run.
 pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
+pub const PEER_MESSAGE_PREFIX: &str = "[blyte] Message from surface ";
+
 pub const CONVERSATION_FIXED: &str = "\
 Change nothing outside the repository yourself (blyte's own files under `.wt/` and its records are fine).\n\n\
 ## Working efficiently\n\
@@ -472,13 +474,17 @@ impl<'a> Runner<'a> {
     /// The immutable part of the prompt: who the worker is, what it may touch, where it runs.
     ///
     /// Held constant for the whole run so it caches.
-    fn system_prompt(&self, state: &State, goal: &str) -> Result<String, String> {
+    fn system_prompt(&self, state: &State, goal: Option<&str>) -> Result<String, String> {
         let bins = tools::available_binaries(self.shell, &self.root)?.join(", ");
         let where_ = self.shell.describe();
 
         if let Some(text) = &state.brief.instructions {
+            let request_section = match goal {
+                Some(goal) => format!("## Your user's first request\n{goal}\n\n"),
+                None => String::new(),
+            };
             return Ok(format!(
-                "{text}## Your user's first request\n{goal}\n\n\
+                "{text}{request_section}\
                  ## Environment\n{where_}\nAvailable: {bins}\n\n\
                  {CONVERSATION_FIXED}",
             ));
@@ -521,7 +527,7 @@ impl<'a> Runner<'a> {
              Independent reads, searches and commands can be issued as several tool calls in one \
              turn: they run in order and you see every result together. Batch them whenever one \
              does not depend on another's result; every turn you save is a full model call.\n",
-            goal = goal,
+            goal = goal.unwrap_or(&state.brief.goal),
             completion = completion,
             where_ = where_,
             bins = bins,
@@ -814,13 +820,10 @@ impl<'a> Runner<'a> {
         now: &(dyn Fn() -> std::time::Instant + Sync),
         sleep: &(dyn Fn(std::time::Duration) + Sync),
     ) -> (Outcome, RunReport) {
-        let is_empty_conversation = state
-            .runtime
-            .conversation
-            .as_ref()
-            .map(|c| c.is_empty())
-            .unwrap_or(false);
-        if is_empty_conversation {
+        if state.runtime.conversation.is_some()
+            && state.runtime.conversation_goal.is_none()
+            && !state.brief.goal.starts_with(PEER_MESSAGE_PREFIX)
+        {
             state.runtime.conversation_goal = Some(state.brief.goal.clone());
         }
 
@@ -837,8 +840,9 @@ impl<'a> Runner<'a> {
         };
 
         let goal = match &state.runtime.conversation_goal {
-            Some(g) => g.as_str(),
-            None => state.brief.goal.as_str(),
+            Some(g) => Some(g.as_str()),
+            None if state.brief.goal.starts_with(PEER_MESSAGE_PREFIX) => None,
+            None => Some(state.brief.goal.as_str()),
         };
         let system = match self.system_prompt(state, goal) {
             Ok(s) => s,
@@ -855,7 +859,9 @@ impl<'a> Runner<'a> {
 
         let mut seen_names = HashSet::new();
         if self.research {
-            seen_names.extend(research_check::identifiers(goal).map(str::to_owned));
+            if let Some(g) = goal {
+                seen_names.extend(research_check::identifiers(g).map(str::to_owned));
+            }
             seen_names.extend(research_check::identifiers(&state.brief.goal).map(str::to_owned));
             // Tool results only: restored user messages include gate feedback that names the
             // very identifiers the check flagged.

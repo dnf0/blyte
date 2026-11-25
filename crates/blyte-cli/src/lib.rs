@@ -52,6 +52,7 @@ pub mod surface_notify;
 pub mod surface_registry;
 pub mod surfaces_cmd;
 pub mod task_runner;
+pub mod tell;
 pub mod tty_approver;
 pub mod update;
 pub mod update_notice;

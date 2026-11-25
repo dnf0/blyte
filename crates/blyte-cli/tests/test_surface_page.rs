@@ -56,6 +56,7 @@ fn page_handles_every_entry_kind() {
     let html = load_surface_html();
     for kind in [
         "user_message",
+        "peer_message",
         "turn",
         "tool_started",
         "tool_finished",
@@ -412,6 +413,7 @@ const waitingHtml = renderRequestCard({
   runs: ["T1", "T2"],
   state: "waiting",
   waiting_reasons: ["T1 is still running", "T2 failed check"],
+  started_by: null,
 });
 assert.ok(waitingHtml.includes("req-wait"), waitingHtml);
 assert.ok(waitingHtml.includes("T1") && waitingHtml.includes("T2"), waitingHtml);
@@ -424,6 +426,7 @@ const combiningHtml = renderRequestCard({
   request: "req-comb",
   runs: ["T3"],
   state: "combining",
+  started_by: null,
 });
 assert.ok(combiningHtml.includes("req-comb"), combiningHtml);
 assert.ok(combiningHtml.includes("T3"), combiningHtml);
@@ -443,6 +446,7 @@ const combinedHtml = renderRequestCard({
   suggested_body: "feat: first commit\nfix: second commit",
   pushed: false,
   pull_request_url: null,
+  started_by: null,
 });
 assert.ok(combinedHtml.includes("req-done"), combinedHtml);
 assert.ok(combinedHtml.includes("T4") && combinedHtml.includes("T5"), combinedHtml);
@@ -460,6 +464,7 @@ const conflictHtml = renderRequestCard({
   state: "conflict",
   conflicting_run: "T7",
   conflicting_files: ["src/main.rs", "src/lib.rs"],
+  started_by: null,
 });
 assert.ok(conflictHtml.includes("req-conf"), conflictHtml);
 assert.ok(conflictHtml.includes("T6") && conflictHtml.includes("T7"), conflictHtml);
@@ -472,6 +477,7 @@ const checkFailedHtml = renderRequestCard({
   state: "check_failed",
   failing_step: "cargo test",
   output_tail: "test foo ... FAILED\nassertion failed",
+  started_by: null,
 });
 assert.ok(checkFailedHtml.includes("req-fail"), checkFailedHtml);
 assert.ok(checkFailedHtml.includes("T8"), checkFailedHtml);
@@ -486,6 +492,7 @@ const errorHtml = renderRequestCard({
   runs: ["T9"],
   state: "error",
   error: "git cherry-pick exited 128",
+  started_by: null,
 });
 assert.ok(errorHtml.includes("req-err"), errorHtml);
 assert.ok(errorHtml.includes("T9"), errorHtml);
@@ -498,6 +505,7 @@ const missingBranchHtml = renderRequestCard({
   commits: [],
   pushed: false,
   pull_request_url: null,
+  started_by: null,
 });
 assert.ok(missingBranchHtml.includes("branch"), missingBranchHtml);
 assert.ok(missingBranchHtml.includes("request-validation-error"), missingBranchHtml);
@@ -507,6 +515,7 @@ const missingStepHtml = renderRequestCard({
   runs: ["T11"],
   state: "check_failed",
   output_tail: "boom",
+  started_by: null,
 });
 assert.ok(missingStepHtml.includes("failing_step"), missingStepHtml);
 assert.ok(missingStepHtml.includes("request-validation-error"), missingStepHtml);
@@ -515,6 +524,7 @@ const missingErrorHtml = renderRequestCard({
   request: "req-bad-err",
   runs: ["T12"],
   state: "error",
+  started_by: null,
 });
 assert.ok(missingErrorHtml.includes("error"), missingErrorHtml);
 assert.ok(missingErrorHtml.includes("request-validation-error"), missingErrorHtml);
@@ -542,6 +552,7 @@ const baseCombined = {
   suggested_body: "Suggested PR Body",
   pushed: false,
   pull_request_url: null,
+  started_by: null,
 };
 
 const notPushedHtml = renderRequestCard(baseCombined);
@@ -643,6 +654,7 @@ const boldErrHtml = renderRequestCard({
   runs: ["T2"],
   state: "error",
   error: "failed <b>badly</b>",
+  started_by: null,
 });
 assert.ok(!boldErrHtml.includes("<b>"), boldErrHtml);
 assert.ok(boldErrHtml.includes("failed &lt;b&gt;badly&lt;/b&gt;"), boldErrHtml);
@@ -1704,6 +1716,7 @@ const html = renderRequestCard({
   state: "conflict",
   conflicting_run: "T1",
   conflicting_files: [],
+  started_by: null,
 });
 assert.ok(html.includes("request-validation-error"), html);
 assert.ok(html.includes("conflicting_files"), html);
@@ -1723,6 +1736,7 @@ const emptyHtml = renderRequestCard({
   state: "check_failed",
   failing_step: "cargo test",
   output_tail: "",
+  started_by: null,
 });
 assert.ok(emptyHtml.includes("request-validation-error"), emptyHtml);
 assert.ok(emptyHtml.includes("output_tail"), emptyHtml);
@@ -1732,6 +1746,7 @@ const missingHtml = renderRequestCard({
   runs: ["T1"],
   state: "check_failed",
   failing_step: "cargo test",
+  started_by: null,
 });
 assert.ok(missingHtml.includes("request-validation-error"), missingHtml);
 assert.ok(missingHtml.includes("output_tail"), missingHtml);
@@ -1769,6 +1784,7 @@ const doneReq = {
   commits: [{ sha: "abcdef1234567", subject: "feat: merged work" }],
   pushed: true,
   pull_request_url: null,
+  started_by: null,
 };
 
 const waitingReq = {
@@ -1776,6 +1792,7 @@ const waitingReq = {
   runs: ["W1"],
   state: "waiting",
   waiting_reasons: ["W1: needs review"],
+  started_by: null,
 };
 
 const doneHtml = renderRequestCard(doneReq);
@@ -1799,6 +1816,7 @@ const bogusHtml = renderRequestCard({
   request: "req-bogus",
   runs: ["B1"],
   state: "bogus",
+  started_by: null,
 });
 assert.ok(bogusHtml.includes("request-validation-error"), bogusHtml);
 assert.ok(bogusHtml.includes("unknown state: bogus"), bogusHtml);
@@ -1847,6 +1865,311 @@ applySessionState({
   last_seq: 0,
 }, false);
 assert.strictEqual(document.title, "demo-2 - blyte");
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn peer_message_shows_sender_and_text() {
+    let html = load_surface_html();
+    let start = html
+        .find(".msg-line.peer {")
+        .expect("surface page must define .msg-line.peer CSS rule");
+    let rest = &html[start..];
+    let end = rest
+        .find('}')
+        .expect(".msg-line.peer CSS rule must close with }");
+    let rule = &rest[..=end];
+    assert!(
+        rule.contains("white-space: pre-wrap"),
+        ".msg-line.peer rule must contain white-space: pre-wrap:\n{rule}"
+    );
+
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderEntry({
+  seq: 10,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "api",
+  from_repository: "shop",
+  text: "please expose **v2**\nwith line breaks",
+  queued: false,
+  held: false,
+});
+assert.ok(html.includes("msg-line peer"), html);
+assert.ok(!html.includes("msg-line user"), html);
+assert.ok(!html.includes("msg-line assistant"), html);
+assert.ok(html.includes("from surface api (shop)"), html);
+assert.ok(html.includes("please expose **v2**\nwith line breaks"), html);
+assert.ok(!html.includes("<strong>"), html);
+assert.ok(!html.includes("msg-queued-badge"), html);
+assert.ok(!html.includes("msg-held-note"), html);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn peer_message_text_and_names_are_escaped() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderEntry({
+  seq: 11,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "<script>bad</script>",
+  from_repository: "<b>",
+  text: "<img src=x onerror=1>",
+  queued: false,
+  held: false,
+});
+assert.ok(!html.includes("<img"), html);
+assert.ok(!html.includes("<b>"), html);
+assert.ok(!html.includes("<script>"), html);
+assert.ok(html.includes("&lt;img src=x onerror=1&gt;"), html);
+assert.ok(html.includes("&lt;b&gt;"), html);
+assert.ok(html.includes("&lt;script&gt;bad&lt;/script&gt;"), html);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn held_peer_message_says_why() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderEntry({
+  seq: 12,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "api",
+  from_repository: "shop",
+  text: "waiting for user",
+  queued: false,
+  held: true,
+});
+assert.ok(
+  html.includes(
+    "held: this surface has run five turns from other surfaces since you last wrote. It runs after your next message."
+  ),
+  html
+);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn queued_peer_message_shows_waiting() {
+    let harness = r#"
+const assert = require("assert");
+
+const queuedUser = renderEntry({
+  seq: 13,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "user_message",
+  text: "user text",
+  reports: [],
+  queued: true,
+});
+const queuedPeer = renderEntry({
+  seq: 14,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "api",
+  from_repository: "shop",
+  text: "peer text",
+  queued: true,
+  held: false,
+});
+assert.ok(queuedUser.includes('<span class="msg-queued-badge">queued</span>'), queuedUser);
+assert.ok(queuedPeer.includes('<span class="msg-queued-badge">queued</span>'), queuedPeer);
+
+const clearedPeer = renderEntry(
+  {
+    seq: 14,
+    ts: "2026-01-01T00:00:00Z",
+    kind: "peer_message",
+    from_name: "api",
+    from_repository: "shop",
+    text: "peer text",
+    queued: true,
+    held: false,
+  },
+  { stillQueued: false }
+);
+assert.ok(!clearedPeer.includes("msg-queued-badge"), clearedPeer);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn malformed_peer_message_is_reported() {
+    let harness = r#"
+const assert = require("assert");
+
+const missingFromName = renderEntry({
+  seq: 15,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_repository: "shop",
+  text: "hello",
+  queued: false,
+  held: false,
+});
+assert.ok(missingFromName.includes("entry-error"), missingFromName);
+assert.ok(missingFromName.includes("from_name"), missingFromName);
+
+const badFromRepo = renderEntry({
+  seq: 16,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "api",
+  from_repository: 42,
+  text: "hello",
+  queued: false,
+  held: false,
+});
+assert.ok(badFromRepo.includes("entry-error"), badFromRepo);
+assert.ok(badFromRepo.includes("from_repository"), badFromRepo);
+
+const badText = renderEntry({
+  seq: 17,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "api",
+  from_repository: "shop",
+  text: null,
+  queued: false,
+  held: false,
+});
+assert.ok(badText.includes("entry-error"), badText);
+assert.ok(badText.includes("text"), badText);
+
+const badQueued = renderEntry({
+  seq: 18,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "api",
+  from_repository: "shop",
+  text: "hello",
+  queued: "no",
+  held: false,
+});
+assert.ok(badQueued.includes("entry-error"), badQueued);
+assert.ok(badQueued.includes("queued"), badQueued);
+
+const missingHeld = renderEntry({
+  seq: 19,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "peer_message",
+  from_name: "api",
+  from_repository: "shop",
+  text: "hello",
+  queued: false,
+});
+assert.ok(missingHeld.includes("entry-error"), missingHeld);
+assert.ok(missingHeld.includes("held"), missingHeld);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn request_card_shows_started_by() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderRequestCard({
+  request: "req-peer",
+  runs: ["T1"],
+  state: "combining",
+  started_by: "api",
+});
+assert.ok(!html.includes("request-validation-error"), html);
+assert.ok(html.includes("started by surface api"), html);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn request_card_started_by_is_escaped() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderRequestCard({
+  request: "req-xss",
+  runs: ["T1"],
+  state: "combining",
+  started_by: "<img src=x onerror=1>",
+});
+assert.ok(!html.includes("request-validation-error"), html);
+assert.ok(!html.includes("<img"), html);
+assert.ok(html.includes("started by surface &lt;img src=x onerror=1&gt;"), html);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn request_card_without_started_by_shows_nothing() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderRequestCard({
+  request: "req-local",
+  runs: ["T1"],
+  state: "combining",
+  started_by: null,
+});
+assert.ok(!html.includes("request-validation-error"), html);
+assert.ok(!html.includes("started by surface"), html);
+assert.ok(!html.includes("request-started-by"), html);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn request_card_rejects_a_bad_started_by() {
+    let harness = r#"
+const assert = require("assert");
+
+const withNumber = {
+  request: "req-num",
+  runs: ["T1"],
+  state: "combining",
+  started_by: 42,
+};
+const numberErrors = validateRequestCard(withNumber);
+assert.ok(numberErrors.some(e => e.includes("started_by")), JSON.stringify(numberErrors));
+const numberHtml = renderRequestCard(withNumber);
+assert.ok(numberHtml.includes("request-validation-error"), numberHtml);
+assert.ok(numberHtml.includes("started_by"), numberHtml);
+assert.ok(!numberHtml.includes("started by surface"), numberHtml);
+
+const withEmpty = {
+  request: "req-empty",
+  runs: ["T1"],
+  state: "combining",
+  started_by: "",
+};
+const emptyErrors = validateRequestCard(withEmpty);
+assert.ok(emptyErrors.some(e => e.includes("started_by")), JSON.stringify(emptyErrors));
+const emptyHtml = renderRequestCard(withEmpty);
+assert.ok(emptyHtml.includes("request-validation-error"), emptyHtml);
+assert.ok(emptyHtml.includes("started_by"), emptyHtml);
+assert.ok(!emptyHtml.includes("started by surface"), emptyHtml);
+
+const withMissing = {
+  request: "req-missing",
+  runs: ["T1"],
+  state: "combining",
+};
+const missingErrors = validateRequestCard(withMissing);
+assert.ok(missingErrors.some(e => e.includes("started_by")), JSON.stringify(missingErrors));
+const missingHtml = renderRequestCard(withMissing);
+assert.ok(missingHtml.includes("request-validation-error"), missingHtml);
+assert.ok(missingHtml.includes("started_by"), missingHtml);
+assert.ok(!missingHtml.includes("started by surface"), missingHtml);
 "#;
     run_surface_script(harness);
 }

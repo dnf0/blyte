@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use blyte_agent::sandbox::{
-    conversation_allowed, default_allowed, profile, surface_token_path_for_id, validate_surface_id,
+    conversation_allowed, default_allowed, profile, surface_message_path_for_id,
+    surface_token_path_for_id, validate_surface_id,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -227,6 +228,32 @@ fn surface_token_path_for_id_uses_surface_dir_and_rejects_invalid_id() {
 
     let err = surface_token_path_for_id("bad-id").unwrap_err();
     assert_eq!(err, "invalid surface id: bad-id");
+}
+
+#[test]
+fn surface_message_path_is_next_to_the_token() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = XdgStateGuard::set(tmp.path());
+
+    let token_path = surface_token_path_for_id("s0123456789abcdef").unwrap();
+    let msg_path = surface_message_path_for_id("s0123456789abcdef").unwrap();
+    assert_eq!(
+        msg_path.file_name().and_then(|n| n.to_str()),
+        Some("s0123456789abcdef.message")
+    );
+    assert_eq!(msg_path.parent(), token_path.parent());
+}
+
+#[test]
+fn surface_message_path_rejects_an_invalid_id() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = XdgStateGuard::set(tmp.path());
+
+    let token_err = surface_token_path_for_id("../x").unwrap_err();
+    let msg_err = surface_message_path_for_id("../x").unwrap_err();
+    assert_eq!(msg_err, token_err);
 }
 
 #[cfg(target_os = "macos")]
