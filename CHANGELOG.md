@@ -1,3 +1,9 @@
+## v0.63.2 (2026-11-25)
+
+### Fix
+
+- merged runs without a verdict count as merged in plan views; unreadable run files are errors (#422)
+
 ## v0.63.1 (2026-11-25)
 
 ### Fix
