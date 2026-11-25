@@ -2959,7 +2959,7 @@
       }
       if (!Array.isArray(data.runs)) return "/api/runs: missing runs array";
       const reqStr = ["key", "id", "repo", "title", "task", "outcome"];
-      const reqBool = ["research", "checks_recorded"];
+      const reqBool = ["research", "checks_recorded", "combined"];
       const reqNum = ["started_at", "finished_at", "turns"];
       const nullStr = ["plan_file", "plan_task", "final_message", "group", "verdict", "verdict_notes", "report"];
       const nullNum = ["cost_usd", "verdict_ts"];
@@ -3050,11 +3050,11 @@
     }
 
     function isUndecided(run) {
-      return run.verdict === null;
+      return run.verdict === null && !(run.combined && run.card === "clean" && run.hold === null);
     }
 
     function isHeld(run) {
-      return run.verdict === null && run.hold !== null;
+      return isUndecided(run) && run.hold !== null;
     }
 
     function computeGroups() {

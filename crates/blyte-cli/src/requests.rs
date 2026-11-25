@@ -572,6 +572,57 @@ fn record_runs_match_tips(record: &CombineRecord, current_runs: &[CombinedRun]) 
     sorted_runs(record.runs.clone()) == current_runs
 }
 
+fn check_record_combined_for_request(
+    root: &Path,
+    request: &str,
+    run_ids: &[&str],
+) -> Result<BTreeSet<String>, String> {
+    let Some(rec) = load_combine_record(root, request)? else {
+        return Ok(BTreeSet::new());
+    };
+    if rec.state != CombineState::Combined {
+        return Ok(BTreeSet::new());
+    }
+    let matching: BTreeSet<String> = rec
+        .runs
+        .iter()
+        .filter(|r| run_ids.contains(&r.id.as_str()))
+        .map(|r| r.id.clone())
+        .collect();
+    if matching.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let current_runs = resolve_current_run_tips(root, request)?;
+    if !record_runs_match_tips(&rec, &current_runs) {
+        return Ok(BTreeSet::new());
+    }
+    Ok(matching)
+}
+
+pub fn run_is_combined(root: &Path, run_id: &str, request: Option<&str>) -> Result<bool, String> {
+    let Some(request) = request else {
+        return Ok(false);
+    };
+    Ok(check_record_combined_for_request(root, request, &[run_id])?.contains(run_id))
+}
+
+pub fn combined_run_ids(
+    root: &Path,
+    runs: &[(&str, Option<&str>)],
+) -> Result<BTreeSet<String>, String> {
+    let mut by_request: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for &(run_id, request) in runs {
+        if let Some(req) = request {
+            by_request.entry(req).or_default().push(run_id);
+        }
+    }
+    let mut combined = BTreeSet::new();
+    for (request, run_ids) in by_request {
+        combined.extend(check_record_combined_for_request(root, request, &run_ids)?);
+    }
+    Ok(combined)
+}
+
 fn combine_record_tip(record: &CombineRecord) -> &str {
     record.commits.last().unwrap_or(&record.base).as_str()
 }

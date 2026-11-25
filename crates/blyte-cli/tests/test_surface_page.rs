@@ -1022,6 +1022,7 @@ const assert = require("node:assert");
       changed_files: ["src/lib.rs"],
       commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
       hold: null,
+      combined: false,
     };
   }
 
@@ -1359,6 +1360,7 @@ const assert = require("node:assert");
       changed_files: ["src/lib.rs"],
       commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
       hold: null,
+      combined: false,
     };
   }
 
@@ -1468,4 +1470,225 @@ assert.strictEqual(
 );
 "#;
     run_surface_script(harness);
+}
+
+fn review_queue_test_prelude() -> &'static str {
+    r#"
+const assert = require("node:assert");
+const elements = {};
+function makeStubElement(id) {
+  const attrs = new Map();
+  const classes = new Set();
+  const metricVal = { textContent: "" };
+  return {
+    id,
+    textContent: "",
+    innerHTML: "",
+    hidden: false,
+    disabled: false,
+    dataset: {},
+    style: {},
+    children: [],
+    get title() { return attrs.get("title") || ""; },
+    set title(v) {
+      if (v === undefined || v === null) attrs.delete("title");
+      else attrs.set("title", String(v));
+    },
+    classList: {
+      toggle(name, force) {
+        if (force === undefined) {
+          if (classes.has(name)) classes.delete(name);
+          else classes.add(name);
+        } else if (force) {
+          classes.add(name);
+        } else {
+          classes.delete(name);
+        }
+      },
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+    },
+    setAttribute(name, val) { attrs.set(name, String(val)); },
+    getAttribute(name) { return attrs.has(name) ? attrs.get(name) : null; },
+    hasAttribute(name) { return attrs.has(name); },
+    removeAttribute(name) { attrs.delete(name); },
+    querySelector(sel) { return sel === ".metric-val" ? metricVal : null; },
+    querySelectorAll() { return []; },
+  };
+}
+global.document = {
+  getElementById(id) {
+    if (!elements[id]) elements[id] = makeStubElement(id);
+    return elements[id];
+  },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+};
+function makeRun(id, overrides) {
+  return Object.assign({
+    key: id,
+    id,
+    repo: "demo",
+    title: "Task " + id,
+    task: "Do " + id,
+    outcome: "verified",
+    research: false,
+    checks_recorded: true,
+    combined: false,
+    started_at: 1000,
+    finished_at: 1010,
+    turns: 1,
+    plan_file: null,
+    plan_task: null,
+    final_message: "done",
+    group: "core",
+    verdict: null,
+    verdict_notes: null,
+    report: null,
+    cost_usd: 0.01,
+    verdict_ts: null,
+    card: "clean",
+    flags: [],
+    changed_files: ["src/lib.rs"],
+    commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
+    hold: null,
+  }, overrides || {});
+}
+function stubRunsFetch(runsPayload) {
+  global.fetch = async (url) => {
+    if (url !== "/api/runs") {
+      throw new Error("unexpected fetch url: " + url);
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          generated_at: 1020,
+          repo: "demo",
+          running: [],
+          runs: runsPayload,
+          skipped: [],
+        };
+      },
+    };
+  };
+}
+"#
+}
+
+#[test]
+fn a_clean_combined_run_is_not_in_the_review_count_or_list() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  stubRunsFetch([
+    makeRun("C1", {{ combined: true, card: "clean", hold: null, verdict: null }}),
+    makeRun("U1", {{ combined: false, card: "clean", hold: null, verdict: null }}),
+  ]);
+  await fetchRuns();
+  switchMode("review");
+  assert.strictEqual(document.getElementById("mode-review").textContent, "Review (1)");
+  const queueHtml = document.getElementById("queue").innerHTML;
+  assert.ok(queueHtml.includes("Task U1"), queueHtml);
+  assert.ok(!queueHtml.includes("Task C1"), queueHtml);
+  assert.ok(!queueHtml.includes('data-run-key="C1"'), queueHtml);
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
+}
+
+#[test]
+fn a_flagged_combined_run_stays_in_review() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  stubRunsFetch([
+    makeRun("F1", {{ combined: true, card: "exception", flags: ["lint warning"], hold: null, verdict: null }}),
+  ]);
+  await fetchRuns();
+  switchMode("review");
+  assert.strictEqual(document.getElementById("mode-review").textContent, "Review (1)");
+  const queueHtml = document.getElementById("queue").innerHTML;
+  assert.ok(queueHtml.includes("Task F1"), queueHtml);
+  assert.ok(queueHtml.includes("lint warning"), queueHtml);
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
+}
+
+#[test]
+fn a_held_combined_run_stays_in_review() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  stubRunsFetch([
+    makeRun("H1", {{
+      combined: true,
+      card: "clean",
+      hold: {{ note: "wait for reviewer", ts: 1015 }},
+      verdict: null,
+    }}),
+  ]);
+  await fetchRuns();
+  switchMode("review");
+  assert.strictEqual(document.getElementById("mode-review").textContent, "Review (1)");
+  const queueHtml = document.getElementById("queue").innerHTML;
+  const heldHeadingIdx = queueHtml.indexOf('<div class="held-heading">Held</div>');
+  const cardIdx = queueHtml.indexOf("Task H1");
+  assert.ok(heldHeadingIdx !== -1, queueHtml);
+  assert.ok(cardIdx > heldHeadingIdx, queueHtml);
+  assert.ok(queueHtml.includes("wait for reviewer"), queueHtml);
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
+}
+
+#[test]
+fn a_runs_payload_without_combined_is_an_error() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  const missingCombined = makeRun("M1");
+  delete missingCombined.combined;
+  stubRunsFetch([missingCombined]);
+  await fetchRuns();
+  const queueError = document.getElementById("queue-error");
+  assert.strictEqual(queueError.hidden, false);
+  assert.ok(queueError.textContent.includes("combined"), queueError.textContent);
+  const reviewTab = document.getElementById("mode-review");
+  assert.ok(reviewTab.title.includes("combined"), reviewTab.title);
+
+  const nonBoolCombined = makeRun("B1", {{ combined: "yes" }});
+  const err = validateRuns({{
+    generated_at: 1020,
+    repo: "demo",
+    running: [],
+    runs: [nonBoolCombined],
+    skipped: [],
+  }});
+  assert.ok(err && err.includes("combined"), String(err));
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
 }

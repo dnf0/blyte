@@ -93,6 +93,7 @@ struct RunWithHold<'a> {
     #[serde(flatten)]
     run: &'a crate::replay::Run,
     hold: Option<Hold>,
+    combined: bool,
 }
 
 #[derive(Serialize)]
@@ -433,13 +434,28 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
         surface.session.record_error(&msg);
     }
 
+    let run_refs: Vec<(&str, Option<&str>)> = live
+        .runs
+        .iter()
+        .map(|run| (run.id.as_str(), run.request.as_deref()))
+        .collect();
+    let combined_ids = match crate::requests::combined_run_ids(&surface.root, &run_refs) {
+        Ok(ids) => ids,
+        Err(e) => return json_error(500, e),
+    };
+
     let mut runs_with_hold = Vec::with_capacity(live.runs.len());
     for run in &live.runs {
         let hold = match crate::queue_actions::read_hold(&surface.root, &run.id) {
             Ok(h) => h,
             Err(e) => return json_error(500, e),
         };
-        runs_with_hold.push(RunWithHold { run, hold });
+        let combined = combined_ids.contains(&run.id);
+        runs_with_hold.push(RunWithHold {
+            run,
+            hold,
+            combined,
+        });
     }
 
     let payload = LiveRunsResponse {
