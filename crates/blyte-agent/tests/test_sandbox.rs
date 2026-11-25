@@ -1,9 +1,36 @@
 //! On macOS blyte's shell refuses writes outside an allow-list: a model once spent 50 minutes
 //! deleting a host cache after a gate failure, and a prompt is not enforcement.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use blyte_agent::sandbox::{conversation_allowed, default_allowed, profile};
+use blyte_agent::sandbox::{
+    conversation_allowed, default_allowed, profile, surface_token_path_for_id, validate_surface_id,
+};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct XdgStateGuard {
+    prev: Option<OsString>,
+}
+
+impl XdgStateGuard {
+    fn set(path: &Path) -> Self {
+        let prev = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", path);
+        Self { prev }
+    }
+}
+
+impl Drop for XdgStateGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+    }
+}
 
 #[test]
 fn the_profile_denies_writes_then_allows_the_listed_paths() {
@@ -155,6 +182,51 @@ fn conversation_allowed_in_linked_worktree_uses_main_wt_tasks() {
             .any(|p| canon(p) == linked_root.join(".wt/tasks")),
         "{allowed:?}"
     );
+}
+
+#[test]
+fn validate_surface_id_accepts_valid_and_rejects_malformed() {
+    assert!(validate_surface_id("s0123456789abcdef").is_ok());
+    assert!(validate_surface_id("sffffffffffffffff").is_ok());
+    assert!(validate_surface_id("s0000000000000000").is_ok());
+
+    for bad in [
+        "",
+        "s123",
+        "S0123456789abcdef",
+        "s0123456789ABCDEF",
+        "s0123456789abcde/",
+        "../s0123456789abcdef",
+        "s0123456789abcdef0",
+        "0123456789abcdef0",
+    ] {
+        let err = validate_surface_id(bad).unwrap_err();
+        assert_eq!(err, format!("invalid surface id: {bad}"));
+    }
+}
+
+#[test]
+fn surface_token_path_for_id_uses_surface_dir_and_rejects_invalid_id() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = XdgStateGuard::set(tmp.path());
+
+    let path = surface_token_path_for_id("s0123456789abcdef").unwrap();
+    assert!(
+        path.ends_with(Path::new("surface/s0123456789abcdef.token")),
+        "{}",
+        path.display()
+    );
+    assert_eq!(
+        path,
+        tmp.path()
+            .join("blyte")
+            .join("surface")
+            .join("s0123456789abcdef.token")
+    );
+
+    let err = surface_token_path_for_id("bad-id").unwrap_err();
+    assert_eq!(err, "invalid surface id: bad-id");
 }
 
 #[cfg(target_os = "macos")]

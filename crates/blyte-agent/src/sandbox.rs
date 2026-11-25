@@ -313,6 +313,31 @@ pub fn surface_token_path(main_checkout: &Path) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{key}.token")))
 }
 
+/// A surface id is `s` followed by exactly 16 lowercase hex digits.
+pub fn validate_surface_id(id: &str) -> Result<(), String> {
+    let bytes = id.as_bytes();
+    let valid = bytes.len() == 17
+        && bytes[0] == b's'
+        && bytes[1..]
+            .iter()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("invalid surface id: {id}"))
+    }
+}
+
+/// `<surface_token_dir()>/<id>.token`. Errors if the id is invalid or the directory is unknown.
+pub fn surface_token_path_for_id(surface_id: &str) -> Result<PathBuf, String> {
+    validate_surface_id(surface_id)?;
+    let dir = surface_token_dir().ok_or_else(|| {
+        "cannot determine surface token directory: neither XDG_STATE_HOME nor HOME is set"
+            .to_string()
+    })?;
+    Ok(dir.join(format!("{surface_id}.token")))
+}
+
 fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     if let Ok(canon) = path.canonicalize() {
         return canon;
