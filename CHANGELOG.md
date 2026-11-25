@@ -1,3 +1,9 @@
+## v0.63.1 (2026-11-25)
+
+### Fix
+
+- models cannot reach the surface token, API key file or ssh agent; Review count, combine output and silent failures (#420)
+
 ## v0.63.0 (2026-11-25)
 
 ### Feat
