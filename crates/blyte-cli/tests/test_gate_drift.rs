@@ -782,3 +782,51 @@ fn is_ci_step_covered_handles_key_based_edge_cases() {
     .unwrap();
     assert!(!is_ci_step_covered(d.path(), "cargo test", "", ""));
 }
+
+#[test]
+fn gate_drift_check_errors_on_unreadable_blyte_toml() {
+    let d = tempfile::tempdir().unwrap();
+    let toml_dir = d.path().join("blyte.toml");
+    std::fs::create_dir_all(&toml_dir).unwrap();
+
+    let err = blyte_cli::dispatch::load_gate_drift(d.path(), &toml_dir, "cargo test")
+        .expect_err("directory at blyte.toml must be an error");
+    assert!(
+        err.contains(&toml_dir.display().to_string()),
+        "error must name unreadable blyte.toml path, got: {err}"
+    );
+}
+
+#[test]
+fn patch_report_gate_left_out_errors_on_corrupt_or_unreadable_report() {
+    let d = tempfile::tempdir().unwrap();
+    let left_out = vec![("cargo clippy".to_string(), "too slow".to_string())];
+
+    let corrupt_path = d.path().join("corrupt.report.json");
+    std::fs::write(&corrupt_path, "not json").unwrap();
+    let err = blyte_cli::dispatch::patch_report_gate_left_out(&corrupt_path, &left_out)
+        .expect_err("corrupt report JSON must fail");
+    assert!(
+        err.contains(&corrupt_path.display().to_string()),
+        "error must name corrupt report path, got: {err}"
+    );
+
+    let dir_path = d.path().join("dir.report.json");
+    std::fs::create_dir_all(&dir_path).unwrap();
+    let err = blyte_cli::dispatch::patch_report_gate_left_out(&dir_path, &left_out)
+        .expect_err("directory at report path must fail");
+    assert!(
+        err.contains(&dir_path.display().to_string()),
+        "error must name unreadable report path, got: {err}"
+    );
+
+    let valid_path = d.path().join("valid.report.json");
+    std::fs::write(&valid_path, r#"{"outcome":"verified"}"#).unwrap();
+    blyte_cli::dispatch::patch_report_gate_left_out(&valid_path, &left_out).unwrap();
+    let patched: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&valid_path).unwrap()).unwrap();
+    assert_eq!(
+        patched["gate_left_out"],
+        serde_json::json!(["cargo clippy (too slow)"])
+    );
+}

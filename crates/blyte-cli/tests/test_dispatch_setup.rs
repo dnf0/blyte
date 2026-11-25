@@ -206,3 +206,146 @@ fn test_6_end_to_end_setup_failure_blocks_dispatch() {
         ".wt/S1x.log must not exist (implementer never started)"
     );
 }
+
+#[test]
+fn test_7_failing_setup_preserves_stdout_and_stderr_tails_and_full_log_path() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("setup.log");
+    let env = BTreeMap::new();
+
+    let script = "\
+for i in $(seq 1 29); do echo \"out-line-$i\"; done; \
+echo \"ROOT_CAUSE_ON_STDOUT_30\"; \
+for i in $(seq 1 29); do echo \"err-line-$i\" >&2; done; \
+echo \"LAST_STDERR_LINE_30\" >&2; \
+exit 1";
+
+    let err = run_setup(
+        script,
+        wt.path(),
+        main.path(),
+        &env,
+        &log_path,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+
+    assert!(
+        err.contains("stdout:\n"),
+        "expected stdout: label in error:\n{err}"
+    );
+    assert!(
+        err.contains("stderr:\n"),
+        "expected stderr: label in error:\n{err}"
+    );
+    assert!(
+        err.contains("ROOT_CAUSE_ON_STDOUT_30"),
+        "expected stdout cause line in error:\n{err}"
+    );
+    assert!(
+        !err.contains("out-line-10\n"),
+        "expected only last 20 stdout lines:\n{err}"
+    );
+    assert!(
+        err.contains("out-line-11"),
+        "expected stdout line 11 in error:\n{err}"
+    );
+    assert!(
+        err.contains("LAST_STDERR_LINE_30"),
+        "expected last stderr line in error:\n{err}"
+    );
+    assert!(
+        !err.contains("err-line-10\n"),
+        "expected only last 20 stderr lines:\n{err}"
+    );
+    assert!(
+        err.contains("err-line-11"),
+        "expected stderr line 11 in error:\n{err}"
+    );
+    let expected_footer = format!("full log: {}", log_path.display());
+    assert_eq!(
+        err.lines().last(),
+        Some(expected_footer.as_str()),
+        "expected trailing full log line, got:\n{err}"
+    );
+}
+
+#[test]
+fn test_8_failing_setup_omits_empty_stream_labels() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let env = BTreeMap::new();
+
+    let only_stdout_log = log_dir.path().join("stdout-only.log");
+    let err_out = run_setup(
+        "echo only-stdout; exit 2",
+        wt.path(),
+        main.path(),
+        &env,
+        &only_stdout_log,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+    assert!(err_out.contains("stdout:\n"), "{err_out}");
+    assert!(!err_out.contains("stderr:\n"), "{err_out}");
+
+    let only_stderr_log = log_dir.path().join("stderr-only.log");
+    let err_err = run_setup(
+        "echo only-stderr >&2; exit 2",
+        wt.path(),
+        main.path(),
+        &env,
+        &only_stderr_log,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+    assert!(!err_err.contains("stdout:\n"), "{err_err}");
+    assert!(err_err.contains("stderr:\n"), "{err_err}");
+}
+
+#[test]
+fn test_9_unwritable_setup_log_reports_error_on_success_and_failure() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let dir_as_log = tempfile::tempdir().unwrap();
+    let env = BTreeMap::new();
+
+    let err_ok = run_setup(
+        "echo ok",
+        wt.path(),
+        main.path(),
+        &env,
+        dir_as_log.path(),
+        SETUP_TIMEOUT,
+    )
+    .expect_err("succeeded setup with unwritable log must error");
+    assert!(
+        err_ok.contains(&dir_as_log.path().display().to_string()),
+        "error must name log path: {err_ok}"
+    );
+
+    let err_fail = run_setup(
+        "echo boom; exit 4",
+        wt.path(),
+        main.path(),
+        &env,
+        dir_as_log.path(),
+        SETUP_TIMEOUT,
+    )
+    .expect_err("failed setup with unwritable log must error");
+    assert!(
+        err_fail.contains("setup failed (exit 4)"),
+        "error must include setup failure: {err_fail}"
+    );
+    assert!(
+        err_fail.contains(&dir_as_log.path().display().to_string()),
+        "error must name unwritable log path: {err_fail}"
+    );
+    assert!(
+        !err_fail.contains("full log:"),
+        "error must not advertise nonexistent log: {err_fail}"
+    );
+}

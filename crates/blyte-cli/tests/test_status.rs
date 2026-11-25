@@ -109,3 +109,74 @@ fn an_unknown_id_is_an_error() {
     let r = repo();
     assert_eq!(blyte(r.path(), &["status", "nope"]).status.code(), Some(2));
 }
+
+#[test]
+fn corrupt_report_json_exits_nonzero_and_names_file() {
+    let r = repo();
+    let wt = r.path().join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(
+        wt.join("X.start.json"),
+        r#"{"id":"X","pid":99999999,"started_at":1700000000}"#,
+    )
+    .unwrap();
+    let report_path = wt.join("X.report.json");
+    std::fs::write(&report_path, "not json").unwrap();
+
+    let out = blyte(r.path(), &["status", "X"]);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "expected non-zero exit for corrupt report, stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stderr.contains("X.report.json"),
+        "expected error naming report file, stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("state: dead") && !stdout.contains("state: finished"),
+        "corrupt report must not be reported as dead or finished, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn unreadable_report_or_log_exits_nonzero_and_names_file() {
+    let r = repo();
+    let wt = r.path().join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+
+    std::fs::write(
+        wt.join("RDIR.start.json"),
+        r#"{"id":"RDIR","pid":99999999,"started_at":1700000000}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(wt.join("RDIR.report.json")).unwrap();
+    let out_report = blyte(r.path(), &["status", "RDIR"]);
+    assert_ne!(out_report.status.code(), Some(0));
+    let stderr_report = String::from_utf8_lossy(&out_report.stderr);
+    let stdout_report = String::from_utf8_lossy(&out_report.stdout);
+    assert!(
+        stderr_report.contains("RDIR.report.json"),
+        "stderr: {stderr_report}"
+    );
+    assert!(
+        !stdout_report.contains("state: dead"),
+        "stdout: {stdout_report}"
+    );
+
+    std::fs::write(
+        wt.join("LDIR.start.json"),
+        r#"{"id":"LDIR","pid":99999999,"started_at":1700000000}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(wt.join("LDIR.log")).unwrap();
+    let out_log = blyte(r.path(), &["status", "LDIR"]);
+    assert_ne!(out_log.status.code(), Some(0));
+    let stderr_log = String::from_utf8_lossy(&out_log.stderr);
+    let stdout_log = String::from_utf8_lossy(&out_log.stdout);
+    assert!(stderr_log.contains("LDIR.log"), "stderr: {stderr_log}");
+    assert!(!stdout_log.contains("state: dead"), "stdout: {stdout_log}");
+}
