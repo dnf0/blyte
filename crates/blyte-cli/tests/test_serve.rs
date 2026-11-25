@@ -3077,6 +3077,7 @@ fn polling_a_done_request_records_no_session_error_and_refuses_push_and_pr() {
         pr_body.contains("already merged and removed"),
         "pr body: {pr_body}"
     );
+}
 
 fn assert_no_file_under_contains(dir: &Path, needle: &str) {
     for entry in std::fs::read_dir(dir).unwrap() {

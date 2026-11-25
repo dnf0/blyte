@@ -473,7 +473,25 @@ existing sandbox tests do):
 
 Run: `cargo test -p blyte-agent`.
 
-**Constraints:** do not change which network hosts are allowed; do not touch the surface token code
-from Task TK; no new dependencies.
+**Also in this task: harden Task TK's tests** (found in review, 2026-11-25). A specific
+`allow file-read-data` rule beats a later `deny file-read*` in Seatbelt; TK's test for that case
+passed its gate only because it returns early when `sandbox-exec` cannot nest, and it failed on a
+real machine. The rule is fixed (each read deny is now also written for `file-read-data`). Make the
+tests unable to pass without running:
+
+- In `test_sandbox_read_deny.rs` and `test_sandbox_linux.rs`, every new TK test first reads a benign
+  file in the workspace through the same sandboxed shell and asserts it succeeds. When the sandbox
+  cannot start (nested), the test prints `skipped: sandbox cannot nest here` to stderr and returns;
+  that is the only allowed early return, and it must be decided by that benign read, not by the
+  secret read.
+- Add a case granting `$HOME/.config/blyte` and one granting `$HOME/.config/blyte/env` through
+  `allow_read`: the key file stays unreadable in the conversation and implementer profiles.
+- Every test in those two files that reads or changes `HOME` or `XDG_STATE_HOME`, or builds a profile,
+  holds one file-wide lock. In `crates/blyte-cli/tests/` (`test_serve.rs`, `test_requests.rs`,
+  `test_dispatch_notify.rs`, `test_review_notify.rs`), `XDG_STATE_HOME` is set once per test binary
+  inside a `OnceLock::get_or_init`, never per test.
+
+**Constraints:** do not change which network hosts are allowed; do not change where the surface token
+is stored; no new dependencies.
 
 **Commit:** `fix(sandbox): a model-run command cannot reach the ssh agent unless SSH_AUTH_SOCK is passed through`

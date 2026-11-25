@@ -338,6 +338,8 @@ fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+/// Seatbelt lets an earlier `allow file-read-data` override a later `deny file-read*`, so each read
+/// deny here is written for `file-read-data` as well.
 fn deny_state_blyte_write(mut profile: String) -> String {
     if let Some(dir) = state_blyte_dir() {
         let escaped = escape_path(&canonicalize_existing_prefix(&dir));
@@ -345,12 +347,16 @@ fn deny_state_blyte_write(mut profile: String) -> String {
     }
     if let Some(dir) = surface_token_dir() {
         let escaped = escape_path(&canonicalize_existing_prefix(&dir));
-        profile.push_str(&format!(r#"(deny file-read* (subpath "{escaped}"))"#));
+        profile.push_str(&format!(
+            r#"(deny file-read* (subpath "{escaped}"))(deny file-read-data (subpath "{escaped}"))"#
+        ));
     }
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
         let env_path = PathBuf::from(home).join(".config/blyte/env");
         let escaped = escape_path(&canonicalize_existing_prefix(&env_path));
-        profile.push_str(&format!(r#"(deny file-read* (subpath "{escaped}"))"#));
+        profile.push_str(&format!(
+            r#"(deny file-read* (subpath "{escaped}"))(deny file-read-data (subpath "{escaped}"))"#
+        ));
     }
     profile
 }
