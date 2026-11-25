@@ -302,6 +302,11 @@ fn dispatch_refuses_merged_run_with_uncommitted_changes() {
         std::fs::read_to_string(root.join(".wt/A1.json")).unwrap(),
         r#"{"outcome":"verified"}"#
     );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".wt/A1.verdict.json")).unwrap(),
+        r#"{"verdict":"accepted"}"#
+    );
+    assert!(root.join(".wt/A1.start.json").is_file());
     assert!(!root.join(".wt/archive").exists());
 }
 
