@@ -1,3 +1,9 @@
+## v0.65.0 (2026-11-25)
+
+### Feat
+
+- a machine-wide list of running surfaces, blyte surfaces and blyte open (#427)
+
 ## v0.64.0 (2026-11-25)
 
 ### Feat
