@@ -20,9 +20,7 @@ use blyte_cli::serve::{
 };
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
 use blyte_cli::surface_dir::{entries_path, list_records, record_path, surfaces_dir};
-use blyte_cli::surface_registry::{
-    entry_path, live_entries, registry_dir, write_entry, RegistryEntry,
-};
+use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
 
 struct RecordedCall {
     prompt: String,
@@ -3827,13 +3825,33 @@ fn explicit_name_used_in_different_repo_fails_and_writes_no_registry_entry() {
         "expected existing pick_name duplicate error, got: {err_text}"
     );
     assert!(list_records(&repo2).unwrap().is_empty());
+    let first_records = list_records(&repo1).unwrap();
+    assert_eq!(first_records.len(), 1);
+    let first_id = &first_records[0].id;
+    assert!(entry_path(&reg_dir, first_id).exists());
     let repo2_canon = repo2.canonicalize().unwrap();
-    let live = live_entries(&reg_dir).unwrap();
+    let mut stray = Vec::new();
+    for item in std::fs::read_dir(&reg_dir).unwrap() {
+        let path = item.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("failed to read {}: {e}", path.display()),
+        };
+        let entry: RegistryEntry = serde_json::from_str(&raw).unwrap();
+        let points_to_repo2 =
+            entry.root == repo2 || entry.root.canonicalize().ok().as_ref() == Some(&repo2_canon);
+        let duplicate_name = entry.name == "reg-cross-repo-name" && entry.id != *first_id;
+        if points_to_repo2 || duplicate_name {
+            stray.push(entry);
+        }
+    }
     assert!(
-        !live
-            .iter()
-            .any(|e| e.root.canonicalize().ok().as_ref() == Some(&repo2_canon)),
-        "expected no registry entry for second repo; live={live:?}"
+        stray.is_empty(),
+        "expected no registry entry for second repo; stray={stray:?}"
     );
 
     first.stop.store(true, Ordering::Relaxed);
