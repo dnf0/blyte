@@ -83,11 +83,43 @@ impl ModelReviewResult {
     }
 
     pub fn has_findings(&self) -> bool {
-        self.status == "ok" && !self.concerns.is_empty()
+        !self.is_failed() && !self.concerns.is_empty()
     }
 
     pub fn is_failed(&self) -> bool {
-        self.status != "ok" || self.error.is_some()
+        self.status != "ok"
+            || self.error.is_some()
+            || self.model.as_deref().is_none_or(|m| m.trim().is_empty())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.status == "ok" {
+            if self.error.is_some() {
+                return Err("status \"ok\" cannot carry an error".to_string());
+            }
+            if self.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
+                return Err("status \"ok\" is missing model".to_string());
+            }
+            Ok(())
+        } else if self.error.as_deref().is_none_or(|e| e.trim().is_empty()) {
+            Err(format!("status {:?} is missing error", self.status))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn failure_detail(&self) -> String {
+        if let Some(err) = self.error.as_deref().filter(|s| !s.trim().is_empty()) {
+            return err.to_string();
+        }
+        let raw = serde_json::to_string(self)
+            .map(|s| first_200(&s))
+            .unwrap_or_else(|e| format!("status={:?} ({e})", self.status));
+        if self.status == "ok" && self.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
+            format!("malformed model review result (missing model): {raw}")
+        } else {
+            format!("malformed model review result (missing error): {raw}")
+        }
     }
 
     pub fn waits_in_queue(&self) -> bool {
@@ -96,7 +128,7 @@ impl ModelReviewResult {
 
     pub fn flag(&self) -> Option<String> {
         if self.is_failed() {
-            let reason = self.error.as_deref().unwrap_or("unknown error");
+            let reason = self.failure_detail();
             return Some(sanitize_flag(format!("model review failed: {reason}")));
         }
         if self.has_findings() {
@@ -272,7 +304,10 @@ pub fn parse(text: &str, expect_fallbacks: bool) -> Result<ParsedReview, String>
         }
         None => {
             if expect_fallbacks {
-                return Err("missing \"fallbacks\" key in model review response".to_string());
+                return Err(format!(
+                    "missing \"fallbacks\" key in model review response: {}",
+                    first_200(text)
+                ));
             }
             Vec::new()
         }
@@ -345,7 +380,8 @@ pub fn parse(text: &str, expect_fallbacks: bool) -> Result<ParsedReview, String>
         };
         if verdict != "fallback" && verdict != "not_fallback" {
             return Err(format!(
-                "unknown fallback verdict {verdict:?} (expected \"fallback\" or \"not_fallback\")"
+                "unknown fallback verdict {verdict:?} (expected \"fallback\" or \"not_fallback\"): {}",
+                first_200(text)
             ));
         }
         let Some(reason) = obj.get("reason").and_then(|v| v.as_str()) else {
@@ -437,17 +473,7 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) -> ModelReviewResult {
     let task_text = match read_task_text(root, &start_path) {
         Some(t) => t,
         None => {
-            let result = ModelReviewResult::failed(None, None, "task file not found");
-            save_review(
-                root,
-                id,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                result.error.clone(),
-            );
-            return result;
+            return finish_failed(root, id, None, None, "task file not found");
         }
     };
 
@@ -459,17 +485,7 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) -> ModelReviewResult {
         Ok(Some((cfg, _))) => Some(cfg),
         Ok(None) => None,
         Err(e) => {
-            let result = ModelReviewResult::failed(None, None, e);
-            save_review(
-                root,
-                id,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                result.error.clone(),
-            );
-            return result;
+            return finish_failed(root, id, None, None, e);
         }
     };
     let dispatch_cfg = repo_config.map(|c| c.dispatch).unwrap_or_default();
@@ -482,30 +498,10 @@ pub fn run(root: &Path, id: &str, base: &str, wt: &Path) -> ModelReviewResult {
     let provider = match blyte_provider::resolve_provider(model) {
         Ok(p) => p,
         Err(blyte_provider::ProviderError::MissingKey(key)) => {
-            let result = ModelReviewResult::failed(None, None, format!("no API key (set {key})"));
-            save_review(
-                root,
-                id,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                result.error.clone(),
-            );
-            return result;
+            return finish_failed(root, id, None, None, format!("no API key (set {key})"));
         }
         Err(e) => {
-            let result = ModelReviewResult::failed(None, None, e.to_string());
-            save_review(
-                root,
-                id,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                result.error.clone(),
-            );
-            return result;
+            return finish_failed(root, id, None, None, e.to_string());
         }
     };
 
@@ -523,18 +519,13 @@ pub fn run_with_provider(
     let task_text = match read_task_text(root, &start_path) {
         Some(t) => t,
         None => {
-            let result =
-                ModelReviewResult::failed(Some(provider.model_id()), None, "task file not found");
-            save_review(
+            return finish_failed(
                 root,
                 id,
-                result.model.as_deref(),
+                Some(provider.model_id()),
                 None,
-                Vec::new(),
-                Vec::new(),
-                result.error.clone(),
+                "task file not found",
             );
-            return result;
         }
     };
     run_with_task_and_provider(root, id, base, wt, &task_text, provider)
@@ -626,29 +617,11 @@ fn run_with_task_and_provider(
                 "git diff --stat failed: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             );
-            save_review(
-                root,
-                id,
-                Some(&model_id),
-                None,
-                Vec::new(),
-                Vec::new(),
-                Some(err.clone()),
-            );
-            return ModelReviewResult::failed(Some(model_id), None, err);
+            return finish_failed(root, id, Some(model_id), None, err);
         }
         Err(e) => {
             let err = format!("git diff --stat failed: {e}");
-            save_review(
-                root,
-                id,
-                Some(&model_id),
-                None,
-                Vec::new(),
-                Vec::new(),
-                Some(err.clone()),
-            );
-            return ModelReviewResult::failed(Some(model_id), None, err);
+            return finish_failed(root, id, Some(model_id), None, err);
         }
     };
 
@@ -663,29 +636,11 @@ fn run_with_task_and_provider(
                 "git diff failed: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             );
-            save_review(
-                root,
-                id,
-                Some(&model_id),
-                None,
-                Vec::new(),
-                Vec::new(),
-                Some(err.clone()),
-            );
-            return ModelReviewResult::failed(Some(model_id), None, err);
+            return finish_failed(root, id, Some(model_id), None, err);
         }
         Err(e) => {
             let err = format!("git diff failed: {e}");
-            save_review(
-                root,
-                id,
-                Some(&model_id),
-                None,
-                Vec::new(),
-                Vec::new(),
-                Some(err.clone()),
-            );
-            return ModelReviewResult::failed(Some(model_id), None, err);
+            return finish_failed(root, id, Some(model_id), None, err);
         }
     };
 
@@ -695,17 +650,7 @@ fn run_with_task_and_provider(
     let resp = match provider.complete(&req) {
         Ok(r) => r,
         Err(e) => {
-            let err = e.to_string();
-            save_review(
-                root,
-                id,
-                Some(&model_id),
-                None,
-                Vec::new(),
-                Vec::new(),
-                Some(err.clone()),
-            );
-            return ModelReviewResult::failed(Some(model_id), None, err);
+            return finish_failed(root, id, Some(model_id), None, e.to_string());
         }
     };
 
@@ -728,16 +673,7 @@ fn run_with_task_and_provider(
                 Ok(r) => r,
                 Err(e2) => {
                     let err_msg = format!("{e2} (after one retry)");
-                    save_review(
-                        root,
-                        id,
-                        Some(&model_id),
-                        cost1,
-                        Vec::new(),
-                        Vec::new(),
-                        Some(err_msg.clone()),
-                    );
-                    return ModelReviewResult::failed(Some(model_id), cost1, err_msg);
+                    return finish_failed(root, id, Some(model_id), cost1, err_msg);
                 }
             };
             let cost2 = blyte_provider::pricing(&model_id).map(|p| p.cost(&resp2.usage));
@@ -757,31 +693,13 @@ fn run_with_task_and_provider(
                         "{} (after one retry)",
                         parse_error_message(&e2, resp2.finish_reason.as_deref())
                     );
-                    save_review(
-                        root,
-                        id,
-                        Some(&model_id),
-                        total_cost,
-                        Vec::new(),
-                        Vec::new(),
-                        Some(err_msg.clone()),
-                    );
-                    return ModelReviewResult::failed(Some(model_id), total_cost, err_msg);
+                    return finish_failed(root, id, Some(model_id), total_cost, err_msg);
                 }
             }
         }
         Err(e) => {
             let err_msg = parse_error_message(&e, resp.finish_reason.as_deref());
-            save_review(
-                root,
-                id,
-                Some(&model_id),
-                cost1,
-                Vec::new(),
-                Vec::new(),
-                Some(err_msg.clone()),
-            );
-            return ModelReviewResult::failed(Some(model_id), cost1, err_msg);
+            return finish_failed(root, id, Some(model_id), cost1, err_msg);
         }
     };
 
@@ -789,7 +707,7 @@ fn run_with_task_and_provider(
     sort_concerns(&mut concerns);
     let fallbacks = parsed.fallbacks;
 
-    save_review(
+    if let Err(save_err) = save_review(
         root,
         id,
         Some(&model_id),
@@ -797,33 +715,43 @@ fn run_with_task_and_provider(
         concerns.clone(),
         fallbacks.clone(),
         None,
-    );
+    ) {
+        return ModelReviewResult::failed(Some(model_id), total_cost, save_err);
+    }
     ModelReviewResult::ok(model_id, total_cost, concerns).with_fallbacks(fallbacks)
 }
 
-pub fn print_result(result: &ModelReviewResult) {
+pub fn format_result(result: &ModelReviewResult) -> String {
+    let mut out = String::new();
     if result.is_failed() {
-        let err = result.error.as_deref().unwrap_or("unknown error");
-        println!("== model review");
+        let err = result.failure_detail();
+        out.push_str("== model review\n");
         if err == "task file not found" || err.starts_with("no API key (set ") {
-            println!("skipped: {err}");
+            out.push_str(&format!("skipped: {err}\n"));
         } else {
-            println!("error: {err}");
+            out.push_str(&format!("error: {err}\n"));
         }
-        return;
+        return out;
     }
 
-    let model_id = result.model.as_deref().unwrap_or("?");
+    let Some(model_id) = result.model.as_deref().filter(|m| !m.trim().is_empty()) else {
+        let err = result.failure_detail();
+        out.push_str("== model review\n");
+        out.push_str(&format!("error: {err}\n"));
+        return out;
+    };
     let cost_str = match result.cost_usd {
         Some(c) => format!("${c:.4}"),
-        None => "?".to_string(),
+        None => "price unknown".to_string(),
     };
-    println!("== model review (trial: {model_id}, {cost_str})");
+    out.push_str(&format!(
+        "== model review (trial: {model_id}, {cost_str})\n"
+    ));
     if result.concerns.is_empty() {
-        println!("nothing raised");
+        out.push_str("nothing raised\n");
     } else {
         for c in &result.concerns {
-            println!("{}", format_concern(c));
+            out.push_str(&format!("{}\n", format_concern(c)));
         }
     }
     if !result.fallbacks.is_empty() {
@@ -838,13 +766,18 @@ pub fn print_result(result: &ModelReviewResult) {
             .filter(|f| f.verdict == "not_fallback")
             .count();
         if !confirmed.is_empty() {
-            println!("confirmed fallbacks ({}):", confirmed.len());
+            out.push_str(&format!("confirmed fallbacks ({}):\n", confirmed.len()));
             for f in confirmed {
-                println!("  {}:{} {}", f.file, f.line, f.reason);
+                out.push_str(&format!("  {}:{} {}\n", f.file, f.line, f.reason));
             }
         }
-        println!("fallback candidates dismissed: {dismissed}");
+        out.push_str(&format!("fallback candidates dismissed: {dismissed}\n"));
     }
+    out
+}
+
+pub fn print_result(result: &ModelReviewResult) {
+    print!("{}", format_result(result));
 }
 
 pub fn load_saved_review(path: &Path) -> Result<SavedModelReview, String> {
@@ -867,6 +800,29 @@ fn read_task_text(root: &Path, start_path: &Path) -> Option<String> {
     }
 }
 
+fn finish_failed(
+    root: &Path,
+    id: &str,
+    model: Option<String>,
+    cost_usd: Option<f64>,
+    err: impl Into<String>,
+) -> ModelReviewResult {
+    let orig_err = err.into();
+    let final_err = match save_review(
+        root,
+        id,
+        model.as_deref(),
+        cost_usd,
+        Vec::new(),
+        Vec::new(),
+        Some(orig_err.clone()),
+    ) {
+        Ok(()) => orig_err,
+        Err(save_err) => format!("{orig_err}; {save_err}"),
+    };
+    ModelReviewResult::failed(model, cost_usd, final_err)
+}
+
 fn save_review(
     root: &Path,
     id: &str,
@@ -875,10 +831,11 @@ fn save_review(
     concerns: Vec<Concern>,
     fallbacks: Vec<FallbackVerdict>,
     error: Option<String>,
-) {
+) -> Result<(), String> {
     let wt_dir = root.join(".wt");
-    let _ = std::fs::create_dir_all(&wt_dir);
     let review_path = wt_dir.join(format!("{id}.model-review.json"));
+    std::fs::create_dir_all(&wt_dir)
+        .map_err(|e| format!("cannot save {}: {e}", review_path.display()))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -891,9 +848,10 @@ fn save_review(
         ts,
         error,
     };
-    if let Ok(json_str) = serde_json::to_string_pretty(&record) {
-        let _ = std::fs::write(&review_path, json_str + "\n");
-    }
+    let json_str = serde_json::to_string_pretty(&record)
+        .map_err(|e| format!("cannot serialize {}: {e}", review_path.display()))?;
+    std::fs::write(&review_path, json_str + "\n")
+        .map_err(|e| format!("cannot write {}: {e}", review_path.display()))
 }
 
 #[cfg(test)]
@@ -1194,7 +1152,8 @@ Overall looks okay otherwise.
             concerns,
             fallbacks,
             None,
-        );
+        )
+        .unwrap();
         let path = dir.path().join(".wt/T1.model-review.json");
         assert!(path.is_file());
         let content = std::fs::read_to_string(&path).unwrap();
@@ -1225,5 +1184,101 @@ Overall looks okay otherwise.
         let old_loaded = load_saved_review(&old_path).unwrap();
         assert_eq!(old_loaded.model.as_deref(), Some("gemini/gemini-3.8-flash"));
         assert!(old_loaded.fallbacks.is_empty());
+    }
+
+    #[test]
+    fn test_malformed_result_and_responses_carry_content_without_placeholders() {
+        let missing_error = ModelReviewResult {
+            status: "error".to_string(),
+            model: Some("test-model".to_string()),
+            cost_usd: None,
+            concerns: Vec::new(),
+            fallbacks: Vec::new(),
+            error: None,
+        };
+        assert!(missing_error.is_failed());
+        let flag = missing_error.flag().expect("expected flag");
+        assert!(!flag.contains("unknown error"), "flag={flag}");
+        assert!(!flag.contains('?'), "flag={flag}");
+        assert!(flag.contains("test-model"), "flag={flag}");
+
+        let rendered = format_result(&missing_error);
+        assert!(!rendered.contains("unknown error"), "rendered={rendered}");
+        assert!(!rendered.contains('?'), "rendered={rendered}");
+        assert!(rendered.contains("test-model"), "rendered={rendered}");
+
+        let missing_model = ModelReviewResult {
+            status: "ok".to_string(),
+            model: None,
+            cost_usd: None,
+            concerns: Vec::new(),
+            fallbacks: Vec::new(),
+            error: None,
+        };
+        assert!(missing_model.is_failed());
+        let model_flag = missing_model.flag().expect("expected flag");
+        assert!(!model_flag.contains("unknown error"), "flag={model_flag}");
+        assert!(!model_flag.contains('?'), "flag={model_flag}");
+        assert!(model_flag.contains("missing model"), "flag={model_flag}");
+
+        let rendered_missing_model = format_result(&missing_model);
+        assert!(
+            !rendered_missing_model.contains('?'),
+            "rendered={rendered_missing_model}"
+        );
+        assert!(
+            !rendered_missing_model.contains("unknown error"),
+            "rendered={rendered_missing_model}"
+        );
+
+        let no_price = ModelReviewResult::ok("custom/unpriced".to_string(), None, Vec::new());
+        let rendered_no_price = format_result(&no_price);
+        assert!(
+            rendered_no_price.contains("price unknown"),
+            "rendered={rendered_no_price}"
+        );
+        assert!(
+            !rendered_no_price.contains('?'),
+            "rendered={rendered_no_price}"
+        );
+
+        let bad_missing_fb = r#"{"concerns": [], "extra": "actual-payload-123"}"#;
+        let err_fb = parse(bad_missing_fb, true).unwrap_err();
+        assert!(err_fb.contains("actual-payload-123"), "err={err_fb}");
+        assert!(!err_fb.contains("unknown error"), "err={err_fb}");
+
+        let bad_verdict = r#"{"concerns": [], "fallbacks": [{"file": "a.rs", "line": 1, "verdict": "bogus", "reason": "r"}]}"#;
+        let err_v = parse(bad_verdict, true).unwrap_err();
+        assert!(err_v.contains("bogus"), "err={err_v}");
+        assert!(err_v.contains("a.rs"), "err={err_v}");
+    }
+
+    #[test]
+    fn test_save_review_errors_when_parent_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".wt"), "blocking file").unwrap();
+        let expected_path = dir.path().join(".wt/T1.model-review.json");
+        let err = save_review(
+            dir.path(),
+            "T1",
+            Some("test-model"),
+            Some(0.01),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .expect_err("expected error when .wt is a file");
+        assert!(
+            err.contains(&expected_path.display().to_string()),
+            "err={err}"
+        );
+
+        let res = run(dir.path(), "T1", "HEAD", dir.path());
+        assert!(res.is_failed());
+        let res_err = res.error.expect("expected error");
+        assert!(
+            res_err.contains(&expected_path.display().to_string()),
+            "res_err={res_err}"
+        );
     }
 }

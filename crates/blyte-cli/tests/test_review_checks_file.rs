@@ -259,3 +259,60 @@ fn a_second_review_overwrites() {
     );
     assert_eq!(val2["fallbacks"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn review_errors_on_corrupt_report_and_unreadable_log() {
+    let r = repo();
+    setup_run(r.path(), "X1");
+    let report_path = r.path().join(".wt/X1.report.json");
+    std::fs::write(&report_path, "{not valid json").unwrap();
+
+    let out = blyte(r.path(), &["review", "X1"]);
+    assert_ne!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("X1.report.json"),
+        "expected report path in stderr, got: {stderr}"
+    );
+
+    let r2 = repo();
+    setup_run(r2.path(), "X2");
+    let log_path = r2.path().join(".wt/X2.log");
+    std::fs::create_dir_all(&log_path).unwrap();
+
+    let out2 = blyte(r2.path(), &["review", "X2"]);
+    assert_ne!(out2.status.code(), Some(0));
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr2.contains("X2.log"),
+        "expected log path in stderr, got: {stderr2}"
+    );
+}
+
+#[test]
+fn wait_exits_1_on_summary_missing_required_fields_and_prints_no_question_mark() {
+    let r = repo();
+    std::fs::create_dir_all(r.path().join(".wt")).unwrap();
+    let summary_path = r.path().join(".wt/X.json");
+    std::fs::write(&summary_path, r#"{"id":"X"}"#).unwrap();
+    let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&summary_path)
+        .unwrap()
+        .set_modified(old_time)
+        .unwrap();
+
+    let out = blyte(r.path(), &["wait", "X", "--timeout", "2"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(!stdout.contains('?'), "stdout={stdout:?}");
+    assert!(!stderr.contains('?'), "stderr={stderr:?}");
+    assert!(stderr.contains("X.json"), "stderr={stderr:?}");
+    assert!(stderr.contains("outcome"), "stderr={stderr:?}");
+}
