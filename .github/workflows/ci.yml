@@ -1,56 +1,19 @@
 name: CI
 
+# The checks for a pull request run on the author's machine: scripts/land.sh runs them and then
+# merges. What stays here is the one thing a Mac cannot check: the tests on Linux, once per merge.
 on:
   push:
     branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  pr-lint:
-    name: Validate PR Title (Conventional Commits)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: amannn/action-semantic-pull-request@v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          types: |
-            feat
-            fix
-            docs
-            style
-            refactor
-            perf
-            test
-            build
-            ci
-            chore
-            revert
-          requireScope: false
-
-  licences:
-    name: Dependency licences
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # deny.toml lists the permissive licences allowed; anything else (GPL, LGPL, AGPL, MPL) fails.
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check licenses
-
   matrix-test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: Test (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -70,22 +33,3 @@ jobs:
 
       - name: Workspace Tests
         run: python3 scripts/test-parallel.py -- --workspace --all-targets
-
-
-  docs-check:
-    name: Docs Build Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.100.0"
-      - name: Build API Docs
-        run: cargo doc --no-deps --workspace
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build Docs Site
-        run: |
-          pip install "mkdocs-material==9.6.*"
-          mkdocs build --strict
