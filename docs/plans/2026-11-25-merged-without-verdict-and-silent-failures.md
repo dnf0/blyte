@@ -122,7 +122,7 @@ the modules.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 8. `crates/blyte-cli/src/clean.rs:1115-1123, 1490-1498, 3092-3100` — Corrupt `.verdict.json` (and child `.json` at `1134-1142`) coerced to empty string / `false`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/clean.rs:1489-1501`
+`crates/blyte-cli/src/clean.rs:1489-1501`
 ```rs
         let verdict_str = if verdict_path.is_file() {
             std::fs::read_to_string(&verdict_path)
@@ -219,7 +219,7 @@ the modules.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 4. `crates/blyte-cli/src/plan_cmd.rs:75, 85, 89` — Unreadable `.wt` or `.start.json` silently skipped in `blyte plan`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/plan_cmd.rs:71-90`
+`crates/blyte-cli/src/plan_cmd.rs:71-90`
 ```rs
 fn read_start_files(root: &Path) -> Vec<StartRecord> {
     let wt_dir = root.join(".wt");
@@ -251,7 +251,7 @@ fn read_start_files(root: &Path) -> Vec<StartRecord> {
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 12. `crates/blyte-cli/src/plan_cmd.rs:144-162, 385-386, 394` — Corrupt verdict/summary ignored and missing outcome/run rendered as `"unknown"` / `""`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/plan_cmd.rs:150-163`
+`crates/blyte-cli/src/plan_cmd.rs:150-163`
 ```rs
 fn read_summary(root: &Path, run_id: &str) -> Option<(Option<String>, bool)> {
     let summary_file = root.join(".wt").join(format!("{run_id}.json"));
@@ -268,7 +268,7 @@ fn read_summary(root: &Path, run_id: &str) -> Option<(Option<String>, bool)> {
         })
 }
 ```
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/plan_cmd.rs:381-397`
+`crates/blyte-cli/src/plan_cmd.rs:381-397`
 ```rs
             "review" => {
                 if let Some(ref problem) = r.problem {
@@ -329,7 +329,7 @@ closes stdin at once, or a seam).
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 7. `crates/blyte-agent/src/shell.rs:220` — Failed environment probe returns empty binary list
-`/Users/danielfisher/repos/blyte/crates/blyte-agent/src/shell.rs:213-222`
+`crates/blyte-agent/src/shell.rs:213-222`
 ```rs
         match self.exec(&probe, cwd, Duration::from_secs(30)) {
             Ok(o) => o
@@ -351,7 +351,7 @@ closes stdin at once, or a seam).
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 20. `crates/blyte-agent/src/tools.rs:1272-1273` — `dispatch` tool ignores arg serialization and stdin write errors
-`/Users/danielfisher/repos/blyte/crates/blyte-agent/src/tools.rs:1271-1275`
+`crates/blyte-agent/src/tools.rs:1271-1275`
 ```rs
             if let Some(mut stdin) = child.stdin.take() {
                 let json_bytes = serde_json::to_vec(args).unwrap_or_default();
@@ -412,7 +412,7 @@ change only as far as a changed signature forces.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 10. `crates/blyte-cli/src/dispatch.rs:1122` — Unreadable `blyte.toml` replaced with `""` during gate-drift check
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/dispatch.rs:1116-1134`
+`crates/blyte-cli/src/dispatch.rs:1116-1134`
 ```rs
     } else if let Some(ref g) = dispatch_cfg.gate {
         let toml_path = if from_main {
@@ -439,7 +439,7 @@ change only as far as a changed signature forces.
 - **Verdict:** **Real violation** — `blyte.toml` is known to exist on this branch; a read error must fail naming `toml_path`.
 
 ##### 11. `crates/blyte-cli/src/dispatch.rs:465, 477` — Ignored `child.wait()` and `gate_left_out` report rewrite failure
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/dispatch.rs:465-481`
+`crates/blyte-cli/src/dispatch.rs:465-481`
 ```rs
     let _ = child.wait();
 
@@ -468,7 +468,7 @@ change only as far as a changed signature forces.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 17. `crates/blyte-cli/src/dispatch.rs:3079-3115, 3128` — `blyte status` silently hides corrupt `.report.json` and unreadable `.log`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/dispatch.rs:3095-3129`
+`crates/blyte-cli/src/dispatch.rs:3095-3129`
 ```rs
     let (outcome, cost_usd, final_message, report_duration) = if state == "finished" {
         if let Ok(content) = std::fs::read_to_string(&report_path) {
@@ -511,7 +511,7 @@ change only as far as a changed signature forces.
 - **Verdict:** **Real violation** — existing unreadable/corrupt report or log files must fail naming what failed.
 
 ##### 18. `crates/blyte-cli/src/task_runner.rs:480-486` — Watchdog discards report write error and substitutes `""` for `model_id`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/task_runner.rs:480-488`
+`crates/blyte-cli/src/task_runner.rs:480-488`
 ```rs
                 let model_id = blyte_provider::resolve_provider(watchdog_config.model.as_deref())
                     .map(|pr| pr.model_id())
@@ -528,7 +528,7 @@ change only as far as a changed signature forces.
 - **Verdict:** **Real violation** — write failure should be printed to stderr before `exit(1)` and provider resolution failure should be noted rather than silently zeroing cost lookup.
 
 ##### 19. `crates/blyte-cli/src/setup.rs:48, 65` — Silent drop of `.setup.log` write failure
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/setup.rs:47-66`
+`crates/blyte-cli/src/setup.rs:47-66`
 ```rs
             let combined = output.merged();
             let _ = std::fs::write(log_path, &combined);
@@ -598,7 +598,7 @@ found in the final message.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 9. `crates/blyte-cli/src/queue_actions.rs:435, 450-457` — Unreadable `.log` or corrupt `.report.json` silently ignored in review checks
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/queue_actions.rs:434-457`
+`crates/blyte-cli/src/queue_actions.rs:434-457`
 ```rs
     let log_file = root.join(".wt").join(format!("{id}.log"));
     let log_content_opt = std::fs::read_to_string(&log_file).ok();
@@ -634,7 +634,7 @@ found in the final message.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 13. `crates/blyte-cli/src/wait.rs:28-34, 56, 64` — Corrupt summary treated as `dead`; missing `outcome`/`turns` rendered as `"?"`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/wait.rs:26-38`
+`crates/blyte-cli/src/wait.rs:26-38`
 ```rs
 fn try_read_summary(wt: &Path, id: &str) -> Option<serde_json::Value> {
     let path = wt.join(format!("{id}.json"));
@@ -650,7 +650,7 @@ fn read_start_pid(path: &Path) -> Option<libc::pid_t> {
         .map(|v| v as libc::pid_t)
 }
 ```
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/wait.rs:52-70`
+`crates/blyte-cli/src/wait.rs:52-70`
 ```rs
 fn format_summary_line(id: &str, summary: &serde_json::Value) -> String {
     let outcome = summary
@@ -681,7 +681,7 @@ fn format_summary_line(id: &str, summary: &serde_json::Value) -> String {
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 15. `crates/blyte-cli/src/model_review.rs:99, 806, 816` & `crates/blyte-cli/src/fallback_check.rs:150` — `"unknown error"` and `"?"` placeholders on malformed review results
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/model_review.rs:97-102`
+`crates/blyte-cli/src/model_review.rs:97-102`
 ```rs
     pub fn flag(&self) -> Option<String> {
         if self.is_failed() {
@@ -690,7 +690,7 @@ fn format_summary_line(id: &str, summary: &serde_json::Value) -> String {
         }
         if self.has_findings() {
 ```
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/model_review.rs:804-821`
+`crates/blyte-cli/src/model_review.rs:804-821`
 ```rs
 pub fn print_result(result: &ModelReviewResult) {
     if result.is_failed() {
@@ -711,7 +711,7 @@ pub fn print_result(result: &ModelReviewResult) {
     };
     println!("== model review (trial: {model_id}, {cost_str})");
 ```
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/fallback_check.rs:149-152`
+`crates/blyte-cli/src/fallback_check.rs:149-152`
 ```rs
     if mr.is_failed() {
         let why = mr.error.as_deref().unwrap_or("unknown error");
@@ -723,7 +723,7 @@ pub fn print_result(result: &ModelReviewResult) {
 - **Verdict:** **Real violation** for `error` (`99, 806`, `fallback_check.rs:150`) and `model` (`816`) (note `cost_usd: None` on line `819` is valid when a model has no pricing entry, though `"price unknown"` is clearer than `"?"`).
 
 ##### 16. `crates/blyte-cli/src/model_review.rs:895` — Silent drop of `.model-review.json` save failure
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/model_review.rs:880-897`
+`crates/blyte-cli/src/model_review.rs:880-897`
 ```rs
     let _ = std::fs::create_dir_all(&wt_dir);
     let review_path = wt_dir.join(format!("{id}.model-review.json"));
@@ -792,7 +792,7 @@ binary could not be verified and gives its path.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 14. `crates/blyte-cli/src/dashboard.rs:1175` — Missing `outcome` in `.report.json` replaced with `"unknown"`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/dashboard.rs:1174-1182`
+`crates/blyte-cli/src/dashboard.rs:1174-1182`
 ```rs
         ) = if let Some(ref report) = report_json {
             let outcome = report["outcome"].as_str().unwrap_or("unknown").to_string();
@@ -813,7 +813,7 @@ binary could not be verified and gives its path.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 21. `crates/blyte-cli/src/dashboard.rs:416, 767-768, 1119-1121, 1140-1142, 1155-1157` — Unreadable/corrupt run artifacts silently treated as absent
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/dashboard.rs:1137-1145`
+`crates/blyte-cli/src/dashboard.rs:1137-1145`
 ```rs
         let log_info = parse_log(&raw.log_path);
 
@@ -834,7 +834,7 @@ binary could not be verified and gives its path.
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
 
 ##### 23. `crates/blyte-cli/src/update.rs:194` — Rollback returns `Ok("blyte (version unknown)")` when swapped binary fails `--version`
-`/Users/danielfisher/repos/blyte/crates/blyte-cli/src/update.rs:190-195`
+`crates/blyte-cli/src/update.rs:190-195`
 ```rs
     let swap = exe.with_file_name(".blyte-swap");
     std::fs::rename(exe, &swap).map_err(|e| format!("rollback failed: {e}"))?;
