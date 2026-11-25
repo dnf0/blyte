@@ -1987,20 +1987,23 @@ fn ensure_isolated_state_home() {
             .join(format!("test-requests-state-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         std::env::set_var("XDG_STATE_HOME", &base);
+        std::env::set_var("BLYTE_STATE_DIR", base.join("blyte"));
         base
     });
 }
 
 fn start_stoppable_surface(
     repo: &Path,
+    surface_id: &str,
+    surface_name: &str,
 ) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
     ensure_isolated_state_home();
     let rec = blyte_cli::surface_dir::SurfaceRecord {
-        id: "s00000000000000aa".to_string(),
-        name: "test-surface".to_string(),
+        id: surface_id.to_string(),
+        name: surface_name.to_string(),
         pid: 0,
         port: 0,
-        session_id: "sess-test-surface".to_string(),
+        session_id: format!("sess-{surface_name}"),
         started_at: 1_700_000_000,
     };
     blyte_cli::surface_dir::write_record(repo, &rec).unwrap();
@@ -2008,6 +2011,7 @@ fn start_stoppable_surface(
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let repo_bg = repo.to_path_buf();
+    let resume_name = surface_name.to_string();
     let out_bg = Arc::clone(&out_buf);
     let err_bg = Arc::clone(&err_buf);
     let stop_bg = Arc::clone(&stop);
@@ -2016,7 +2020,7 @@ fn start_stoppable_surface(
             port: 0,
             no_open: true,
             days: 14,
-            resume: Some("test-surface".to_string()),
+            resume: Some(resume_name),
             ..Default::default()
         };
         let mut out = SharedBuf(out_bg);
@@ -2111,12 +2115,22 @@ fn a_ready_request_is_combined_with_no_page_request() {
     let now = now_secs();
 
     create_run_branch(root, "TM1", &base, "timer.txt", "timer\n", "feat: timer");
-    write_start_file(root, "TM1", Some("req-timer"), &base, now, false);
+    write_start_file_with_surface(
+        root,
+        "TM1",
+        Some("req-timer"),
+        "main",
+        &base,
+        now,
+        false,
+        Value::String("s00000000000000a1".to_string()),
+    );
     write_reportable_summary(root, "TM1", "verified", Some("wip/TM1"));
     write_checks(root, "TM1", &["needs review"]);
     decide(root, "TM1", Action::Accept, None, now + 1).unwrap();
 
-    let (_port, _token, stop, handle) = start_stoppable_surface(root);
+    let (_port, _token, stop, handle) =
+        start_stoppable_surface(root, "s00000000000000a1", "req-timer-surface");
 
     let rec_path = root.join(".wt/combined/req-timer.json");
     let attempt_path = root.join(".wt/combined/req-timer.attempt.json");
@@ -2147,11 +2161,21 @@ fn timer_and_page_requests_do_not_report_a_run_twice() {
 
     create_run_branch(root, "RACE1", &base, "r1.txt", "r1\n", "feat: r1");
     create_run_branch(root, "RACE2", &base, "r2.txt", "r2\n", "feat: r2");
-    write_start_file(root, "RACE1", Some("req-race-1"), &base, now, false);
+    write_start_file_with_surface(
+        root,
+        "RACE1",
+        Some("req-race-1"),
+        "main",
+        &base,
+        now,
+        false,
+        Value::String("s00000000000000a2".to_string()),
+    );
     write_reportable_summary(root, "RACE1", "verified", Some("wip/RACE1"));
     write_checks(root, "RACE1", &["needs review"]);
 
-    let (port, token, stop, handle) = start_stoppable_surface(root);
+    let (port, token, stop, handle) =
+        start_stoppable_surface(root, "s00000000000000a2", "req-race-surface");
 
     let hammer_stop = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::new();
@@ -2170,7 +2194,16 @@ fn timer_and_page_requests_do_not_report_a_run_twice() {
     }
 
     std::thread::sleep(Duration::from_millis(1200));
-    write_start_file(root, "RACE2", Some("req-race-2"), &base, now + 1, false);
+    write_start_file_with_surface(
+        root,
+        "RACE2",
+        Some("req-race-2"),
+        "main",
+        &base,
+        now + 1,
+        false,
+        Value::String("s00000000000000a2".to_string()),
+    );
     write_reportable_summary(root, "RACE2", "verified", Some("wip/RACE2"));
     write_checks(root, "RACE2", &["needs review"]);
     std::thread::sleep(Duration::from_millis(1300));
@@ -2203,7 +2236,8 @@ fn the_timer_thread_ends_with_the_server() {
     let root = repo.path();
     let now = now_secs();
 
-    let (_port, _token, stop, handle) = start_stoppable_surface(root);
+    let (_port, _token, stop, handle) =
+        start_stoppable_surface(root, "s00000000000000a3", "req-stop-surface");
     stop.store(true, Ordering::Relaxed);
     assert_eq!(handle.join().unwrap(), 0);
 
