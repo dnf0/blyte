@@ -7,7 +7,7 @@ use blyte_agent::fs::LocalFs;
 use blyte_agent::shell::LocalShell;
 use blyte_agent::tools::{
     blyte_command_timeout, execute, set_blyte_request, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS,
-    COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT,
+    COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT, OUTPUT_LINE_BUDGET,
 };
 use serde_json::json;
 
@@ -200,13 +200,17 @@ fn background_rules_and_async_dispatch() {
         &json!({"args": ["dispatch", "T1", "t.md"], "background": true}),
     );
     let elapsed = start.elapsed();
+    let expected_out = root.path().join(".wt").join("T1.dispatch.out");
     assert!(!bg.is_error, "{}", bg.content);
     assert_eq!(
         bg.content,
-        "started T1 in the background; use wait to learn when it ends"
+        format!(
+            "started T1 in the background; use wait to learn when it ends; output: {}",
+            expected_out.display()
+        )
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < Duration::from_secs(4),
         "background dispatch blocked for {elapsed:?}"
     );
     assert!(!marker.exists(), "marker appeared too early");
@@ -658,4 +662,170 @@ fn the_tool_child_does_not_carry_the_marker() {
             .any(|line| line.starts_with("BLYTE_MODEL_SHELL=")),
         "BLYTE_MODEL_SHELL leaked to child: {recorded}"
     );
+}
+
+#[test]
+fn background_dispatch_early_nonzero_exit_reports_error_and_keeps_output() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("printf 'no API key\\n' >&2\nexit 3\n");
+
+    let start = Instant::now();
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "BD1", "t.md"], "background": true}),
+    );
+    let elapsed = start.elapsed();
+
+    assert!(out.is_error, "expected error, got: {:?}", out.content);
+    assert!(
+        out.content
+            .contains("dispatch BD1 failed to start (exit 3)"),
+        "content was: {:?}",
+        out.content
+    );
+    assert!(
+        out.content.contains("no API key"),
+        "content was: {:?}",
+        out.content
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "early failure waited too long: {elapsed:?}"
+    );
+
+    let out_file = root.path().join(".wt").join("BD1.dispatch.out");
+    let saved = std::fs::read_to_string(&out_file).unwrap();
+    assert!(saved.contains("no API key"), "saved output was: {saved:?}");
+}
+
+#[test]
+fn background_dispatch_still_running_after_startup_wait_reports_started_and_output_path() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("exec sleep 5\n");
+
+    let start = Instant::now();
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "BD2", "t.md"], "background": true}),
+    );
+    let elapsed = start.elapsed();
+    let expected_path = root.path().join(".wt").join("BD2.dispatch.out");
+
+    assert!(!out.is_error, "expected ok, got: {:?}", out.content);
+    assert!(
+        out.content.contains("started"),
+        "content was: {:?}",
+        out.content
+    );
+    assert!(
+        out.content.contains(&expected_path.display().to_string()),
+        "expected output path {} in {:?}",
+        expected_path.display(),
+        out.content
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "background dispatch blocked for {elapsed:?}"
+    );
+    assert!(expected_path.exists(), "output file was not created");
+}
+
+#[test]
+fn background_dispatch_immediate_zero_exit_reports_finished_with_output() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("printf 'ok\\n'\nexit 0\n");
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "BD3", "t.md"], "background": true}),
+    );
+
+    assert!(!out.is_error, "expected ok, got: {:?}", out.content);
+    assert!(
+        out.content.contains("dispatch BD3 finished"),
+        "content was: {:?}",
+        out.content
+    );
+    assert!(out.content.contains("ok"), "content was: {:?}", out.content);
+
+    let out_file = root.path().join(".wt").join("BD3.dispatch.out");
+    let saved = std::fs::read_to_string(&out_file).unwrap();
+    assert!(saved.contains("ok"), "saved output was: {saved:?}");
+}
+
+#[test]
+fn background_dispatch_fails_when_wt_is_a_regular_file() {
+    let root = tempfile::tempdir().unwrap();
+    let wt_path = root.path().join(".wt");
+    std::fs::write(&wt_path, "not a directory").unwrap();
+    let marker = root.path().join("ran");
+    let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", marker.display()));
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "BD4", "t.md"], "background": true}),
+    );
+
+    assert!(out.is_error, "expected error, got: {:?}", out.content);
+    assert!(
+        out.content.contains(&wt_path.display().to_string()),
+        "expected error naming {}, got: {:?}",
+        wt_path.display(),
+        out.content
+    );
+    assert!(!marker.exists(), "stub executable should not have run");
+}
+
+#[test]
+fn background_dispatch_truncates_previous_output_and_bounds_large_early_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let wt_dir = root.path().join(".wt");
+    std::fs::create_dir_all(&wt_dir).unwrap();
+    let out_file = wt_dir.join("BD5.dispatch.out");
+    std::fs::write(&out_file, "stale previous output\n").unwrap();
+
+    let total_lines = OUTPUT_LINE_BUDGET + 200;
+    let _g = BlyteToolGuard::acquire_script(&format!(
+        "i=1\nwhile [ \"$i\" -le {total_lines} ]; do printf 'line %d\\n' \"$i\" >&2; i=$((i + 1)); done\nexit 4\n"
+    ));
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "BD5", "t.md"], "background": true}),
+    );
+
+    assert!(out.is_error, "expected error, got: {:?}", out.content);
+    assert!(
+        out.content
+            .contains("dispatch BD5 failed to start (exit 4)"),
+        "content was: {:?}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("stale previous output"),
+        "previous output was not truncated"
+    );
+    assert!(
+        out.content.contains("elided by blyte"),
+        "large output was not bounded"
+    );
+
+    let saved = std::fs::read_to_string(&out_file).unwrap();
+    assert!(!saved.contains("stale previous output"));
+    assert_eq!(saved.lines().count(), total_lines);
 }
