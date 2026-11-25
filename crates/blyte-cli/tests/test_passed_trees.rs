@@ -177,6 +177,18 @@ fn count_lines(path: &Path) -> usize {
     std::fs::read_to_string(path).unwrap().lines().count()
 }
 
+fn wait_for_marker(path: &Path, step: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{step}: {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn blyte_dispatch(dir: &Path, args: &[&str]) -> std::process::Output {
     let home = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_blyte"))
@@ -530,26 +542,22 @@ fn dispatch_runs_base_check_when_base_tree_not_recorded() {
     let root = repo.path();
     let counter_dir = tempfile::tempdir().unwrap();
     let counter = counter_dir.path().join("base.log");
-    let done_fifo = counter_dir.path().join("done.fifo");
-    assert!(Command::new("mkfifo")
-        .arg(&done_fifo)
-        .status()
-        .unwrap()
-        .success());
+    let done_marker = counter_dir.path().join("done.marker");
     let gate = format!(
         "if [ \"$(basename \"$PWD\")\" = \"D2.base\" ]; then echo base >> '{}'; echo done > '{}'; exit 1; fi; exit 0",
         counter.display(),
-        done_fifo.display()
+        done_marker.display()
     );
     write_blyte_toml(root, &gate, None, None);
     std::fs::write(root.join("task.md"), "Do work.\n").unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let fifo_for_server = done_fifo.clone();
+    let done_for_server = done_marker.clone();
     std::thread::spawn(move || {
         let mut first = true;
         for mut s in listener.incoming().flatten() {
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(10)));
             let mut buf = vec![0u8; 65536];
             let mut got = Vec::new();
             loop {
@@ -575,7 +583,7 @@ fn dispatch_runs_base_check_when_base_tree_not_recorded() {
             }
             if first {
                 first = false;
-                let _ = std::fs::read_to_string(&fifo_for_server);
+                wait_for_marker(&done_for_server, "base check never reached its gate step");
             }
             let body = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"true\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
             let _ = write!(
@@ -595,6 +603,8 @@ fn dispatch_runs_base_check_when_base_tree_not_recorded() {
             "task.md",
             "--max-turns",
             "10",
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
@@ -608,6 +618,8 @@ fn dispatch_runs_base_check_when_base_tree_not_recorded() {
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env("BLYTE_NO_KEEP_AWAKE", "1")
         .env("BLYTE_USAGE_LOG", "off")
+        .env("BLYTE_MODEL_TIMEOUT_SECS", "10")
+        .env("BLYTE_RETRY_DELAY_MS", "10")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")

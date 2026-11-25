@@ -5,8 +5,12 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use blyte_cli::passed_trees::{check_key, has_passed, now_secs, tree_of};
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const HANDSHAKE_POLL: Duration = Duration::from_millis(20);
 
 const TOOL_CALL_BODY: &str = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"true\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
 const COMMIT_CALL_BODY: &str = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo ok > change.txt && git add change.txt && git commit -m change --no-gpg-sign\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
@@ -22,6 +26,7 @@ where
     let counter = Arc::clone(&requests);
     std::thread::spawn(move || {
         for mut s in listener.incoming().flatten() {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
             let mut buf = vec![0u8; 65536];
             let mut got = Vec::new();
             loop {
@@ -62,8 +67,25 @@ fn model_server() -> (u16, Arc<AtomicUsize>) {
     model_server_with(|_| DONE_BODY.to_string())
 }
 
-fn mkfifo(path: &Path) {
-    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+fn wait_for_marker(path: &Path, step: &str) {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "{step}: {}", path.display());
+        std::thread::sleep(HANDSHAKE_POLL);
+    }
+}
+
+fn release_gate(release: &Path, ack: &Path) {
+    std::fs::write(release, "go\n").unwrap();
+    wait_for_marker(ack, "base check never took the release");
+}
+
+fn wait_for_release_sh(release: &Path, ack: &Path) -> String {
+    format!(
+        "i=0; while [ ! -f '{}' ]; do i=$((i+1)); [ \"$i\" -gt 750 ] && exit 99; sleep 0.02; done; echo ok > '{}'",
+        release.display(),
+        ack.display()
+    )
 }
 
 fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
@@ -78,6 +100,8 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
         .env("BLYTE_USAGE_LOG", "off")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_MODEL_TIMEOUT_SECS", "10")
+        .env("BLYTE_RETRY_DELAY_MS", "10")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
@@ -172,6 +196,8 @@ fn test_dispatch_failing_gate_stops_as_blocked_before_model() {
             task_file.to_str().unwrap(),
             "--gate",
             "exit 3",
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
@@ -241,6 +267,8 @@ fn test_dispatch_no_base_check_flag_skips_base_check() {
             "--no-base-check",
             "--max-turns",
             "1",
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
@@ -317,6 +345,8 @@ fn test_dispatch_config_base_check_false_skips_base_check() {
             "exit 3",
             "--max-turns",
             "1",
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
@@ -359,30 +389,33 @@ fn test_dispatch_first_model_call_happens_before_base_check_ends() {
     let task_file = repo_dir.join("task.md");
     std::fs::write(&task_file, "Do something").unwrap();
 
-    let entered_fifo = sync.path().join("entered.fifo");
-    let release_fifo = sync.path().join("release.fifo");
+    let entered_marker = sync.path().join("entered");
+    let release_marker = sync.path().join("release");
+    let ack_marker = sync.path().join("released");
     let done_file = sync.path().join("base_done");
-    mkfifo(&entered_fifo);
-    mkfifo(&release_fifo);
 
     let gate = format!(
-        "if [ \"$(basename \"$PWD\")\" = \"T_PARALLEL.base\" ]; then echo started > '{}'; cat '{}' >/dev/null; echo done > '{}'; fi; exit 0",
-        entered_fifo.display(),
-        release_fifo.display(),
+        "if [ \"$(basename \"$PWD\")\" = \"T_PARALLEL.base\" ]; then echo started > '{}'; {}; echo done > '{}'; fi; exit 0",
+        entered_marker.display(),
+        wait_for_release_sh(&release_marker, &ack_marker),
         done_file.display()
     );
 
     let model_before_base_done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&model_before_base_done);
-    let entered_for_server = entered_fifo.clone();
-    let release_for_server = release_fifo.clone();
+    let entered_for_server = entered_marker.clone();
+    let release_for_server = release_marker.clone();
+    let ack_for_server = ack_marker.clone();
     let done_for_server = done_file.clone();
 
     let (port, requests) = model_server_with(move |n| {
         if n == 1 {
-            let _ = std::fs::read_to_string(&entered_for_server);
+            wait_for_marker(
+                &entered_for_server,
+                "base check never reached its gate step",
+            );
             flag.store(!done_for_server.exists(), Ordering::SeqCst);
-            let _ = std::fs::write(&release_for_server, "go\n");
+            release_gate(&release_for_server, &ack_for_server);
             COMMIT_CALL_BODY.to_string()
         } else {
             DONE_BODY.to_string()
@@ -396,6 +429,8 @@ fn test_dispatch_first_model_call_happens_before_base_check_ends() {
             task_file.to_str().unwrap(),
             "--gate",
             &gate,
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
@@ -434,23 +469,26 @@ fn test_dispatch_failing_parallel_base_gate_blocks_and_cleans_up() {
     let task_file = repo_dir.join("task.md");
     std::fs::write(&task_file, "Do something").unwrap();
 
-    let entered_fifo = sync.path().join("entered.fifo");
-    let release_fifo = sync.path().join("release.fifo");
-    mkfifo(&entered_fifo);
-    mkfifo(&release_fifo);
+    let entered_marker = sync.path().join("entered");
+    let release_marker = sync.path().join("release");
+    let ack_marker = sync.path().join("released");
 
     let gate = format!(
-        "if [ \"$(basename \"$PWD\")\" = \"T_PAR_FAIL.base\" ]; then echo started > '{}'; cat '{}' >/dev/null; echo 'broken on base'; exit 3; fi; exit 0",
-        entered_fifo.display(),
-        release_fifo.display()
+        "if [ \"$(basename \"$PWD\")\" = \"T_PAR_FAIL.base\" ]; then echo started > '{}'; {}; echo 'broken on base'; exit 3; fi; exit 0",
+        entered_marker.display(),
+        wait_for_release_sh(&release_marker, &ack_marker)
     );
 
-    let entered_for_server = entered_fifo.clone();
-    let release_for_server = release_fifo.clone();
+    let entered_for_server = entered_marker.clone();
+    let release_for_server = release_marker.clone();
+    let ack_for_server = ack_marker.clone();
     let (port, requests) = model_server_with(move |n| {
         if n == 1 {
-            let _ = std::fs::read_to_string(&entered_for_server);
-            let _ = std::fs::write(&release_for_server, "go\n");
+            wait_for_marker(
+                &entered_for_server,
+                "base check never reached its gate step",
+            );
+            release_gate(&release_for_server, &ack_for_server);
         }
         TOOL_CALL_BODY.to_string()
     });
@@ -464,6 +502,8 @@ fn test_dispatch_failing_parallel_base_gate_blocks_and_cleans_up() {
             &gate,
             "--max-turns",
             "20",
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
@@ -503,23 +543,22 @@ fn test_dispatch_pending_base_check_stopped_without_orphan_process_and_removes_b
     let task_file = repo_dir.join("task.md");
     std::fs::write(&task_file, "Do something").unwrap();
 
-    let entered_fifo = sync.path().join("entered.fifo");
-    let hold_fifo = sync.path().join("hold.fifo");
+    let entered_marker = sync.path().join("entered");
     let pid_file = sync.path().join("child.pid");
-    mkfifo(&entered_fifo);
-    mkfifo(&hold_fifo);
 
     let gate = format!(
-        "if [ \"$(basename \"$PWD\")\" = \"T_PENDING_STOP.base\" ]; then (exec 3<>'{}'; cat <&3) & CHILD=$!; echo \"$CHILD\" > '{}'; echo started > '{}'; wait \"$CHILD\"; fi; exit 0",
-        hold_fifo.display(),
+        "if [ \"$(basename \"$PWD\")\" = \"T_PENDING_STOP.base\" ]; then sleep 60 & CHILD=$!; echo \"$CHILD\" > '{}'; echo started > '{}'; wait \"$CHILD\"; fi; exit 0",
         pid_file.display(),
-        entered_fifo.display()
+        entered_marker.display()
     );
 
-    let entered_for_server = entered_fifo.clone();
+    let entered_for_server = entered_marker.clone();
     let (port, _requests) = model_server_with(move |n| {
         if n == 1 {
-            let _ = std::fs::read_to_string(&entered_for_server);
+            wait_for_marker(
+                &entered_for_server,
+                "base check never reached its gate step",
+            );
         }
         TOOL_CALL_BODY.to_string()
     });
@@ -533,6 +572,8 @@ fn test_dispatch_pending_base_check_stopped_without_orphan_process_and_removes_b
             &gate,
             "--max-turns",
             "1",
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
@@ -578,25 +619,30 @@ fn test_dispatch_failing_base_check_when_change_passes_verifies_with_notice_and_
     let task_file = repo_dir.join("task.md");
     std::fs::write(&task_file, "Fix it").unwrap();
 
-    let entered_fifo = sync.path().join("entered.fifo");
-    let release_fifo = sync.path().join("release.fifo");
-    mkfifo(&entered_fifo);
-    mkfifo(&release_fifo);
+    let entered_marker = sync.path().join("entered");
+    let release_marker = sync.path().join("release");
+    let ack_marker = sync.path().join("released");
 
     let gate = format!(
-        "if [ \"$(basename \"$PWD\")\" = \"T_FIXES_BASE.base\" ]; then echo started > '{}'; cat '{}' >/dev/null; exit 3; fi; exit 0",
-        entered_fifo.display(),
-        release_fifo.display()
+        "if [ \"$(basename \"$PWD\")\" = \"T_FIXES_BASE.base\" ]; then echo started > '{}'; {}; exit 3; fi; exit 0",
+        entered_marker.display(),
+        wait_for_release_sh(&release_marker, &ack_marker)
     );
 
-    let entered_for_server = entered_fifo.clone();
-    let release_for_server = release_fifo.clone();
+    let entered_for_server = entered_marker.clone();
+    let release_for_server = release_marker.clone();
+    let ack_for_server = ack_marker.clone();
     let (port, _requests) = model_server_with(move |n| {
         if n == 1 {
-            let _ = std::fs::read_to_string(&entered_for_server);
+            wait_for_marker(
+                &entered_for_server,
+                "base check never reached its gate step",
+            );
             COMMIT_CALL_BODY.to_string()
+        } else if n == 2 {
+            release_gate(&release_for_server, &ack_for_server);
+            DONE_BODY.to_string()
         } else {
-            let _ = std::fs::write(&release_for_server, "go\n");
             DONE_BODY.to_string()
         }
     });
@@ -608,6 +654,8 @@ fn test_dispatch_failing_base_check_when_change_passes_verifies_with_notice_and_
             task_file.to_str().unwrap(),
             "--gate",
             &gate,
+            "--max-seconds",
+            "60",
             "--sandbox",
             "off",
         ])
