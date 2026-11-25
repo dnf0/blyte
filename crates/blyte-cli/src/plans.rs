@@ -16,13 +16,13 @@ static IS_MERGED_CACHE: IsMergedCache = LazyLock::new(|| RwLock::new(HashMap::ne
 static REPORTED_REMOVAL_ERRORS: LazyLock<RwLock<HashSet<String>>> =
     LazyLock::new(|| RwLock::new(HashSet::new()));
 
-fn report_removal_record_error(err: &str) {
+fn report_removal_record_error_with(err: &str, emit: impl FnOnce(&str)) {
     let should_print = match REPORTED_REMOVAL_ERRORS.write() {
         Ok(mut seen) => seen.insert(err.to_string()),
         Err(_) => true,
     };
     if should_print {
-        eprintln!("blyte: {err}");
+        emit(err);
     }
 }
 
@@ -894,7 +894,7 @@ pub fn is_merged(root: &Path, branch: &str, head: &str) -> bool {
     merged
 }
 
-fn is_job_merged(job: &Job) -> bool {
+fn is_job_merged_with_error_reporter(job: &Job, emit_error: impl FnOnce(&str)) -> bool {
     let Some(ref root) = job.root else {
         return false;
     };
@@ -924,10 +924,14 @@ fn is_job_merged(job: &Job) -> bool {
     match is_merged_when_branch_gone(root, &job.id, job.verdict.as_deref()) {
         Ok(merged) => merged,
         Err(e) => {
-            report_removal_record_error(&e);
+            report_removal_record_error_with(&e, emit_error);
             false
         }
     }
+}
+
+fn is_job_merged(job: &Job) -> bool {
+    is_job_merged_with_error_reporter(job, |e| eprintln!("blyte: {e}"))
 }
 
 fn choose_task_job<'a>(jobs: &[&'a Job]) -> Option<&'a Job> {
@@ -2077,8 +2081,41 @@ Depends on: Task X9
             assert!(!is_job_merged(&job), "reason {reason} should not be merged");
         }
 
-        std::fs::write(crate::removal_record::path(root, "J1"), "{corrupt").unwrap();
-        assert!(!is_job_merged(&job));
+        let corrupt_path = crate::removal_record::path(root, "J1");
+        std::fs::write(&corrupt_path, "{corrupt").unwrap();
+        let mut reported = Vec::new();
+        assert!(!is_job_merged_with_error_reporter(&job, |e| {
+            reported.push(e.to_string());
+        }));
+        assert_eq!(reported.len(), 1);
+        assert!(
+            reported[0].contains(&corrupt_path.display().to_string()),
+            "expected error naming {}, got: {}",
+            corrupt_path.display(),
+            reported[0]
+        );
+        assert!(!is_job_merged_with_error_reporter(&job, |e| {
+            reported.push(e.to_string());
+        }));
+        assert_eq!(
+            reported.len(),
+            1,
+            "corrupt removal record error should be reported only once"
+        );
+
+        let job2 = make_test_job(root.to_path_buf(), "J2", None);
+        let corrupt_path2 = crate::removal_record::path(root, "J2");
+        std::fs::write(&corrupt_path2, "{corrupt").unwrap();
+        assert!(!is_job_merged(&job2));
+        assert!(
+            REPORTED_REMOVAL_ERRORS
+                .read()
+                .unwrap()
+                .iter()
+                .any(|msg| msg.contains(&corrupt_path2.display().to_string())),
+            "expected is_job_merged to record error naming {}",
+            corrupt_path2.display()
+        );
 
         let rec = crate::removal_record::RemovalRecord {
             id: "J1".to_string(),

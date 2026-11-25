@@ -577,6 +577,27 @@ Do B.
     assert_eq!(rows[0]["state"], "ready");
     assert_eq!(rows[1]["state"], "waiting");
 
+    let tmp_wt_file = tempfile::tempdir().unwrap();
+    let r_wt_file = tmp_wt_file.path().join("r_wt_file");
+    init_repo(&r_wt_file);
+    write(&r_wt_file.join(plan_rel), plan_text);
+    write(&r_wt_file.join(".wt"), "not a directory");
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["plan", plan_rel])
+        .current_dir(&r_wt_file)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        ".wt as regular file: expected non-zero exit, stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(".wt"),
+        ".wt as regular file: expected stderr to name .wt, got:\n{stderr}"
+    );
+
     let valid_start = serde_json::json!({
         "id": "X",
         "pid": 999_999,
