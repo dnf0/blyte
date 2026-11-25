@@ -455,6 +455,12 @@ pub fn run_edit_finish_in(
             return 2;
         }
     }
+    if let Some(ref surface) = args.surface {
+        if let Err(e) = blyte_agent::sandbox::validate_surface_id(surface) {
+            eprintln!("blyte: {e}");
+            return 2;
+        }
+    }
 
     let wt_parent = root.join(".wt");
     let edit_path = wt_parent.join(format!("{}.edit.json", args.id));
@@ -806,6 +812,7 @@ pub fn run_edit_finish_in(
         "plan": serde_json::Value::Null,
         "plan_task": serde_json::Value::Null,
         "request": args.request,
+        "surface": args.surface,
         "base": edit.base,
         "base_sha": edit.base_sha,
         "base_check": "off",
