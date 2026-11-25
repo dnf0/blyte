@@ -1998,6 +1998,7 @@ Depends on: Task X9
 
     fn make_test_job(root: PathBuf, id: &str, verdict: Option<&str>) -> Job {
         Job {
+            problems: Vec::new(),
             key: format!("app/{id}"),
             id: id.to_string(),
             repo: "app".to_string(),
