@@ -339,3 +339,154 @@ fn edit_finish_records_surface_and_rejects_invalid_surface_id() {
         "expected surface: null in {start_e2}"
     );
 }
+
+#[test]
+fn dispatch_records_started_by() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path();
+    init_repo(repo);
+
+    let out_with = run_dispatch_cli(repo, "SB1", &["--started-by", "api-2"]);
+    assert!(
+        !out_with.stdout.is_empty(),
+        "stderr={}",
+        String::from_utf8_lossy(&out_with.stderr)
+    );
+    let start_with: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(repo.join(".wt/SB1.start.json")).unwrap())
+            .unwrap();
+    assert_eq!(start_with["started_by"], "api-2");
+
+    let out_without = run_dispatch_cli(repo, "SB2", &[]);
+    assert!(
+        !out_without.stdout.is_empty(),
+        "stderr={}",
+        String::from_utf8_lossy(&out_without.stderr)
+    );
+    let start_without: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(repo.join(".wt/SB2.start.json")).unwrap())
+            .unwrap();
+    assert!(
+        start_without.get("started_by").is_none(),
+        "expected no started_by key in {start_without}"
+    );
+}
+
+#[test]
+fn edit_finish_records_started_by() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path();
+    init_repo(repo);
+
+    let start_out = run_edit_cli(repo, &["edit-start", "ESB1", "--task", "Update f.txt"]);
+    assert!(
+        start_out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&start_out.stderr)
+    );
+    let wt1 = repo.join(".wt/ESB1");
+    std::fs::write(wt1.join("f.txt"), "b\n").unwrap();
+    git(&wt1, &["add", "f.txt"]);
+    git(&wt1, &["commit", "-qm", "update f", "--no-gpg-sign"]);
+
+    let finish_out = run_edit_cli(repo, &["edit-finish", "ESB1", "--started-by", "api-2"]);
+    assert_eq!(
+        finish_out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&finish_out.stderr)
+    );
+    let start_1: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(repo.join(".wt/ESB1.start.json")).unwrap())
+            .unwrap();
+    assert_eq!(start_1["started_by"], "api-2");
+
+    let start_out2 = run_edit_cli(
+        repo,
+        &["edit-start", "ESB2", "--task", "Update f.txt again"],
+    );
+    assert!(
+        start_out2.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&start_out2.stderr)
+    );
+    let wt2 = repo.join(".wt/ESB2");
+    std::fs::write(wt2.join("f.txt"), "c\n").unwrap();
+    git(&wt2, &["add", "f.txt"]);
+    git(&wt2, &["commit", "-qm", "update f again", "--no-gpg-sign"]);
+
+    let finish_out2 = run_edit_cli(repo, &["edit-finish", "ESB2"]);
+    assert_eq!(
+        finish_out2.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&finish_out2.stderr)
+    );
+    let start_2: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(repo.join(".wt/ESB2.start.json")).unwrap())
+            .unwrap();
+    assert!(
+        start_2.get("started_by").is_none(),
+        "expected no started_by key in {start_2}"
+    );
+}
+
+#[test]
+fn started_by_must_be_a_surface_name() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path();
+    init_repo(repo);
+
+    let expected = blyte_cli::surface_dir::validate_surface_name("../x").unwrap_err();
+
+    let out = run_dispatch_cli(repo, "BADSB1", &["--started-by", "../x"]);
+    assert!(!out.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&expected),
+        "expected validation error {expected:?}, got stderr={stderr:?}"
+    );
+    assert!(!repo.join(".wt/BADSB1.start.json").exists());
+    assert!(!repo.join(".wt/BADSB1").exists());
+    assert!(!branch_exists(repo, "wip/BADSB1"));
+
+    let start_out = run_edit_cli(repo, &["edit-start", "BADSB2", "--task", "Update f.txt"]);
+    assert!(
+        start_out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&start_out.stderr)
+    );
+    let wt = repo.join(".wt/BADSB2");
+    std::fs::write(wt.join("f.txt"), "b\n").unwrap();
+    git(&wt, &["add", "f.txt"]);
+    git(&wt, &["commit", "-qm", "update f", "--no-gpg-sign"]);
+
+    let bad = run_edit_cli(repo, &["edit-finish", "BADSB2", "--started-by", "../x"]);
+    assert!(!bad.status.success(), "expected non-zero exit");
+    let bad_stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        bad_stderr.contains(&expected),
+        "expected validation error {expected:?}, got stderr={bad_stderr:?}"
+    );
+    assert!(!repo.join(".wt/BADSB2.start.json").exists());
+}
+
+#[test]
+fn started_by_is_hidden_from_help() {
+    for subcommand in ["dispatch", "edit-finish"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+            .args([subcommand, "--help"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "blyte {subcommand} --help failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !help.contains("started-by"),
+            "expected --started-by to be hidden from `blyte {subcommand} --help`:\n{help}"
+        );
+    }
+}

@@ -229,6 +229,9 @@ pub struct EditFinishArgs {
     #[arg(long, value_name = "ID")]
     pub surface: Option<String>,
 
+    #[arg(long, hide = true, value_name = "NAME")]
+    pub started_by: Option<String>,
+
     /// Commit message used to commit uncommitted or untracked changes in the worktree
     #[arg(long, value_name = "TEXT")]
     pub message: Option<String>,
@@ -265,6 +268,9 @@ pub struct DispatchArgs {
     /// Surface identifier that started this dispatch
     #[arg(long, value_name = "ID")]
     pub surface: Option<String>,
+
+    #[arg(long, hide = true, value_name = "NAME")]
+    pub started_by: Option<String>,
 
     /// The commit a new worktree starts from
     #[arg(long, default_value = "HEAD")]

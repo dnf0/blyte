@@ -537,6 +537,7 @@ fn edit_finish_recovers_after_crash_between_start_record_and_summary() {
         id: "e-crash".to_string(),
         request: Some("req-crash".to_string()),
         surface: None,
+        started_by: None,
         message: None,
     };
     let crash_hook = || Err("simulated crash before summary".to_string());

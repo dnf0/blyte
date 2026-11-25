@@ -461,6 +461,12 @@ pub fn run_edit_finish_in(
             return 2;
         }
     }
+    if let Some(ref started_by) = args.started_by {
+        if let Err(e) = crate::surface_dir::validate_surface_name(started_by) {
+            eprintln!("blyte: {e}");
+            return 2;
+        }
+    }
 
     let wt_parent = root.join(".wt");
     let edit_path = wt_parent.join(format!("{}.edit.json", args.id));
@@ -819,6 +825,9 @@ pub fn run_edit_finish_in(
         "comments": comments_str,
         "kind": "edit",
     });
+    if let Some(ref started_by) = args.started_by {
+        start_json["started_by"] = serde_json::json!(started_by);
+    }
     if let Some(s) = session {
         start_json["session"] = serde_json::json!(s);
     }
