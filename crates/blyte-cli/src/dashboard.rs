@@ -442,6 +442,33 @@ fn read_optional_json<T: serde::de::DeserializeOwned>(
     }
 }
 
+fn read_required_u64(
+    report: &serde_json::Value,
+    field: &str,
+    path: &Path,
+    problems: &mut Vec<String>,
+) -> u64 {
+    match report.get(field) {
+        Some(v) => match v.as_u64() {
+            Some(n) => n,
+            None => {
+                problems.push(format!(
+                    "{}: invalid '{field}' field (expected non-negative integer)",
+                    path.display()
+                ));
+                0
+            }
+        },
+        None => {
+            problems.push(format!(
+                "{}: missing required field '{field}'",
+                path.display()
+            ));
+            0
+        }
+    }
+}
+
 fn parse_log(path: &Path, problems: &mut Vec<String>) -> LogInfo {
     let mtime = std::fs::metadata(path)
         .ok()
@@ -1240,10 +1267,9 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                     }
                 };
                 let cost = report["cost_usd"].as_f64();
-                let turns = report["turns"].as_u64().unwrap_or(log_info.turns);
-                let gate_attempts = report["gate_attempts"]
-                    .as_u64()
-                    .unwrap_or(log_info.gate_attempts);
+                let turns = read_required_u64(&report, "turns", &raw.report_path, &mut problems);
+                let gate_attempts =
+                    read_required_u64(&report, "gate_attempts", &raw.report_path, &mut problems);
                 let model = report["model_id"].as_str().map(|s| s.to_string());
 
                 let gate_failures = match report.get("gate_failures") {

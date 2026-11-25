@@ -287,7 +287,8 @@ fn corrupt_report_records_problem_and_keeps_other_runs() {
         wt.join("Y.report.json"),
         serde_json::json!({
             "outcome": "accepted",
-            "turns": 2
+            "turns": 2,
+            "gate_attempts": 0
         })
         .to_string(),
     )
@@ -458,4 +459,107 @@ fn dashboard_html_renders_job_problems() {
     let html = include_str!("../assets/dashboard/index.html");
     assert!(html.contains("job.problems"));
     assert!(html.contains("row-problems"));
+}
+
+#[test]
+fn report_missing_or_invalid_turns_and_gate_attempts_record_problems() {
+    let d = tempfile::tempdir().unwrap();
+    let wt = d.path().join("repos").join("alpha").join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let t = now();
+
+    std::fs::write(
+        wt.join("M1.start.json"),
+        serde_json::json!({
+            "id": "M1",
+            "started_at": t - 60,
+            "pid": 999_999
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(wt.join("M1.log"), "[Turn 7] \n✓ Gate passed (attempt 1)\n").unwrap();
+    let missing_report = wt.join("M1.report.json");
+    std::fs::write(
+        &missing_report,
+        serde_json::json!({
+            "outcome": "verified"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    std::fs::write(
+        wt.join("M2.start.json"),
+        serde_json::json!({
+            "id": "M2",
+            "started_at": t - 50,
+            "pid": 999_998
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(wt.join("M2.log"), "[Turn 5] \n✓ Gate passed (attempt 1)\n").unwrap();
+    let invalid_report = wt.join("M2.report.json");
+    std::fs::write(
+        &invalid_report,
+        serde_json::json!({
+            "outcome": "verified",
+            "turns": "five",
+            "gate_attempts": -1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let src = Sources {
+        roots: vec![d.path().join("repos")],
+        runs_dirs: vec![],
+        hours: 24,
+    };
+    let jobs = collect_jobs(&src, t);
+    let by_id: std::collections::HashMap<_, _> =
+        jobs.into_iter().map(|j| (j.id.clone(), j)).collect();
+
+    let m1 = by_id.get("M1").expect("job M1 missing");
+    assert_eq!(m1.turns, 0);
+    assert_eq!(m1.gate_attempts, 0);
+    assert!(
+        m1.problems
+            .iter()
+            .any(|p| p.contains(&missing_report.display().to_string()) && p.contains("turns")),
+        "expected missing turns problem for {}, got {:?}",
+        missing_report.display(),
+        m1.problems
+    );
+    assert!(
+        m1.problems
+            .iter()
+            .any(|p| p.contains(&missing_report.display().to_string())
+                && p.contains("gate_attempts")),
+        "expected missing gate_attempts problem for {}, got {:?}",
+        missing_report.display(),
+        m1.problems
+    );
+
+    let m2 = by_id.get("M2").expect("job M2 missing");
+    assert_eq!(m2.turns, 0);
+    assert_eq!(m2.gate_attempts, 0);
+    assert!(
+        m2.problems
+            .iter()
+            .any(|p| p.contains(&invalid_report.display().to_string()) && p.contains("turns")),
+        "expected invalid turns problem for {}, got {:?}",
+        invalid_report.display(),
+        m2.problems
+    );
+    assert!(
+        m2.problems
+            .iter()
+            .any(|p| p.contains(&invalid_report.display().to_string())
+                && p.contains("gate_attempts")),
+        "expected invalid gate_attempts problem for {}, got {:?}",
+        invalid_report.display(),
+        m2.problems
+    );
 }
