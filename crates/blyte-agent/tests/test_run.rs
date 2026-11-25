@@ -397,3 +397,85 @@ fn the_turn_budget_bounds_a_model_that_never_stops() {
     assert_eq!(outcome, Outcome::BudgetExhausted);
     assert_eq!(rep.outcome_turns, 12);
 }
+
+struct FailingResetShell {
+    exec_error: Option<&'static str>,
+}
+
+impl Shell for FailingResetShell {
+    fn exec(&self, command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        let trimmed = command.trim();
+        if trimmed == "git rev-parse HEAD" {
+            return Ok(Output {
+                stdout: "deadbeef1234\n".into(),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+        }
+        if trimmed.starts_with("git reset --hard ") {
+            if let Some(err) = self.exec_error {
+                return Err(err.into());
+            }
+            return Ok(Output {
+                stdout: String::new(),
+                stderr: "fatal: unable to create '.git/index.lock': File exists\n".into(),
+                exit_code: 128,
+            });
+        }
+        Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+        })
+    }
+
+    fn exec_host(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+        self.exec(command, cwd, timeout)
+    }
+
+    fn describe(&self) -> String {
+        String::new()
+    }
+
+    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
+        vec!["git".into()]
+    }
+}
+
+#[test]
+fn a_failed_rollback_nonzero_exit_ends_the_run_with_an_error() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ScriptedProvider::new(vec![says("done"), says("should not run")]);
+    let shell = FailingResetShell { exec_error: None };
+    let mut st = State::new("g", "false");
+    let (outcome, _) = runner(&p, &shell, d.path(), &Conversational, true).run(&mut st);
+    match outcome {
+        Outcome::Error(msg) => {
+            assert!(msg.contains("could not roll back to deadbeef1234"), "{msg}");
+            assert!(msg.contains("index.lock"), "{msg}");
+        }
+        other => panic!("expected Outcome::Error, got {other:?}"),
+    }
+    assert_eq!(st.runtime.rollbacks, 0);
+    assert_eq!(p.seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_failed_rollback_exec_error_ends_the_run_with_an_error() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ScriptedProvider::new(vec![says("done"), says("should not run")]);
+    let shell = FailingResetShell {
+        exec_error: Some("shell session closed"),
+    };
+    let mut st = State::new("g", "false");
+    let (outcome, _) = runner(&p, &shell, d.path(), &Conversational, true).run(&mut st);
+    match outcome {
+        Outcome::Error(msg) => {
+            assert!(msg.contains("could not roll back to deadbeef1234"), "{msg}");
+            assert!(msg.contains("shell session closed"), "{msg}");
+        }
+        other => panic!("expected Outcome::Error, got {other:?}"),
+    }
+    assert_eq!(st.runtime.rollbacks, 0);
+    assert_eq!(p.seen.lock().unwrap().len(), 1);
+}

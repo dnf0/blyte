@@ -747,12 +747,31 @@ impl<'a> Runner<'a> {
         ))
     }
 
-    fn reset_to(&self, commit: &str) {
-        let _ = self.shell.exec(
-            &format!("git reset --hard {commit} && git clean -fd"),
-            &self.root,
-            Duration::from_secs(120),
-        );
+    fn reset_to(&self, commit: &str) -> Result<(), String> {
+        let out = self
+            .shell
+            .exec(
+                &format!("git reset --hard {commit} && git clean -fd"),
+                &self.root,
+                Duration::from_secs(120),
+            )
+            .map_err(|e| format!("could not roll back to {commit}: {e}"))?;
+        if out.exit_code != 0 {
+            let detail = out.merged();
+            let detail = detail.trim();
+            return if detail.is_empty() {
+                Err(format!(
+                    "could not roll back to {commit}: exit {}",
+                    out.exit_code
+                ))
+            } else {
+                Err(format!(
+                    "could not roll back to {commit}: exit {}: {detail}",
+                    out.exit_code
+                ))
+            };
+        }
+        Ok(())
     }
 
     fn elapsed_fraction(
@@ -1600,7 +1619,9 @@ impl<'a> Runner<'a> {
 
             if self.rollback {
                 if let Some(base) = &baseline {
-                    self.reset_to(base);
+                    if let Err(msg) = self.reset_to(base) {
+                        return (Outcome::Error(msg), report);
+                    }
                     state.runtime.rollbacks += 1;
                     let short_sha = &base[..base.len().min(8)];
                     self.emit(Event::RolledBack { to: short_sha });
