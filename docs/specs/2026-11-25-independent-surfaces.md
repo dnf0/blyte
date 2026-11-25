@@ -17,9 +17,10 @@ what they are doing, the way separate Claude Code sessions do.
    surface that dispatched it.
 3. **A registry of running surfaces on the machine.** A `surfaces` tool lists them and a
    `tell` tool messages one by name, across repositories too.
-4. **Peer messages are information only.** They carry a message-only credential and can
+4. **Peer messages carry no authority.** They carry a message-only credential and can
    never approve, push or open a PR. A surface's push and PR buttons act only on its own
-   requests.
+   requests. A peer message can lead the receiving surface to start work, as between Claude
+   Code sessions (the user's correction, 2026-11-25, to an earlier draft where it could not).
 
 Rejected: one surface per checkout holding several conversations in tabs. It kept one
 server and one token per repository, which was convenient to build, but it is not how the
@@ -122,13 +123,17 @@ user can send.
   the model marked as information from another surface, not from the user.
 - It is delivered between turns, never into a turn in progress. If the surface is idle it
   starts a **peer turn**.
-- In a peer turn the model can read, answer the user in the page, and `tell` a reply. It
-  cannot start a run or edit a file: the tool layer refuses, with an error saying a peer
-  message cannot start work. To act on a peer message, the user says so.
+- A peer turn can do what a turn the user starts can do, under the same rules: read, answer
+  in the page, `tell` a reply, edit, and start a run (one run per request by default, the
+  same approvals). This is how Claude Code sessions treat messages from each other. The
+  message does not carry the user's authority: the model is told it comes from another
+  surface and acts on it only where that fits the work this surface is doing.
+- A request started by a peer turn is recorded and shown in the page as started by surface
+  `<name>`, not by the user.
 - Approvals, push and open-PR stay behind the surface token, which only the page holds. No
   peer message, and no model, can reach them.
-- To stop two models talking in a loop, a surface runs at most five peer turns between user
-  messages. Further messages are queued and shown in the page, and `tell` returns `held`.
+- To stop two models handing each other work in a loop, a surface runs at most five peer
+  turns between user messages. Further messages are queued and shown in the page, and `tell` returns `held`.
 
 A limit to be clear about: once a peer message is in the conversation, later turns the user
 starts can see it, as they can see any file the model has read. The marking is the defence
@@ -138,7 +143,7 @@ there, as it is for file contents.
 
 - Persisting the model's message history across a restart.
 - Surfaces on different machines.
-- One surface driving another (starting runs, approving) on its behalf.
+- One surface approving, pushing or opening a PR for another.
 
 ## Order of work
 
@@ -160,5 +165,5 @@ run. Step 5 depends on 4.
   per-surface path in one change.
 - Whether anything else reads `.wt/surface.json` (the dashboard, `blyte wait`, the skill).
 - That appends to `usage.jsonl` from several processes are one write per line.
-- How a peer turn is told apart in the tool layer: where the run and edit tools can see the
-  turn's origin.
+- Where a request records who started it, so a peer-started request can be labelled in the
+  page and counted against the limit.
