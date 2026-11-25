@@ -1296,13 +1296,18 @@ where
         path: token_file_path,
     };
 
-    let surface_dir_path = crate::surface_dir::surface_dir(&main_checkout, &surface_id);
-    if let Err(e) = std::fs::create_dir_all(&surface_dir_path) {
-        let _ = writeln!(
-            err,
-            "blyte: cannot create {}: {e}",
-            surface_dir_path.display()
-        );
+    // The record is written as soon as the directory exists: another start lists
+    // every surface directory and fails on one that has no record.
+    let record = SurfaceRecord {
+        id: surface_id.clone(),
+        name: surface_name.clone(),
+        pid: std::process::id(),
+        port: actual_port,
+        session_id: session_id.clone(),
+        started_at,
+    };
+    if let Err(e) = crate::surface_dir::write_record(&main_checkout, &record) {
+        let _ = writeln!(err, "blyte: {e}");
         return 1;
     }
     let entries_log_path = crate::surface_dir::entries_path(&main_checkout, &surface_id);
@@ -1318,19 +1323,6 @@ where
             return 1;
         }
     };
-
-    let record = SurfaceRecord {
-        id: surface_id.clone(),
-        name: surface_name.clone(),
-        pid: std::process::id(),
-        port: actual_port,
-        session_id: session_id.clone(),
-        started_at,
-    };
-    if let Err(e) = crate::surface_dir::write_record(&main_checkout, &record) {
-        let _ = writeln!(err, "blyte: {e}");
-        return 1;
-    }
 
     let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
     let _ = writeln!(out, "blyte: surface {surface_name} at {url}");
