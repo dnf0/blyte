@@ -150,7 +150,7 @@ struct WorktreeGitData {
     commits_out: String,
     files_out: String,
     tree_out: String,
-    diff_res: Option<Result<String, String>>,
+    diff_raw: Option<String>,
     diff_out: String,
     task_text: Option<String>,
     changed_files: Vec<String>,
@@ -165,11 +165,42 @@ impl WorktreeGitData {
             commits_out: String::new(),
             files_out: String::new(),
             tree_out: String::new(),
-            diff_res: None,
+            diff_raw: None,
             diff_out: String::new(),
             task_text: None,
             changed_files: Vec::new(),
             subjects: Vec::new(),
+        }
+    }
+}
+
+fn git_stdout_in_wt_with(
+    run_git: &dyn Fn(&Path, &[&str]) -> WtGit,
+    wt: &Path,
+    args: &[&str],
+) -> Result<Option<String>, String> {
+    match run_git(wt, args) {
+        WtGit::WorktreeGone => Ok(None),
+        WtGit::IoErr(e) => Err(format!(
+            "could not run git {} in {}: {e}",
+            args.join(" "),
+            wt.display()
+        )),
+        WtGit::Output(o) if o.status.success() => {
+            Ok(Some(String::from_utf8_lossy(&o.stdout).into_owned()))
+        }
+        WtGit::Output(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let detail = if stderr.is_empty() {
+                format!("exit {}", o.status)
+            } else {
+                stderr
+            };
+            Err(format!(
+                "git {} failed in {}: {detail}",
+                args.join(" "),
+                wt.display()
+            ))
         }
     }
 }
@@ -181,6 +212,7 @@ fn read_worktree_git_data(
     is_research: bool,
     include_diff_for_research: bool,
     before_git: Option<&dyn Fn()>,
+    run_git: &dyn Fn(&Path, &[&str]) -> WtGit,
 ) -> Result<Option<WorktreeGitData>, String> {
     let start_path = root.join(".wt").join(format!("{id}.start.json"));
     let (start_base_sha, start_comments): (Option<String>, Option<String>) =
@@ -238,12 +270,18 @@ fn read_worktree_git_data(
             }
         };
 
-        match run_git_in_wt(wt, &["merge-base", "HEAD", &root_head_sha]) {
+        match run_git(wt, &["merge-base", "HEAD", &root_head_sha]) {
             WtGit::WorktreeGone => return Ok(None),
+            WtGit::IoErr(e) => {
+                return Err(format!(
+                    "could not run git merge-base HEAD {root_head_sha} in {}: {e}",
+                    wt.display()
+                ));
+            }
             WtGit::Output(o) if o.status.success() => {
                 String::from_utf8_lossy(&o.stdout).trim().to_string()
             }
-            _ => {
+            WtGit::Output(_) => {
                 return Err(format!(
                     "cannot find where run {id} started; its start record has no base_sha and the worktree shares no history with {root_head_sha}"
                 ));
@@ -253,54 +291,35 @@ fn read_worktree_git_data(
 
     let range = format!("{base}..HEAD");
 
-    let commits_out = match run_git_in_wt(wt, &["log", "--oneline", &range]) {
-        WtGit::WorktreeGone => return Ok(None),
-        WtGit::Output(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        WtGit::IoErr(_) => String::new(),
+    let Some(commits_raw) = git_stdout_in_wt_with(run_git, wt, &["log", "--oneline", &range])?
+    else {
+        return Ok(None);
     };
+    let commits_out = commits_raw.trim().to_string();
 
-    let files_out = match run_git_in_wt(wt, &["diff", "--stat", &range]) {
-        WtGit::WorktreeGone => return Ok(None),
-        WtGit::Output(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        WtGit::IoErr(_) => String::new(),
+    let Some(files_raw) = git_stdout_in_wt_with(run_git, wt, &["diff", "--stat", &range])? else {
+        return Ok(None);
     };
+    let files_out = files_raw.trim().to_string();
 
-    let tree_out = match run_git_in_wt(wt, &["status", "--short"]) {
-        WtGit::WorktreeGone => return Ok(None),
-        WtGit::Output(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        WtGit::IoErr(_) => String::new(),
+    let Some(tree_raw) = git_stdout_in_wt_with(run_git, wt, &["status", "--short"])? else {
+        return Ok(None);
     };
+    let tree_out = tree_raw.trim().to_string();
 
-    let diff_res: Option<Result<String, String>> = if !is_research {
-        match run_git_in_wt(wt, &["diff", &range]) {
-            WtGit::WorktreeGone => return Ok(None),
-            WtGit::IoErr(e) => Some(Err(e.to_string())),
-            WtGit::Output(o) => Some(if o.status.success() {
-                Ok(String::from_utf8_lossy(&o.stdout).into_owned())
-            } else {
-                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                if stderr.is_empty() {
-                    Err(format!("exit {}", o.status))
-                } else {
-                    Err(stderr)
-                }
-            }),
-        }
-    } else if include_diff_for_research {
-        match run_git_in_wt(wt, &["diff", &range]) {
-            WtGit::WorktreeGone => return Ok(None),
-            WtGit::IoErr(e) => Some(Err(e.to_string())),
-            WtGit::Output(o) => Some(Ok(String::from_utf8_lossy(&o.stdout).into_owned())),
-        }
+    let diff_raw = if !is_research || include_diff_for_research {
+        let Some(diff) = git_stdout_in_wt_with(run_git, wt, &["diff", &range])? else {
+            return Ok(None);
+        };
+        Some(diff)
     } else {
         None
     };
 
-    let diff_out = diff_res
-        .as_ref()
-        .and_then(|r| r.as_ref().ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+    let diff_out = match diff_raw.as_deref() {
+        Some(s) => s.trim().to_string(),
+        None => String::new(),
+    };
 
     let task_text: Option<String> = (|| {
         let start_file = root.join(".wt").join(format!("{id}.start.json"));
@@ -314,25 +333,25 @@ fn read_worktree_git_data(
         std::fs::read_to_string(root.join(p)).ok()
     })();
 
-    let changed_files: Vec<String> = match run_git_in_wt(wt, &["diff", "--name-only", &range]) {
-        WtGit::WorktreeGone => return Ok(None),
-        WtGit::Output(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-        _ => Vec::new(),
+    let Some(changed_raw) = git_stdout_in_wt_with(run_git, wt, &["diff", "--name-only", &range])?
+    else {
+        return Ok(None);
     };
+    let changed_files: Vec<String> = changed_raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
 
-    let subjects: Vec<String> = match run_git_in_wt(wt, &["log", "--format=%s", &range]) {
-        WtGit::WorktreeGone => return Ok(None),
-        WtGit::Output(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-        _ => Vec::new(),
+    let Some(subjects_raw) = git_stdout_in_wt_with(run_git, wt, &["log", "--format=%s", &range])?
+    else {
+        return Ok(None);
     };
+    let subjects: Vec<String> = subjects_raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
 
     Ok(Some(WorktreeGitData {
         base,
@@ -340,7 +359,7 @@ fn read_worktree_git_data(
         commits_out,
         files_out,
         tree_out,
-        diff_res,
+        diff_raw,
         diff_out,
         task_text,
         changed_files,
@@ -363,6 +382,24 @@ fn compute_review_res(
     include_diff_for_research: bool,
     summary_worktree_fallback: Option<&Path>,
     before_git: Option<&dyn Fn()>,
+) -> Result<ReviewComputation, ReviewError> {
+    compute_review_res_with_runner(
+        root,
+        id,
+        include_diff_for_research,
+        summary_worktree_fallback,
+        before_git,
+        &run_git_in_wt,
+    )
+}
+
+fn compute_review_res_with_runner(
+    root: &Path,
+    id: &str,
+    include_diff_for_research: bool,
+    summary_worktree_fallback: Option<&Path>,
+    before_git: Option<&dyn Fn()>,
+    run_git: &dyn Fn(&Path, &[&str]) -> WtGit,
 ) -> Result<ReviewComputation, ReviewError> {
     let wt = root.join(".wt").join(id);
     let mut wt_exists = wt_present(&wt);
@@ -403,6 +440,7 @@ fn compute_review_res(
             is_research,
             include_diff_for_research,
             before_git,
+            run_git,
         ) {
             Ok(Some(data)) => data,
             Ok(None) => {
@@ -424,7 +462,7 @@ fn compute_review_res(
         commits_out,
         files_out,
         tree_out,
-        diff_res,
+        diff_raw,
         diff_out,
         task_text,
         changed_files,
@@ -530,60 +568,49 @@ fn compute_review_res(
     };
     let mut fallbacks: Vec<crate::fallback_check::Finding> = Vec::new();
     if !is_research {
-        if let Some(ref res) = diff_res {
-            match res {
-                Ok(diff) => {
-                    fallbacks = crate::fallback_check::added_fallbacks(diff);
-                    if start_comments.as_deref() != Some("off") {
-                        let wt_gone = std::cell::Cell::new(false);
-                        match crate::comment_lint::added_comments(
-                            diff,
-                            &|path| match run_git_in_wt(&wt, &["show", &format!("HEAD:{path}")]) {
-                                WtGit::WorktreeGone => {
-                                    wt_gone.set(true);
-                                    Err(format!("worktree {} does not exist", wt.display()))
-                                }
-                                WtGit::IoErr(e) => Err(e.to_string()),
-                                WtGit::Output(o) => {
-                                    if o.status.success() {
-                                        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
-                                    } else {
-                                        let stderr =
-                                            String::from_utf8_lossy(&o.stderr).trim().to_string();
-                                        if stderr.is_empty() {
-                                            Err(format!("exit {}", o.status))
-                                        } else {
-                                            Err(stderr)
-                                        }
-                                    }
-                                }
-                            },
-                        ) {
-                            Ok(comments) => {
-                                if let Some(flag) = crate::comment_lint::flag(&comments) {
-                                    checks.flags.push(flag);
-                                }
-                            }
-                            Err(reason) => {
-                                if wt_gone.get() {
-                                    return Err(ReviewError::WorktreeGone(format!(
-                                        "worktree {} does not exist",
-                                        wt.display()
-                                    )));
-                                }
-                                let first_line = reason.lines().next().unwrap_or(reason.as_str());
-                                let msg = format!("comment check not run: {first_line}");
-                                let cut: String = msg.chars().take(200).collect();
-                                checks.flags.push(cut);
+        if let Some(ref diff) = diff_raw {
+            fallbacks = crate::fallback_check::added_fallbacks(diff);
+            if start_comments.as_deref() != Some("off") {
+                let wt_gone = std::cell::Cell::new(false);
+                match crate::comment_lint::added_comments(diff, &|path| match run_git_in_wt(
+                    &wt,
+                    &["show", &format!("HEAD:{path}")],
+                ) {
+                    WtGit::WorktreeGone => {
+                        wt_gone.set(true);
+                        Err(format!("worktree {} does not exist", wt.display()))
+                    }
+                    WtGit::IoErr(e) => Err(e.to_string()),
+                    WtGit::Output(o) => {
+                        if o.status.success() {
+                            Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+                        } else {
+                            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                            if stderr.is_empty() {
+                                Err(format!("exit {}", o.status))
+                            } else {
+                                Err(stderr)
                             }
                         }
                     }
-                }
-                Err(reason) => {
-                    let first_line = reason.lines().next().unwrap_or(reason.as_str());
-                    let msg = format!("fallback check not run: git diff failed: {first_line}");
-                    let cut: String = msg.chars().take(200).collect();
-                    checks.flags.push(cut);
+                }) {
+                    Ok(comments) => {
+                        if let Some(flag) = crate::comment_lint::flag(&comments) {
+                            checks.flags.push(flag);
+                        }
+                    }
+                    Err(reason) => {
+                        if wt_gone.get() {
+                            return Err(ReviewError::WorktreeGone(format!(
+                                "worktree {} does not exist",
+                                wt.display()
+                            )));
+                        }
+                        let first_line = reason.lines().next().unwrap_or(reason.as_str());
+                        let msg = format!("comment check not run: {first_line}");
+                        let cut: String = msg.chars().take(200).collect();
+                        checks.flags.push(cut);
+                    }
                 }
             }
         }
@@ -1226,5 +1253,80 @@ mod tests {
             .unwrap();
         assert!(!data.wt_exists);
         assert!(data.is_research);
+    }
+
+    #[test]
+    fn review_summary_errors_when_worktree_git_io_fails_naming_args() {
+        let (d, head) = init_repo();
+        setup_finished_code_run(d.path(), "G1", Some(&head));
+        let wt = d.path().join(".wt/G1");
+        let range = format!("{head}..HEAD");
+
+        let failing_calls: &[(&[&str], &str)] = &[
+            (&["log", "--oneline"], "log --oneline"),
+            (&["diff", "--stat"], "diff --stat"),
+            (&["status", "--short"], "status --short"),
+            (&["diff", range.as_str()], "diff"),
+            (&["diff", "--name-only"], "diff --name-only"),
+            (&["log", "--format=%s"], "log --format=%s"),
+        ];
+
+        for &(fail_prefix, expected_args) in failing_calls {
+            let runner = |dir: &Path, args: &[&str]| -> WtGit {
+                if args.starts_with(fail_prefix) {
+                    WtGit::IoErr(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "git binary missing",
+                    ))
+                } else {
+                    run_git_in_wt(dir, args)
+                }
+            };
+            let err = compute_review_res_with_runner(d.path(), "G1", false, None, None, &runner)
+                .err()
+                .expect("expected error")
+                .into_message();
+            assert!(
+                err.contains("could not run git"),
+                "for {expected_args}, got: {err}"
+            );
+            assert!(
+                err.contains(expected_args),
+                "for {expected_args}, got: {err}"
+            );
+            assert!(
+                err.contains(&wt.display().to_string()),
+                "for {expected_args}, got: {err}"
+            );
+            assert!(
+                err.contains("git binary missing"),
+                "for {expected_args}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_summary_errors_when_worktree_git_exits_nonzero_with_stderr() {
+        let (d, head) = init_repo();
+        setup_finished_code_run(d.path(), "G2", Some(&head));
+
+        let runner = |dir: &Path, args: &[&str]| -> WtGit {
+            if args.starts_with(&["diff", "--stat"]) {
+                let mut out = Command::new("sh")
+                    .args(["-c", "echo 'fatal: bad revision' >&2; exit 128"])
+                    .output()
+                    .unwrap();
+                out.stdout.clear();
+                WtGit::Output(out)
+            } else {
+                run_git_in_wt(dir, args)
+            }
+        };
+        let err = compute_review_res_with_runner(d.path(), "G2", false, None, None, &runner)
+            .err()
+            .expect("expected error")
+            .into_message();
+        assert!(err.contains("diff --stat"), "got: {err}");
+        assert!(err.contains("fatal: bad revision"), "got: {err}");
     }
 }
