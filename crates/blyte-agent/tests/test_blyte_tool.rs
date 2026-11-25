@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use blyte_agent::fs::LocalFs;
 use blyte_agent::shell::LocalShell;
 use blyte_agent::tools::{
-    blyte_command_timeout, blyte_surface, execute, set_blyte_request, set_blyte_surface,
-    set_blyte_tool, specs, BLYTE_TOOL_COMMANDS, COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT,
-    OUTPUT_LINE_BUDGET,
+    blyte_command_timeout, blyte_started_by, blyte_surface, execute, set_blyte_request,
+    set_blyte_started_by, set_blyte_surface, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS,
+    COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT, OUTPUT_LINE_BUDGET,
 };
 use serde_json::json;
 
@@ -1043,4 +1043,165 @@ fn no_surface_added_when_blyte_surface_is_none() {
     assert!(!edit_out.is_error, "{}", edit_out.content);
     let edit_lines: Vec<&str> = edit_out.content.lines().collect();
     assert_eq!(edit_lines, vec!["edit-finish", "E1"]);
+}
+
+struct StartedByReset;
+
+impl Drop for StartedByReset {
+    fn drop(&mut self) {
+        set_blyte_started_by(None);
+    }
+}
+
+#[test]
+fn blyte_tool_adds_started_by_to_dispatch_and_edit_finish() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    let _started_reset = StartedByReset;
+    set_blyte_request(None);
+    set_blyte_surface(None);
+    set_blyte_started_by(Some("api-2".to_string()));
+    assert_eq!(blyte_started_by().as_deref(), Some("api-2"));
+
+    let dispatch_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md"]}),
+    );
+    assert!(!dispatch_out.is_error, "{}", dispatch_out.content);
+    let dispatch_lines: Vec<&str> = dispatch_out.content.lines().collect();
+    assert_eq!(
+        dispatch_lines,
+        vec!["dispatch", "T1", "t.md", "--started-by", "api-2"]
+    );
+
+    let sep_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md", "--", "extra"]}),
+    );
+    assert!(!sep_out.is_error, "{}", sep_out.content);
+    let sep_lines: Vec<&str> = sep_out.content.lines().collect();
+    assert_eq!(
+        sep_lines,
+        vec![
+            "dispatch",
+            "T1",
+            "t.md",
+            "--started-by",
+            "api-2",
+            "--",
+            "extra"
+        ]
+    );
+
+    let edit_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "E1"]}),
+    );
+    assert!(!edit_out.is_error, "{}", edit_out.content);
+    let edit_lines: Vec<&str> = edit_out.content.lines().collect();
+    assert_eq!(
+        edit_lines,
+        vec!["edit-finish", "E1", "--started-by", "api-2"]
+    );
+
+    let status_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["status", "T1"]}),
+    );
+    assert!(!status_out.is_error, "{}", status_out.content);
+    let status_lines: Vec<&str> = status_out.content.lines().collect();
+    assert_eq!(status_lines, vec!["status", "T1"]);
+
+    set_blyte_started_by(None);
+    assert_eq!(blyte_started_by(), None);
+}
+
+#[test]
+fn blyte_tool_adds_nothing_when_no_peer_started_the_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    let _started_reset = StartedByReset;
+    set_blyte_request(None);
+    set_blyte_surface(None);
+    set_blyte_started_by(None);
+
+    let dispatch_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md"]}),
+    );
+    assert!(!dispatch_out.is_error, "{}", dispatch_out.content);
+    let dispatch_lines: Vec<&str> = dispatch_out.content.lines().collect();
+    assert_eq!(dispatch_lines, vec!["dispatch", "T1", "t.md"]);
+
+    let edit_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "E1"]}),
+    );
+    assert!(!edit_out.is_error, "{}", edit_out.content);
+    let edit_lines: Vec<&str> = edit_out.content.lines().collect();
+    assert_eq!(edit_lines, vec!["edit-finish", "E1"]);
+}
+
+#[test]
+fn blyte_tool_refuses_a_model_supplied_started_by() {
+    let root = tempfile::tempdir().unwrap();
+    let refused_marker = root.path().join("started_by_refused.ran");
+    let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", refused_marker.display()));
+    let _req_reset = RequestReset;
+    let _started_reset = StartedByReset;
+    set_blyte_request(None);
+    set_blyte_surface(None);
+    set_blyte_started_by(Some("api-2".to_string()));
+
+    for bad_args in [
+        json!({"args": ["dispatch", "T1", "t.md", "--started-by", "x"]}),
+        json!({"args": ["dispatch", "T1", "t.md", "--started-by=x"]}),
+        json!({"args": ["dispatch", "--started-by", "x", "T1", "t.md"]}),
+        json!({"args": ["dispatch", "T1", "t.md", "--started-by", "x"], "background": true}),
+        json!({"args": ["edit-finish", "E1", "--started-by", "x"]}),
+        json!({"args": ["edit-finish", "E1", "--started-by=x"]}),
+    ] {
+        let out = execute(root.path(), &LocalShell, &LocalFs, "blyte", &bad_args);
+        assert!(out.is_error, "expected error for {bad_args}");
+        assert_eq!(
+            out.content, "do not pass --started-by; blyte sets it automatically",
+            "unexpected error for {bad_args}"
+        );
+    }
+    assert!(!refused_marker.exists(), "refused command ran executable");
+
+    set_blyte_started_by(None);
+    let refused_when_unset = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md", "--started-by", "x"]}),
+    );
+    assert!(refused_when_unset.is_error);
+    assert_eq!(
+        refused_when_unset.content,
+        "do not pass --started-by; blyte sets it automatically"
+    );
+    assert!(!refused_marker.exists(), "refused command ran executable");
 }

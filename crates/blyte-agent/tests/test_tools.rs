@@ -899,3 +899,199 @@ fn dispatch_tool_reports_signal_termination_without_fabricating_exit_code() {
         r.content
     );
 }
+
+static PEER_TOOLS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct ResetPeerTools;
+impl Drop for ResetPeerTools {
+    fn drop(&mut self) {
+        blyte_agent::tools::set_peer_tools(None);
+    }
+}
+
+struct FakePeerTools {
+    surfaces_result: Result<String, String>,
+    tell_result: Result<String, String>,
+    tell_calls: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl FakePeerTools {
+    fn ok(surfaces_text: &str, tell_text: &str) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            surfaces_result: Ok(surfaces_text.to_string()),
+            tell_result: Ok(tell_text.to_string()),
+            tell_calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn tell_err(err_text: &str) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            surfaces_result: Ok(String::new()),
+            tell_result: Err(err_text.to_string()),
+            tell_calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl blyte_agent::tools::PeerTools for FakePeerTools {
+    fn surfaces(&self) -> Result<String, String> {
+        self.surfaces_result.clone()
+    }
+
+    fn tell(&self, name: &str, message: &str) -> Result<String, String> {
+        self.tell_calls
+            .lock()
+            .unwrap()
+            .push((name.to_string(), message.to_string()));
+        self.tell_result.clone()
+    }
+}
+
+#[test]
+fn peer_tools_are_listed_only_when_registered() {
+    let _lock = PEER_TOOLS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetPeerTools;
+    blyte_agent::tools::set_peer_tools(None);
+
+    let before = specs();
+    assert!(!before.iter().any(|t| t.name == "surfaces"));
+    assert!(!before.iter().any(|t| t.name == "tell"));
+
+    blyte_agent::tools::set_peer_tools(Some(FakePeerTools::ok("ok", "delivered")));
+    let during = specs();
+    let surfaces_spec = during.iter().find(|t| t.name == "surfaces").unwrap();
+    assert_eq!(
+        surfaces_spec.description,
+        "List the surfaces running on this machine: name, repository, branch and what each is doing."
+    );
+    assert_eq!(
+        surfaces_spec.parameters["properties"]
+            .as_object()
+            .unwrap()
+            .len(),
+        0
+    );
+    let tell_spec = during.iter().find(|t| t.name == "tell").unwrap();
+    assert_eq!(
+        tell_spec.description,
+        "Send a message to another running surface by name. Its model reads it between turns as a message from this surface, not from its user. Returns delivered or held."
+    );
+    let tell_props = tell_spec.parameters["properties"].as_object().unwrap();
+    assert_eq!(tell_props["name"]["type"], "string");
+    assert_eq!(tell_props["message"]["type"], "string");
+    assert_eq!(tell_spec.parameters["required"], json!(["name", "message"]));
+
+    blyte_agent::tools::set_peer_tools(None);
+    let after = specs();
+    assert!(!after.iter().any(|t| t.name == "surfaces"));
+    assert!(!after.iter().any(|t| t.name == "tell"));
+}
+
+#[test]
+fn surfaces_tool_returns_the_registered_text() {
+    let _lock = PEER_TOOLS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetPeerTools;
+    let fake = FakePeerTools::ok("api-2  repo/api  main  idle", "delivered");
+    blyte_agent::tools::set_peer_tools(Some(fake));
+
+    let d = ws();
+    let r = execute(d.path(), &LocalShell, &LocalFs, "surfaces", &json!({}));
+    assert!(!r.is_error, "expected ok, got {r:?}");
+    assert_eq!(r.content, "api-2  repo/api  main  idle");
+}
+
+#[test]
+fn tell_tool_passes_name_and_message() {
+    let _lock = PEER_TOOLS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetPeerTools;
+    let fake = FakePeerTools::ok("", "delivered");
+    blyte_agent::tools::set_peer_tools(Some(fake.clone()));
+
+    let d = ws();
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "tell",
+        &json!({"name": "api-2", "message": "please rebase"}),
+    );
+    assert!(!r.is_error, "expected ok, got {r:?}");
+    assert_eq!(r.content, "delivered");
+    assert_eq!(
+        fake.tell_calls.lock().unwrap().as_slice(),
+        &[("api-2".to_string(), "please rebase".to_string())]
+    );
+}
+
+#[test]
+fn tell_tool_reports_the_error_text() {
+    let _lock = PEER_TOOLS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetPeerTools;
+    let fake = FakePeerTools::tell_err("no running surface named ghost");
+    blyte_agent::tools::set_peer_tools(Some(fake));
+
+    let d = ws();
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "tell",
+        &json!({"name": "ghost", "message": "hello"}),
+    );
+    assert!(r.is_error, "expected error, got {r:?}");
+    assert_eq!(r.content, "no running surface named ghost");
+}
+
+#[test]
+fn tell_tool_refuses_blank_arguments() {
+    let _lock = PEER_TOOLS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetPeerTools;
+    let fake = FakePeerTools::ok("", "delivered");
+    blyte_agent::tools::set_peer_tools(Some(fake.clone()));
+
+    let d = ws();
+    for bad in [
+        json!({}),
+        json!({"name": "api-2"}),
+        json!({"message": "hello"}),
+        json!({"name": "", "message": "hello"}),
+        json!({"name": "   ", "message": "hello"}),
+        json!({"name": "api-2", "message": ""}),
+        json!({"name": "api-2", "message": " \t\n "}),
+        json!({"name": 123, "message": "hello"}),
+        json!({"name": "api-2", "message": true}),
+    ] {
+        let r = execute(d.path(), &LocalShell, &LocalFs, "tell", &bad);
+        assert!(r.is_error, "expected error for {bad}, got {r:?}");
+        assert_eq!(
+            r.content, "tell needs a name and a message",
+            "unexpected error for {bad}"
+        );
+    }
+    assert!(
+        fake.tell_calls.lock().unwrap().is_empty(),
+        "stand-in must not be called for invalid arguments"
+    );
+}
+
+#[test]
+fn peer_tools_unregistered_say_so() {
+    let _lock = PEER_TOOLS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetPeerTools;
+    blyte_agent::tools::set_peer_tools(None);
+
+    let d = ws();
+    let s = execute(d.path(), &LocalShell, &LocalFs, "surfaces", &json!({}));
+    assert!(s.is_error, "expected error, got {s:?}");
+    assert_eq!(s.content, "the surfaces tool is not available here");
+
+    let t = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "tell",
+        &json!({"name": "api-2", "message": "hello"}),
+    );
+    assert!(t.is_error, "expected error, got {t:?}");
+    assert_eq!(t.content, "the tell tool is not available here");
+}
