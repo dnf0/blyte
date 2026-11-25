@@ -1022,6 +1022,7 @@ const assert = require("node:assert");
       changed_files: ["src/lib.rs"],
       commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
       hold: null,
+      combined: false,
     };
   }
 
@@ -1359,6 +1360,7 @@ const assert = require("node:assert");
       changed_files: ["src/lib.rs"],
       commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
       hold: null,
+      combined: false,
     };
   }
 
@@ -1466,6 +1468,340 @@ assert.strictEqual(
   missingErr,
   "decision response missing field decision.conversation_message"
 );
+"#;
+    run_surface_script(harness);
+}
+
+fn review_queue_test_prelude() -> &'static str {
+    r#"
+const assert = require("node:assert");
+const elements = {};
+function makeStubElement(id) {
+  const attrs = new Map();
+  const classes = new Set();
+  const metricVal = { textContent: "" };
+  return {
+    id,
+    textContent: "",
+    innerHTML: "",
+    hidden: false,
+    disabled: false,
+    dataset: {},
+    style: {},
+    children: [],
+    get title() { return attrs.get("title") || ""; },
+    set title(v) {
+      if (v === undefined || v === null) attrs.delete("title");
+      else attrs.set("title", String(v));
+    },
+    classList: {
+      toggle(name, force) {
+        if (force === undefined) {
+          if (classes.has(name)) classes.delete(name);
+          else classes.add(name);
+        } else if (force) {
+          classes.add(name);
+        } else {
+          classes.delete(name);
+        }
+      },
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+    },
+    setAttribute(name, val) { attrs.set(name, String(val)); },
+    getAttribute(name) { return attrs.has(name) ? attrs.get(name) : null; },
+    hasAttribute(name) { return attrs.has(name); },
+    removeAttribute(name) { attrs.delete(name); },
+    querySelector(sel) { return sel === ".metric-val" ? metricVal : null; },
+    querySelectorAll() { return []; },
+  };
+}
+global.document = {
+  getElementById(id) {
+    if (!elements[id]) elements[id] = makeStubElement(id);
+    return elements[id];
+  },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+};
+function makeRun(id, overrides) {
+  return Object.assign({
+    key: id,
+    id,
+    repo: "demo",
+    title: "Task " + id,
+    task: "Do " + id,
+    outcome: "verified",
+    research: false,
+    checks_recorded: true,
+    combined: false,
+    started_at: 1000,
+    finished_at: 1010,
+    turns: 1,
+    plan_file: null,
+    plan_task: null,
+    final_message: "done",
+    group: "core",
+    verdict: null,
+    verdict_notes: null,
+    report: null,
+    cost_usd: 0.01,
+    verdict_ts: null,
+    card: "clean",
+    flags: [],
+    changed_files: ["src/lib.rs"],
+    commits: [{ sha: "1234567890abcdef", subject: "feat: " + id }],
+    hold: null,
+  }, overrides || {});
+}
+function stubRunsFetch(runsPayload) {
+  global.fetch = async (url) => {
+    if (url !== "/api/runs") {
+      throw new Error("unexpected fetch url: " + url);
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          generated_at: 1020,
+          repo: "demo",
+          running: [],
+          runs: runsPayload,
+          skipped: [],
+        };
+      },
+    };
+  };
+}
+"#
+}
+
+#[test]
+fn a_clean_combined_run_is_not_in_the_review_count_or_list() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  stubRunsFetch([
+    makeRun("C1", {{ combined: true, card: "clean", hold: null, verdict: null }}),
+    makeRun("U1", {{ combined: false, card: "clean", hold: null, verdict: null }}),
+  ]);
+  await fetchRuns();
+  switchMode("review");
+  assert.strictEqual(document.getElementById("mode-review").textContent, "Review (1)");
+  const queueHtml = document.getElementById("queue").innerHTML;
+  assert.ok(queueHtml.includes("Task U1"), queueHtml);
+  assert.ok(!queueHtml.includes("Task C1"), queueHtml);
+  assert.ok(!queueHtml.includes('data-run-key="C1"'), queueHtml);
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
+}
+
+#[test]
+fn a_flagged_combined_run_stays_in_review() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  stubRunsFetch([
+    makeRun("F1", {{ combined: true, card: "exception", flags: ["lint warning"], hold: null, verdict: null }}),
+  ]);
+  await fetchRuns();
+  switchMode("review");
+  assert.strictEqual(document.getElementById("mode-review").textContent, "Review (1)");
+  const queueHtml = document.getElementById("queue").innerHTML;
+  assert.ok(queueHtml.includes("Task F1"), queueHtml);
+  assert.ok(queueHtml.includes("lint warning"), queueHtml);
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
+}
+
+#[test]
+fn a_held_combined_run_stays_in_review() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  stubRunsFetch([
+    makeRun("H1", {{
+      combined: true,
+      card: "clean",
+      hold: {{ note: "wait for reviewer", ts: 1015 }},
+      verdict: null,
+    }}),
+  ]);
+  await fetchRuns();
+  switchMode("review");
+  assert.strictEqual(document.getElementById("mode-review").textContent, "Review (1)");
+  const queueHtml = document.getElementById("queue").innerHTML;
+  const heldHeadingIdx = queueHtml.indexOf('<div class="held-heading">Held</div>');
+  const cardIdx = queueHtml.indexOf("Task H1");
+  assert.ok(heldHeadingIdx !== -1, queueHtml);
+  assert.ok(cardIdx > heldHeadingIdx, queueHtml);
+  assert.ok(queueHtml.includes("wait for reviewer"), queueHtml);
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
+}
+
+#[test]
+fn a_runs_payload_without_combined_is_an_error() {
+    let script = format!(
+        r#"{}
+(async () => {{
+  const missingCombined = makeRun("M1");
+  delete missingCombined.combined;
+  stubRunsFetch([missingCombined]);
+  await fetchRuns();
+  const queueError = document.getElementById("queue-error");
+  assert.strictEqual(queueError.hidden, false);
+  assert.ok(queueError.textContent.includes("combined"), queueError.textContent);
+  const reviewTab = document.getElementById("mode-review");
+  assert.ok(reviewTab.title.includes("combined"), reviewTab.title);
+
+  const nonBoolCombined = makeRun("B1", {{ combined: "yes" }});
+  const err = validateRuns({{
+    generated_at: 1020,
+    repo: "demo",
+    running: [],
+    runs: [nonBoolCombined],
+    skipped: [],
+  }});
+  assert.ok(err && err.includes("combined"), String(err));
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"#,
+        review_queue_test_prelude()
+    );
+    run_surface_script(&script);
+}
+
+#[test]
+fn a_conflict_card_without_files_is_a_validation_error() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderRequestCard({
+  request: "req-empty-conf",
+  runs: ["T1"],
+  state: "conflict",
+  conflicting_run: "T1",
+  conflicting_files: [],
+});
+assert.ok(html.includes("request-validation-error"), html);
+assert.ok(html.includes("conflicting_files"), html);
+assert.ok(!html.includes("No conflicting files listed."), html);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn a_check_failed_card_without_output_is_a_validation_error() {
+    let harness = r#"
+const assert = require("assert");
+
+const emptyHtml = renderRequestCard({
+  request: "req-empty-out",
+  runs: ["T1"],
+  state: "check_failed",
+  failing_step: "cargo test",
+  output_tail: "",
+});
+assert.ok(emptyHtml.includes("request-validation-error"), emptyHtml);
+assert.ok(emptyHtml.includes("output_tail"), emptyHtml);
+
+const missingHtml = renderRequestCard({
+  request: "req-missing-out",
+  runs: ["T1"],
+  state: "check_failed",
+  failing_step: "cargo test",
+});
+assert.ok(missingHtml.includes("request-validation-error"), missingHtml);
+assert.ok(missingHtml.includes("output_tail"), missingHtml);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn a_user_message_keeps_its_line_breaks() {
+    let html = load_surface_html();
+    let start = html
+        .find(".msg-line.user {")
+        .expect("surface page must define .msg-line.user CSS rule");
+    let rest = &html[start..];
+    let end = rest
+        .find('}')
+        .expect(".msg-line.user CSS rule must close with }");
+    let rule = &rest[..=end];
+    assert!(
+        rule.contains("white-space: pre-wrap"),
+        ".msg-line.user rule must contain white-space: pre-wrap:\n{rule}"
+    );
+}
+
+#[test]
+fn a_done_request_renders_done_without_actions_after_waiting_and_bogus_is_rejected() {
+    let harness = r#"
+const assert = require("assert");
+
+const doneReq = {
+  request: "req-done",
+  runs: ["D1"],
+  state: "done",
+  branch: "blyte/req-done",
+  commits: [{ sha: "abcdef1234567", subject: "feat: merged work" }],
+  pushed: true,
+  pull_request_url: null,
+};
+
+const waitingReq = {
+  request: "req-waiting",
+  runs: ["W1"],
+  state: "waiting",
+  waiting_reasons: ["W1: needs review"],
+};
+
+const doneHtml = renderRequestCard(doneReq);
+assert.ok(doneHtml.includes(">Done</span>"), doneHtml);
+assert.ok(doneHtml.includes("request-state-done"), doneHtml);
+assert.ok(!doneHtml.includes("request-state-error"), doneHtml);
+assert.ok(!doneHtml.includes("request-validation-error"), doneHtml);
+assert.ok(!doneHtml.includes("failed"), doneHtml);
+assert.ok(!doneHtml.includes("<button"), doneHtml);
+assert.ok(!doneHtml.includes("data-request-push"), doneHtml);
+assert.ok(!doneHtml.includes("data-request-open-pr"), doneHtml);
+
+const listHtml = renderRequestsList([doneReq, waitingReq], {});
+const waitingPos = listHtml.indexOf('data-request-id="req-waiting"');
+const donePos = listHtml.indexOf('data-request-id="req-done"');
+assert.ok(waitingPos !== -1, listHtml);
+assert.ok(donePos !== -1, listHtml);
+assert.ok(waitingPos < donePos, "expected waiting before done: " + listHtml);
+
+const bogusHtml = renderRequestCard({
+  request: "req-bogus",
+  runs: ["B1"],
+  state: "bogus",
+});
+assert.ok(bogusHtml.includes("request-validation-error"), bogusHtml);
+assert.ok(bogusHtml.includes("unknown state: bogus"), bogusHtml);
 "#;
     run_surface_script(harness);
 }

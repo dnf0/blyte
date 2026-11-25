@@ -517,6 +517,56 @@ fn git_commit_subject(root: &Path, sha: &str) -> Result<String, String> {
         .map_err(|e| format!("failed to read subject for commit {sha}: {e}"))
 }
 
+fn run_branch(wt_dir: &Path, run_id: &str) -> Result<String, String> {
+    let summary_path = wt_dir.join(format!("{run_id}.json"));
+    let raw = std::fs::read_to_string(&summary_path)
+        .map_err(|e| format!("failed to read {}: {e}", summary_path.display()))?;
+    let val: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("failed to parse {}: {e}", summary_path.display()))?;
+    let branch_hint = match val.get("branch") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(format!(
+                "summary file {} has non-string branch",
+                summary_path.display()
+            ));
+        }
+    };
+    Ok(branch_hint.unwrap_or_else(|| format!("wip/{run_id}")))
+}
+
+fn git_branch_exists(root: &Path, run_id: &str, branch: &str) -> Result<bool, String> {
+    let ref_name = format!("refs/heads/{branch}");
+    let out = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &ref_name])
+        .current_dir(root)
+        .output()
+        .map_err(|e| {
+            format!("run {run_id}: failed to check branch {branch} with git show-ref: {e}")
+        })?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let status_desc = match code {
+                Some(c) => format!("exit code {c}"),
+                None => "terminated by signal".to_string(),
+            };
+            if stderr.is_empty() {
+                Err(format!(
+                    "run {run_id}: git show-ref failed for branch {branch} ({status_desc})"
+                ))
+            } else {
+                Err(format!(
+                    "run {run_id}: git show-ref failed for branch {branch} ({status_desc}): {stderr}"
+                ))
+            }
+        }
+    }
+}
+
 fn resolve_current_run_tips(root: &Path, request: &str) -> Result<Vec<CombinedRun>, String> {
     let wt_dir = root.join(".wt");
     let entries = list_start_files(&wt_dir)?;
@@ -529,22 +579,7 @@ fn resolve_current_run_tips(root: &Path, request: &str) -> Result<Vec<CombinedRu
         if crate::combine::is_run_left_out(root, &info.id)? {
             continue;
         }
-        let summary_path = wt_dir.join(format!("{}.json", info.id));
-        let raw = std::fs::read_to_string(&summary_path)
-            .map_err(|e| format!("failed to read {}: {e}", summary_path.display()))?;
-        let val: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| format!("failed to parse {}: {e}", summary_path.display()))?;
-        let branch_hint = match val.get("branch") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(serde_json::Value::String(s)) => Some(s.clone()),
-            Some(_) => {
-                return Err(format!(
-                    "summary file {} has non-string branch",
-                    summary_path.display()
-                ));
-            }
-        };
-        let branch = branch_hint.unwrap_or_else(|| format!("wip/{}", info.id));
+        let branch = run_branch(&wt_dir, &info.id)?;
         let rev = format!("refs/heads/{branch}^{{commit}}");
         let sha = git_rev_parse(root, &rev).map_err(|e| {
             format!(
@@ -572,6 +607,128 @@ fn record_runs_match_tips(record: &CombineRecord, current_runs: &[CombinedRun]) 
     sorted_runs(record.runs.clone()) == current_runs
 }
 
+enum CombinedRunBranchState {
+    Gone,
+    AtRecordedTip,
+    Changed,
+}
+
+fn check_recorded_run_branch(
+    root: &Path,
+    wt_dir: &Path,
+    run: &CombinedRun,
+) -> Result<CombinedRunBranchState, String> {
+    let branch = run_branch(wt_dir, &run.id)?;
+    if !git_branch_exists(root, &run.id, &branch)? {
+        return Ok(CombinedRunBranchState::Gone);
+    }
+    let rev = format!("refs/heads/{branch}^{{commit}}");
+    let sha = git_rev_parse(root, &rev).map_err(|e| {
+        format!(
+            "run {}: branch {branch} does not resolve to a commit: {e}",
+            run.id
+        )
+    })?;
+    if sha == run.tip {
+        Ok(CombinedRunBranchState::AtRecordedTip)
+    } else {
+        Ok(CombinedRunBranchState::Changed)
+    }
+}
+
+fn active_request_run_ids(root: &Path, request: &str) -> Result<Vec<String>, String> {
+    let wt_dir = root.join(".wt");
+    let entries = list_start_files(&wt_dir)?;
+    let mut run_ids = Vec::new();
+    for path in entries {
+        let info = parse_start_file(&wt_dir, &path)?;
+        if info.is_research || info.request.as_deref() != Some(request) {
+            continue;
+        }
+        if crate::combine::is_run_left_out(root, &info.id)? {
+            continue;
+        }
+        run_ids.push(info.id);
+    }
+    Ok(run_ids)
+}
+
+fn request_is_done(root: &Path, request: &str, rec: &CombineRecord) -> Result<bool, String> {
+    if rec.state != CombineState::Combined {
+        return Ok(false);
+    }
+    let active_runs = active_request_run_ids(root, request)?;
+    if active_runs.is_empty() {
+        return Ok(false);
+    }
+    let recorded_by_id: HashMap<&str, &CombinedRun> =
+        rec.runs.iter().map(|run| (run.id.as_str(), run)).collect();
+    let wt_dir = root.join(".wt");
+    let mut any_branch_gone = false;
+    for run_id in &active_runs {
+        let Some(&recorded_run) = recorded_by_id.get(run_id.as_str()) else {
+            return Ok(false);
+        };
+        match check_recorded_run_branch(root, &wt_dir, recorded_run)? {
+            CombinedRunBranchState::Gone => any_branch_gone = true,
+            CombinedRunBranchState::AtRecordedTip => {}
+            CombinedRunBranchState::Changed => return Ok(false),
+        }
+    }
+    Ok(any_branch_gone)
+}
+
+fn check_record_combined_for_request(
+    root: &Path,
+    request: &str,
+    run_ids: &[&str],
+) -> Result<BTreeSet<String>, String> {
+    let Some(rec) = load_combine_record(root, request)? else {
+        return Ok(BTreeSet::new());
+    };
+    if rec.state != CombineState::Combined {
+        return Ok(BTreeSet::new());
+    }
+    let wt_dir = root.join(".wt");
+    let mut combined = BTreeSet::new();
+    for run in &rec.runs {
+        if !run_ids.contains(&run.id.as_str()) {
+            continue;
+        }
+        match check_recorded_run_branch(root, &wt_dir, run)? {
+            CombinedRunBranchState::Gone | CombinedRunBranchState::AtRecordedTip => {
+                combined.insert(run.id.clone());
+            }
+            CombinedRunBranchState::Changed => {}
+        }
+    }
+    Ok(combined)
+}
+
+pub fn run_is_combined(root: &Path, run_id: &str, request: Option<&str>) -> Result<bool, String> {
+    let Some(request) = request else {
+        return Ok(false);
+    };
+    Ok(check_record_combined_for_request(root, request, &[run_id])?.contains(run_id))
+}
+
+pub fn combined_run_ids(
+    root: &Path,
+    runs: &[(&str, Option<&str>)],
+) -> Result<BTreeSet<String>, String> {
+    let mut by_request: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for &(run_id, request) in runs {
+        if let Some(req) = request {
+            by_request.entry(req).or_default().push(run_id);
+        }
+    }
+    let mut combined = BTreeSet::new();
+    for (request, run_ids) in by_request {
+        combined.extend(check_record_combined_for_request(root, request, &run_ids)?);
+    }
+    Ok(combined)
+}
+
 fn combine_record_tip(record: &CombineRecord) -> &str {
     record.commits.last().unwrap_or(&record.base).as_str()
 }
@@ -586,36 +743,61 @@ fn branch_matches_record(root: &Path, record: &CombineRecord) -> bool {
     git_rev_parse(root, &rev).is_ok_and(|actual| actual == expected)
 }
 
-fn format_record_failure(record: &CombineRecord) -> String {
+fn format_record_failure(record: &CombineRecord, record_path: &Path) -> Result<String, String> {
     match record.state {
         CombineState::Conflict => {
-            let run = record.conflicting_run.as_deref().unwrap_or("unknown");
-            let files = if record.conflicting_files.is_empty() {
-                "(none listed)".to_string()
-            } else {
-                record.conflicting_files.join(", ")
-            };
-            format!(
+            let run = record
+                .conflicting_run
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "combine record {} has state conflict with missing conflicting_run",
+                        record_path.display()
+                    )
+                })?;
+            if record.conflicting_files.is_empty() {
+                return Err(format!(
+                    "combine record {} has state conflict with empty conflicting_files",
+                    record_path.display()
+                ));
+            }
+            let files = record.conflicting_files.join(", ");
+            Ok(format!(
                 "Combine failed for request {} (state: conflict).\nConflicting run: {run}\nConflicting files: {files}",
                 record.request
-            )
+            ))
         }
         CombineState::CheckFailed => {
-            let step = record.failing_step.as_deref().unwrap_or("unknown");
-            let tail = record.output_tail.as_deref().unwrap_or("");
-            if tail.is_empty() {
-                format!(
-                    "Combine failed for request {} (state: check_failed).\nFailing step: {step}",
-                    record.request
-                )
-            } else {
-                format!(
-                    "Combine failed for request {} (state: check_failed).\nFailing step: {step}\nOutput tail:\n{tail}",
-                    record.request
-                )
-            }
+            let step = record
+                .failing_step
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "combine record {} has state check_failed with missing failing_step",
+                        record_path.display()
+                    )
+                })?;
+            let tail = record
+                .output_tail
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "combine record {} has state check_failed with missing or empty output_tail",
+                        record_path.display()
+                    )
+                })?;
+            Ok(format!(
+                "Combine failed for request {} (state: check_failed).\nFailing step: {step}\nOutput tail:\n{tail}",
+                record.request
+            ))
         }
-        CombineState::Combined => String::new(),
+        CombineState::Combined => Err(format!(
+            "combine record {} has state combined: not a failure record",
+            record_path.display()
+        )),
     }
 }
 
@@ -650,7 +832,9 @@ fn retry_failure_message(
                 AttemptResult::Combined | AttemptResult::Error => unreachable!(),
             };
             match load_combine_record(root, request)? {
-                Some(rec) if rec.state == expected_state => Ok(format_record_failure(&rec)),
+                Some(rec) if rec.state == expected_state => {
+                    format_record_failure(&rec, &combine_record_path(root, request))
+                }
                 _ => Err(format!(
                     "attempt file {} has result {:?} without a matching combine record",
                     path.display(),
@@ -734,6 +918,12 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
         Readiness::Ready => {}
     }
 
+    if let Some(rec) = load_combine_record(&surface.root, request)? {
+        if request_is_done(&surface.root, request, &rec)? {
+            return Ok(false);
+        }
+    }
+
     let current_runs = resolve_current_run_tips(&surface.root, request)?;
 
     {
@@ -744,16 +934,29 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
         if let Some(mut attempt) = load_attempt_record(&surface.root, request)? {
             if attempt.runs == current_runs {
                 if attempt.result != AttemptResult::Combined && !attempt.reported {
-                    let msg = retry_failure_message(&surface.root, request, &attempt)?;
-                    match surface.session.queue_for_request(request, &msg) {
-                        Ok(_) => {
-                            attempt.reported = true;
-                            write_attempt_record(&surface.root, request, &attempt)?;
-                        }
+                    match retry_failure_message(&surface.root, request, &attempt) {
+                        Ok(msg) => match surface.session.queue_for_request(request, &msg) {
+                            Ok(_) => {
+                                attempt.reported = true;
+                                write_attempt_record(&surface.root, request, &attempt)?;
+                            }
+                            Err(e) => {
+                                surface.session.record_error(&format!(
+                                    "failed to queue combine failure for {request}: {e}"
+                                ));
+                            }
+                        },
                         Err(e) => {
-                            surface.session.record_error(&format!(
-                                "failed to queue combine failure for {request}: {e}"
-                            ));
+                            let msg = format_error_failure(request, &e);
+                            record_and_report_failure(
+                                &surface.root,
+                                &surface.session,
+                                request,
+                                attempt.runs,
+                                AttemptResult::Error,
+                                Some(e),
+                                &msg,
+                            );
                         }
                     }
                 }
@@ -814,16 +1017,32 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
                         CombineState::Combined => unreachable!(),
                     };
                     let runs = sorted_runs(rec.runs.clone());
-                    let msg = format_record_failure(&rec);
-                    record_and_report_failure(
-                        &root,
-                        &session,
-                        &request_owned,
-                        runs,
-                        result,
-                        None,
-                        &msg,
-                    );
+                    let rec_path = combine_record_path(&root, &request_owned);
+                    match format_record_failure(&rec, &rec_path) {
+                        Ok(msg) => {
+                            record_and_report_failure(
+                                &root,
+                                &session,
+                                &request_owned,
+                                runs,
+                                result,
+                                None,
+                                &msg,
+                            );
+                        }
+                        Err(e) => {
+                            let msg = format_error_failure(&request_owned, &e);
+                            record_and_report_failure(
+                                &root,
+                                &session,
+                                &request_owned,
+                                runs,
+                                AttemptResult::Error,
+                                Some(e),
+                                &msg,
+                            );
+                        }
+                    }
                 }
                 Ok(_) => {
                     let err_text = String::from_utf8_lossy(&err).trim().to_string();
@@ -1061,6 +1280,21 @@ fn build_request_status(
             status
         }
         Ok(Readiness::Ready) => {
+            if let Some(ref rec) = record {
+                match request_is_done(&surface.root, &request, rec) {
+                    Ok(true) => {
+                        status.state = "done".to_string();
+                        populate_record_metadata(&surface.root, rec, &mut status);
+                        return status;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        status.state = "error".to_string();
+                        status.error = Some(e);
+                        return status;
+                    }
+                }
+            }
             let current_runs = match resolve_current_run_tips(&surface.root, &request) {
                 Ok(t) => t,
                 Err(e) => {
@@ -1161,6 +1395,11 @@ pub fn push_request(surface: &Surface, request: &str) -> Result<(), RequestActio
             record.state
         )));
     }
+    if request_is_done(&surface.root, request, &record).map_err(RequestActionError::Internal)? {
+        return Err(RequestActionError::Conflict(format!(
+            "request {request} is done: its branches were already merged and removed"
+        )));
+    }
 
     let mut published =
         load_published_record(&surface.root, request).map_err(RequestActionError::Internal)?;
@@ -1224,6 +1463,11 @@ pub fn open_request_pull_request(
             record.state
         )));
     }
+    if request_is_done(&surface.root, request, &record).map_err(RequestActionError::Internal)? {
+        return Err(RequestActionError::Conflict(format!(
+            "request {request} is done: its branches were already merged and removed"
+        )));
+    }
 
     let mut published =
         load_published_record(&surface.root, request).map_err(RequestActionError::Internal)?;
@@ -1260,5 +1504,138 @@ pub fn open_request_pull_request(
             ));
             Err(RequestActionError::Internal(e))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write_test_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn a_combined_run_without_a_summary_errors_naming_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("missing-summary-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        write_test_file(&repo.join("README.md"), "hello\n");
+        write_test_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-q", "-m", "initial"]);
+        let base_sha = run_git(&repo, &["rev-parse", "HEAD"]);
+
+        let wt_run = repo.join(".wt/MS1");
+        std::fs::create_dir_all(repo.join(".wt")).unwrap();
+        assert!(Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "wip/MS1"])
+            .arg(&wt_run)
+            .arg(&base_sha)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        write_test_file(&wt_run.join("ms1.txt"), "one\n");
+        run_git(&wt_run, &["add", "ms1.txt"]);
+        run_git(&wt_run, &["commit", "-q", "-m", "feat: MS1"]);
+        assert!(Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&wt_run)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+
+        write_test_file(&repo.join(".wt/tasks/MS1.md"), "# Task MS1\n");
+        write_test_file(
+            &repo.join(".wt/MS1.start.json"),
+            &format!(
+                r#"{{"id":"MS1","pid":999999,"started_at":100,"base_sha":"{base_sha}","task_file":".wt/tasks/MS1.md","research":false,"request":"req-ms"}}"#
+            ),
+        );
+        let summary_path = repo.join(".wt/MS1.json");
+        write_test_file(
+            &summary_path,
+            r#"{"id":"MS1","outcome":"verified","branch":"wip/MS1","turns":2,"seconds":5,"cost_usd":0.01,"final_message":"done"}"#,
+        );
+        write_test_file(
+            &repo.join(".wt/MS1.checks.json"),
+            r#"{"flags":[],"fallbacks":[]}"#,
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = crate::combine::combine_in(&repo, "req-ms", &mut out, &mut err);
+        assert_eq!(code, 0, "combine failed: {}", String::from_utf8_lossy(&err));
+        assert_eq!(run_is_combined(&repo, "MS1", Some("req-ms")), Ok(true));
+
+        std::fs::remove_file(&summary_path).unwrap();
+        let err_msg = run_is_combined(&repo, "MS1", Some("req-ms")).unwrap_err();
+        assert!(
+            err_msg.contains(".wt/MS1.json"),
+            "expected error to contain .wt/MS1.json, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn a_combined_run_with_non_string_branch_errors_naming_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("non-string-branch-repo");
+        write_test_file(
+            &repo.join(".wt/combined/req-ns.json"),
+            r#"{"request":"req-ns","state":"combined","branch":"request/req-ns","base":"0000000","runs":[{"id":"NS1","tip":"1111111"}],"commits":["1111111"]}"#,
+        );
+        write_test_file(
+            &repo.join(".wt/NS1.json"),
+            r#"{"id":"NS1","outcome":"verified","branch":42}"#,
+        );
+
+        let err_msg = run_is_combined(&repo, "NS1", Some("req-ns")).unwrap_err();
+        assert!(
+            err_msg.contains(".wt/NS1.json"),
+            "expected error to contain .wt/NS1.json, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn a_combined_run_with_git_error_returns_error_naming_run_and_branch() {
+        let d = tempfile::tempdir().unwrap();
+        let non_repo = d.path().join("not-a-git-repo");
+        write_test_file(
+            &non_repo.join(".wt/combined/req-ge.json"),
+            r#"{"request":"req-ge","state":"combined","branch":"request/req-ge","base":"0000000","runs":[{"id":"GE1","tip":"1111111"}],"commits":["1111111"]}"#,
+        );
+        write_test_file(
+            &non_repo.join(".wt/GE1.json"),
+            r#"{"id":"GE1","outcome":"verified","branch":"wip/GE1"}"#,
+        );
+
+        let err_msg = run_is_combined(&non_repo, "GE1", Some("req-ge")).unwrap_err();
+        assert!(
+            err_msg.contains("GE1") && err_msg.contains("wip/GE1"),
+            "expected error to name run and branch, got: {err_msg}"
+        );
     }
 }

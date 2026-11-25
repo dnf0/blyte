@@ -1066,3 +1066,55 @@ fn shell_does_not_restart_when_open_edits_are_unchanged() {
     let pid2 = second.stdout.trim().to_string();
     assert_eq!(pid1, pid2);
 }
+
+#[test]
+fn read_tool_refuses_surface_token_and_blyte_env() {
+    let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(tmp_base).unwrap();
+    let root = tempfile::tempdir_in(tmp_base).unwrap();
+    let home = tempfile::tempdir_in(tmp_base).unwrap();
+    let xdg = tempfile::tempdir_in(tmp_base).unwrap();
+    let _env = EnvGuard::set(xdg.path(), home.path());
+
+    struct XdgStateGuard(Option<OsString>);
+    impl Drop for XdgStateGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
+    let _xdg_state = XdgStateGuard(std::env::var_os("XDG_STATE_HOME"));
+    std::env::remove_var("XDG_STATE_HOME");
+
+    let token_path = sandbox::surface_token_path(root.path()).unwrap();
+    std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    std::fs::write(&token_path, "surface-token-read-tool-secret\n").unwrap();
+
+    let env_path = home.path().join(".config/blyte/env");
+    std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+    std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-read-tool-secret\n").unwrap();
+
+    let shell = blyte_agent::shell::LocalShell::new();
+    let fs = blyte_agent::fs::LocalFs;
+    for (path, secret) in [
+        (&token_path, "surface-token-read-tool-secret"),
+        (&env_path, "blyte-env-read-tool-secret"),
+    ] {
+        let outcome = blyte_agent::tools::execute(
+            root.path(),
+            &shell,
+            &fs,
+            "read",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        );
+        assert!(
+            outcome.is_error,
+            "read tool must refuse {}: {}",
+            path.display(),
+            outcome.content
+        );
+        assert!(!outcome.content.contains(secret), "{}", outcome.content);
+    }
+}

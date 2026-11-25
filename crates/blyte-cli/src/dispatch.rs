@@ -6,6 +6,15 @@ use std::process::Command;
 
 use crate::cli::{DispatchArgs, ReviewArgs};
 
+pub const DEFAULT_MAX_COST_USD: f64 = 25.0;
+
+fn resolve_max_cost(flag: Option<f64>, config: Option<f64>) -> f64 {
+    match flag.or(config) {
+        Some(v) => v,
+        None => DEFAULT_MAX_COST_USD,
+    }
+}
+
 pub const DISPATCH_RULES: &str = r#"Rules:
 - Stay within the task. If it cannot pass without a small change elsewhere, make the smallest one and say so.
 - Write no comments in code: not to explain it, not to mark a section, not to note an assumption or a TODO. The check fails on any comment you add. If something needs saying, say it in your final report. Documentation comments a tool reads (///, //!, /** */) and tool directives (noqa, eslint-disable, SAFETY:) are the only exceptions; do not use them to get around this rule.
@@ -317,7 +326,7 @@ struct ImplementerConfig<'a> {
     model: Option<&'a str>,
     max_seconds: u64,
     max_turns: u32,
-    max_cost: Option<f64>,
+    max_cost: f64,
     fold_budget: Option<usize>,
     sandbox: &'a str,
     network: &'a str,
@@ -418,9 +427,7 @@ where
     if let Some(m) = cfg.model {
         cmd.arg("--model").arg(m);
     }
-    if let Some(c) = cfg.max_cost {
-        cmd.arg("--max-cost").arg(c.to_string());
-    }
+    cmd.arg("--max-cost").arg(cfg.max_cost.to_string());
     if let Some(fb) = cfg.fold_budget {
         cmd.arg("--fold-budget").arg(fb.to_string());
     }
@@ -928,16 +935,84 @@ impl Drop for BaseWorktreeGuard {
     }
 }
 
+fn copy_report_file(
+    scratch_report: &Path,
+    dest: &Path,
+    research_sources: Option<&str>,
+) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "could not create directory {} for {}: {e}",
+                    parent.display(),
+                    dest.display()
+                )
+            })?;
+        }
+    }
+    std::fs::copy(scratch_report, dest)
+        .map_err(|e| format!("could not copy research report to {}: {e}", dest.display()))?;
+    if let Some(block) = research_sources {
+        append_source_state(dest, block);
+    }
+    Ok(())
+}
+
+fn copy_research_reports(
+    scratch_report: &Path,
+    research_report_path: &Path,
+    report_to: Option<&Path>,
+    research_sources: Option<&str>,
+) -> Result<(), String> {
+    copy_report_file(scratch_report, research_report_path, research_sources)?;
+    if let Some(dest) = report_to {
+        copy_report_file(scratch_report, dest, research_sources)?;
+    }
+    Ok(())
+}
+
 fn finish_summary(summary: &DispatchSummary, root: &Path) -> i32 {
+    finish_summary_with_writers(
+        summary,
+        root,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+fn finish_summary_with_writers(
+    summary: &DispatchSummary,
+    root: &Path,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+) -> i32 {
     let wt_parent = root.join(".wt");
-    let _ = std::fs::create_dir_all(&wt_parent);
     let json_str = serde_json::to_string_pretty(summary).unwrap();
     let summary_path = wt_parent.join(format!("{}.json", summary.id));
-    let _ = std::fs::write(&summary_path, format!("{json_str}\n"));
-    let notify_outcome = crate::surface_notify::notify_runs_changed(root, &summary.id);
-    crate::surface_notify::report(&notify_outcome, &mut std::io::stderr());
-    println!("{json_str}");
-    summary.exit
+    let write_failed = match std::fs::create_dir_all(&wt_parent)
+        .and_then(|()| std::fs::write(&summary_path, format!("{json_str}\n")))
+    {
+        Ok(()) => false,
+        Err(e) => {
+            let _ = writeln!(
+                stderr,
+                "blyte: could not write {}: {e}",
+                summary_path.display()
+            );
+            true
+        }
+    };
+    if !write_failed {
+        let notify_outcome = crate::surface_notify::notify_runs_changed(root, &summary.id);
+        crate::surface_notify::report(&notify_outcome, stderr);
+    }
+    let _ = writeln!(stdout, "{json_str}");
+    if write_failed && summary.exit == 0 {
+        1
+    } else {
+        summary.exit
+    }
 }
 
 pub fn branch_exists_message(root: &Path, branch: &str, id: &str) -> String {
@@ -1169,7 +1244,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300),
         )
     };
-    let max_cost = args.max_cost_usd.or(dispatch_cfg.max_cost);
+    let max_cost = resolve_max_cost(args.max_cost_usd, dispatch_cfg.max_cost);
     let fold_budget = args.fold_budget.or(dispatch_cfg.fold_budget);
     let network = args
         .network
@@ -2132,20 +2207,34 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             .map(|m| m.len() > 0)
             .unwrap_or(false);
         if is_non_empty {
-            let _ = std::fs::copy(&scratch_report, &research_report_path);
-            if let Some(block) = &research_sources {
-                append_source_state(&research_report_path, block);
-            }
-            if let Some(ref report_to) = args.report_to {
-                if let Some(parent) = report_to.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        let _ = std::fs::create_dir_all(parent);
+            if let Err(err_msg) = copy_research_reports(
+                &scratch_report,
+                &research_report_path,
+                args.report_to.as_deref(),
+                research_sources.as_deref(),
+            ) {
+                if research_report_path.exists() {
+                    if let Err(err) =
+                        crate::provenance::mark_if_unverified(&research_report_path, "error", None)
+                    {
+                        eprintln!(
+                            "error: could not mark {} as not verified: {err}",
+                            research_report_path.display()
+                        );
                     }
                 }
-                let _ = std::fs::copy(&scratch_report, report_to);
-                if let Some(block) = &research_sources {
-                    append_source_state(report_to, block);
-                }
+                let summary = build_error_summary(
+                    &args.id,
+                    &worktree_dir,
+                    branch,
+                    err_msg,
+                    args.sandbox.clone(),
+                    &log_path,
+                    &report_path,
+                    gate_source,
+                    Vec::new(),
+                );
+                return finish_summary(&summary, &root);
             }
         }
     }
@@ -3352,5 +3441,83 @@ mod tests {
         assert_eq!(reads.len(), 20);
         assert_eq!(reads[0], "cat ~/secret/0.txt");
         assert_eq!(reads[19], "cat ~/secret/19.txt");
+    }
+
+    fn sample_summary(id: &str, exit: i32) -> DispatchSummary {
+        DispatchSummary {
+            id: id.to_string(),
+            worktree: "/tmp/wt".to_string(),
+            branch: format!("wip/{id}"),
+            outcome: if exit == 0 { "verified" } else { "gate_failed" },
+            exit,
+            error: None,
+            commits: Vec::new(),
+            changed_files: Vec::new(),
+            final_message: Some("ok".to_string()),
+            turns: 1,
+            gate_attempts: 1,
+            gate_failures: Vec::new(),
+            cost_usd: Some(0.01),
+            model: None,
+            seconds: 1,
+            sandbox: "off".to_string(),
+            log: "/tmp/wt.log".to_string(),
+            report: "/tmp/wt.report.json".to_string(),
+            gate_source: "flag",
+            research_report: None,
+            base_check_seconds: None,
+            warnings: Vec::new(),
+            fix_round: None,
+        }
+    }
+
+    #[test]
+    fn finish_summary_reports_error_when_wt_is_a_regular_file() {
+        let d = tempfile::tempdir().unwrap();
+        let wt_file = d.path().join(".wt");
+        std::fs::write(&wt_file, "not a dir").unwrap();
+
+        let summary_ok = sample_summary("FC1", 0);
+        let mut out_ok = Vec::new();
+        let mut err_ok = Vec::new();
+        let code_ok = finish_summary_with_writers(&summary_ok, d.path(), &mut out_ok, &mut err_ok);
+        assert_eq!(code_ok, 1);
+        let stderr_ok = String::from_utf8(err_ok).unwrap();
+        let expected_path = wt_file.join("FC1.json");
+        assert!(
+            stderr_ok.contains("blyte: could not write"),
+            "stderr: {stderr_ok}"
+        );
+        assert!(
+            stderr_ok.contains(&expected_path.display().to_string()),
+            "stderr: {stderr_ok}"
+        );
+        let parsed_ok: serde_json::Value = serde_json::from_slice(&out_ok).unwrap();
+        assert_eq!(parsed_ok["id"], "FC1");
+        assert_eq!(parsed_ok["exit"], 0);
+
+        let summary_fail = sample_summary("FC3", 3);
+        let mut out_fail = Vec::new();
+        let mut err_fail = Vec::new();
+        let code_fail =
+            finish_summary_with_writers(&summary_fail, d.path(), &mut out_fail, &mut err_fail);
+        assert_eq!(code_fail, 3);
+        let stderr_fail = String::from_utf8(err_fail).unwrap();
+        assert!(
+            stderr_fail.contains(&wt_file.join("FC3.json").display().to_string()),
+            "stderr: {stderr_fail}"
+        );
+        let parsed_fail: serde_json::Value = serde_json::from_slice(&out_fail).unwrap();
+        assert_eq!(parsed_fail["id"], "FC3");
+        assert_eq!(parsed_fail["exit"], 3);
+    }
+
+    #[test]
+    fn resolve_max_cost_precedence() {
+        assert_eq!(resolve_max_cost(None, None), 25.0);
+        assert_eq!(resolve_max_cost(None, None), DEFAULT_MAX_COST_USD);
+        assert_eq!(resolve_max_cost(None, Some(8.0)), 8.0);
+        assert_eq!(resolve_max_cost(Some(3.0), Some(8.0)), 3.0);
+        assert_eq!(resolve_max_cost(Some(3.0), None), 3.0);
     }
 }

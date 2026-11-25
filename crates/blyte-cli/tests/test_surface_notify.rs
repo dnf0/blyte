@@ -1,11 +1,38 @@
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use blyte_agent::sandbox::surface_token_path;
 use blyte_cli::serve::TOKEN_HEADER;
 use blyte_cli::surface_notify::{notify_runs_changed, report, NotifyOutcome};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct StateHomeGuard {
+    prev: Option<OsString>,
+    _dir: tempfile::TempDir,
+}
+
+impl StateHomeGuard {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        Self { prev, _dir: dir }
+    }
+}
+
+impl Drop for StateHomeGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+    }
+}
 
 fn write_file(path: &Path, content: &str) {
     if let Some(parent) = path.parent() {
@@ -21,7 +48,8 @@ fn write_surface_files(root: &Path, port: u16, token: &str) {
             r#"{{"pid":12345,"port":{port},"session_id":"surface-test","started_at":1700000000}}"#
         ),
     );
-    write_file(&root.join(".wt/surface.token"), &format!("{token}\n"));
+    let token_path = surface_token_path(root).unwrap();
+    write_file(&token_path, &format!("{token}\n"));
 }
 
 fn spawn_single_response_listener(
@@ -58,6 +86,8 @@ fn spawn_single_response_listener(
 
 #[test]
 fn no_surface_files_is_silent() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let outcome = notify_runs_changed(dir.path(), "T1");
     assert_eq!(outcome, NotifyOutcome::NoSurface);
@@ -69,6 +99,8 @@ fn no_surface_files_is_silent() {
 
 #[test]
 fn a_running_surface_is_told() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let token = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
     let (port, recorded, handle) = spawn_single_response_listener("HTTP/1.1 202 Accepted", "{}");
@@ -103,6 +135,8 @@ fn a_running_surface_is_told() {
 
 #[test]
 fn a_dead_surface_is_reported_not_fatal() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let dead_port = listener.local_addr().unwrap().port();
@@ -142,6 +176,8 @@ fn a_dead_surface_is_reported_not_fatal() {
 
 #[test]
 fn an_unreadable_surface_file_is_reported() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let surface_path = dir.path().join(".wt/surface.json");
     write_file(&surface_path, "not json");
@@ -164,6 +200,8 @@ fn an_unreadable_surface_file_is_reported() {
 
 #[test]
 fn a_wrong_token_is_reported() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let secret_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let (port, _recorded, handle) =
@@ -191,4 +229,19 @@ fn a_wrong_token_is_reported() {
         !msg.contains(secret_token),
         "token must never appear in error message: {msg}"
     );
+}
+
+#[test]
+fn leftover_wt_surface_token_alone_gives_no_surface() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        &dir.path().join(".wt/surface.json"),
+        r#"{"pid":12345,"port":12345,"session_id":"surface-test","started_at":1700000000}"#,
+    );
+    write_file(&dir.path().join(".wt/surface.token"), "stale-token\n");
+
+    let outcome = notify_runs_changed(dir.path(), "T5");
+    assert_eq!(outcome, NotifyOutcome::NoSurface);
 }

@@ -258,7 +258,7 @@ pub struct DispatchArgs {
     #[arg(long)]
     pub max_turns: Option<u32>,
 
-    /// Maximum spend in USD
+    /// Maximum spend in USD (default 25)
     #[arg(long = "max-cost")]
     pub max_cost_usd: Option<f64>,
 

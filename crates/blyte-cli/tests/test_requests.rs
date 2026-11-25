@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_cli::cli::{ReviewVerdict, SurfaceArgs};
-use blyte_cli::combine::{CombineRecord, CombineState};
+use blyte_cli::combine::{CombineCheck, CombineRecord, CombineState, CombinedRun};
 use blyte_cli::http::{Request, Response};
 use blyte_cli::queue_actions::{decide, record_verdict, set_hold, Action};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::requests::{
     load_attempt_record, load_published_record, maybe_combine, request_readiness,
-    write_attempt_record, AttemptResult, Publisher, Readiness, RealPublisher, RequestsState,
+    write_attempt_record, AttemptRecord, AttemptResult, Publisher, Readiness, RealPublisher,
+    RequestsState,
 };
 use blyte_cli::serve::{generate_token, route, run_with_hooks, Surface, TOKEN_HEADER};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
@@ -1952,9 +1953,21 @@ fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
     }
 }
 
+fn ensure_isolated_state_home() {
+    static STATE_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    STATE_HOME.get_or_init(|| {
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("test-requests-state-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("XDG_STATE_HOME", &base);
+        base
+    });
+}
+
 fn start_stoppable_surface(
     repo: &Path,
 ) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
+    ensure_isolated_state_home();
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -2166,4 +2179,279 @@ fn the_timer_thread_ends_with_the_server() {
 
     assert!(!root.join(".wt/combined/req-after-stop.json").exists());
     assert!(!branch_exists(root, "blyte/req-after-stop"));
+}
+
+#[test]
+fn a_conflict_record_without_files_is_reported_as_an_error_naming_the_field() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+
+    let tip = create_run_branch(root, "CFN1", &base, "a.txt", "v1\n", "feat: cfn1");
+    write_start_file(root, "CFN1", Some("req-bad-conflict"), &base, 100, false);
+    write_summary(root, "CFN1", "verified", Some("wip/CFN1"));
+    write_checks(root, "CFN1", &[]);
+
+    let runs = vec![CombinedRun {
+        id: "CFN1".to_string(),
+        tip,
+    }];
+    let record = CombineRecord {
+        request: "req-bad-conflict".to_string(),
+        state: CombineState::Conflict,
+        branch: "blyte/req-bad-conflict".to_string(),
+        base,
+        runs: runs.clone(),
+        commits: Vec::new(),
+        check: CombineCheck::Ran,
+        conflicting_run: Some("CFN1".to_string()),
+        conflicting_files: Vec::new(),
+        failing_step: None,
+        output_tail: None,
+    };
+    let rec_path = root.join(".wt/combined/req-bad-conflict.json");
+    std::fs::create_dir_all(rec_path.parent().unwrap()).unwrap();
+    std::fs::write(&rec_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+    write_attempt_record(
+        root,
+        "req-bad-conflict",
+        &AttemptRecord {
+            runs,
+            result: AttemptResult::Conflict,
+            error: None,
+            reported: false,
+        },
+    )
+    .unwrap();
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&surface, "req-bad-conflict").unwrap());
+    wait_for_idle_entries(&surface.session, 1);
+
+    let captured = prompts.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let msg = &captured[0];
+    assert!(msg.contains("conflicting_files"), "msg: {msg}");
+    assert!(
+        msg.contains(".wt/combined/req-bad-conflict.json"),
+        "msg: {msg}"
+    );
+    assert!(!msg.contains("(none listed)"), "msg: {msg}");
+
+    let attempt = load_attempt_record(root, "req-bad-conflict")
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.result, AttemptResult::Error);
+    assert!(attempt.reported);
+    let err = attempt.error.as_deref().unwrap_or("");
+    assert!(err.contains("conflicting_files"), "err: {err}");
+    assert!(
+        err.contains(".wt/combined/req-bad-conflict.json"),
+        "err: {err}"
+    );
+    assert!(!err.contains("(none listed)"), "err: {err}");
+}
+
+#[test]
+fn a_check_failed_record_without_output_is_reported_as_an_error_naming_the_field() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+
+    let tip = create_run_branch(root, "CFO1", &base, "a.txt", "v1\n", "feat: cfo1");
+    write_start_file(root, "CFO1", Some("req-bad-cf"), &base, 100, false);
+    write_summary(root, "CFO1", "verified", Some("wip/CFO1"));
+    write_checks(root, "CFO1", &[]);
+
+    let runs = vec![CombinedRun {
+        id: "CFO1".to_string(),
+        tip,
+    }];
+    let record = CombineRecord {
+        request: "req-bad-cf".to_string(),
+        state: CombineState::CheckFailed,
+        branch: "blyte/req-bad-cf".to_string(),
+        base,
+        runs: runs.clone(),
+        commits: Vec::new(),
+        check: CombineCheck::Ran,
+        conflicting_run: None,
+        conflicting_files: Vec::new(),
+        failing_step: Some("cargo test".to_string()),
+        output_tail: Some(String::new()),
+    };
+    let rec_path = root.join(".wt/combined/req-bad-cf.json");
+    std::fs::create_dir_all(rec_path.parent().unwrap()).unwrap();
+    std::fs::write(&rec_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+    write_attempt_record(
+        root,
+        "req-bad-cf",
+        &AttemptRecord {
+            runs,
+            result: AttemptResult::CheckFailed,
+            error: None,
+            reported: false,
+        },
+    )
+    .unwrap();
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&surface, "req-bad-cf").unwrap());
+    wait_for_idle_entries(&surface.session, 1);
+
+    let captured = prompts.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let msg = &captured[0];
+    assert!(msg.contains("output_tail"), "msg: {msg}");
+    assert!(msg.contains(".wt/combined/req-bad-cf.json"), "msg: {msg}");
+
+    let attempt = load_attempt_record(root, "req-bad-cf").unwrap().unwrap();
+    assert_eq!(attempt.result, AttemptResult::Error);
+    assert!(attempt.reported);
+    let err = attempt.error.as_deref().unwrap_or("");
+    assert!(err.contains("output_tail"), "err: {err}");
+    assert!(err.contains(".wt/combined/req-bad-cf.json"), "err: {err}");
+}
+
+#[test]
+fn a_combined_request_with_all_branches_deleted_is_done() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "DN1", &base, "dn1.txt", "one\n", "feat: dn1");
+    write_start_file(root, "DN1", Some("req-done-all"), &base, now, false);
+    write_summary(root, "DN1", "verified", Some("wip/DN1"));
+    write_checks(root, "DN1", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/1"));
+    assert!(maybe_combine(&surface, "req-done-all").unwrap());
+    surface.requests.wait_for_idle("req-done-all");
+
+    git(root, &["branch", "-D", "wip/DN1"]);
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-done-all");
+    assert_eq!(arr[0]["state"], "done");
+    assert!(arr[0]["error"].is_null());
+    assert_eq!(arr[0]["branch"], "blyte/req-done-all");
+    assert_eq!(arr[0]["base"], base);
+    assert_eq!(arr[0]["check"], "ran");
+    assert_eq!(arr[0]["commits"].as_array().unwrap().len(), 1);
+    assert!(!maybe_combine(&surface, "req-done-all").unwrap());
+}
+
+#[test]
+fn a_combined_request_with_one_of_two_branches_deleted_is_done() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "DP1", &base, "dp1.txt", "one\n", "feat: dp1");
+    create_run_branch(root, "DP2", &base, "dp2.txt", "two\n", "feat: dp2");
+    write_start_file(root, "DP1", Some("req-done-part"), &base, now, false);
+    write_start_file(root, "DP2", Some("req-done-part"), &base, now + 1, false);
+    write_summary(root, "DP1", "verified", Some("wip/DP1"));
+    write_summary(root, "DP2", "verified", Some("wip/DP2"));
+    write_checks(root, "DP1", &[]);
+    write_checks(root, "DP2", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/2"));
+    assert!(maybe_combine(&surface, "req-done-part").unwrap());
+    surface.requests.wait_for_idle("req-done-part");
+
+    git(root, &["branch", "-D", "wip/DP1"]);
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 2));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-done-part");
+    assert_eq!(arr[0]["state"], "done");
+    assert!(arr[0]["error"].is_null());
+    assert_eq!(arr[0]["branch"], "blyte/req-done-part");
+    assert!(!maybe_combine(&surface, "req-done-part").unwrap());
+}
+
+#[test]
+fn a_combined_request_with_an_unlisted_runs_branch_deleted_is_an_error() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "UL1", &base, "ul1.txt", "one\n", "feat: ul1");
+    write_start_file(root, "UL1", Some("req-unlisted"), &base, now, false);
+    write_summary(root, "UL1", "verified", Some("wip/UL1"));
+    write_checks(root, "UL1", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/3"));
+    assert!(maybe_combine(&surface, "req-unlisted").unwrap());
+    surface.requests.wait_for_idle("req-unlisted");
+
+    create_run_branch(root, "UL2", &base, "ul2.txt", "two\n", "feat: ul2");
+    write_start_file(root, "UL2", Some("req-unlisted"), &base, now + 1, false);
+    write_summary(root, "UL2", "verified", Some("wip/UL2"));
+    write_checks(root, "UL2", &[]);
+    git(root, &["branch", "-D", "wip/UL2"]);
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 2));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-unlisted");
+    assert_eq!(arr[0]["state"], "error");
+    let err = arr[0]["error"].as_str().unwrap();
+    assert!(err.contains("UL2"), "err: {err}");
+    assert!(err.contains("wip/UL2"), "err: {err}");
+}
+
+#[test]
+fn a_request_without_a_combine_record_and_a_deleted_branch_is_an_error() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "NR1", &base, "nr1.txt", "one\n", "feat: nr1");
+    write_start_file(root, "NR1", Some("req-no-rec"), &base, now, false);
+    write_summary(root, "NR1", "verified", Some("wip/NR1"));
+    write_checks(root, "NR1", &[]);
+    git(root, &["branch", "-D", "wip/NR1"]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/4"));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-no-rec");
+    assert_eq!(arr[0]["state"], "error");
+    let err = arr[0]["error"].as_str().unwrap();
+    assert!(err.contains("NR1"), "err: {err}");
+    assert!(err.contains("wip/NR1"), "err: {err}");
+}
+
+#[test]
+fn a_combined_request_with_no_branch_deleted_stays_combined() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "KC1", &base, "kc1.txt", "one\n", "feat: kc1");
+    write_start_file(root, "KC1", Some("req-keep-comb"), &base, now, false);
+    write_summary(root, "KC1", "verified", Some("wip/KC1"));
+    write_checks(root, "KC1", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/5"));
+    assert!(maybe_combine(&surface, "req-keep-comb").unwrap());
+    surface.requests.wait_for_idle("req-keep-comb");
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-keep-comb");
+    assert_eq!(arr[0]["state"], "combined");
+    assert!(arr[0]["error"].is_null());
 }

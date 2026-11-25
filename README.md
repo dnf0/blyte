@@ -72,7 +72,10 @@ Named after rust fungus (the blight Rust is named after), and bytes.
   `grep` and `glob` run in-process on ripgrep's libraries; no tool result can flood the context.
 - **Sandboxed by default.** Commands cannot write outside the workspace (macOS Seatbelt, Linux
   Landlock), read credential stores or `.env` files (macOS), or see credential-looking environment
-  variables; `--network=off` keeps code on the machine.
+  variables; `--network=off` keeps code on the machine. On macOS the sandbox also blocks ssh agent
+  sockets unless `--pass-env SSH_AUTH_SOCK` is given (which lets a run push over ssh); on Linux
+  Landlock does not control unix socket connections by path, so only `SSH_AUTH_SOCK` and
+  `SSH_AGENT_PID` scrubbing applies.
 - **Honest numbers.** `--report` writes one JSON record per run: outcome, turns, true cost,
   per-call usage, where the time went, and the run's security settings.
 - **Small on purpose.** Features that did not win in measurement (a daemon, an MCP server, a

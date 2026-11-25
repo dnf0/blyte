@@ -2,17 +2,22 @@
 //! (#91) left Linux runs able to write anywhere the user can (2026-09-27).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use blyte_agent::sandbox::{conversation_profile, default_profile, Profile};
+use blyte_agent::sandbox::{conversation_profile, default_profile, read_allowed, Profile};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn a_string_profile_is_a_seatbelt_profile() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let p: Profile = String::from("(version 1)").into();
     assert_eq!(p, Profile::Seatbelt("(version 1)".into()));
 }
 
 #[test]
 fn the_default_profile_matches_the_platform() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let d = tempfile::tempdir().unwrap();
     let p = default_profile(d.path(), &[]);
     if cfg!(target_os = "macos") {
@@ -38,6 +43,7 @@ fn the_default_profile_matches_the_platform() {
 
 #[test]
 fn conversation_profile_allows_only_wt_tasks_for_writes() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let d = tempfile::tempdir_in(tmp_base).unwrap();
@@ -102,13 +108,71 @@ fn conversation_profile_allows_only_wt_tasks_for_writes() {
     }
 }
 
+#[test]
+fn read_allowed_excludes_blyte_state_and_config_dirs() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = Path::new("/home/someone");
+    let allowed = read_allowed(Some(home), &[]);
+    let state_dir = home.join(".local/state/blyte");
+    let config_dir = home.join(".config/blyte");
+    for secret_dir in [&state_dir, &config_dir] {
+        assert!(
+            !allowed.iter().any(|p| secret_dir.starts_with(p)),
+            "{} must not be covered by {allowed:?}",
+            secret_dir.display()
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
 
-    use blyte_agent::sandbox::{available, conversation_profile, Profile};
+    use blyte_agent::sandbox::{
+        available, conversation_profile, conversation_profile_net, default_profile_net,
+        landlock_abi, surface_token_path, Profile,
+    };
     use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
+
+    use super::ENV_LOCK;
+
+    struct EnvGuard {
+        home: Option<OsString>,
+        xdg_state: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(home: Option<&Path>, xdg_state: Option<&Path>) -> Self {
+            let prev = Self {
+                home: std::env::var_os("HOME"),
+                xdg_state: std::env::var_os("XDG_STATE_HOME"),
+            };
+            match home {
+                Some(p) => std::env::set_var("HOME", p),
+                None => std::env::remove_var("HOME"),
+            }
+            match xdg_state {
+                Some(p) => std::env::set_var("XDG_STATE_HOME", p),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+            prev
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.xdg_state {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
 
     fn landlock_or_skip() -> bool {
         if available() {
@@ -124,6 +188,7 @@ mod linux {
 
     #[test]
     fn a_landlocked_command_can_write_inside_and_not_outside() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !landlock_or_skip() {
             return;
         }
@@ -155,6 +220,7 @@ mod linux {
 
     #[test]
     fn a_landlocked_persistent_session_is_confined_too() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !landlock_or_skip() {
             return;
         }
@@ -186,6 +252,7 @@ mod linux {
 
     #[test]
     fn conversation_profile_writes_only_in_wt_tasks_not_root_git_or_wt_passed() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !landlock_or_skip() {
             return;
         }
@@ -237,6 +304,79 @@ mod linux {
                 !denied_path.exists(),
                 "{} must not be created",
                 denied_path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn landlock_profiles_cannot_read_surface_token_or_blyte_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if !landlock_or_skip() {
+            eprintln!("skipped: sandbox cannot nest here");
+            return;
+        }
+        let real_home = std::env::var("HOME").unwrap();
+        let fake_home = tempfile::tempdir_in(&real_home).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(Some(fake_home.path()), None);
+
+        let benign = repo.path().join("benign.txt");
+        std::fs::write(&benign, "benign-ok\n").unwrap();
+
+        let token_path = surface_token_path(repo.path()).unwrap();
+        std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        std::fs::write(&token_path, "surface-token-linux-secret\n").unwrap();
+
+        let env_path = fake_home.path().join(".config/blyte/env");
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-linux-secret\n").unwrap();
+
+        let conv_network = landlock_abi() < 4;
+        for profile in [
+            conversation_profile_net(repo.path(), &[], conv_network),
+            default_profile_net(repo.path(), &[], true),
+        ] {
+            let sh = LocalShell::sandboxed(profile);
+            let benign_res = sh
+                .exec(
+                    &format!("cat '{}'", benign.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_eq!(benign_res.exit_code, 0, "{}", benign_res.merged());
+            assert!(
+                benign_res.merged().contains("benign-ok"),
+                "{}",
+                benign_res.merged()
+            );
+
+            let token_res = sh
+                .exec(
+                    &format!("cat '{}'", token_path.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_ne!(token_res.exit_code, 0, "{}", token_res.merged());
+            assert!(
+                !token_res.merged().contains("surface-token-linux-secret"),
+                "{}",
+                token_res.merged()
+            );
+
+            let env_res = sh
+                .exec(
+                    &format!("cat '{}'", env_path.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_ne!(env_res.exit_code, 0, "{}", env_res.merged());
+            assert!(
+                !env_res.merged().contains("blyte-env-linux-secret"),
+                "{}",
+                env_res.merged()
             );
         }
     }

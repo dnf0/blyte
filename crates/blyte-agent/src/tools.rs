@@ -1375,20 +1375,7 @@ fn execute_unbounded(
                 let Some(id) = cmd_args.get(1).filter(|s| !s.is_empty()) else {
                     return ToolOutcome::err("dispatch needs an id");
                 };
-                cmd_builder
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                return match cmd_builder.spawn() {
-                    Ok(mut child) => {
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                        });
-                        ToolOutcome::ok(format!(
-                            "started {id} in the background; use wait to learn when it ends"
-                        ))
-                    }
-                    Err(e) => ToolOutcome::err(format!("blyte failed to spawn: {e}")),
-                };
+                return run_background_dispatch(cmd_builder, root, id);
             }
 
             match run_command_bounded(cmd_builder, command_timeout) {
@@ -1429,6 +1416,112 @@ fn execute_unbounded(
             }
         }
         other => ToolOutcome::err(format!("unknown tool: {other}")),
+    }
+}
+
+const BACKGROUND_STARTUP_WAIT: Duration = Duration::from_secs(2);
+const BACKGROUND_STARTUP_POLL: Duration = Duration::from_millis(50);
+
+fn run_background_dispatch(
+    mut cmd_builder: std::process::Command,
+    root: &Path,
+    id: &str,
+) -> ToolOutcome {
+    let wt_dir = root.join(".wt");
+    let out_path = wt_dir.join(format!("{id}.dispatch.out"));
+    if let Err(e) = std::fs::create_dir_all(&wt_dir) {
+        return ToolOutcome::err(format!(
+            "cannot create {} for {}: {e}",
+            wt_dir.display(),
+            out_path.display()
+        ));
+    }
+    let out_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&out_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return ToolOutcome::err(format!("cannot open {}: {e}", out_path.display()));
+        }
+    };
+    let err_file = match out_file.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            return ToolOutcome::err(format!(
+                "cannot clone output file {}: {e}",
+                out_path.display()
+            ));
+        }
+    };
+    cmd_builder
+        .stdout(std::process::Stdio::from(out_file))
+        .stderr(std::process::Stdio::from(err_file));
+
+    let mut child = match cmd_builder.spawn() {
+        Ok(c) => c,
+        Err(e) => return ToolOutcome::err(format!("blyte failed to spawn: {e}")),
+    };
+    drop(cmd_builder);
+
+    let deadline = std::time::Instant::now() + BACKGROUND_STARTUP_WAIT;
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break None;
+                }
+                std::thread::sleep(BACKGROUND_STARTUP_POLL.min(deadline - now));
+            }
+            Err(e) => {
+                return ToolOutcome::err(format!("blyte wait failed for dispatch {id}: {e}"));
+            }
+        }
+    };
+
+    match exited {
+        Some(status) => {
+            let raw = match std::fs::read(&out_path) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => {
+                    return ToolOutcome::err(format!(
+                        "dispatch {id} exited ({status}), and reading {} failed: {e}",
+                        out_path.display()
+                    ));
+                }
+            };
+            let body = raw.trim_end();
+            if status.success() {
+                if body.is_empty() {
+                    ToolOutcome::ok(format!("dispatch {id} finished"))
+                } else {
+                    ToolOutcome::ok(format!("dispatch {id} finished\n{body}"))
+                }
+            } else {
+                let header = match status.code() {
+                    Some(code) => format!("dispatch {id} failed to start (exit {code})"),
+                    None => format!("dispatch {id} failed to start ({status})"),
+                };
+                if body.is_empty() {
+                    ToolOutcome::err(header)
+                } else {
+                    ToolOutcome::err(format!("{header}\n{body}"))
+                }
+            }
+        }
+        None => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            ToolOutcome::ok(format!(
+                "started {id} in the background; use wait to learn when it ends; output: {}",
+                out_path.display()
+            ))
+        }
     }
 }
 

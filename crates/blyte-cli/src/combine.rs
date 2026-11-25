@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use blyte_agent::run::{gate_steps, run_gate_steps};
+use blyte_agent::run::{cut_gate_output, gate_steps, run_gate_steps};
 use blyte_agent::shell::{LocalShell, Output, Shell};
 use serde::{Deserialize, Serialize};
 
@@ -503,9 +503,21 @@ fn run_combine_inner(
                 output_tail: None,
             }
         } else {
-            let (failing_step, raw_output) = match gate_result.failures.first() {
-                Some(f) => (f.step.clone(), f.output.as_str()),
-                None => (gate.clone(), gate_result.output.as_str()),
+            let (failing_step, output_tail) = match gate_result.failures.as_slice() {
+                [] => {
+                    return Err(format!(
+                        "combine check failed for {request} but no failing step was recorded"
+                    ));
+                }
+                [f] => (f.step.clone(), cut_gate_output(&f.output)),
+                many => {
+                    let steps = many
+                        .iter()
+                        .map(|f| f.step.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    (steps, cut_gate_output(&gate_result.output))
+                }
             };
             CombineRecord {
                 request: request.to_string(),
@@ -518,7 +530,7 @@ fn run_combine_inner(
                 conflicting_run: None,
                 conflicting_files: Vec::new(),
                 failing_step: Some(failing_step),
-                output_tail: Some(tail_output(raw_output, 50, 4000)),
+                output_tail: Some(output_tail),
             }
         }
     };
@@ -1543,6 +1555,77 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("broken-check"));
+    }
+
+    #[test]
+    fn a_failure_on_stdout_survives_many_stderr_lines() {
+        let gate = r#"echo "test thing ... FAILED"; i=0; while [ $i -lt 120 ]; do echo "Running tests/t$i" >&2; i=$((i+1)); done; exit 1"#;
+        let (dir, _base_sha) = init_repo(gate);
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-stdout",
+            "main",
+            100,
+            &[("a.txt", "hello\n", "add a")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-stdout", &mut out, &mut err);
+        assert_ne!(code, 0);
+
+        let record: CombineRecord = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".wt/combined/req-stdout.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.state, CombineState::CheckFailed);
+        let output_tail = record.output_tail.as_deref().unwrap_or("");
+        assert!(
+            output_tail.contains("test thing ... FAILED"),
+            "output_tail lost stdout failure:\n{output_tail}"
+        );
+    }
+
+    #[test]
+    fn every_failing_step_is_named() {
+        let step1 = "echo first-step-boom && exit 1";
+        let step2 = "echo second-step-boom && exit 1";
+        let (dir, _base_sha) = init_repo(&format!("{step1}\n{step2}"));
+        let root = dir.path();
+        create_run_branch(
+            root,
+            "T1",
+            "req-both",
+            "main",
+            100,
+            &[("a.txt", "hello\n", "add a")],
+            Some("verified"),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = combine_in(root, "req-both", &mut out, &mut err);
+        assert_ne!(code, 0);
+
+        let record: CombineRecord = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".wt/combined/req-both.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.state, CombineState::CheckFailed);
+        let failing_step = record.failing_step.as_deref().unwrap_or("");
+        assert!(
+            failing_step.contains(step1) && failing_step.contains(step2),
+            "expected both failing steps in: {failing_step:?}"
+        );
+        assert_eq!(failing_step, format!("{step1}; {step2}"));
+        let output_tail = record.output_tail.as_deref().unwrap_or("");
+        assert!(
+            output_tail.contains("first-step-boom") && output_tail.contains("second-step-boom"),
+            "expected both outputs in:\n{output_tail}"
+        );
     }
 
     #[test]

@@ -114,7 +114,19 @@ fn surface_listener(summary_path: PathBuf) -> (u16, Arc<Mutex<Vec<RecordedNotify
     (port, recorded)
 }
 
+fn state_home() -> &'static Path {
+    static STATE_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    STATE_HOME
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::env::set_var("XDG_STATE_HOME", dir.path());
+            dir
+        })
+        .path()
+}
+
 fn write_surface_files(repo_dir: &Path, port: u16, token: &str) {
+    let _ = state_home();
     let wt_dir = repo_dir.join(".wt");
     std::fs::create_dir_all(&wt_dir).unwrap();
     std::fs::write(
@@ -122,7 +134,9 @@ fn write_surface_files(repo_dir: &Path, port: u16, token: &str) {
         format!("{{\"port\": {port}}}\n"),
     )
     .unwrap();
-    std::fs::write(wt_dir.join("surface.token"), format!("{token}\n")).unwrap();
+    let token_path = blyte_agent::sandbox::surface_token_path(repo_dir).unwrap();
+    std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    std::fs::write(&token_path, format!("{token}\n")).unwrap();
 }
 
 fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
@@ -130,6 +144,7 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
     cmd.current_dir(repo_dir)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
+        .env("XDG_STATE_HOME", state_home())
         .env("BLYTE_STATE_DIR", home.join("state"))
         .env("BLYTE_GATE_SLOT_DIR", home.join("slots"))
         .env("BLYTE_GATE_SLOTS", "16")

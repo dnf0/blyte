@@ -95,7 +95,6 @@ fn escape_path(path: &Path) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Canonicalises when possible and escapes a path for inclusion in an SBPL subpath rule.
 fn escape_subpath(path: &Path) -> String {
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     escape_path(&canon)
@@ -134,6 +133,7 @@ pub fn read_denied(home: &Path) -> Vec<PathBuf> {
         ".ssh",
         ".aws",
         ".azure",
+        ".config/blyte/env",
         ".config/gcloud",
         ".config/gh",
         ".kube",
@@ -288,7 +288,31 @@ pub fn state_blyte_dir() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".local").join("state").join("blyte"))
 }
 
-#[cfg(target_os = "macos")]
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Returns the directory holding surface authentication tokens (`<state_blyte_dir>/surface`).
+pub fn surface_token_dir() -> Option<PathBuf> {
+    state_blyte_dir().map(|d| d.join("surface"))
+}
+
+/// Returns the path to the surface authentication token for `main_checkout`.
+pub fn surface_token_path(main_checkout: &Path) -> Result<PathBuf, String> {
+    let dir = surface_token_dir().ok_or_else(|| {
+        "cannot determine surface token directory: neither XDG_STATE_HOME nor HOME is set"
+            .to_string()
+    })?;
+    let canon = canonicalize_existing_prefix(main_checkout);
+    let key = format!("{:016x}", fnv1a64(canon.as_os_str().as_encoded_bytes()));
+    Ok(dir.join(format!("{key}.token")))
+}
+
 fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     if let Ok(canon) = path.canonicalize() {
         return canon;
@@ -314,10 +338,25 @@ fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+/// Seatbelt lets an earlier `allow file-read-data` override a later `deny file-read*`, so each read
+/// deny here is written for `file-read-data` as well.
 fn deny_state_blyte_write(mut profile: String) -> String {
     if let Some(dir) = state_blyte_dir() {
         let escaped = escape_path(&canonicalize_existing_prefix(&dir));
         profile.push_str(&format!(r#"(deny file-write* (subpath "{escaped}"))"#));
+    }
+    if let Some(dir) = surface_token_dir() {
+        let escaped = escape_path(&canonicalize_existing_prefix(&dir));
+        profile.push_str(&format!(
+            r#"(deny file-read* (subpath "{escaped}"))(deny file-read-data (subpath "{escaped}"))"#
+        ));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let env_path = PathBuf::from(home).join(".config/blyte/env");
+        let escaped = escape_path(&canonicalize_existing_prefix(&env_path));
+        profile.push_str(&format!(
+            r#"(deny file-read* (subpath "{escaped}"))(deny file-read-data (subpath "{escaped}"))"#
+        ));
     }
     profile
 }
@@ -604,15 +643,16 @@ pub fn conversation_profile_with_edits(
             profile_with(root, &conversation_allowed(root), &deny_read, allow_read),
             edit_worktrees,
         ));
-        if network {
-            Profile::Seatbelt(base)
+        let profiled = if network {
+            base
         } else {
             let socks = match std::env::var_os("HOME") {
                 Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
                 _ => Vec::new(),
             };
-            Profile::Seatbelt(offline(base, &socks))
-        }
+            offline(base, &socks)
+        };
+        Profile::Seatbelt(deny_unix_sockets(profiled, &current_agent_sockets()))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -660,34 +700,93 @@ pub fn docker_sockets(home: &Path) -> Vec<PathBuf> {
     ]
 }
 
+/// Returns the Unix socket paths used by ssh and gpg agents, in order and without duplicates.
+///
+/// Includes `ssh_auth_sock` when given, followed by the standard gpg-agent and 1Password agent
+/// socket paths under `home`. On Linux, Landlock does not control connecting to a Unix socket by
+/// path, so only environment scrubbing (`SSH_AUTH_SOCK` and `SSH_AGENT_PID`) applies there.
+pub fn agent_sockets(home: &Path, ssh_auth_sock: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(sock) = ssh_auth_sock {
+        if !sock.as_os_str().is_empty() {
+            out.push(sock.to_path_buf());
+        }
+    }
+    for rel in [
+        ".gnupg/S.gpg-agent.ssh",
+        ".gnupg/S.gpg-agent",
+        ".1password/agent.sock",
+        "Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
+    ] {
+        let path = home.join(rel);
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn current_agent_sockets() -> Vec<PathBuf> {
+    let ssh_auth_sock = if crate::shell::is_pass_env("SSH_AUTH_SOCK") {
+        None
+    } else {
+        std::env::var_os("SSH_AUTH_SOCK")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => agent_sockets(Path::new(&home), ssh_auth_sock.as_deref()),
+        _ => ssh_auth_sock.into_iter().collect(),
+    }
+}
+
+fn deny_unix_sockets(mut profile: String, sockets: &[PathBuf]) -> String {
+    if sockets.is_empty() {
+        return profile;
+    }
+    let mut paths = Vec::new();
+    for s in sockets {
+        if !paths.contains(s) {
+            paths.push(s.clone());
+        }
+        let canon = canonicalize_existing_prefix(s);
+        if canon != *s && !paths.contains(&canon) {
+            paths.push(canon);
+        }
+    }
+    profile.push_str("(deny network-outbound");
+    for p in paths {
+        let escaped = escape_path(&p);
+        profile.push_str(&format!(
+            r#" (remote unix-socket (path-literal "{escaped}"))"#
+        ));
+    }
+    profile.push(')');
+    profile
+}
+
 /// Augments an SBPL profile string with network-denial rules, allowing loopback and unix sockets,
 /// then denying the specified Docker unix sockets (and their canonicalised paths if different).
 pub fn offline(mut profile: String, docker_sockets: &[PathBuf]) -> String {
     profile.push_str(
         r#"(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (remote unix-socket))"#,
     );
-    if !docker_sockets.is_empty() {
-        let mut paths = Vec::new();
-        for s in docker_sockets {
-            if !paths.contains(s) {
-                paths.push(s.clone());
-            }
-            if let Ok(canon) = s.canonicalize() {
-                if canon != *s && !paths.contains(&canon) {
-                    paths.push(canon);
-                }
-            }
-        }
-        profile.push_str("(deny network-outbound");
-        for p in paths {
-            let escaped = escape_path(&p);
-            profile.push_str(&format!(
-                r#" (remote unix-socket (path-literal "{escaped}"))"#
-            ));
-        }
-        profile.push(')');
-    }
-    profile
+    deny_unix_sockets(profile, docker_sockets)
+}
+
+#[cfg(target_os = "macos")]
+fn default_profile_base(root: &Path, allow_read: &[PathBuf]) -> String {
+    let deny_read = match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
+        _ => Vec::new(),
+    };
+    deny_state_blyte_write(profile_with(
+        root,
+        &default_allowed(root),
+        &deny_read,
+        allow_read,
+    ))
 }
 
 /// Returns the default sandbox profile for the current platform.
@@ -697,16 +796,10 @@ pub fn offline(mut profile: String, docker_sockets: &[PathBuf]) -> String {
 pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
     #[cfg(target_os = "macos")]
     {
-        let deny_read = match std::env::var_os("HOME") {
-            Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
-            _ => Vec::new(),
-        };
-        Profile::Seatbelt(deny_state_blyte_write(profile_with(
-            root,
-            &default_allowed(root),
-            &deny_read,
-            allow_read,
-        )))
+        Profile::Seatbelt(deny_unix_sockets(
+            default_profile_base(root, allow_read),
+            &current_agent_sockets(),
+        ))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -730,15 +823,15 @@ pub fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -
     }
     #[cfg(target_os = "macos")]
     {
-        let base = match default_profile(root, allow_read) {
-            Profile::Seatbelt(s) => s,
-            _ => unreachable!(),
-        };
+        let base = default_profile_base(root, allow_read);
         let socks = match std::env::var_os("HOME") {
             Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
             _ => Vec::new(),
         };
-        Profile::Seatbelt(offline(base, &socks))
+        Profile::Seatbelt(deny_unix_sockets(
+            offline(base, &socks),
+            &current_agent_sockets(),
+        ))
     }
     #[cfg(not(target_os = "macos"))]
     {

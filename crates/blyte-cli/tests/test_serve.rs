@@ -1,15 +1,16 @@
 use std::collections::{BTreeSet, VecDeque};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_agent::approval::Approver;
+use blyte_agent::sandbox::surface_token_path;
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
@@ -263,7 +264,19 @@ fn parse_json(resp: &Response) -> serde_json::Value {
     })
 }
 
+fn ensure_isolated_state_home() {
+    static STATE_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    STATE_HOME.get_or_init(|| {
+        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::create_dir_all(base).unwrap();
+        let dir = tempfile::tempdir_in(base).unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        dir
+    });
+}
+
 fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
+    ensure_isolated_state_home();
     ReplConfig {
         repo_root,
         gate: None,
@@ -1705,9 +1718,10 @@ fn secret_never_leaks_and_origin_check_stays() {
 
     let wt_dir = repo.join(".wt");
     assert!(wt_dir.join("surface.json").exists());
+    assert!(!wt_dir.join("surface.token").exists());
     for entry in std::fs::read_dir(&wt_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.is_file() && path.file_name().and_then(|n| n.to_str()) != Some("surface.token") {
+        if path.is_file() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             assert!(
                 !content.contains(&token),
@@ -2174,8 +2188,12 @@ fn token_file_is_private_and_removed_on_shutdown() {
 
     let (_port, token, stop, handle) = start_stoppable_surface(&repo);
 
-    let token_path = repo.join(".wt/surface.token");
+    let token_path = surface_token_path(&repo).unwrap();
     let surface_path = repo.join(".wt/surface.json");
+    assert!(
+        !repo.join(".wt/surface.token").exists(),
+        ".wt/surface.token must not be created"
+    );
     assert!(
         token_path.exists(),
         "expected {} to exist",
@@ -2193,6 +2211,16 @@ fn token_file_is_private_and_removed_on_shutdown() {
     {
         let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected mode 0600, got {:o}", mode);
+        let dir_mode = std::fs::metadata(token_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "expected dir mode 0700, got {:o}",
+            dir_mode
+        );
     }
 
     stop.store(true, Ordering::Relaxed);
@@ -2217,7 +2245,7 @@ fn second_start_fails_loudly_without_the_token_file() {
     init_git_repo(&repo);
 
     let (_port, _token, stop, handle) = start_stoppable_surface(&repo);
-    let token_path = repo.join(".wt/surface.token");
+    let token_path = surface_token_path(&repo).unwrap();
     assert!(token_path.exists());
     std::fs::remove_file(&token_path).unwrap();
 
@@ -2241,8 +2269,9 @@ fn second_start_fails_loudly_without_the_token_file() {
     assert_eq!(code2, 1);
     let err2_str = String::from_utf8(err2).unwrap();
     assert!(
-        err2_str.contains("surface.token"),
-        "expected stderr to name the token file, got: {err2_str}"
+        err2_str.contains(&token_path.display().to_string()),
+        "expected stderr to name the token file {}, got: {err2_str}",
+        token_path.display()
     );
     assert!(
         opened.is_empty(),
@@ -2560,4 +2589,624 @@ fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
         serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
     assert_eq!(rec["state"].as_str(), Some("combined"));
     assert_eq!(rec["branch"].as_str(), Some("blyte/req-notify"));
+}
+
+struct BlockingRunner {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+struct BlockingHandle {
+    entered: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::SyncSender<()>,
+}
+
+impl BlockingRunner {
+    fn new() -> (Self, BlockingHandle) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        (
+            Self {
+                entered: entered_tx,
+                release: release_rx,
+            },
+            BlockingHandle {
+                entered: entered_rx,
+                release: release_tx,
+            },
+        )
+    }
+}
+
+impl PromptRunner for BlockingRunner {
+    fn run(
+        &mut self,
+        _prompt: &str,
+        _model: &str,
+        _emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        let _ = self.entered.send(());
+        let _ = self.release.recv();
+        Ok(())
+    }
+}
+
+fn make_busy_surface(root: PathBuf) -> (Surface, BlockingHandle) {
+    let repo = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap()
+        .to_string();
+    let (runner, handle) = BlockingRunner::new();
+    let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
+    let surface = Surface {
+        root,
+        repo,
+        session,
+        session_id: "sess-test-busy".to_string(),
+        started_at: 1_700_000_000,
+        days: 14,
+        token: generate_token().unwrap(),
+        requests: Arc::new(blyte_cli::requests::RequestsState::new()),
+        publisher: Arc::new(blyte_cli::requests::RealPublisher),
+        reconcile_lock: Mutex::new(()),
+        reconcile_requested: std::sync::atomic::AtomicBool::new(false),
+    };
+    surface.session.submit("hold", Vec::new()).unwrap();
+    handle.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    (surface, handle)
+}
+
+fn create_verified_request_run(
+    repo: &Path,
+    base_sha: &str,
+    id: &str,
+    request: &str,
+    file_name: &str,
+    content: &str,
+    started_at: u64,
+) {
+    let wt_run = repo.join(".wt").join(id);
+    std::fs::create_dir_all(repo.join(".wt")).unwrap();
+    let branch = format!("wip/{id}");
+    assert!(Command::new("git")
+        .args(["worktree", "add", "-q", "-b", &branch])
+        .arg(&wt_run)
+        .arg(base_sha)
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success());
+    write_file(&wt_run.join(file_name), content);
+    assert!(Command::new("git")
+        .args(["add", file_name])
+        .current_dir(&wt_run)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-q", "-m", &format!("feat: {id}")])
+        .current_dir(&wt_run)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&wt_run)
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success());
+
+    write_file(
+        &repo.join(format!(".wt/tasks/{id}.md")),
+        &format!("# Task {id}\n"),
+    );
+    write_file(
+        &repo.join(format!(".wt/{id}.start.json")),
+        &format!(
+            r#"{{"id":"{id}","pid":999999,"started_at":{started_at},"base_sha":"{base_sha}","task_file":".wt/tasks/{id}.md","research":false,"request":"{request}"}}"#
+        ),
+    );
+    write_file(
+        &repo.join(format!(".wt/{id}.report.json")),
+        r#"{"outcome":"verified","turns":2}"#,
+    );
+    write_file(
+        &repo.join(format!(".wt/{id}.json")),
+        &format!(
+            r#"{{"id":"{id}","outcome":"verified","branch":"{branch}","turns":2,"seconds":5,"cost_usd":0.01,"final_message":"done"}}"#
+        ),
+    );
+    write_file(
+        &repo.join(format!(".wt/{id}.checks.json")),
+        r#"{"flags":[],"fallbacks":[]}"#,
+    );
+}
+
+fn add_commit_to_run_branch(repo: &Path, id: &str, file_name: &str, content: &str) {
+    let wt_tmp = repo.join(".wt").join(format!("{id}-amend"));
+    let branch = format!("wip/{id}");
+    assert!(Command::new("git")
+        .args(["worktree", "add", "-q"])
+        .arg(&wt_tmp)
+        .arg(&branch)
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success());
+    write_file(&wt_tmp.join(file_name), content);
+    assert!(Command::new("git")
+        .args(["add", file_name])
+        .current_dir(&wt_tmp)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-q", "-m", &format!("fix: update {id}")])
+        .current_dir(&wt_tmp)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&wt_tmp)
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success());
+}
+
+#[test]
+fn a_combined_run_without_a_verdict_is_marked_combined() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("combined-marked-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "CM1", "req-cm", "cm1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-cm").unwrap());
+    surface.requests.wait_for_idle("req-cm");
+
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 1);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "CM1");
+    assert_eq!(runs[0]["combined"], true);
+    assert!(runs[0]["verdict"].is_null());
+    assert_eq!(
+        blyte_cli::requests::run_is_combined(&repo, "CM1", Some("req-cm")),
+        Ok(true)
+    );
+    assert_eq!(
+        blyte_cli::requests::run_is_combined(&repo, "CM1", None),
+        Ok(false)
+    );
+    assert_eq!(
+        blyte_cli::requests::run_is_combined(&repo, "OTHER", Some("req-cm")),
+        Ok(false)
+    );
+}
+
+#[test]
+fn a_run_whose_request_is_not_combined_is_not_marked() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("uncombined-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "UC1", "req-uc", "uc1.txt", "one\n", now);
+
+    let (surface, handle) = make_busy_surface(repo.clone());
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 1);
+    let _ = handle.release.send(());
+
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "UC1");
+    assert_eq!(runs[0]["combined"], false);
+    assert!(!repo.join(".wt/combined/req-uc.json").exists());
+}
+
+#[test]
+fn a_run_changed_after_the_combine_is_not_marked() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("stale-combine-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "SC1", "req-sc", "sc1.txt", "v1\n", now);
+
+    let (combine_surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&combine_surface, "req-sc").unwrap());
+    combine_surface.requests.wait_for_idle("req-sc");
+
+    add_commit_to_run_branch(&repo, "SC1", "sc1.txt", "v2\n");
+
+    let (surface, handle) = make_busy_surface(repo.clone());
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 2);
+    let _ = handle.release.send(());
+
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "SC1");
+    assert_eq!(runs[0]["combined"], false);
+}
+
+#[test]
+fn a_run_in_a_failed_combine_is_not_marked() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("failed-combine-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"false\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "FC1", "req-fc", "fc1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-fc").unwrap());
+    surface.requests.wait_for_idle("req-fc");
+
+    let rec_path = repo.join(".wt/combined/req-fc.json");
+    let rec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
+    assert_eq!(rec["state"].as_str(), Some("check_failed"));
+
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 1);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "FC1");
+    assert_eq!(runs[0]["combined"], false);
+}
+
+#[test]
+fn an_unreadable_combine_record_is_a_500_naming_the_file() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("bad-combine-record-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "BR1", "req-bad", "br1.txt", "one\n", now);
+
+    let bad_path = repo.join(".wt/combined/req-bad.json");
+    write_file(&bad_path, "{not valid json");
+
+    let (surface, handle) = make_busy_surface(repo.clone());
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 1);
+    let _ = handle.release.send(());
+
+    assert_eq!(resp.status, 500);
+    let body = String::from_utf8_lossy(&resp.body);
+    assert!(
+        body.contains(&bad_path.display().to_string()),
+        "expected 500 body to name {}, got: {body}",
+        bad_path.display()
+    );
+}
+
+#[test]
+fn a_combined_run_whose_branch_was_removed_is_still_marked() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("removed-branch-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "RB1", "req-rb", "rb1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-rb").unwrap());
+    surface.requests.wait_for_idle("req-rb");
+
+    assert!(Command::new("git")
+        .args(["branch", "-D", "wip/RB1"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 1);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "RB1");
+    assert_eq!(runs[0]["combined"], true);
+}
+
+#[test]
+fn a_new_run_in_a_combined_request_does_not_break_the_runs_list() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("new-run-in-combined-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "NR1", "req-nr", "nr1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-nr").unwrap());
+    surface.requests.wait_for_idle("req-nr");
+
+    write_file(&repo.join(".wt/tasks/NR2.md"), "# Task NR2\n");
+    write_file(
+        &repo.join(".wt/NR2.start.json"),
+        &format!(
+            r#"{{"id":"NR2","pid":{},"started_at":{},"base_sha":"{base_sha}","task_file":".wt/tasks/NR2.md","research":false,"request":"req-nr"}}"#,
+            std::process::id(),
+            now + 1
+        ),
+    );
+
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 2);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "NR1");
+    assert_eq!(runs[0]["combined"], true);
+}
+
+#[test]
+fn a_second_finished_run_not_in_the_record_is_not_marked() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("second-run-unrecorded-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "SR1", "req-sr", "sr1.txt", "one\n", now);
+
+    let (combine_surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&combine_surface, "req-sr").unwrap());
+    combine_surface.requests.wait_for_idle("req-sr");
+
+    create_verified_request_run(
+        &repo,
+        &base_sha,
+        "SR2",
+        "req-sr",
+        "sr2.txt",
+        "two\n",
+        now + 1,
+    );
+
+    let (surface, handle) = make_busy_surface(repo.clone());
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 2);
+    let _ = handle.release.send(());
+
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    let sr1 = runs.iter().find(|r| r["id"] == "SR1").unwrap();
+    let sr2 = runs.iter().find(|r| r["id"] == "SR2").unwrap();
+    assert_eq!(sr1["combined"], true);
+    assert_eq!(sr2["combined"], false);
+}
+
+#[test]
+fn polling_a_done_request_records_no_session_error_and_refuses_push_and_pr() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("done-request-serve-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "DR1", "req-done", "dr1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-done").unwrap());
+    surface.requests.wait_for_idle("req-done");
+
+    assert!(Command::new("git")
+        .args(["branch", "-D", "wip/DR1"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let poll1 = route(&surface, &get(&surface, "/api/requests", vec![]), now + 1);
+    assert_eq!(poll1.status, 200);
+    let body1 = parse_json(&poll1);
+    assert_eq!(body1[0]["request"], "req-done");
+    assert_eq!(body1[0]["state"], "done");
+    assert!(body1[0]["error"].is_null());
+
+    let poll2 = route(&surface, &get(&surface, "/api/requests", vec![]), now + 2);
+    assert_eq!(poll2.status, 200);
+    let body2 = parse_json(&poll2);
+    assert_eq!(body2[0]["request"], "req-done");
+    assert_eq!(body2[0]["state"], "done");
+    assert!(body2[0]["error"].is_null());
+
+    let runs_poll = route(&surface, &get(&surface, "/api/runs", vec![]), now + 3);
+    assert_eq!(runs_poll.status, 200);
+
+    let events_resp = route(
+        &surface,
+        &get(&surface, "/api/session/events", vec![("after", "0")]),
+        now + 4,
+    );
+    assert_eq!(events_resp.status, 200);
+    let events = parse_json(&events_resp);
+    let error_entries: Vec<&serde_json::Value> = events["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "error")
+        .collect();
+    assert!(
+        error_entries.is_empty(),
+        "expected no session errors, got: {error_entries:?}"
+    );
+
+    let push_resp = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/requests/req-done/push",
+            &serde_json::json!({}),
+        ),
+        now + 5,
+    );
+    assert_eq!(push_resp.status, 409);
+    let push_body = String::from_utf8_lossy(&push_resp.body);
+    assert!(
+        push_body.contains("already merged and removed"),
+        "push body: {push_body}"
+    );
+
+    let pr_resp = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/requests/req-done/pull-request",
+            &serde_json::json!({"title": "PR title", "body": "PR body"}),
+        ),
+        now + 6,
+    );
+    assert_eq!(pr_resp.status, 409);
+    let pr_body = String::from_utf8_lossy(&pr_resp.body);
+    assert!(
+        pr_body.contains("already merged and removed"),
+        "pr body: {pr_body}"
+    );
+}
+
+fn assert_no_file_under_contains(dir: &Path, needle: &str) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            assert_no_file_under_contains(&path, needle);
+        } else if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                !text.contains(needle),
+                "token leaked into {}",
+                path.display()
+            );
+        }
+    }
+}
+
+struct ChildKillGuard(std::process::Child);
+
+impl Drop for ChildKillGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn surface_keeps_token_out_of_wt_and_rejects_unauthenticated_actions() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("e2e-repo");
+    let fake_home = d.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    init_git_repo(&repo);
+
+    let stale_token = repo.join(".wt/surface.token");
+    write_file(&stale_token, "stale-old-token\n");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["--no-open", "--port", "0"])
+        .current_dir(&repo)
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .env_remove("XDG_STATE_HOME")
+        .env("BLYTE_ENV_FILE", "")
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("BLYTE_NO_KEEP_AWAKE", "1")
+        .env("BLYTE_USAGE_LOG", "off")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut guard = ChildKillGuard(child);
+
+    let stdout = guard.0.stdout.take().unwrap();
+    let mut stderr = guard.0.stderr.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).unwrap();
+        if n == 0 {
+            let mut err_text = String::new();
+            let _ = stderr.read_to_string(&mut err_text);
+            panic!("blyte exited before printing URL; stderr={err_text}");
+        }
+        if line.contains("blyte: surface at ") {
+            break;
+        }
+    }
+    let url = line
+        .split("blyte: surface at ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
+    let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+    let (port_str, token) = rest.split_once("/#token=").unwrap();
+    let port: u16 = port_str.parse().unwrap();
+
+    assert!(
+        !stale_token.exists(),
+        ".wt/surface.token must not exist after surface start"
+    );
+    assert!(repo.join(".wt/surface.json").exists());
+    assert_no_file_under_contains(&repo.join(".wt"), token);
+
+    let token_dir = fake_home.join(".local/state/blyte/surface");
+    let token_files: Vec<PathBuf> = std::fs::read_dir(&token_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(token_files.len(), 1, "{token_files:?}");
+    assert_eq!(
+        std::fs::read_to_string(&token_files[0]).unwrap().trim(),
+        token
+    );
+    #[cfg(unix)]
+    {
+        let dir_mode = std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "dir mode {:o}", dir_mode);
+        let file_mode = std::fs::metadata(&token_files[0])
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "file mode {:o}", file_mode);
+    }
+
+    for path in [
+        "/api/requests/x/push",
+        "/api/requests/x/pull-request",
+        "/api/session/approvals/x",
+        "/api/runs/x/decision",
+    ] {
+        let resp = send_http(
+            port,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            ),
+        );
+        assert!(
+            resp.starts_with("HTTP/1.1 403"),
+            "POST {path} without token must return 403, got: {resp}"
+        );
+        assert!(
+            resp.contains("missing or invalid surface token"),
+            "POST {path} without token must report missing or invalid surface token, got: {resp}"
+        );
+    }
 }

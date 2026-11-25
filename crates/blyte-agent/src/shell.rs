@@ -63,7 +63,12 @@ const CREDENTIAL_SEGMENTS: &[&str] = &[
 
 /// Whole names that select credentials without looking like one: the AWS profile variables pick a
 /// profile in ~/.aws, which the sandbox denies (a passed profile makes boto fail on it).
-const CREDENTIAL_NAMES: &[&str] = &["AWS_PROFILE", "AWS_DEFAULT_PROFILE"];
+const CREDENTIAL_NAMES: &[&str] = &[
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+];
 
 static PASS_ENV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
@@ -110,9 +115,15 @@ pub fn set_pass_env(names: Vec<String>) {
     let _ = PASS_ENV.set(names);
 }
 
+/// Returns true when `name` is in the process-wide pass-through list set by [`set_pass_env`].
+pub fn is_pass_env(name: &str) -> bool {
+    PASS_ENV
+        .get()
+        .is_some_and(|passed| passed.iter().any(|p| p == name))
+}
+
 /// The sorted names of current process environment variables withheld by the credential filter.
 pub fn withheld_env() -> Vec<String> {
-    let pass_env = PASS_ENV.get();
     let mut withheld = Vec::new();
     for (key, val) in std::env::vars_os() {
         let name = key.to_string_lossy();
@@ -122,10 +133,8 @@ pub fn withheld_env() -> Vec<String> {
         if name.starts_with("BLYTE_") {
             continue;
         }
-        if let Some(passed) = pass_env {
-            if passed.iter().any(|p| p == name.as_ref()) {
-                continue;
-            }
+        if is_pass_env(&name) {
+            continue;
         }
         let value = val.to_string_lossy();
         if credential_like(&name, &value) {
@@ -844,6 +853,7 @@ pub enum RunResult {
         out: String,
         err: String,
     },
+    Failed(String),
 }
 
 /// One long-lived `bash -l`. A command arrives through a heredoc read by the `read` builtin; its
@@ -874,6 +884,31 @@ fn nonce() -> String {
 enum ReadErr {
     Timeout,
     Closed,
+    Malformed(String),
+}
+
+fn parse_header(header: &str) -> Result<(i32, usize, usize), String> {
+    let malformed = || format!("shell returned a malformed result header: {header}");
+    let mut f = header.split(' ');
+    let exit_code: i32 = f
+        .next()
+        .ok_or_else(malformed)?
+        .parse()
+        .map_err(|_| malformed())?;
+    let no: usize = f
+        .next()
+        .ok_or_else(malformed)?
+        .parse()
+        .map_err(|_| malformed())?;
+    let ne: usize = f
+        .next()
+        .ok_or_else(malformed)?
+        .parse()
+        .map_err(|_| malformed())?;
+    if f.next().is_some() || no.checked_add(ne).is_none() {
+        return Err(malformed());
+    }
+    Ok((exit_code, no, ne))
 }
 
 impl Session {
@@ -1041,6 +1076,7 @@ impl Session {
         let fail = |e: ReadErr, out: String, err: String| match e {
             ReadErr::Timeout => RunResult::TimedOut { out, err },
             ReadErr::Closed => RunResult::Died { out, err },
+            ReadErr::Malformed(msg) => RunResult::Failed(msg),
         };
         let header = loop {
             match self.read_line(deadline) {
@@ -1052,10 +1088,10 @@ impl Session {
                 Err(e) => return fail(e, out, err),
             }
         };
-        let mut f = header.split(' ');
-        let exit_code = f.next().and_then(|x| x.parse().ok()).unwrap_or(-1);
-        let no: usize = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-        let ne: usize = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let (exit_code, no, ne) = match parse_header(&header) {
+            Ok(parsed) => parsed,
+            Err(msg) => return fail(ReadErr::Malformed(msg), out, err),
+        };
         match self.read_exact(no + ne, deadline) {
             Ok(bytes) => RunResult::Done(Output {
                 stdout: String::from_utf8_lossy(&bytes[..no]).into_owned(),
@@ -1197,6 +1233,11 @@ impl PersistentShell {
         let session = g.as_mut()?;
         let (out, err, note, code) = match session.run(command, Some(cwd), timeout) {
             RunResult::Done(o) => return Some(Ok(o)),
+            RunResult::Failed(msg) => {
+                session.kill();
+                *g = None;
+                return Some(Err(msg));
+            }
             RunResult::TimedOut { out, err } => (
                 out,
                 err,
@@ -1288,6 +1329,11 @@ impl PersistentShell {
         let user = g.as_mut().unwrap();
         let mut output = match user.session.run(command, None, timeout) {
             RunResult::Done(o) => o,
+            RunResult::Failed(msg) => {
+                user.session.kill();
+                *g = None;
+                return Err(msg);
+            }
             RunResult::TimedOut { out, err } => {
                 user.session.kill();
                 *g = None;
@@ -1385,5 +1431,42 @@ mod tests {
             .exec_user("echo hi", tmp.path(), Duration::from_secs(5))
             .unwrap_err();
         assert_eq!(err, "cannot read .wt: permission denied");
+    }
+
+    #[test]
+    fn parse_header_accepts_valid_and_rejects_malformed() {
+        assert_eq!(parse_header("0 3 4"), Ok((0, 3, 4)));
+        assert_eq!(parse_header("127 0 12"), Ok((127, 0, 12)));
+        assert_eq!(parse_header("-1 0 0"), Ok((-1, 0, 0)));
+
+        for bad in ["", "x 1 2", "0 1", "0 -1 2", "0 1 2 3"] {
+            let err = parse_header(bad).unwrap_err();
+            assert_eq!(
+                err,
+                format!("shell returned a malformed result header: {bad}")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_shell_rejects_malformed_result_header_and_recovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let shell = PersistentShell::local(root.clone());
+        let err = shell
+            .exec_user(
+                "printf() { builtin printf '__BLYTE_0__ x 1 2\\n'; }",
+                &root,
+                Duration::from_secs(10),
+            )
+            .unwrap_err();
+        assert_eq!(err, "shell returned a malformed result header: x 1 2");
+
+        let recovered = shell
+            .exec_user("echo ok", &root, Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(recovered.exit_code, 0);
+        assert_eq!(recovered.stdout, "ok\n");
     }
 }
