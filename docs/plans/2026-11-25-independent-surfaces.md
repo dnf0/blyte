@@ -19,7 +19,7 @@ S3 and S4 both change `serve.rs`, so they run one after the other.
 
 Every run is cherry-picked (`git cherry-pick -x`) onto `feat/independent-surfaces`.
 
-### Task S1
+### Task S1: surface ids, names and directories
 
 **Goal.** Give surfaces an id, a name and a directory of their own, as a library with no
 caller yet. Later tasks use it so that several surfaces can run in one checkout.
@@ -132,7 +132,7 @@ repository names or company names anywhere (a test named `test_public_names` enf
 
 **Commit message.** `feat: surface ids, names and per-surface directories`
 
-### Task S2
+### Task S2: runs record their surface
 
 **Goal.** Record in each run's start record which surface started it, so a later task can
 report a finished run to that surface only.
@@ -203,7 +203,7 @@ keys in a start record, which may gain `"surface"`.
 
 **Commit message.** `feat: runs record the surface that started them`
 
-### Task S5
+### Task S5: clean old surface files
 
 **Goal.** `blyte clean` removes the files the old single-surface design left behind, and the
 directories of surfaces that stopped long ago.
@@ -271,7 +271,7 @@ checkout, `XDG_STATE_HOME` set to a temp dir, files' modification times set with
 
 **Commit message.** `feat: blyte clean removes the old surface files and long-stopped surfaces`
 
-### Task S3
+### Task S3: every start is its own surface
 
 **Goal.** Every `blyte` start is its own surface: its own id, name, directory, token, port
 and transcript. A second start in a checkout no longer opens the first one's page. A
@@ -389,7 +389,7 @@ Commands: `cargo test -p blyte --test test_serve --test test_surface_notify --te
 
 **Commit message.** `feat: every blyte start is its own surface`
 
-### Task S4
+### Task S4: a surface owns its runs
 
 **Goal.** A surface lists, checks, combines, reports and acts on only the runs and requests
 it started, so several surfaces in one checkout do not each report every run or push each
