@@ -112,8 +112,13 @@ pub fn read_entries(dir: &Path) -> Result<Vec<RegistryEntry>, String> {
         let Some(stem) = name_str.strip_suffix(".json") else {
             continue;
         };
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        // A surface removes its entry when it exits, which can happen between the listing above
+        // and this read: that surface is no longer running, so it is not in the result.
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("failed to read {}: {e}", path.display())),
+        };
         let entry: RegistryEntry = serde_json::from_str(&text)
             .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
         if entry.id != stem {

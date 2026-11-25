@@ -1469,7 +1469,7 @@ where
         }
     };
     let hook_dir = registry_dir.clone();
-    let hook_id = surface_id.clone();
+    let hook_entry = registry_entry.clone();
     session.set_activity_hook(Box::new(move |prompt| {
         let doing = match prompt {
             Some(text) => {
@@ -1482,7 +1482,13 @@ where
             }
             None => "idle".to_string(),
         };
-        if let Err(e) = crate::surface_registry::set_doing(&hook_dir, &hook_id, &doing) {
+        // The whole entry is written, not only the changed field: another process removes an
+        // entry whose surface did not answer its health check in time, and this puts it back.
+        let entry = crate::surface_registry::RegistryEntry {
+            doing,
+            ..hook_entry.clone()
+        };
+        if let Err(e) = crate::surface_registry::write_entry(&hook_dir, &entry) {
             eprintln!("blyte: {e}");
         }
     }));
