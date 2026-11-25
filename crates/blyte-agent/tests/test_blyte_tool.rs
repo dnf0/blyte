@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use blyte_agent::fs::LocalFs;
 use blyte_agent::shell::LocalShell;
 use blyte_agent::tools::{
-    blyte_command_timeout, execute, set_blyte_request, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS,
-    COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT, OUTPUT_LINE_BUDGET,
+    blyte_command_timeout, blyte_surface, execute, set_blyte_request, set_blyte_surface,
+    set_blyte_tool, specs, BLYTE_TOOL_COMMANDS, COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT,
+    OUTPUT_LINE_BUDGET,
 };
 use serde_json::json;
 
@@ -35,6 +36,7 @@ impl BlyteToolGuard {
     fn acquire_none() -> Self {
         let lock = BLYTE_TOOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_blyte_tool(None);
+        set_blyte_surface(None);
         Self { _lock: lock }
     }
 
@@ -43,6 +45,7 @@ impl BlyteToolGuard {
         let (_, exe, body_path) = dispatcher();
         std::fs::write(body_path, body).unwrap();
         set_blyte_tool(Some(exe.clone()));
+        set_blyte_surface(None);
         Self { _lock: lock }
     }
 
@@ -55,6 +58,7 @@ impl BlyteToolGuard {
 
 impl Drop for BlyteToolGuard {
     fn drop(&mut self) {
+        set_blyte_surface(None);
         set_blyte_tool(None);
     }
 }
@@ -828,4 +832,215 @@ fn background_dispatch_truncates_previous_output_and_bounds_large_early_failure(
     let saved = std::fs::read_to_string(&out_file).unwrap();
     assert!(!saved.contains("stale previous output"));
     assert_eq!(saved.lines().count(), total_lines);
+}
+
+#[test]
+fn surface_injected_into_dispatch_args() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    set_blyte_request(None);
+    set_blyte_surface(Some("s0123456789abcdef".to_string()));
+    assert_eq!(blyte_surface().as_deref(), Some("s0123456789abcdef"));
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md"]}),
+    );
+    assert!(!out.is_error, "{}", out.content);
+    let lines: Vec<&str> = out.content.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["dispatch", "T1", "t.md", "--surface", "s0123456789abcdef"]
+    );
+
+    set_blyte_surface(None);
+    assert_eq!(blyte_surface(), None);
+}
+
+#[test]
+fn surface_injected_into_edit_finish_args() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    set_blyte_request(None);
+    set_blyte_surface(Some("s0123456789abcdef".to_string()));
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "E1"]}),
+    );
+    assert!(!out.is_error, "{}", out.content);
+    let lines: Vec<&str> = out.content.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["edit-finish", "E1", "--surface", "s0123456789abcdef"]
+    );
+
+    set_blyte_surface(None);
+}
+
+#[test]
+fn surface_inserted_before_double_dash_separator() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    set_blyte_request(None);
+    set_blyte_surface(Some("s0123456789abcdef".to_string()));
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md", "--", "extra"]}),
+    );
+    assert!(!out.is_error, "{}", out.content);
+    let lines: Vec<&str> = out.content.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "dispatch",
+            "T1",
+            "t.md",
+            "--surface",
+            "s0123456789abcdef",
+            "--",
+            "extra"
+        ]
+    );
+
+    set_blyte_request(Some("r1700000000-7".to_string()));
+    let with_both = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md", "--", "extra"]}),
+    );
+    assert!(!with_both.is_error, "{}", with_both.content);
+    let both_lines: Vec<&str> = with_both.content.lines().collect();
+    assert_eq!(
+        both_lines,
+        vec![
+            "dispatch",
+            "T1",
+            "t.md",
+            "--request",
+            "r1700000000-7",
+            "--surface",
+            "s0123456789abcdef",
+            "--",
+            "extra"
+        ]
+    );
+
+    set_blyte_surface(None);
+}
+
+#[test]
+fn surface_not_added_to_other_subcommands() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    set_blyte_request(None);
+    set_blyte_surface(Some("s0123456789abcdef".to_string()));
+
+    for args in [
+        vec!["status", "T1"],
+        vec!["wait", "T1"],
+        vec!["edit-start", "E1", "--task", "fix"],
+    ] {
+        let out = execute(
+            root.path(),
+            &LocalShell,
+            &LocalFs,
+            "blyte",
+            &json!({"args": args}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        let lines: Vec<&str> = out.content.lines().collect();
+        assert_eq!(lines, args);
+    }
+
+    set_blyte_surface(None);
+}
+
+#[test]
+fn model_supplied_surface_flag_is_rejected_without_running() {
+    let root = tempfile::tempdir().unwrap();
+    let refused_marker = root.path().join("surface_refused.ran");
+    let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", refused_marker.display()));
+    let _req_reset = RequestReset;
+    set_blyte_request(None);
+    set_blyte_surface(Some("s0123456789abcdef".to_string()));
+
+    for bad_args in [
+        json!({"args": ["dispatch", "T1", "t.md", "--surface", "x"]}),
+        json!({"args": ["dispatch", "T1", "t.md", "--surface=x"]}),
+        json!({"args": ["dispatch", "--surface", "x", "T1", "t.md"]}),
+        json!({"args": ["dispatch", "T1", "t.md", "--surface", "x"], "background": true}),
+        json!({"args": ["edit-finish", "E1", "--surface", "x"]}),
+        json!({"args": ["edit-finish", "E1", "--surface=x"]}),
+    ] {
+        let out = execute(root.path(), &LocalShell, &LocalFs, "blyte", &bad_args);
+        assert!(out.is_error, "expected error for {bad_args}");
+        assert_eq!(
+            out.content, "do not pass --surface; blyte sets it automatically",
+            "unexpected error for {bad_args}"
+        );
+    }
+    assert!(!refused_marker.exists(), "refused command ran executable");
+
+    set_blyte_surface(None);
+    let refused_when_unset = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md", "--surface", "x"]}),
+    );
+    assert!(refused_when_unset.is_error);
+    assert_eq!(
+        refused_when_unset.content,
+        "do not pass --surface; blyte sets it automatically"
+    );
+    assert!(!refused_marker.exists(), "refused command ran executable");
+}
+
+#[test]
+fn no_surface_added_when_blyte_surface_is_none() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    set_blyte_request(None);
+    set_blyte_surface(None);
+
+    let dispatch_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md"]}),
+    );
+    assert!(!dispatch_out.is_error, "{}", dispatch_out.content);
+    let dispatch_lines: Vec<&str> = dispatch_out.content.lines().collect();
+    assert_eq!(dispatch_lines, vec!["dispatch", "T1", "t.md"]);
+
+    let edit_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["edit-finish", "E1"]}),
+    );
+    assert!(!edit_out.is_error, "{}", edit_out.content);
+    let edit_lines: Vec<&str> = edit_out.content.lines().collect();
+    assert_eq!(edit_lines, vec!["edit-finish", "E1"]);
 }

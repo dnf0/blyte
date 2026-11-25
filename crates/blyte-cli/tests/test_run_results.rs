@@ -119,6 +119,7 @@ fn write_start_file(
         "base_sha": base_sha,
         "started_at": started_at,
         "research": research,
+        "surface": "s00000000000000aa",
     });
     if let Some(req) = request {
         obj["request"] = Value::String(req.to_string());
@@ -147,6 +148,8 @@ fn make_surface(root: PathBuf) -> (Surface, Arc<Mutex<Vec<String>>>) {
         .unwrap_or("repo")
         .to_string();
     let surface = Surface {
+        surface_id: "s00000000000000aa".to_string(),
+        surface_name: repo.clone(),
         root,
         repo,
         session,
@@ -531,5 +534,71 @@ fn router_get_api_runs_adds_entry_once_across_two_calls() {
 
     assert_eq!(surface.session.info().queued, 0);
     assert!(!surface.session.info().busy);
+    assert!(prompts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn report_finished_runs_reports_only_runs_owned_by_this_surface() {
+    let (repo, base) = init_wt_dir();
+    let root = repo.path();
+    let now = now_secs();
+
+    let write_with_surface = |id: &str, req: &str, surface: Value| {
+        let obj = json!({
+            "id": id,
+            "request": req,
+            "base": "main",
+            "base_sha": base,
+            "started_at": now,
+            "research": false,
+            "surface": surface,
+        });
+        std::fs::write(
+            root.join(".wt").join(format!("{id}.start.json")),
+            serde_json::to_string_pretty(&obj).unwrap() + "\n",
+        )
+        .unwrap();
+        write_summary(
+            root,
+            id,
+            &json!({
+                "id": id,
+                "outcome": "verified",
+                "turns": 3,
+                "cost_usd": 0.12,
+                "seconds": 60,
+                "final_message": format!("Done {id}."),
+                "gate_failures": []
+            }),
+        );
+    };
+
+    write_with_surface(
+        "RAA",
+        "req-aa",
+        Value::String("s00000000000000aa".to_string()),
+    );
+    write_with_surface(
+        "RBB",
+        "req-bb",
+        Value::String("s00000000000000bb".to_string()),
+    );
+    write_with_surface("RNULL", "req-null", Value::Null);
+
+    let (surface, prompts) = make_surface(root.to_path_buf());
+    report_finished_runs(&surface).unwrap();
+
+    let entries = surface.session.entries_after(0, Duration::ZERO);
+    let reported_runs: Vec<String> = entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::Decision { run, .. } => Some(run.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reported_runs, vec!["RAA".to_string()]);
+    assert!(root.join(".wt/RAA.reported.json").exists());
+    assert!(!root.join(".wt/RBB.reported.json").exists());
+    assert!(!root.join(".wt/RNULL.reported.json").exists());
     assert!(prompts.lock().unwrap().is_empty());
 }

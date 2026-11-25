@@ -125,7 +125,7 @@ pub struct SurfaceArgs {
         long,
         default_value_t = 0,
         value_name = "N",
-        help = "Port to listen on (0 picks a free port)"
+        help = "Port to listen on (default: a free port)"
     )]
     pub port: u16,
 
@@ -140,6 +140,21 @@ pub struct SurfaceArgs {
         help = "How many days back to include finished runs (1 to 31)"
     )]
     pub days: u64,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Name for this surface (default: the repository directory name)"
+    )]
+    pub name: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "name",
+        help = "Restart a stopped surface, by name or id, with its transcript"
+    )]
+    pub resume: Option<String>,
 }
 
 impl Default for SurfaceArgs {
@@ -148,6 +163,8 @@ impl Default for SurfaceArgs {
             port: 0,
             no_open: false,
             days: 14,
+            name: None,
+            resume: None,
         }
     }
 }
@@ -201,6 +218,10 @@ pub struct EditFinishArgs {
     #[arg(long, value_name = "ID")]
     pub request: Option<String>,
 
+    /// Surface identifier that started this edit
+    #[arg(long, value_name = "ID")]
+    pub surface: Option<String>,
+
     /// Commit message used to commit uncommitted or untracked changes in the worktree
     #[arg(long, value_name = "TEXT")]
     pub message: Option<String>,
@@ -233,6 +254,10 @@ pub struct DispatchArgs {
     /// Request identifier this dispatch belongs to
     #[arg(long, value_name = "ID")]
     pub request: Option<String>,
+
+    /// Surface identifier that started this dispatch
+    #[arg(long, value_name = "ID")]
+    pub surface: Option<String>,
 
     /// The commit a new worktree starts from
     #[arg(long, default_value = "HEAD")]
@@ -641,7 +666,7 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "N",
-        help = "Port for the live surface (0 picks a free port)"
+        help = "Port to listen on (default: a free port)"
     )]
     pub port: Option<u16>,
 
@@ -655,6 +680,21 @@ pub struct Cli {
         help = "How many days back to include finished runs in the live surface (1 to 31, default 14)"
     )]
     pub days: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Name for this surface (default: the repository directory name)"
+    )]
+    pub name: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "name",
+        help = "Restart a stopped surface, by name or id, with its transcript"
+    )]
+    pub resume: Option<String>,
 }
 
 /// Turn and context defaults for `--converse`. A flag the user gave explicitly wins.

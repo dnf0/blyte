@@ -536,6 +536,7 @@ fn edit_finish_recovers_after_crash_between_start_record_and_summary() {
     let args = EditFinishArgs {
         id: "e-crash".to_string(),
         request: Some("req-crash".to_string()),
+        surface: None,
         message: None,
     };
     let crash_hook = || Err("simulated crash before summary".to_string());
@@ -976,6 +977,8 @@ fn make_idle_surface(root: PathBuf) -> Surface {
         .to_string();
     let session = Session::start(Box::new(IdleRunner), "test-model".to_string());
     Surface {
+        surface_id: "s00000000000000aa".to_string(),
+        surface_name: repo.clone(),
         root,
         repo,
         session,
@@ -1133,6 +1136,8 @@ fn edit_finish_surface_maybe_combine_combines_request_branch() {
             "e-surf",
             "--request",
             "req-surf",
+            "--surface",
+            "s00000000000000aa",
             "--message",
             "feat: surface combine commit",
         ],

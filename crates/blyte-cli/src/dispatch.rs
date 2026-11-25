@@ -1178,6 +1178,12 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             return 2;
         }
     }
+    if let Some(ref surface) = args.surface {
+        if let Err(e) = blyte_agent::sandbox::validate_surface_id(surface) {
+            eprintln!("blyte: {e}");
+            return 2;
+        }
+    }
     if let Ok(home) = crate::skill::home_dir() {
         if let Ok(Some(path)) = crate::skill::ensure_context_block(&home) {
             eprintln!(
@@ -1759,6 +1765,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         "plan": args.plan,
         "plan_task": args.plan_task,
         "request": args.request,
+        "surface": args.surface,
         "base": args.base,
     });
     if let Some(ref s) = session {
@@ -2210,6 +2217,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 "plan": args.plan,
                 "plan_task": args.plan_task,
                 "request": args.request,
+                "surface": args.surface,
                 "base": args.base,
                 "base_sha": base_commit,
                 "base_check": base_check_decision.as_json(),

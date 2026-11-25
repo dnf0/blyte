@@ -15,6 +15,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 struct StartInfo {
     id: String,
     request: Option<String>,
+    surface: Option<String>,
     started_at: u64,
     is_research: bool,
 }
@@ -104,6 +105,16 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartInfo, String> {
             ));
         }
     };
+    let surface = match val.get("surface") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(format!(
+                "run {file_id}: start file {} has non-string surface field",
+                path.display()
+            ));
+        }
+    };
     let is_research = is_research_start(wt_dir, file_id, &val);
     let started_at = match val.get("started_at") {
         Some(v) => v.as_u64().ok_or_else(|| {
@@ -117,6 +128,7 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartInfo, String> {
     Ok(StartInfo {
         id: file_id.to_string(),
         request,
+        surface,
         started_at,
         is_research,
     })
@@ -380,7 +392,8 @@ pub fn report_finished_runs(surface: &Surface) -> Result<(), String> {
     for path in start_files {
         match parse_start_file(&wt_dir, &path) {
             Ok(info) => {
-                if !info.is_research {
+                if info.surface.as_deref() == Some(surface.surface_id.as_str()) && !info.is_research
+                {
                     if let Some(request) = info.request {
                         candidates.push((info.started_at, info.id, request));
                     }

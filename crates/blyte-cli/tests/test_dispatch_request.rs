@@ -233,6 +233,7 @@ struct ToolReset;
 impl Drop for ToolReset {
     fn drop(&mut self) {
         set_blyte_tool(None);
+        blyte_agent::tools::set_blyte_surface(None);
     }
 }
 
@@ -311,6 +312,7 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
 
     let _tool_reset = ToolReset;
     set_blyte_tool(Some(PathBuf::from(env!("CARGO_BIN_EXE_blyte"))));
+    blyte_agent::tools::set_blyte_surface(Some("s00000000000000aa".to_string()));
 
     let spoof_error = Arc::new(Mutex::new(None));
     let runner = DispatchingRunner {
@@ -322,6 +324,8 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
     let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
     let now = now_secs();
     let surface = Surface {
+        surface_id: "s00000000000000aa".to_string(),
+        surface_name: "repo".to_string(),
         root: repo.clone(),
         repo: "repo".to_string(),
         session: session.clone(),
@@ -398,6 +402,7 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
         "pid": std::process::id(),
         "started_at": now,
         "request": "r-live-1",
+        "surface": "s00000000000000aa",
         "task_file": repo.join("task.md").display().to_string(),
         "branch": "wip/LIVE1",
     });
@@ -407,7 +412,7 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
     )
     .unwrap();
 
-    let noreq_out = run_dispatch_cli(&repo, "NOREQ", &[]);
+    let noreq_out = run_dispatch_cli(&repo, "NOREQ", &["--surface", "s00000000000000aa"]);
     assert!(
         !noreq_out.stdout.is_empty(),
         "stderr={}",
@@ -464,6 +469,8 @@ impl PromptRunner for NoopRunner {
 fn make_test_surface(repo: &Path, now: u64) -> Surface {
     let session = Session::start(Box::new(NoopRunner), "gemini-4-neon".to_string());
     Surface {
+        surface_id: "s00000000000000aa".to_string(),
+        surface_name: "repo".to_string(),
         root: repo.to_path_buf(),
         repo: "repo".to_string(),
         session,
@@ -511,6 +518,7 @@ fn api_runs_lists_finished_run_after_worktree_removed_and_ensure_checks_skips_it
         "started_at": now - 60,
         "base_sha": base_sha,
         "research": false,
+        "surface": "s00000000000000aa",
         "task_file": repo.join("task.md").display().to_string(),
         "branch": "wip/M2",
     });
@@ -602,6 +610,7 @@ fn api_runs_lists_run_with_partially_removed_worktree_directory() {
             "started_at": now - 60,
             "base_sha": base_sha,
             "research": false,
+            "surface": "s00000000000000aa",
             "task_file": repo.join("task.md").display().to_string(),
             "branch": "wip/M3",
         })
@@ -672,6 +681,7 @@ fn api_runs_still_returns_500_when_start_base_sha_is_not_in_repo() {
             "started_at": now - 60,
             "base_sha": missing_sha,
             "research": false,
+            "surface": "s00000000000000aa",
             "task_file": repo.join("task.md").display().to_string(),
             "branch": "wip/BADSHA",
         })

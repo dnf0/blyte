@@ -2586,11 +2586,226 @@ pub fn clean_repo_with_options(
         report_other_worktrees_with_ctx(root, &mut ctx, &all_worktrees);
     }
 
+    if !is_linked
+        && run_clean_surfaces_at(
+            root,
+            older_than_days,
+            dry_run,
+            quiet,
+            std::time::SystemTime::now(),
+        )
+    {
+        had_errors = true;
+    }
+
     CleanRepoStats {
         removed_worktrees,
         freed_bytes,
         had_errors,
     }
+}
+
+fn unix_secs_from_system_time(now: std::time::SystemTime) -> Result<u64, String> {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| format!("system clock is before UNIX_EPOCH: {e}"))
+}
+
+fn run_clean_surfaces_at(
+    root: &Path,
+    older_than_days: u64,
+    dry_run: bool,
+    quiet: bool,
+    now: std::time::SystemTime,
+) -> bool {
+    match unix_secs_from_system_time(now)
+        .and_then(|now_secs| clean_surfaces(root, older_than_days, dry_run, now_secs))
+    {
+        Ok(lines) => {
+            if !quiet {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            false
+        }
+        Err(err) => {
+            eprintln!("blyte: {err}");
+            true
+        }
+    }
+}
+
+const LEGACY_SURFACE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[derive(serde::Deserialize)]
+struct LegacySurfaceFile {
+    port: u16,
+    session_id: String,
+}
+
+fn is_legacy_surface_running(port: u16, expected_session_id: &str) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .timeout_read(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .timeout_write(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .timeout(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .redirects(0)
+        .build();
+    let url = format!("http://127.0.0.1:{port}/api/health");
+    let resp = match agent.get(&url).call() {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    if resp.status() != 200 {
+        return false;
+    }
+    let val: serde_json::Value = match resp.into_json() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    val.get("session_id").and_then(|v| v.as_str()) == Some(expected_session_id)
+}
+
+fn path_present(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("failed to inspect {}: {e}", path.display())),
+    }
+}
+
+fn remove_file_if_present(
+    path: &Path,
+    label: &str,
+    dry_run: bool,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    if !path_present(path)? {
+        return Ok(());
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    if !dry_run {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("failed to remove {}: {e}", path.display()))?;
+    }
+    lines.push(format!("{verb} {label}"));
+    Ok(())
+}
+
+fn remove_dir_if_present(
+    path: &Path,
+    label: &str,
+    dry_run: bool,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    if !path_present(path)? {
+        return Ok(());
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    if !dry_run {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("failed to remove {}: {e}", path.display()))?;
+    }
+    lines.push(format!("{verb} {label}"));
+    Ok(())
+}
+
+fn newest_file_mtime_in(
+    dir: &Path,
+    newest: &mut Option<std::time::SystemTime>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("failed to inspect {}: {e}", path.display()))?;
+        if meta.is_dir() {
+            newest_file_mtime_in(&path, newest)?;
+        } else {
+            let mtime = meta
+                .modified()
+                .map_err(|e| format!("failed to read modified time of {}: {e}", path.display()))?;
+            if newest.is_none_or(|cur| mtime > cur) {
+                *newest = Some(mtime);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn newest_file_mtime(dir: &Path) -> Result<std::time::SystemTime, String> {
+    let mut newest = None;
+    newest_file_mtime_in(dir, &mut newest)?;
+    newest.ok_or_else(|| format!("surface directory {} contains no files", dir.display()))
+}
+
+/// Returns one line per thing removed (or, with dry_run, that would be removed).
+pub fn clean_surfaces(
+    main_checkout: &Path,
+    older_than_days: u64,
+    dry_run: bool,
+    now_secs: u64,
+) -> Result<Vec<String>, String> {
+    let mut lines = Vec::new();
+    let wt_dir = main_checkout.join(".wt");
+    let old_surface_path = wt_dir.join("surface.json");
+    let old_sessions_dir = wt_dir.join("sessions");
+
+    match std::fs::read_to_string(&old_surface_path) {
+        Ok(raw) => {
+            let info: LegacySurfaceFile = serde_json::from_str(&raw)
+                .map_err(|e| format!("failed to parse {}: {e}", old_surface_path.display()))?;
+            if !is_legacy_surface_running(info.port, &info.session_id) {
+                let token_path = blyte_agent::sandbox::surface_token_path(main_checkout)?;
+                let token_label = token_path.display().to_string();
+                remove_file_if_present(&old_surface_path, ".wt/surface.json", dry_run, &mut lines)?;
+                remove_dir_if_present(&old_sessions_dir, ".wt/sessions/", dry_run, &mut lines)?;
+                remove_file_if_present(&token_path, &token_label, dry_run, &mut lines)?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            remove_dir_if_present(&old_sessions_dir, ".wt/sessions/", dry_run, &mut lines)?;
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to read {}: {e}",
+                old_surface_path.display()
+            ));
+        }
+    }
+
+    let records = crate::surface_dir::list_records(main_checkout)?;
+    let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now_secs);
+    let max_age = std::time::Duration::from_secs(older_than_days.saturating_mul(86_400));
+
+    for record in records {
+        if crate::surface_dir::is_running(&record) {
+            continue;
+        }
+        let dir = crate::surface_dir::surface_dir(main_checkout, &record.id);
+        let newest = newest_file_mtime(&dir)?;
+        let is_older = match now.duration_since(newest) {
+            Ok(age) => age > max_age,
+            Err(_) => false,
+        };
+        if !is_older {
+            continue;
+        }
+        let token_path = blyte_agent::sandbox::surface_token_path_for_id(&record.id)?;
+        let dir_label = format!(".wt/surfaces/{}", record.id);
+        let token_label = token_path.display().to_string();
+        remove_dir_if_present(&dir, &dir_label, dry_run, &mut lines)?;
+        remove_file_if_present(&token_path, &token_label, dry_run, &mut lines)?;
+    }
+
+    Ok(lines)
 }
 
 #[derive(Debug)]
@@ -3319,4 +3534,39 @@ pub fn clean_on_review(root: &Path, id: &str) {
     }
 
     spawn_background_clean(root, Some(id));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run_clean_surfaces_at, unix_secs_from_system_time};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn unix_secs_from_system_time_rejects_pre_epoch_time() {
+        let pre_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .expect("pre-epoch SystemTime");
+        let err = unix_secs_from_system_time(pre_epoch)
+            .expect_err("expected error for time before UNIX_EPOCH");
+        assert!(
+            err.contains("UNIX_EPOCH"),
+            "error should name UNIX_EPOCH: {err}"
+        );
+    }
+
+    #[test]
+    fn unix_secs_from_system_time_accepts_post_epoch_time() {
+        let ts = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert_eq!(unix_secs_from_system_time(ts), Ok(1_800_000_000));
+    }
+
+    #[test]
+    fn run_clean_surfaces_at_reports_error_on_pre_epoch_time() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pre_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .expect("pre-epoch SystemTime");
+        let had_errors = run_clean_surfaces_at(tmp.path(), 14, false, true, pre_epoch);
+        assert!(had_errors, "pre-epoch system clock must set had_errors");
+    }
 }

@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -16,19 +16,21 @@ use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
 use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsState};
 use crate::session::{AgentRunner, AnswerError, ApprovalAnswer, Attachment, EntryBody, Session};
+use crate::surface_dir::SurfaceRecord;
 
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
 pub const RECONCILE_SAFETY_NET_INTERVAL: Duration = Duration::from_secs(30);
 
 const INDEX_HTML: &str = include_str!("../assets/surface/index.html");
 const MAX_WAIT_MS: u64 = 25_000;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const RECONCILE_POLL_WAIT: Duration = Duration::from_millis(50);
 const TOKEN_BYTES: usize = 32;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct Surface {
+    pub surface_id: String,
+    pub surface_name: String,
     pub root: PathBuf,
     pub repo: String,
     pub session: Session,
@@ -80,14 +82,6 @@ fn has_valid_token(surface: &Surface, req: &Request) -> bool {
     constant_time_eq(provided.as_bytes(), surface.token.as_bytes())
 }
 
-#[derive(Serialize, Deserialize)]
-struct SurfaceFile {
-    pid: u32,
-    port: u16,
-    session_id: String,
-    started_at: u64,
-}
-
 #[derive(Serialize)]
 struct RunWithHold<'a> {
     #[serde(flatten)]
@@ -136,7 +130,11 @@ fn parse_json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::
 fn health_response(surface: &Surface) -> Response {
     Response::json(
         200,
-        &serde_json::json!({ "session_id": surface.session_id }),
+        &serde_json::json!({
+            "surface_id": surface.surface_id,
+            "surface_name": surface.surface_name,
+            "session_id": surface.session_id,
+        }),
     )
 }
 
@@ -146,6 +144,7 @@ fn session_response(surface: &Surface) -> Response {
         200,
         &serde_json::json!({
             "session_id": surface.session_id,
+            "surface_name": surface.surface_name,
             "repo": surface.repo,
             "started_at": surface.started_at,
             "model": info.model,
@@ -381,7 +380,7 @@ fn handle_post_approval(surface: &Surface, id: &str, req: &Request) -> Response 
     }
 }
 
-fn reconcile_runs(
+pub fn reconcile_runs(
     surface: &Surface,
     now: u64,
 ) -> Result<(crate::live_runs::LiveRuns, Vec<String>), String> {
@@ -389,10 +388,11 @@ fn reconcile_runs(
         .reconcile_lock
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let owned = crate::requests::owned_run_ids(surface)?;
     let mut live = crate::live_runs::collect(&surface.root, now, surface.days)?;
     let mut any_written = false;
     for run in &live.runs {
-        if run.checks_recorded {
+        if !owned.contains(&run.id) || run.checks_recorded {
             continue;
         }
         if crate::queue_actions::ensure_checks(&surface.root, &run.id)? {
@@ -402,6 +402,8 @@ fn reconcile_runs(
     if any_written {
         live = crate::live_runs::collect(&surface.root, now, surface.days)?;
     }
+    live.running.retain(|run| owned.contains(&run.id));
+    live.runs.retain(|run| owned.contains(&run.id));
 
     let mut errors = Vec::new();
     if let Err(e) = crate::run_results::report_finished_runs(surface) {
@@ -482,11 +484,20 @@ fn handle_run_diff(surface: &Surface, id: &str) -> Response {
     }
     let wt_dir = surface.root.join(".wt");
     let wt = wt_dir.join(id);
+    let start = wt_dir.join(format!("{id}.start.json"));
     let summary = wt_dir.join(format!("{id}.json"));
     let report_json = wt_dir.join(format!("{id}.report.json"));
     let report_md = wt_dir.join(format!("{id}.report.md"));
-    if !wt.exists() && !summary.exists() && !report_json.exists() && !report_md.exists() {
+    if !wt.exists()
+        && !start.exists()
+        && !summary.exists()
+        && !report_json.exists()
+        && !report_md.exists()
+    {
         return json_error(404, format!("unknown run: {id}"));
+    }
+    if let Err(err) = crate::requests::run_owner_check(surface, id) {
+        return request_action_error_response(err);
     }
     match crate::queue_actions::compute_review(&surface.root, id, true) {
         Ok(data) => {
@@ -541,6 +552,19 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
         Some(serde_json::Value::String(s)) => Some(s.clone()),
         Some(_) => return json_error(400, "field note must be a string or null"),
     };
+
+    let wt_dir = surface.root.join(".wt");
+    let run_exists = is_valid_run_id(id)
+        && (wt_dir.join(id).exists()
+            || wt_dir.join(format!("{id}.start.json")).exists()
+            || wt_dir.join(format!("{id}.json")).exists()
+            || wt_dir.join(format!("{id}.report.json")).exists()
+            || wt_dir.join(format!("{id}.report.md")).exists());
+    if run_exists {
+        if let Err(err) = crate::requests::run_owner_check(surface, id) {
+            return request_action_error_response(err);
+        }
+    }
 
     let decision =
         match crate::queue_actions::decide(&surface.root, id, action, note.as_deref(), now) {
@@ -606,6 +630,7 @@ fn handle_requests(surface: &Surface) -> Response {
 fn request_action_error_response(err: RequestActionError) -> Response {
     match err {
         RequestActionError::BadRequest(msg) => json_error(400, msg),
+        RequestActionError::NotOwned(msg) => json_error(403, msg),
         RequestActionError::Conflict(msg) => json_error(409, msg),
         RequestActionError::Internal(msg) => json_error(500, msg),
     }
@@ -818,6 +843,53 @@ fn find_git_toplevel(dir: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(path_str))
 }
 
+fn resolve_main_checkout(worktree_root: &Path) -> Result<PathBuf, String> {
+    let out = Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .current_dir(worktree_root)
+        .output()
+        .map_err(|_| {
+            format!(
+                "cannot find the main checkout of {}",
+                worktree_root.display()
+            )
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "cannot find the main checkout of {}",
+            worktree_root.display()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
+        return Err(format!(
+            "cannot find the main checkout of {}",
+            worktree_root.display()
+        ));
+    };
+    let git_dir_path = PathBuf::from(git_dir.trim());
+    let common_dir_path = PathBuf::from(common_dir.trim());
+    let same_git_dir = match (git_dir_path.canonicalize(), common_dir_path.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => git_dir_path == common_dir_path,
+    };
+    if same_git_dir {
+        return Ok(worktree_root.to_path_buf());
+    }
+    crate::config::main_checkout(worktree_root).ok_or_else(|| {
+        format!(
+            "cannot find the main checkout of {}",
+            worktree_root.display()
+        )
+    })
+}
+
 fn repo_name_for(root: &Path) -> Result<String, String> {
     root.file_name()
         .and_then(|s| s.to_str())
@@ -835,42 +907,6 @@ fn now_duration() -> Result<Duration, String> {
 fn new_session_id(nanos: u128) -> String {
     let seq = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("surface-{}-{nanos}-{seq}", std::process::id())
-}
-
-fn probe_existing_surface(port: u16, expected_session_id: &str) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = match TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
-    let req =
-        format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(req.as_bytes()).is_err() {
-        return false;
-    }
-    let mut raw = Vec::new();
-    if stream.read_to_end(&mut raw).is_err() {
-        return false;
-    }
-    let text = match std::str::from_utf8(&raw) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let (head, body) = match text.split_once("\r\n\r\n") {
-        Some(parts) => parts,
-        None => return false,
-    };
-    let status_line = head.lines().next().unwrap_or("");
-    if !(status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")) {
-        return false;
-    }
-    let val: serde_json::Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    val.get("session_id").and_then(|v| v.as_str()) == Some(expected_session_id)
 }
 
 fn open_browser(url: &str) {
@@ -960,14 +996,14 @@ fn write_token_file(token_file_path: &Path, token: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn read_token_file(token_file_path: &Path) -> Result<String, String> {
-    let raw = std::fs::read_to_string(token_file_path)
-        .map_err(|e| format!("cannot read {}: {e}", token_file_path.display()))?;
-    let token = raw.trim().to_string();
-    if token.is_empty() {
-        return Err(format!("{} is empty", token_file_path.display()));
+struct TokenFileGuard {
+    path: PathBuf,
+}
+
+impl Drop for TokenFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
-    Ok(token)
 }
 
 pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
@@ -1104,14 +1140,35 @@ fn run_inner<S>(
 where
     S: Fn() -> bool,
 {
-    let root = match find_git_toplevel(&config.repo_root) {
+    let worktree_root = match find_git_toplevel(&config.repo_root) {
         Ok(r) => r,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
             return 1;
         }
     };
-    let repo = match repo_name_for(&root) {
+    let main_checkout = match resolve_main_checkout(&worktree_root) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+    let same_checkout = match (worktree_root.canonicalize(), main_checkout.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => worktree_root == main_checkout,
+    };
+    if !same_checkout {
+        let _ = writeln!(
+            err,
+            "blyte: started in a linked worktree ({}); this surface works in the main checkout {}",
+            worktree_root.display(),
+            main_checkout.display()
+        );
+        let _ = err.flush();
+    }
+
+    let repo = match repo_name_for(&main_checkout) {
         Ok(r) => r,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
@@ -1119,65 +1176,85 @@ where
         }
     };
 
-    let wt_dir = root.join(".wt");
-    let surface_file_path = wt_dir.join("surface.json");
-    let _ = std::fs::remove_file(wt_dir.join("surface.token"));
-    let main_checkout = crate::config::main_checkout(&root).unwrap_or_else(|| root.clone());
-    let token_file_path = match blyte_agent::sandbox::surface_token_path(&main_checkout) {
-        Ok(p) => p,
+    let all_records = match crate::surface_dir::list_records(&main_checkout) {
+        Ok(r) => r,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
             return 1;
         }
     };
-    match std::fs::read_to_string(&surface_file_path) {
-        Ok(raw) => match serde_json::from_str::<SurfaceFile>(&raw) {
-            Ok(existing) => {
-                if probe_existing_surface(existing.port, &existing.session_id) {
-                    let token = match read_token_file(&token_file_path) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            let _ = writeln!(err, "blyte: {e}");
-                            let _ = err.flush();
-                            return 1;
-                        }
-                    };
-                    let url = format!("http://127.0.0.1:{}/#token={token}", existing.port);
-                    let _ = writeln!(out, "blyte: surface already running at {url}");
-                    let _ = out.flush();
-                    if !args.no_open {
-                        opener(&url);
-                    }
-                    return 0;
-                }
-                let _ = writeln!(
-                    err,
-                    "blyte: stale surface file {} (port {}, session {}); replacing it",
-                    surface_file_path.display(),
-                    existing.port,
-                    existing.session_id
-                );
-                let _ = err.flush();
-            }
-            Err(e) => {
-                let _ = writeln!(
-                    err,
-                    "blyte: cannot parse {}: {e}",
-                    surface_file_path.display()
-                );
-                return 1;
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
+    let mut running = Vec::new();
+    let mut stopped = Vec::new();
+    for rec in all_records {
+        if crate::surface_dir::is_running(&rec) {
+            running.push(rec);
+        } else {
+            stopped.push(rec);
+        }
+    }
+    let running_names: Vec<String> = running.iter().map(|r| r.name.clone()).collect();
+
+    let (surface_id, surface_name) = if let Some(ref target) = args.resume {
+        if let Some(rec) = running
+            .iter()
+            .find(|r| r.id == *target || r.name == *target)
+        {
             let _ = writeln!(
                 err,
-                "blyte: cannot read {}: {e}",
-                surface_file_path.display()
+                "blyte: surface {target} is already running (port {})",
+                rec.port
             );
             return 1;
         }
-    }
+        let stopped_matches: Vec<&SurfaceRecord> = stopped
+            .iter()
+            .filter(|r| r.id == *target || r.name == *target)
+            .collect();
+        if stopped_matches.is_empty() {
+            let _ = writeln!(
+                err,
+                "blyte: no stopped surface named {target} in {}",
+                main_checkout.display()
+            );
+            return 1;
+        }
+        if stopped_matches.len() > 1 {
+            let ids: Vec<&str> = stopped_matches.iter().map(|r| r.id.as_str()).collect();
+            let _ = writeln!(
+                err,
+                "blyte: more than one stopped surface is named {target}; resume by id: {}",
+                ids.join(", ")
+            );
+            return 1;
+        }
+        let rec = stopped_matches[0];
+        if running_names.iter().any(|n| n == &rec.name) {
+            let _ = writeln!(
+                err,
+                "blyte: a running surface is already named {}; stop it or resume by another name",
+                rec.name
+            );
+            return 1;
+        }
+        (rec.id.clone(), rec.name.clone())
+    } else {
+        let id = match crate::surface_dir::new_surface_id() {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                return 1;
+            }
+        };
+        let name = match crate::surface_dir::pick_name(&repo, args.name.as_deref(), &running_names)
+        {
+            Ok(name) => name,
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                return 1;
+            }
+        };
+        (id, name)
+    };
 
     if !config.converse {
         config.converse = true;
@@ -1188,7 +1265,7 @@ where
             config.fold_budget = Some(100_000);
         }
     }
-    config.repo_root = root.clone();
+    config.repo_root = main_checkout.clone();
 
     let started_dur = match now_duration() {
         Ok(d) => d,
@@ -1230,10 +1307,37 @@ where
         }
     };
 
-    let entries_log_path = main_checkout
-        .join(".wt")
-        .join("sessions")
-        .join("entries.jsonl");
+    let token_file_path = match blyte_agent::sandbox::surface_token_path_for_id(&surface_id) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = write_token_file(&token_file_path, &token) {
+        let _ = writeln!(err, "blyte: {e}");
+        return 1;
+    }
+    let _token_guard = TokenFileGuard {
+        path: token_file_path,
+    };
+
+    // The record is written as soon as the directory exists: another start lists
+    // every surface directory and fails on one that has no record.
+    let record = SurfaceRecord {
+        id: surface_id.clone(),
+        name: surface_name.clone(),
+        pid: std::process::id(),
+        port: actual_port,
+        session_id: session_id.clone(),
+        started_at,
+    };
+    if let Err(e) = crate::surface_dir::write_record(&main_checkout, &record) {
+        let _ = writeln!(err, "blyte: {e}");
+        return 1;
+    }
+    let entries_log_path = crate::surface_dir::entries_path(&main_checkout, &surface_id);
+    blyte_agent::tools::set_blyte_surface(Some(surface_id.clone()));
     let model = resolve_initial_model(&config);
     let session = match Session::start_with_log_io(model, Some(entries_log_path), err, |approver| {
         Box::new(AgentRunner::new(&config, approver))
@@ -1246,47 +1350,17 @@ where
         }
     };
 
-    if let Err(e) = std::fs::create_dir_all(&wt_dir) {
-        let _ = writeln!(err, "blyte: cannot create {}: {e}", wt_dir.display());
-        return 1;
-    }
-    if let Err(e) = write_token_file(&token_file_path, &token) {
-        let _ = writeln!(err, "blyte: {e}");
-        return 1;
-    }
-    let record = SurfaceFile {
-        pid: std::process::id(),
-        port: actual_port,
-        session_id: session_id.clone(),
-        started_at,
-    };
-    let record_json = match serde_json::to_string_pretty(&record) {
-        Ok(s) => s + "\n",
-        Err(e) => {
-            let _ = std::fs::remove_file(&token_file_path);
-            let _ = writeln!(err, "blyte: cannot serialize surface file: {e}");
-            return 1;
-        }
-    };
-    if let Err(e) = std::fs::write(&surface_file_path, record_json) {
-        let _ = std::fs::remove_file(&token_file_path);
-        let _ = writeln!(
-            err,
-            "blyte: cannot write {}: {e}",
-            surface_file_path.display()
-        );
-        return 1;
-    }
-
     let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
-    let _ = writeln!(out, "blyte: surface at {url}");
+    let _ = writeln!(out, "blyte: surface {surface_name} at {url}");
     let _ = out.flush();
     if !args.no_open {
         opener(&url);
     }
 
     let surface = Arc::new(Surface {
-        root,
+        surface_id,
+        surface_name,
+        root: main_checkout,
         repo,
         session,
         session_id,
@@ -1308,9 +1382,6 @@ where
         });
 
     drop(timer_guard);
-
-    let _ = std::fs::remove_file(&surface_file_path);
-    let _ = std::fs::remove_file(&token_file_path);
 
     match serve_result {
         Ok(()) => 0,

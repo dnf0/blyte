@@ -155,6 +155,7 @@ pub struct RequestStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequestActionError {
     BadRequest(String),
+    NotOwned(String),
     Conflict(String),
     Internal(String),
 }
@@ -162,6 +163,7 @@ pub enum RequestActionError {
 struct StartRunInfo {
     id: String,
     request: Option<String>,
+    surface: Option<String>,
     base: Option<String>,
     started_at: u64,
     is_research: bool,
@@ -213,6 +215,16 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartRunInfo, String> 
             ));
         }
     };
+    let surface = match val.get("surface") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(format!(
+                "start file {} has non-string surface field",
+                path.display()
+            ));
+        }
+    };
     let base = match val.get("base") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) => Some(s.clone()),
@@ -233,6 +245,7 @@ fn parse_start_file(wt_dir: &Path, path: &Path) -> Result<StartRunInfo, String> 
     Ok(StartRunInfo {
         id: file_id.to_string(),
         request,
+        surface,
         base,
         started_at,
         is_research,
@@ -260,6 +273,97 @@ fn list_start_files(wt_dir: &Path) -> Result<Vec<PathBuf>, String> {
     }
     entries.sort();
     Ok(entries)
+}
+
+enum RequestOwnership {
+    Owned,
+    OtherSurface,
+    Unowned,
+    NotFound,
+}
+
+enum RequestOwnershipError {
+    Mixed(String),
+    IoOrParse(String),
+}
+
+fn check_request_ownership(
+    surface: &Surface,
+    request: &str,
+) -> Result<RequestOwnership, RequestOwnershipError> {
+    let wt_dir = surface.root.join(".wt");
+    let entries = list_start_files(&wt_dir).map_err(RequestOwnershipError::IoOrParse)?;
+    let mut owners: HashSet<Option<String>> = HashSet::new();
+    for path in entries {
+        let info = parse_start_file(&wt_dir, &path).map_err(RequestOwnershipError::IoOrParse)?;
+        if info.request.as_deref() == Some(request) {
+            owners.insert(info.surface);
+        }
+    }
+    if owners.is_empty() {
+        return Ok(RequestOwnership::NotFound);
+    }
+    if owners.len() > 1 {
+        return Err(RequestOwnershipError::Mixed(format!(
+            "request {request} has runs from more than one surface"
+        )));
+    }
+    match owners.into_iter().next().flatten() {
+        Some(owner) if owner == surface.surface_id => Ok(RequestOwnership::Owned),
+        Some(_) => Ok(RequestOwnership::OtherSurface),
+        None => Ok(RequestOwnership::Unowned),
+    }
+}
+
+pub fn owned_run_ids(surface: &Surface) -> Result<HashSet<String>, String> {
+    let wt_dir = surface.root.join(".wt");
+    let entries = list_start_files(&wt_dir)?;
+    let mut ids = HashSet::new();
+    for path in entries {
+        let info = parse_start_file(&wt_dir, &path)?;
+        if info.surface.as_deref() == Some(surface.surface_id.as_str()) {
+            ids.insert(info.id);
+        }
+    }
+    Ok(ids)
+}
+
+pub fn request_owner_check(surface: &Surface, request: &str) -> Result<(), RequestActionError> {
+    crate::dispatch::validate_request_id(request).map_err(RequestActionError::BadRequest)?;
+    match check_request_ownership(surface, request) {
+        Ok(RequestOwnership::Owned) => Ok(()),
+        Ok(RequestOwnership::OtherSurface) => Err(RequestActionError::NotOwned(format!(
+            "request {request} belongs to another surface"
+        ))),
+        Ok(RequestOwnership::Unowned) => Err(RequestActionError::NotOwned(format!(
+            "request {request} was not started by a surface"
+        ))),
+        Ok(RequestOwnership::NotFound) => Err(RequestActionError::Conflict(format!(
+            "request {request} has not been combined"
+        ))),
+        Err(RequestOwnershipError::Mixed(msg)) => Err(RequestActionError::BadRequest(msg)),
+        Err(RequestOwnershipError::IoOrParse(msg)) => Err(RequestActionError::Internal(msg)),
+    }
+}
+
+pub(crate) fn run_owner_check(surface: &Surface, run_id: &str) -> Result<(), RequestActionError> {
+    let wt_dir = surface.root.join(".wt");
+    let path = wt_dir.join(format!("{run_id}.start.json"));
+    if !path.exists() {
+        return Err(RequestActionError::NotOwned(format!(
+            "run {run_id} was not started by a surface"
+        )));
+    }
+    let info = parse_start_file(&wt_dir, &path).map_err(RequestActionError::Internal)?;
+    match info.surface.as_deref() {
+        Some(owner) if owner == surface.surface_id => Ok(()),
+        Some(_) => Err(RequestActionError::NotOwned(format!(
+            "run {run_id} belongs to another surface"
+        ))),
+        None => Err(RequestActionError::NotOwned(format!(
+            "run {run_id} was not started by a surface"
+        ))),
+    }
 }
 
 pub fn run_request_id(root: &Path, run_id: &str) -> Result<Option<String>, String> {
@@ -910,6 +1014,15 @@ fn ready_waiting_reason(conversation_busy: bool) -> String {
 
 pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
     crate::dispatch::validate_request_id(request)?;
+    match check_request_ownership(surface, request) {
+        Ok(RequestOwnership::Owned) => {}
+        Ok(
+            RequestOwnership::OtherSurface | RequestOwnership::Unowned | RequestOwnership::NotFound,
+        ) => return Ok(false),
+        Err(RequestOwnershipError::Mixed(msg) | RequestOwnershipError::IoOrParse(msg)) => {
+            return Err(msg);
+        }
+    }
     if conversation_busy(surface) {
         return Ok(false);
     }
@@ -1128,17 +1241,15 @@ struct RequestGroup {
     request: String,
     max_started_at: u64,
     runs: Vec<(u64, String)>,
+    owners: HashSet<Option<String>>,
 }
 
 pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
     let wt_dir = surface.root.join(".wt");
     let entries = list_start_files(&wt_dir)?;
-    let mut groups: HashMap<String, RequestGroup> = HashMap::new();
+    let mut groups: BTreeMap<String, RequestGroup> = BTreeMap::new();
     for path in entries {
         let info = parse_start_file(&wt_dir, &path)?;
-        if info.is_research {
-            continue;
-        }
         let Some(req_id) = info.request else {
             continue;
         };
@@ -1148,14 +1259,35 @@ pub fn list_requests(surface: &Surface) -> Result<Vec<RequestStatus>, String> {
                 request: req_id,
                 max_started_at: 0,
                 runs: Vec::new(),
+                owners: HashSet::new(),
             });
+        entry.owners.insert(info.surface);
+        if info.is_research {
+            continue;
+        }
         if info.started_at > entry.max_started_at {
             entry.max_started_at = info.started_at;
         }
         entry.runs.push((info.started_at, info.id));
     }
 
-    let mut ordered: Vec<RequestGroup> = groups.into_values().collect();
+    let mut ordered: Vec<RequestGroup> = Vec::new();
+    for group in groups.into_values() {
+        if group.owners.len() > 1 {
+            return Err(format!(
+                "request {} has runs from more than one surface",
+                group.request
+            ));
+        }
+        if group.runs.is_empty() {
+            continue;
+        }
+        let owner = group.owners.iter().next().and_then(|o| o.as_deref());
+        if owner != Some(surface.surface_id.as_str()) {
+            continue;
+        }
+        ordered.push(group);
+    }
     ordered.sort_by(|a, b| {
         b.max_started_at
             .cmp(&a.max_started_at)
@@ -1378,7 +1510,7 @@ fn populate_record_metadata(root: &Path, rec: &CombineRecord, status: &mut Reque
 }
 
 pub fn push_request(surface: &Surface, request: &str) -> Result<(), RequestActionError> {
-    crate::dispatch::validate_request_id(request).map_err(RequestActionError::BadRequest)?;
+    request_owner_check(surface, request)?;
     if surface.requests.is_combining(request) {
         return Err(RequestActionError::Conflict(format!(
             "request {request} is currently combining"
@@ -1440,7 +1572,7 @@ pub fn open_request_pull_request(
     title: &str,
     body: &str,
 ) -> Result<String, RequestActionError> {
-    crate::dispatch::validate_request_id(request).map_err(RequestActionError::BadRequest)?;
+    request_owner_check(surface, request)?;
     let trimmed_title = title.trim();
     if trimmed_title.is_empty() {
         return Err(RequestActionError::BadRequest(
