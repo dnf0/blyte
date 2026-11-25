@@ -909,7 +909,7 @@ fn new_session_id(nanos: u128) -> String {
     format!("surface-{}-{nanos}-{seq}", std::process::id())
 }
 
-fn open_browser(url: &str) {
+pub fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let cmd = "open";
     #[cfg(not(target_os = "macos"))]

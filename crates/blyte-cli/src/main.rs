@@ -108,6 +108,38 @@ fn main() {
             blyte_cli::cli::Command::Plan(args) => {
                 std::process::exit(blyte_cli::plan_cmd::run(&args.plan, args.json));
             }
+            blyte_cli::cli::Command::Surfaces { json } => {
+                let dir = match blyte_cli::surface_registry::registry_dir() {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        eprintln!("blyte: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let mut out = std::io::stdout();
+                let mut err = std::io::stderr();
+                std::process::exit(blyte_cli::surfaces_cmd::run_surfaces(
+                    &dir, json, &mut out, &mut err,
+                ));
+            }
+            blyte_cli::cli::Command::Open { name } => {
+                let dir = match blyte_cli::surface_registry::registry_dir() {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        eprintln!("blyte: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let mut out = std::io::stdout();
+                let mut err = std::io::stderr();
+                std::process::exit(blyte_cli::surfaces_cmd::run_open(
+                    &dir,
+                    &name,
+                    &blyte_cli::serve::open_browser,
+                    &mut out,
+                    &mut err,
+                ));
+            }
             blyte_cli::cli::Command::Comments(args) => {
                 let dir = match std::env::current_dir() {
                     Ok(dir) => dir,
