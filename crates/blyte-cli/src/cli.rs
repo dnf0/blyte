@@ -61,6 +61,13 @@ pub enum Command {
     Statusline(StatuslineArgs),
     /// List a plan's tasks with their state and the command to dispatch each ready one
     Plan(PlanArgs),
+    /// List the surfaces running on this machine
+    Surfaces {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open a running surface's page by name
+    Open { name: String },
     /// Fail when the working tree adds comments since a base commit
     #[command(hide = true)]
     Comments(CommentsArgs),

@@ -152,11 +152,11 @@ pub fn list_records(main_checkout: &Path) -> Result<Vec<SurfaceRecord>, String> 
     Ok(records)
 }
 
-pub fn is_running(record: &SurfaceRecord) -> bool {
-    if record.port == 0 {
+pub fn health_matches(port: u16, id: &str) -> bool {
+    if port == 0 {
         return false;
     }
-    let addr = SocketAddr::from(([127, 0, 0, 1], record.port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = match TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) {
         Ok(s) => s,
         Err(_) => return false,
@@ -167,10 +167,8 @@ pub fn is_running(record: &SurfaceRecord) -> bool {
     if stream.set_write_timeout(Some(PROBE_TIMEOUT)).is_err() {
         return false;
     }
-    let req = format!(
-        "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-        record.port
-    );
+    let req =
+        format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
@@ -194,7 +192,11 @@ pub fn is_running(record: &SurfaceRecord) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
-    val.get("surface_id").and_then(|v| v.as_str()) == Some(record.id.as_str())
+    val.get("surface_id").and_then(|v| v.as_str()) == Some(id)
+}
+
+pub fn is_running(record: &SurfaceRecord) -> bool {
+    health_matches(record.port, &record.id)
 }
 
 pub fn pick_name(

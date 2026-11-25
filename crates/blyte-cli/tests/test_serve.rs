@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_agent::approval::Approver;
@@ -16,10 +16,11 @@ use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::{
     authenticated_api_get_routes, constant_time_eq, generate_token, route, run_with_hooks,
-    run_with_io, Surface, RECONCILE_SAFETY_NET_INTERVAL, TOKEN_HEADER,
+    run_with_io, run_with_runner, Surface, RECONCILE_SAFETY_NET_INTERVAL, TOKEN_HEADER,
 };
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
 use blyte_cli::surface_dir::{entries_path, list_records, record_path, surfaces_dir};
+use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
 
 struct RecordedCall {
     prompt: String,
@@ -274,6 +275,7 @@ fn ensure_isolated_state_home() {
         std::fs::create_dir_all(base).unwrap();
         let dir = tempfile::tempdir_in(base).unwrap();
         std::env::set_var("XDG_STATE_HOME", dir.path());
+        std::env::set_var("BLYTE_STATE_DIR", dir.path().join("blyte"));
         dir
     });
 }
@@ -3470,6 +3472,7 @@ fn surface_keeps_token_out_of_wt_and_rejects_unauthenticated_actions() {
         .env("HOME", &fake_home)
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .env_remove("XDG_STATE_HOME")
+        .env_remove("BLYTE_STATE_DIR")
         .env("BLYTE_ENV_FILE", "")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env("BLYTE_NO_KEEP_AWAKE", "1")
@@ -3547,4 +3550,517 @@ fn surface_keeps_token_out_of_wt_and_rejects_unauthenticated_actions() {
             "POST {path} without token must report missing or invalid surface token, got: {resp}"
         );
     }
+}
+
+fn test_registry_dir() -> PathBuf {
+    ensure_isolated_state_home();
+    registry_dir().unwrap()
+}
+
+fn read_registry_entry(dir: &Path, id: &str) -> RegistryEntry {
+    let raw = std::fs::read_to_string(entry_path(dir, id)).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn start_stoppable_surface_with_runner(
+    repo: &Path,
+    args: SurfaceArgs,
+    runner: Box<dyn PromptRunner>,
+) -> RunningSurface {
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let repo_bg = repo.to_path_buf();
+    let out_bg = Arc::clone(&out_buf);
+    let err_bg = Arc::clone(&err_buf);
+    let stop_bg = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let cfg = default_repl_config(repo_bg);
+        let mut out = SharedBuf(out_bg);
+        let mut err = SharedBuf(err_bg);
+        let mut opener = |_: &str| {};
+        run_with_runner(&args, cfg, &mut out, &mut err, &mut opener, stop_bg, runner)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (name, port, token) = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stderr={}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
+        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
+            break parsed;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    RunningSurface {
+        name,
+        port,
+        token,
+        stop,
+        err_buf,
+        handle,
+    }
+}
+
+struct DoingBlockingRunner {
+    started: Arc<(Mutex<bool>, Condvar)>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl PromptRunner for DoingBlockingRunner {
+    fn run(
+        &mut self,
+        _prompt: &str,
+        _model: &str,
+        emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        {
+            let (lock, cv) = &*self.started;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        {
+            let (lock, cv) = &*self.release;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
+            }
+        }
+        emit(EntryBody::Turn {
+            n: 1,
+            text: "done".to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: None,
+        });
+        Ok(())
+    }
+}
+
+fn init_repo_on_branch(dir: &Path, branch: &str) {
+    init_git_repo(dir);
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test"]);
+    run_git(&["checkout", "-b", branch]);
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "initial"]);
+}
+
+#[test]
+fn started_surface_writes_registry_entry_with_metadata_and_idle() {
+    let reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("reg-entry-repo");
+    init_repo_on_branch(&repo, "feat/registry-entry");
+
+    let running = start_stoppable_surface_with_args(
+        &repo,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: None,
+            resume: None,
+        },
+        None,
+    );
+
+    let records = list_records(&repo).unwrap();
+    assert_eq!(records.len(), 1);
+    let rec = &records[0];
+
+    let entry = read_registry_entry(&reg_dir, &rec.id);
+    assert_eq!(entry.id, rec.id);
+    assert_eq!(entry.name, running.name);
+    assert_eq!(entry.port, running.port);
+    assert_eq!(
+        entry.root.canonicalize().unwrap(),
+        repo.canonicalize().unwrap()
+    );
+    assert_eq!(entry.branch, "feat/registry-entry");
+    assert_eq!(entry.doing, "idle");
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn stopped_surface_removes_registry_entry_and_keeps_surface_record() {
+    let reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("reg-stop-repo");
+    init_git_repo(&repo);
+
+    let running = start_stoppable_surface_with_args(
+        &repo,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: None,
+            resume: None,
+        },
+        None,
+    );
+
+    let records = list_records(&repo).unwrap();
+    assert_eq!(records.len(), 1);
+    let surface_id = records[0].id.clone();
+    assert!(entry_path(&reg_dir, &surface_id).exists());
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+
+    assert!(!entry_path(&reg_dir, &surface_id).exists());
+    let records_after = list_records(&repo).unwrap();
+    assert_eq!(records_after.len(), 1);
+    assert_eq!(records_after[0].id, surface_id);
+}
+
+#[test]
+fn second_surface_in_different_repo_with_same_dir_name_gets_dash_2() {
+    let _reg_dir = test_registry_dir();
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let repo1 = d1.path().join("reg-shared-dir");
+    let repo2 = d2.path().join("reg-shared-dir");
+    init_git_repo(&repo1);
+    init_git_repo(&repo2);
+
+    let first = start_stoppable_surface_with_args(
+        &repo1,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: None,
+            resume: None,
+        },
+        None,
+    );
+    let second = start_stoppable_surface_with_args(
+        &repo2,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: None,
+            resume: None,
+        },
+        None,
+    );
+
+    assert_eq!(first.name, "reg-shared-dir");
+    assert_eq!(second.name, "reg-shared-dir-2");
+
+    second.stop.store(true, Ordering::Relaxed);
+    first.stop.store(true, Ordering::Relaxed);
+    assert_eq!(second.handle.join().unwrap(), 0);
+    assert_eq!(first.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn explicit_name_used_in_different_repo_fails_and_writes_no_registry_entry() {
+    let reg_dir = test_registry_dir();
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let repo1 = d1.path().join("reg-name-owner");
+    let repo2 = d2.path().join("reg-name-challenger");
+    init_git_repo(&repo1);
+    init_git_repo(&repo2);
+
+    let first = start_stoppable_surface_with_args(
+        &repo1,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: Some("reg-cross-repo-name".to_string()),
+            resume: None,
+        },
+        None,
+    );
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut opener = |_: &str| {};
+    let stop = Arc::new(AtomicBool::new(false));
+    let code = run_with_hooks(
+        &SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: Some("reg-cross-repo-name".to_string()),
+            resume: None,
+        },
+        default_repl_config(repo2.clone()),
+        &mut out,
+        &mut err,
+        &mut opener,
+        stop,
+    );
+
+    assert_eq!(code, 1);
+    let err_text = String::from_utf8(err).unwrap();
+    assert!(
+        err_text.contains("a running surface is already named reg-cross-repo-name"),
+        "expected existing pick_name duplicate error, got: {err_text}"
+    );
+    assert!(list_records(&repo2).unwrap().is_empty());
+    let first_records = list_records(&repo1).unwrap();
+    assert_eq!(first_records.len(), 1);
+    let first_id = &first_records[0].id;
+    assert!(entry_path(&reg_dir, first_id).exists());
+    let repo2_canon = repo2.canonicalize().unwrap();
+    let mut stray = Vec::new();
+    for item in std::fs::read_dir(&reg_dir).unwrap() {
+        let path = item.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("failed to read {}: {e}", path.display()),
+        };
+        let entry: RegistryEntry = serde_json::from_str(&raw).unwrap();
+        let points_to_repo2 =
+            entry.root == repo2 || entry.root.canonicalize().ok().as_ref() == Some(&repo2_canon);
+        let duplicate_name = entry.name == "reg-cross-repo-name" && entry.id != *first_id;
+        if points_to_repo2 || duplicate_name {
+            stray.push(entry);
+        }
+    }
+    assert!(
+        stray.is_empty(),
+        "expected no registry entry for second repo; stray={stray:?}"
+    );
+
+    first.stop.store(true, Ordering::Relaxed);
+    assert_eq!(first.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn stale_registry_entry_does_not_block_name_and_is_removed() {
+    let reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("reg-stale-repo");
+    init_git_repo(&repo);
+
+    let dead_port = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let stale_id = "s00000000000000f1";
+    let stale_entry = RegistryEntry {
+        id: stale_id.to_string(),
+        name: "reg-stale-repo".to_string(),
+        root: d.path().join("ghost-repo"),
+        branch: "main".to_string(),
+        pid: 999_999,
+        port: dead_port,
+        started_at: 1_700_000_000,
+        doing: "idle".to_string(),
+    };
+    write_entry(&reg_dir, &stale_entry).unwrap();
+    assert!(entry_path(&reg_dir, stale_id).exists());
+
+    let running = start_stoppable_surface_with_args(
+        &repo,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: None,
+            resume: None,
+        },
+        None,
+    );
+
+    assert_eq!(running.name, "reg-stale-repo");
+    assert!(!entry_path(&reg_dir, stale_id).exists());
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn resume_fails_when_name_is_running_in_another_repository() {
+    let _reg_dir = test_registry_dir();
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let repo1 = d1.path().join("reg-resume-first");
+    let repo2 = d2.path().join("reg-resume-second");
+    init_git_repo(&repo1);
+    init_git_repo(&repo2);
+
+    let first = start_stoppable_surface_with_args(
+        &repo1,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: Some("reg-resume-taken".to_string()),
+            resume: None,
+        },
+        None,
+    );
+    first.stop.store(true, Ordering::Relaxed);
+    assert_eq!(first.handle.join().unwrap(), 0);
+
+    let second = start_stoppable_surface_with_args(
+        &repo2,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: Some("reg-resume-taken".to_string()),
+            resume: None,
+        },
+        None,
+    );
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut opener = |_: &str| {};
+    let stop = Arc::new(AtomicBool::new(false));
+    let code = run_with_hooks(
+        &SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: None,
+            resume: Some("reg-resume-taken".to_string()),
+        },
+        default_repl_config(repo1),
+        &mut out,
+        &mut err,
+        &mut opener,
+        stop,
+    );
+
+    assert_eq!(code, 1);
+    let err_text = String::from_utf8(err).unwrap();
+    assert!(
+        err_text.contains("a running surface is already named reg-resume-taken"),
+        "expected running surface name conflict, got: {err_text}"
+    );
+
+    second.stop.store(true, Ordering::Relaxed);
+    assert_eq!(second.handle.join().unwrap(), 0);
+}
+
+#[test]
+fn registry_doing_tracks_running_turn_first_line_and_returns_to_idle() {
+    let reg_dir = test_registry_dir();
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("reg-doing-repo");
+    init_git_repo(&repo);
+
+    let started = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let runner = DoingBlockingRunner {
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    };
+
+    let running = start_stoppable_surface_with_runner(
+        &repo,
+        SurfaceArgs {
+            port: 0,
+            no_open: true,
+            days: 14,
+            name: None,
+            resume: None,
+        },
+        Box::new(runner),
+    );
+
+    let records = list_records(&repo).unwrap();
+    assert_eq!(records.len(), 1);
+    let surface_id = records[0].id.clone();
+
+    assert_eq!(read_registry_entry(&reg_dir, &surface_id).doing, "idle");
+
+    let body = serde_json::json!({
+        "text": "investigate flaky parser\nwith extra details on line two"
+    })
+    .to_string();
+    let post_resp = send_http(
+        running.port,
+        &format!(
+            "POST /api/session/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: http://127.0.0.1:{}\r\n{}: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            running.port,
+            running.port,
+            TOKEN_HEADER,
+            running.token,
+            body.len(),
+            body
+        ),
+    );
+    assert!(
+        post_resp.starts_with("HTTP/1.1 200"),
+        "POST /api/session/messages failed: {post_resp}"
+    );
+
+    {
+        let (lock, cv) = &*started;
+        let mut is_started = lock.lock().unwrap();
+        while !*is_started {
+            is_started = cv.wait(is_started).unwrap();
+        }
+    }
+
+    assert_eq!(
+        read_registry_entry(&reg_dir, &surface_id).doing,
+        "investigate flaky parser"
+    );
+
+    {
+        let (lock, cv) = &*release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for turn to finish"
+        );
+        let ev_resp = send_http(
+            running.port,
+            &format!(
+                "GET /api/session/events?after=0&wait_ms=100 HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{}: {}\r\nConnection: close\r\n\r\n",
+                running.port, TOKEN_HEADER, running.token
+            ),
+        );
+        if ev_resp.contains("\"kind\":\"idle\"") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(read_registry_entry(&reg_dir, &surface_id).doing, "idle");
+
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
 }

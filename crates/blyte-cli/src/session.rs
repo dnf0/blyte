@@ -538,8 +538,11 @@ impl SessionState {
     }
 }
 
+type ActivityHook = Arc<dyn Fn(Option<&str>) + Send + Sync>;
+
 struct Shared {
     state: Mutex<SessionState>,
+    activity_hook: Mutex<Option<ActivityHook>>,
     log_cv: Condvar,
     work_cv: Condvar,
     approval_cv: Condvar,
@@ -563,6 +566,7 @@ impl Shared {
                 approvals: HashMap::new(),
                 next_approval_id: 0,
             }),
+            activity_hook: Mutex::new(None),
             log_cv: Condvar::new(),
             work_cv: Condvar::new(),
             approval_cv: Condvar::new(),
@@ -607,6 +611,7 @@ impl Shared {
         }
         Ok(Self {
             state: Mutex::new(state),
+            activity_hook: Mutex::new(None),
             log_cv: Condvar::new(),
             work_cv: Condvar::new(),
             approval_cv: Condvar::new(),
@@ -644,6 +649,17 @@ struct TurnTotals {
 }
 
 impl Session {
+    #[allow(clippy::type_complexity)]
+    pub fn set_activity_hook(&self, hook: Box<dyn Fn(Option<&str>) + Send + Sync>) {
+        let mut slot = self
+            .guard
+            .shared
+            .activity_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *slot = Some(Arc::from(hook));
+    }
+
     pub fn start(runner: Box<dyn PromptRunner>, model: String) -> Session {
         Self::start_with(model, |_| runner)
     }
@@ -956,6 +972,22 @@ impl Drop for RequestGuard {
     }
 }
 
+fn call_activity_hook(shared: &Shared, prompt: Option<&str>) {
+    let hook = {
+        let slot = shared
+            .activity_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        slot.clone()
+    };
+    if let Some(hook) = hook {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| hook(prompt))) {
+            let msg = panic_message(payload).replace(['\r', '\n'], " ");
+            eprintln!("blyte: activity hook panicked: {msg}");
+        }
+    }
+}
+
 fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
     loop {
         let (msg, effective_model) = {
@@ -975,6 +1007,8 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
                     .unwrap_or_else(|e| e.into_inner());
             }
         };
+
+        call_activity_hook(&shared, Some(&msg.prompt));
 
         let totals = Mutex::new(TurnTotals {
             turns: 0,
@@ -999,6 +1033,8 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
             let _req_guard = RequestGuard::enter(msg.request_id);
             runner.run(&msg.prompt, &effective_model, &emit)
         }));
+
+        call_activity_hook(&shared, None);
 
         let (turns, cost_usd) = {
             let t = totals.lock().unwrap_or_else(|e| e.into_inner());

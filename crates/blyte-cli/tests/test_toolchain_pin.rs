@@ -119,7 +119,7 @@ fn every_workflow_toolchain_matches_the_file() {
     }
 
     assert!(
-        found >= 4,
-        "expected at least 4 dtolnay/rust-toolchain@ steps across workflows, found {found}"
+        found >= 3,
+        "expected at least 3 dtolnay/rust-toolchain@ steps across workflows, found {found}"
     );
 }

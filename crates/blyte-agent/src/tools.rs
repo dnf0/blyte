@@ -1292,41 +1292,26 @@ fn execute_unbounded(
                 let _ = child.wait();
                 return ToolOutcome::err("dispatch failed: stdin pipe unavailable");
             };
-            if let Err(e) = std::io::Write::write_all(&mut stdin, &json_bytes) {
-                drop(stdin);
-                let _ = child.kill();
-                let _ = child.wait();
-                return ToolOutcome::err(format!(
-                    "dispatch failed to write arguments to stdin: {e}"
-                ));
-            }
+            let write_err = std::io::Write::write_all(&mut stdin, &json_bytes).err();
             drop(stdin);
 
-            match child.wait_with_output() {
-                Ok(output) => {
-                    if output.status.success() {
-                        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                        ToolOutcome::ok(stdout)
-                    } else {
-                        let stderr_str = String::from_utf8_lossy(&output.stderr);
-                        let lines: Vec<&str> = stderr_str.lines().collect();
-                        let tail = if lines.len() > OUTPUT_LINE_BUDGET {
-                            lines[lines.len() - OUTPUT_LINE_BUDGET..].join("\n")
-                        } else if !stderr_str.trim().is_empty() {
-                            stderr_str.trim_end().to_string()
-                        } else {
-                            format!("exit {}", output.status.code().unwrap_or(1))
-                        };
-                        // The dispatch command may report its result on stdout even when it fails.
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        if stdout.trim().is_empty() {
-                            ToolOutcome::err(tail)
-                        } else {
-                            ToolOutcome::err(format!("{}\n{tail}", stdout.trim_end()))
-                        }
-                    }
+            match (write_err, child.wait_with_output()) {
+                (None, Ok(output)) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    ToolOutcome::ok(stdout)
                 }
-                Err(e) => ToolOutcome::err(format!("dispatch command failed: {e}")),
+                (None, Ok(output)) => ToolOutcome::err(format_dispatch_failure(&output)),
+                (None, Err(e)) => ToolOutcome::err(format!("dispatch command failed: {e}")),
+                (Some(write_err), Ok(output)) if output.status.success() => ToolOutcome::err(
+                    format!("dispatch failed to write arguments to stdin: {write_err}"),
+                ),
+                (Some(write_err), Ok(output)) => ToolOutcome::err(format!(
+                    "{}\ndispatch also failed to write arguments to stdin: {write_err}",
+                    format_dispatch_failure(&output)
+                )),
+                (Some(write_err), Err(wait_err)) => ToolOutcome::err(format!(
+                    "dispatch failed to write arguments to stdin: {write_err}; dispatch command also failed: {wait_err}"
+                )),
             }
         }
         "blyte" => {
@@ -1567,6 +1552,27 @@ fn run_background_dispatch(
                 out_path.display()
             ))
         }
+    }
+}
+
+fn format_dispatch_failure(output: &std::process::Output) -> String {
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr_str.lines().collect();
+    let tail = if lines.len() > OUTPUT_LINE_BUDGET {
+        lines[lines.len() - OUTPUT_LINE_BUDGET..].join("\n")
+    } else if !stderr_str.trim().is_empty() {
+        stderr_str.trim_end().to_string()
+    } else {
+        match output.status.code() {
+            Some(code) => format!("exit {code}"),
+            None => format!("terminated without exit code ({})", output.status),
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        tail
+    } else {
+        format!("{}\n{tail}", stdout.trim_end())
     }
 }
 

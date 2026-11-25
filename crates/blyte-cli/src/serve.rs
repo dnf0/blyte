@@ -15,7 +15,9 @@ use crate::http::{Request, Response};
 use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
 use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsState};
-use crate::session::{AgentRunner, AnswerError, ApprovalAnswer, Attachment, EntryBody, Session};
+use crate::session::{
+    AgentRunner, AnswerError, ApprovalAnswer, Attachment, EntryBody, PromptRunner, Session,
+};
 use crate::surface_dir::SurfaceRecord;
 
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
@@ -890,6 +892,37 @@ fn resolve_main_checkout(worktree_root: &Path) -> Result<PathBuf, String> {
     })
 }
 
+fn current_branch(main_checkout: &Path) -> Result<String, String> {
+    if let Ok(out) = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(main_checkout)
+        .output()
+    {
+        if out.status.success() {
+            let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !branch.is_empty() {
+                return Ok(branch);
+            }
+        }
+    }
+    if let Ok(out) = Command::new("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(main_checkout)
+        .output()
+    {
+        if out.status.success() {
+            let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !branch.is_empty() {
+                return Ok(branch);
+            }
+        }
+    }
+    Err(format!(
+        "cannot read the current branch of {}",
+        main_checkout.display()
+    ))
+}
+
 fn repo_name_for(root: &Path) -> Result<String, String> {
     root.file_name()
         .and_then(|s| s.to_str())
@@ -909,7 +942,7 @@ fn new_session_id(nanos: u128) -> String {
     format!("surface-{}-{nanos}-{seq}", std::process::id())
 }
 
-fn open_browser(url: &str) {
+pub fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let cmd = "open";
     #[cfg(not(target_os = "macos"))]
@@ -1006,6 +1039,17 @@ impl Drop for TokenFileGuard {
     }
 }
 
+struct RegistryEntryGuard {
+    dir: PathBuf,
+    id: String,
+}
+
+impl Drop for RegistryEntryGuard {
+    fn drop(&mut self) {
+        let _ = crate::surface_registry::remove_entry(&self.dir, &self.id);
+    }
+}
+
 pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
     #[cfg(unix)]
     {
@@ -1037,6 +1081,7 @@ pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
                 false
             }
         },
+        None,
     )
 }
 
@@ -1046,7 +1091,7 @@ pub fn run_with_io(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    run_inner(args, config, out, err, &mut open_browser, || false)
+    run_inner(args, config, out, err, &mut open_browser, || false, None)
 }
 
 pub fn run_with_hooks(
@@ -1057,9 +1102,35 @@ pub fn run_with_hooks(
     opener: &mut dyn FnMut(&str),
     stop: Arc<AtomicBool>,
 ) -> i32 {
-    run_inner(args, config, out, err, opener, move || {
-        stop.load(Ordering::Relaxed)
-    })
+    run_inner(
+        args,
+        config,
+        out,
+        err,
+        opener,
+        move || stop.load(Ordering::Relaxed),
+        None,
+    )
+}
+
+pub fn run_with_runner(
+    args: &SurfaceArgs,
+    config: ReplConfig,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    opener: &mut dyn FnMut(&str),
+    stop: Arc<AtomicBool>,
+    runner: Box<dyn PromptRunner>,
+) -> i32 {
+    run_inner(
+        args,
+        config,
+        out,
+        err,
+        opener,
+        move || stop.load(Ordering::Relaxed),
+        Some(runner),
+    )
 }
 
 struct ReconcileTimerGuard {
@@ -1136,6 +1207,7 @@ fn run_inner<S>(
     err: &mut dyn Write,
     opener: &mut dyn FnMut(&str),
     should_stop: S,
+    custom_runner: Option<Box<dyn PromptRunner>>,
 ) -> i32
 where
     S: Fn() -> bool,
@@ -1176,6 +1248,14 @@ where
         }
     };
 
+    let registry_dir = match crate::surface_registry::registry_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+
     let all_records = match crate::surface_dir::list_records(&main_checkout) {
         Ok(r) => r,
         Err(e) => {
@@ -1192,7 +1272,20 @@ where
             stopped.push(rec);
         }
     }
-    let running_names: Vec<String> = running.iter().map(|r| r.name.clone()).collect();
+
+    let live_registry = match crate::surface_registry::live_entries(&registry_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+    let mut running_names: Vec<String> = running.iter().map(|r| r.name.clone()).collect();
+    for entry in &live_registry {
+        if !running_names.iter().any(|n| n == &entry.name) {
+            running_names.push(entry.name.clone());
+        }
+    }
 
     let (surface_id, surface_name) = if let Some(ref target) = args.resume {
         if let Some(rec) = running
@@ -1254,6 +1347,14 @@ where
             }
         };
         (id, name)
+    };
+
+    let branch = match current_branch(&main_checkout) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
     };
 
     if !config.converse {
@@ -1336,11 +1437,29 @@ where
         let _ = writeln!(err, "blyte: {e}");
         return 1;
     }
+    let registry_entry = crate::surface_registry::RegistryEntry {
+        id: surface_id.clone(),
+        name: surface_name.clone(),
+        root: main_checkout.clone(),
+        branch,
+        pid: std::process::id(),
+        port: actual_port,
+        started_at,
+        doing: "idle".to_string(),
+    };
+    if let Err(e) = crate::surface_registry::write_entry(&registry_dir, &registry_entry) {
+        let _ = writeln!(err, "blyte: {e}");
+        return 1;
+    }
+    let _registry_guard = RegistryEntryGuard {
+        dir: registry_dir.clone(),
+        id: surface_id.clone(),
+    };
     let entries_log_path = crate::surface_dir::entries_path(&main_checkout, &surface_id);
     blyte_agent::tools::set_blyte_surface(Some(surface_id.clone()));
     let model = resolve_initial_model(&config);
     let session = match Session::start_with_log_io(model, Some(entries_log_path), err, |approver| {
-        Box::new(AgentRunner::new(&config, approver))
+        custom_runner.unwrap_or_else(|| Box::new(AgentRunner::new(&config, approver)))
     }) {
         Ok(s) => s,
         Err(e) => {
@@ -1349,6 +1468,30 @@ where
             return 1;
         }
     };
+    let hook_dir = registry_dir.clone();
+    let hook_entry = registry_entry.clone();
+    session.set_activity_hook(Box::new(move |prompt| {
+        let doing = match prompt {
+            Some(text) => {
+                let line = crate::surface_registry::first_line(text);
+                if line.is_empty() {
+                    "working".to_string()
+                } else {
+                    line
+                }
+            }
+            None => "idle".to_string(),
+        };
+        // The whole entry is written, not only the changed field: another process removes an
+        // entry whose surface did not answer its health check in time, and this puts it back.
+        let entry = crate::surface_registry::RegistryEntry {
+            doing,
+            ..hook_entry.clone()
+        };
+        if let Err(e) = crate::surface_registry::write_entry(&hook_dir, &entry) {
+            eprintln!("blyte: {e}");
+        }
+    }));
 
     let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
     let _ = writeln!(out, "blyte: surface {surface_name} at {url}");

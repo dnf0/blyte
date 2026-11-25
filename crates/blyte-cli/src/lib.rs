@@ -49,6 +49,8 @@ pub mod skill;
 pub mod statusline;
 pub mod surface_dir;
 pub mod surface_notify;
+pub mod surface_registry;
+pub mod surfaces_cmd;
 pub mod task_runner;
 pub mod tty_approver;
 pub mod update;
