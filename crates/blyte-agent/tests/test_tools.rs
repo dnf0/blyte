@@ -746,7 +746,7 @@ impl Drop for ResetDispatch {
 
 #[test]
 fn dispatch_tool_runs_stub_command_and_echoes_json() {
-    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _lock = DISPATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = ResetDispatch;
     blyte_agent::tools::set_dispatch_cmd(Some("cat".into()));
 
@@ -771,7 +771,7 @@ fn dispatch_tool_runs_stub_command_and_echoes_json() {
 
 #[test]
 fn dispatch_tool_failing_command_gives_error_result() {
-    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _lock = DISPATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = ResetDispatch;
     blyte_agent::tools::set_dispatch_cmd(Some(
         "sh -c 'echo failed to execute task >&2; exit 1'".into(),
@@ -795,7 +795,7 @@ fn dispatch_tool_failing_command_gives_error_result() {
 
 #[test]
 fn dispatch_tool_sets_dispatch_parent_env() {
-    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _lock = DISPATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = ResetDispatch;
     std::env::set_var("BLYTE_SESSION", "test-orch-session-123");
     blyte_agent::tools::set_dispatch_cmd(Some("sh -c 'echo parent=$BLYTE_DISPATCH_PARENT'".into()));
@@ -818,7 +818,7 @@ fn dispatch_tool_sets_dispatch_parent_env() {
 
 #[test]
 fn dispatch_tool_stdin_write_failure_returns_error_outcome() {
-    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _lock = DISPATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = ResetDispatch;
     blyte_agent::tools::set_dispatch_cmd(Some("exec <&-; exit 0".into()));
 
@@ -838,6 +838,36 @@ fn dispatch_tool_stdin_write_failure_returns_error_outcome() {
     assert!(
         r.content.contains("stdin") && r.content.contains("write"),
         "expected error message naming stdin write failure, got: {:?}",
+        r.content
+    );
+}
+
+#[test]
+fn dispatch_tool_reports_the_command_failure_when_it_exits_before_reading() {
+    let _lock = DISPATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetDispatch;
+    blyte_agent::tools::set_dispatch_cmd(Some(
+        "exec <&-; echo failed to execute task >&2; exit 1".into(),
+    ));
+
+    let d = ws();
+    let large_task = "x".repeat(512 * 1024);
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "dispatch",
+        &json!({"task": large_task, "gate": "false"}),
+    );
+    assert!(r.is_error, "expected error, got {r:?}");
+    assert!(
+        r.content.contains("failed to execute task"),
+        "expected command stderr in content, got: {:?}",
+        r.content
+    );
+    assert!(
+        r.content.contains("failed to write arguments to stdin"),
+        "expected stdin write error in content, got: {:?}",
         r.content
     );
 }
