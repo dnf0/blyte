@@ -86,6 +86,37 @@ the modules.
 - A run with a corrupt `.verdict.json` (`not json`): clean exits non-zero, stderr names the file, and
   the run's worktree and branch still exist.
 
+**The removal record (the contract between Task RR and Task PM):**
+
+`blyte clean` (and the clean pass at the start of `blyte dispatch`) writes
+`.wt/<id>.removed.json` immediately before it removes a run's worktree and `wip/<id>` branch:
+
+```json
+{"id":"T1","reason":"merged","detail":null,"removed_at":1795000000}
+```
+
+- `reason` is one of `merged`, `merged_into`, `merged_through`, `session_merged`, `verdict`,
+  `no_changes`, `older_than`, plus one snake_case name for each research variant of
+  `clean::RemovalReason`. One name per variant, no catch-all.
+- `detail` is the variant's payload as a string where it has one (the branch merged into, the
+  follow-up run merged through, the verdict, the age in days), otherwise `null`.
+- `removed_at` is Unix seconds.
+- A run counts as **merged** when `reason` is `merged`, `merged_into`, `merged_through` or
+  `session_merged`.
+
+**Rules:**
+
+- **No fallbacks.** A file that does not exist may mean "nothing there" where that is the documented
+  meaning. A file that exists but cannot be read or parsed is an error whose message names the path
+  and the cause. Never substitute `""`, `"unknown"`, `"?"`, `0`, `false` or an empty list.
+- Nothing here is a long-running job, so "resumable" does not apply.
+- Existing tests pass unmodified unless they asserted the old silent behaviour; change only those and
+  say which in the final message.
+- Every new behaviour has a test that fails before the change. Tests must not need the network.
+- Change only the files the task names. The sibling tasks run in other worktrees; their
+  changes are not in this worktree, so do not add or "fix" them here.
+- Check: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && python3 scripts/test-changed.py`
+
 **Commit message:** `fix: clean records why it removed a run; corrupt verdict files are errors`
 
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
@@ -151,6 +182,37 @@ the modules.
 - `blyte plan` with a corrupt `.wt/X.start.json` exits non-zero and names the file; the same for a
   corrupt `.wt/X.verdict.json`, `.wt/X.json` and `.wt/X.removed.json`.
 - `blyte plan` in a repository with no `.wt` directory still works (no runs).
+
+**The removal record (the contract between Task RR and Task PM):**
+
+`blyte clean` (and the clean pass at the start of `blyte dispatch`) writes
+`.wt/<id>.removed.json` immediately before it removes a run's worktree and `wip/<id>` branch:
+
+```json
+{"id":"T1","reason":"merged","detail":null,"removed_at":1795000000}
+```
+
+- `reason` is one of `merged`, `merged_into`, `merged_through`, `session_merged`, `verdict`,
+  `no_changes`, `older_than`, plus one snake_case name for each research variant of
+  `clean::RemovalReason`. One name per variant, no catch-all.
+- `detail` is the variant's payload as a string where it has one (the branch merged into, the
+  follow-up run merged through, the verdict, the age in days), otherwise `null`.
+- `removed_at` is Unix seconds.
+- A run counts as **merged** when `reason` is `merged`, `merged_into`, `merged_through` or
+  `session_merged`.
+
+**Rules:**
+
+- **No fallbacks.** A file that does not exist may mean "nothing there" where that is the documented
+  meaning. A file that exists but cannot be read or parsed is an error whose message names the path
+  and the cause. Never substitute `""`, `"unknown"`, `"?"`, `0`, `false` or an empty list.
+- Nothing here is a long-running job, so "resumable" does not apply.
+- Existing tests pass unmodified unless they asserted the old silent behaviour; change only those and
+  say which in the final message.
+- Every new behaviour has a test that fails before the change. Tests must not need the network.
+- Change only the files the task names. The sibling tasks run in other worktrees; their
+  changes are not in this worktree, so do not add or "fix" them here.
+- Check: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && python3 scripts/test-changed.py`
 
 **Commit message:** `fix: plan views count a run removed as merged; unreadable run files fail blyte plan`
 
@@ -249,6 +311,19 @@ non-zero returns `Err` naming it (use a seam or an injected command; do not depe
 tools); the dispatch tool returns an error outcome when the stdin write fails (use a child that
 closes stdin at once, or a seam).
 
+**Rules:**
+
+- **No fallbacks.** A file that does not exist may mean "nothing there" where that is the documented
+  meaning. A file that exists but cannot be read or parsed is an error whose message names the path
+  and the cause. Never substitute `""`, `"unknown"`, `"?"`, `0`, `false` or an empty list.
+- Nothing here is a long-running job, so "resumable" does not apply.
+- Existing tests pass unmodified unless they asserted the old silent behaviour; change only those and
+  say which in the final message.
+- Every new behaviour has a test that fails before the change. Tests must not need the network.
+- Change only the files the task names. The sibling tasks run in other worktrees; their
+  changes are not in this worktree, so do not add or "fix" them here.
+- Check: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && python3 scripts/test-changed.py`
+
 **Commit message:** `fix: a failed environment probe or dispatch tool write is an error`
 
 **Audit excerpt (line numbers are from main at 9e30575d; find the code by content if they have moved):**
@@ -318,6 +393,19 @@ change only as far as a changed signature forces.
   error naming it.
 - The watchdog report write failure is returned or logged with the path, and `model_id` is not `""`
   (test at the unit level with a seam).
+
+**Rules:**
+
+- **No fallbacks.** A file that does not exist may mean "nothing there" where that is the documented
+  meaning. A file that exists but cannot be read or parsed is an error whose message names the path
+  and the cause. Never substitute `""`, `"unknown"`, `"?"`, `0`, `false` or an empty list.
+- Nothing here is a long-running job, so "resumable" does not apply.
+- Existing tests pass unmodified unless they asserted the old silent behaviour; change only those and
+  say which in the final message.
+- Every new behaviour has a test that fails before the change. Tests must not need the network.
+- Change only the files the task names. The sibling tasks run in other worktrees; their
+  changes are not in this worktree, so do not add or "fix" them here.
+- Check: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && python3 scripts/test-changed.py`
 
 **Commit message:** `fix: dispatch, status and setup report unreadable files; setup errors name the full log`
 
@@ -491,6 +579,19 @@ found in the final message.
 - A malformed model-review response produces an error carrying the response's actual content (or its
   first 200 characters), not `"unknown error"` or `"?"`.
 - A `.model-review.json` that cannot be saved (its parent is a file) is an error naming the path.
+
+**Rules:**
+
+- **No fallbacks.** A file that does not exist may mean "nothing there" where that is the documented
+  meaning. A file that exists but cannot be read or parsed is an error whose message names the path
+  and the cause. Never substitute `""`, `"unknown"`, `"?"`, `0`, `false` or an empty list.
+- Nothing here is a long-running job, so "resumable" does not apply.
+- Existing tests pass unmodified unless they asserted the old silent behaviour; change only those and
+  say which in the final message.
+- Every new behaviour has a test that fails before the change. Tests must not need the network.
+- Change only the files the task names. The sibling tasks run in other worktrees; their
+  changes are not in this worktree, so do not add or "fix" them here.
+- Check: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && python3 scripts/test-changed.py`
 
 **Commit message:** `fix: review, wait and model review name corrupt files instead of using placeholders`
 
@@ -672,6 +773,19 @@ binary could not be verified and gives its path.
 - A report lacking `outcome`: a problem naming the file and the field; the job's outcome is not
   `"unknown"`.
 - The update rollback path with a binary that exits non-zero on `--version` returns `Err`.
+
+**Rules:**
+
+- **No fallbacks.** A file that does not exist may mean "nothing there" where that is the documented
+  meaning. A file that exists but cannot be read or parsed is an error whose message names the path
+  and the cause. Never substitute `""`, `"unknown"`, `"?"`, `0`, `false` or an empty list.
+- Nothing here is a long-running job, so "resumable" does not apply.
+- Existing tests pass unmodified unless they asserted the old silent behaviour; change only those and
+  say which in the final message.
+- Every new behaviour has a test that fails before the change. Tests must not need the network.
+- Change only the files the task names. The sibling tasks run in other worktrees; their
+  changes are not in this worktree, so do not add or "fix" them here.
+- Check: `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && python3 scripts/test-changed.py`
 
 **Commit message:** `fix: dashboard shows unreadable run files as problems; update rollback verifies the binary`
 
