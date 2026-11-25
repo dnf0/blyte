@@ -345,3 +345,78 @@ elsewhere. None are in this worktree. Keep changes to `serve.rs` to what this ta
 Run: `cargo test -p blyte-cli --test test_requests --test test_serve --test test_surface_page`.
 
 **Commit message:** `fix(surface): a request whose branches were merged and removed shows as done, not as an error`
+
+### Task FC
+
+**Goal.** Four places in the CLI replace a failure with nothing, and `blyte dispatch` has no default
+cost cap. Make the failures loud and give a run a default cap.
+
+**Depends on:** none. **Siblings:** TK, HT, BD, CL, MR and FA run separately and are not in this
+worktree.
+
+**Files:** `crates/blyte-cli/src/dispatch.rs`, `crates/blyte-cli/src/queue_actions.rs`,
+`crates/blyte-cli/src/config.rs` (the template comment only), and tests.
+
+**What to build.** No fallbacks anywhere in this task.
+
+1. `finish_summary` (`dispatch.rs`): `create_dir_all` and the write of `.wt/<id>.json` are no longer
+   ignored. On failure print `blyte: could not write <path>: <error>` to stderr, still print the JSON
+   to stdout, and return a non-zero exit (1 when the summary's own exit was 0, otherwise the summary's).
+2. Research report copies (`dispatch.rs`, the `if args.research` block that copies `report.md` to the
+   run's report path and to `--report-to`): a failed `create_dir_all` or `copy` makes the run end with
+   outcome `error` and a message naming the destination path and the OS error, reported the way this
+   function reports its other late errors. The scratch report is left in place.
+3. `queue_actions.rs`, the review summary that runs `git log --oneline`, `git diff --stat`,
+   `git status --short` and `git diff` in the run's worktree: `WtGit::IoErr(e)` returns
+   `Err("could not run git <args> in <worktree>: <e>")` in place of an empty string, for each of the
+   calls. A git command that ran and exited non-zero is likewise an `Err` carrying its stderr, unless
+   the code already handles that exit for a stated reason (keep those and say which in the final message).
+4. Default cost cap: `pub const DEFAULT_MAX_COST_USD: f64 = 25.0;` and
+   `fn resolve_max_cost(flag: Option<f64>, config: Option<f64>) -> f64` (flag, else config, else the
+   default), used where `max_cost` is computed from `args.max_cost_usd.or(dispatch_cfg.max_cost)`; the
+   run always has a cap. The config template comment becomes `# max_cost = 25.0   # USD per run; this is the default`.
+   `blyte dispatch --help` text for `--max-cost` states the default.
+
+**Tests.**
+
+- `finish_summary` with `.wt` being a regular file: stderr names the path, stdout still has the JSON,
+  exit is 1 for a summary whose exit is 0 and stays 3 for one whose exit is 3.
+- research run whose `--report-to` parent is a regular file: outcome `error`, message names the path.
+- review summary with a worktree path whose git call cannot be run (for example `PATH` without git, or
+  the seam the existing tests use): `Err` naming the git arguments.
+- `resolve_max_cost(None, None) == 25.0`, `(None, Some(8.0)) == 8.0`, `(Some(3.0), Some(8.0)) == 3.0`.
+
+Run: `cargo test -p blyte-cli`.
+
+**Commit message:** `fix(cli): lost summary, report and review git failures are errors; a run has a default cost cap of USD 25`
+
+### Task FA
+
+**Goal.** Two places in the agent replace a failure with a made-up value.
+
+**Depends on:** none. **Siblings:** BD changes `tools.rs` in this crate; TK changes `sandbox.rs`. Not in
+this worktree; do not touch those files.
+
+**Files:** `crates/blyte-agent/src/run.rs`, `crates/blyte-agent/src/shell.rs`, and tests.
+
+**What to build.** No fallbacks.
+
+1. `Runner::reset_to` (`run.rs`) returns `Result<(), String>`: an `exec` error or a non-zero exit of
+   `git reset --hard <commit> && git clean -fd` is `Err("could not roll back to <commit>: <detail>")`.
+   Every caller handles it: a failed rollback ends the run with an error outcome carrying that message;
+   the run does not continue on a tree it could not roll back.
+2. Persistent shell result header (`shell.rs`, where `header.split(' ')` is parsed with
+   `unwrap_or(-1)` and `unwrap_or(0)`): a header that does not have exactly an integer exit code and
+   two unsigned lengths is a failure through the existing `fail(...)` path with the message
+   `shell returned a malformed result header: <header>`, not exit -1 with empty output.
+
+**Tests.**
+
+- a `Runner` whose shell fails the reset command: the run ends with an error outcome whose message
+  contains `could not roll back to`.
+- the header parser (extract a small `fn parse_header(&str) -> Result<(i32, usize, usize), String>` and
+  test it): `"0 3 4"` ok; `""`, `"x 1 2"`, `"0 1"`, `"0 -1 2"`, `"0 1 2 3"` are errors naming the header.
+
+Run: `cargo test -p blyte-agent`.
+
+**Commit message:** `fix(agent): a failed rollback and a malformed shell result header are errors`
