@@ -370,7 +370,7 @@ fn grep_outside_the_workspace_is_refused() {
 #[test]
 fn the_environment_probe_finds_the_tools_that_are_actually_here() {
     let d = ws();
-    let bins = blyte_agent::tools::available_binaries(&LocalShell, d.path());
+    let bins = blyte_agent::tools::available_binaries(&LocalShell, d.path()).unwrap();
     assert!(
         bins.iter().any(|b| b == "git"),
         "git is present on any dev machine: {bins:?}"
@@ -484,7 +484,7 @@ fn the_probe_reports_what_the_execution_environment_has_not_the_host() {
     // from the seam's reply rather than from the host.
     let d = ws();
     let fake = FakeShell::default();
-    let bins = blyte_agent::tools::available_binaries(&fake, d.path());
+    let bins = blyte_agent::tools::available_binaries(&fake, d.path()).unwrap();
     assert!(
         bins.contains(&"ran elsewhere".to_string()) || !bins.is_empty(),
         "probe must be answered by the executor, got {bins:?}"
@@ -502,7 +502,7 @@ fn the_environment_is_probed_in_one_round_trip() {
     // A remote shell pays a round trip per call; sixteen before the first turn is a poor start.
     let d = ws();
     let fake = FakeShell::default();
-    blyte_agent::tools::available_binaries(&fake, d.path());
+    blyte_agent::tools::available_binaries(&fake, d.path()).unwrap();
     assert_eq!(
         fake.seen.lock().unwrap().len(),
         1,
@@ -812,6 +812,32 @@ fn dispatch_tool_sets_dispatch_parent_env() {
     assert!(
         r.content.contains("parent=test-orch-session-123"),
         "content was: {:?}",
+        r.content
+    );
+}
+
+#[test]
+fn dispatch_tool_stdin_write_failure_returns_error_outcome() {
+    let _lock = DISPATCH_LOCK.lock().unwrap();
+    let _guard = ResetDispatch;
+    blyte_agent::tools::set_dispatch_cmd(Some("exec <&-; exit 0".into()));
+
+    let d = ws();
+    let large_task = "x".repeat(512 * 1024);
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "dispatch",
+        &json!({"task": large_task, "gate": "true"}),
+    );
+    assert!(
+        r.is_error,
+        "expected error on stdin write failure, got {r:?}"
+    );
+    assert!(
+        r.content.contains("stdin") && r.content.contains("write"),
+        "expected error message naming stdin write failure, got: {:?}",
         r.content
     );
 }

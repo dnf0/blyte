@@ -470,7 +470,16 @@ fn compute_review_res_with_runner(
     } = git_data;
 
     let log_file = root.join(".wt").join(format!("{id}.log"));
-    let log_content_opt = std::fs::read_to_string(&log_file).ok();
+    let log_content_opt = match std::fs::read_to_string(&log_file) {
+        Ok(content) => Some(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(ReviewError::Other(format!(
+                "cannot read {}: {e}",
+                log_file.display()
+            )));
+        }
+    };
     let (hcmds, reads, (refused_count, refused_paths)) =
         if let Some(ref log_content) = log_content_opt {
             let hcmds = host_commands(log_content);
@@ -485,14 +494,10 @@ fn compute_review_res_with_runner(
             (Vec::new(), Vec::new(), (0, Vec::new()))
         };
 
-    let report_val = std::fs::read_to_string(&report_file)
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .or_else(|| {
-            std::fs::read_to_string(&summary_file)
-                .ok()
-                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        });
+    let report_val = match read_optional_json(&report_file)? {
+        Some(v) => Some(v),
+        None => read_optional_json(&summary_file)?,
+    };
     let outcome = report_val
         .as_ref()
         .and_then(|v| v.get("outcome"))
@@ -789,9 +794,28 @@ pub(crate) fn parse_stored_model_review(
     if mr.is_null() {
         return Ok(None);
     }
-    serde_json::from_value(mr.clone())
+    let parsed: crate::model_review::ModelReviewResult = serde_json::from_value(mr.clone())
+        .map_err(|e| format!("invalid model_review in {}: {e}", checks_path.display()))?;
+    parsed
+        .validate()
+        .map_err(|e| format!("invalid model_review in {}: {e}", checks_path.display()))?;
+    Ok(Some(parsed))
+}
+
+fn read_optional_json(path: &Path) -> Result<Option<serde_json::Value>, ReviewError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(ReviewError::Other(format!(
+                "cannot read {}: {e}",
+                path.display()
+            )));
+        }
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
         .map(Some)
-        .map_err(|e| format!("invalid model_review in {}: {e}", checks_path.display()))
+        .map_err(|e| ReviewError::Other(format!("cannot parse {}: {e}", path.display())))
 }
 
 pub(crate) fn write_checks_file(
@@ -1328,5 +1352,51 @@ mod tests {
             .into_message();
         assert!(err.contains("diff --stat"), "got: {err}");
         assert!(err.contains("fatal: bad revision"), "got: {err}");
+    }
+
+    #[test]
+    fn compute_review_errors_on_corrupt_report_json_naming_file() {
+        let (d, head) = init_repo();
+        setup_finished_code_run(d.path(), "C1", Some(&head));
+        let report_path = d.path().join(".wt/C1.report.json");
+        std::fs::write(&report_path, "{corrupt json").unwrap();
+
+        let err = compute_review(d.path(), "C1", false)
+            .err()
+            .expect("expected error for corrupt report.json");
+        assert!(
+            err.contains(&report_path.display().to_string()),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn compute_review_errors_on_unreadable_log_directory_naming_file() {
+        let (d, head) = init_repo();
+        setup_finished_code_run(d.path(), "C2", Some(&head));
+        let log_path = d.path().join(".wt/C2.log");
+        std::fs::create_dir_all(&log_path).unwrap();
+
+        let err = compute_review(d.path(), "C2", false)
+            .err()
+            .expect("expected error for unreadable log directory");
+        assert!(err.contains(&log_path.display().to_string()), "got: {err}");
+    }
+
+    #[test]
+    fn compute_review_errors_on_corrupt_summary_json_when_report_absent() {
+        let (d, head) = init_repo();
+        setup_finished_code_run(d.path(), "C3", Some(&head));
+        std::fs::remove_file(d.path().join(".wt/C3.report.json")).unwrap();
+        let summary_path = d.path().join(".wt/C3.json");
+        std::fs::write(&summary_path, "not json at all").unwrap();
+
+        let err = compute_review(d.path(), "C3", false)
+            .err()
+            .expect("expected error for corrupt summary json");
+        assert!(
+            err.contains(&summary_path.display().to_string()),
+            "got: {err}"
+        );
     }
 }

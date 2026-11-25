@@ -64,6 +64,8 @@ pub enum KeptReason {
     UsedRecently(u64),
     HoldsRuns(String),
     UnreadableStartRecord(String),
+    UnreadableVerdict(String),
+    UnreadableChildState(String),
     Custom(String),
 }
 
@@ -83,8 +85,49 @@ impl std::fmt::Display for KeptReason {
             Self::UsedRecently(d) => write!(f, "used in the last {d} days"),
             Self::HoldsRuns(path) => write!(f, "holds runs: review them from {path}"),
             Self::UnreadableStartRecord(reason) => write!(f, "unreadable start record: {reason}"),
+            Self::UnreadableVerdict(reason) => write!(f, "unreadable verdict: {reason}"),
+            Self::UnreadableChildState(reason) => write!(f, "unreadable child state: {reason}"),
             Self::Custom(s) => write!(f, "{s}"),
         }
+    }
+}
+
+fn read_verdict_file(path: &Path) -> Result<Option<String>, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&content).map_err(|err| format!("{}: {err}", path.display()))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("{}: not a JSON object", path.display()))?;
+    match obj.get("verdict") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(Some(s.clone())),
+        Some(serde_json::Value::String(_)) => {
+            Err(format!("{}: empty verdict field", path.display()))
+        }
+        Some(_) => Err(format!("{}: verdict field is not a string", path.display())),
+        None => Err(format!("{}: missing verdict field", path.display())),
+    }
+}
+
+fn read_child_summary_verified(path: &Path) -> Result<bool, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&content).map_err(|err| format!("{}: {err}", path.display()))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("{}: not a JSON object", path.display()))?;
+    match obj.get("outcome") {
+        Some(serde_json::Value::String(s)) => Ok(s == "verified"),
+        Some(_) => Err(format!("{}: outcome field is not a string", path.display())),
+        None => Err(format!("{}: missing outcome field", path.display())),
     }
 }
 
@@ -1101,9 +1144,13 @@ impl<'a> CleanContext<'a> {
         children
     }
 
-    pub fn is_child_run_merged(&mut self, child: &str, visited: &mut HashSet<String>) -> bool {
+    pub fn is_child_run_merged(
+        &mut self,
+        child: &str,
+        visited: &mut HashSet<String>,
+    ) -> Result<bool, String> {
         if self.is_research_run(child) {
-            return false;
+            return Ok(false);
         }
 
         let branch_name = format!("wip/{child}");
@@ -1111,45 +1158,27 @@ impl<'a> CleanContext<'a> {
 
         if tip.is_none() {
             let verdict_path = self.root.join(".wt").join(format!("{child}.verdict.json"));
-            let (has_accepted_verdict, is_redone) = if verdict_path.is_file() {
-                let v = std::fs::read_to_string(&verdict_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|v| {
-                        v.get("verdict")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_default();
-                (v == "accepted" || v == "fixed", v == "redone")
-            } else {
-                (false, false)
+            let (has_accepted_verdict, is_redone) = match read_verdict_file(&verdict_path)? {
+                Some(v) => (v == "accepted" || v == "fixed", v == "redone"),
+                None => (false, false),
             };
 
             if is_redone {
-                return false;
+                return Ok(false);
             }
 
             let summary_path = self.root.join(".wt").join(format!("{child}.json"));
-            let is_verified = std::fs::read_to_string(&summary_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| {
-                    v.get("outcome")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s == "verified")
-                })
-                .unwrap_or(false);
+            let is_verified = read_child_summary_verified(&summary_path)?;
 
             let wt_gone = !self.root.join(".wt").join(child).is_dir();
 
-            return has_accepted_verdict || (is_verified && wt_gone);
+            return Ok(has_accepted_verdict || (is_verified && wt_gone));
         }
 
-        self.check_run_merged_internal(child, visited).is_some()
+        Ok(self.check_run_merged_internal(child, visited)?.is_some())
     }
 
-    pub fn check_run_merged(&mut self, id: &str) -> Option<RemovalReason> {
+    pub fn check_run_merged(&mut self, id: &str) -> Result<Option<RemovalReason>, String> {
         let mut visited = HashSet::new();
         self.check_run_merged_internal(id, &mut visited)
     }
@@ -1158,13 +1187,13 @@ impl<'a> CleanContext<'a> {
         &mut self,
         id: &str,
         visited: &mut HashSet<String>,
-    ) -> Option<RemovalReason> {
+    ) -> Result<Option<RemovalReason>, String> {
         if visited.contains(id) {
-            return None;
+            return Ok(None);
         }
 
         if let Some(cached) = self.merged_cache.get(id) {
-            return cached.clone();
+            return Ok(cached.clone());
         }
 
         visited.insert(id.to_string());
@@ -1176,7 +1205,9 @@ impl<'a> CleanContext<'a> {
 
         visited.remove(id);
 
-        self.merged_cache.insert(id.to_string(), result.clone());
+        if let Ok(ref val) = result {
+            self.merged_cache.insert(id.to_string(), val.clone());
+        }
         result
     }
 
@@ -1292,11 +1323,21 @@ impl<'a> CleanContext<'a> {
         self.is_commit_merged_with_targets(&tip, extra_targets)
     }
 
-    pub fn is_branch_merged(&mut self, branch_name: &str) -> bool {
+    pub fn is_branch_merged_checked(&mut self, branch_name: &str) -> Result<bool, String> {
         if let Some(id) = branch_name.strip_prefix("wip/") {
-            self.check_run_merged(id).is_some()
+            Ok(self.check_run_merged(id)?.is_some())
         } else {
-            self.is_branch_merged_with_targets(branch_name, &[])
+            Ok(self.is_branch_merged_with_targets(branch_name, &[]))
+        }
+    }
+
+    pub fn is_branch_merged(&mut self, branch_name: &str) -> bool {
+        match self.is_branch_merged_checked(branch_name) {
+            Ok(merged) => merged,
+            Err(err) => {
+                eprintln!("error: {err}");
+                false
+            }
         }
     }
 
@@ -1305,7 +1346,7 @@ impl<'a> CleanContext<'a> {
         id: &str,
         tip_sha: Option<&str>,
         visited: &mut HashSet<String>,
-    ) -> Option<RemovalReason> {
+    ) -> Result<Option<RemovalReason>, String> {
         let base_opt = self.start_files.get(id).and_then(|s| {
             s.get("base")
                 .and_then(|b| b.as_str())
@@ -1322,23 +1363,23 @@ impl<'a> CleanContext<'a> {
 
         if let Some(tip_sha) = tip_sha {
             if self.is_ancestor_of_default(tip_sha) {
-                return Some(RemovalReason::Merged);
+                return Ok(Some(RemovalReason::Merged));
             }
 
             if self.is_in_cherry_pick_record(tip_sha) {
-                return Some(RemovalReason::Merged);
+                return Ok(Some(RemovalReason::Merged));
             }
 
             if let Some((ref display_name, ref targets)) = base_targets {
                 for target in targets {
                     if self.is_ancestor_of_target(tip_sha, target) {
-                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                        return Ok(Some(RemovalReason::MergedInto(display_name.clone())));
                     }
                     if self.is_cherry_merged_into_target(tip_sha, target) {
-                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                        return Ok(Some(RemovalReason::MergedInto(display_name.clone())));
                     }
                     if self.is_merge_tree_merged_into_target(tip_sha, target, None) {
-                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                        return Ok(Some(RemovalReason::MergedInto(display_name.clone())));
                     }
                 }
             }
@@ -1349,25 +1390,25 @@ impl<'a> CleanContext<'a> {
             if visited.contains(&child) {
                 continue;
             }
-            if self.is_child_run_merged(&child, visited) {
-                return Some(RemovalReason::MergedThrough(child));
+            if self.is_child_run_merged(&child, visited)? {
+                return Ok(Some(RemovalReason::MergedThrough(child)));
             }
         }
 
         if let Some(tip_sha) = tip_sha {
             let def = self.default_branch.clone();
             if self.is_cherry_merged_into_target(tip_sha, &def) {
-                return Some(RemovalReason::Merged);
+                return Ok(Some(RemovalReason::Merged));
             }
             if let Some(origin_def) = self.origin_default.clone() {
                 if self.is_cherry_merged_into_target(tip_sha, &origin_def) {
-                    return Some(RemovalReason::Merged);
+                    return Ok(Some(RemovalReason::Merged));
                 }
             }
 
             let def_tree = self.default_tree.clone();
             if self.is_merge_tree_merged_into_target(tip_sha, &def, def_tree.as_deref()) {
-                return Some(RemovalReason::Merged);
+                return Ok(Some(RemovalReason::Merged));
             }
             if let Some(origin_def) = self.origin_default.clone() {
                 let origin_tree = self.origin_default_tree.clone();
@@ -1376,32 +1417,32 @@ impl<'a> CleanContext<'a> {
                     &origin_def,
                     origin_tree.as_deref(),
                 ) {
-                    return Some(RemovalReason::Merged);
+                    return Ok(Some(RemovalReason::Merged));
                 }
             }
 
             if self.check_history_merged(tip_sha, &def, started_at.as_ref()) {
-                return Some(RemovalReason::Merged);
+                return Ok(Some(RemovalReason::Merged));
             }
             if let Some(origin_def) = self.origin_default.clone() {
                 if self.check_history_merged(tip_sha, &origin_def, started_at.as_ref()) {
-                    return Some(RemovalReason::Merged);
+                    return Ok(Some(RemovalReason::Merged));
                 }
             }
             if let Some((ref display_name, ref targets)) = base_targets {
                 for target in targets {
                     if self.check_history_merged(tip_sha, target, started_at.as_ref()) {
-                        return Some(RemovalReason::MergedInto(display_name.clone()));
+                        return Ok(Some(RemovalReason::MergedInto(display_name.clone())));
                     }
                 }
             }
 
             if let Some(reason) = self.squash_merged_reason(tip_sha, &base_targets) {
-                return Some(reason);
+                return Ok(Some(reason));
             }
         }
 
-        None
+        Ok(None)
     }
 
     fn squash_merged_reason(
@@ -1428,15 +1469,18 @@ impl<'a> CleanContext<'a> {
         None
     }
 
-    pub fn find_merged_followup(&mut self, id: &str) -> Option<String> {
+    pub fn find_merged_followup(&mut self, id: &str) -> Result<Option<String>, String> {
         let branch_name = format!("wip/{id}");
         let tip_sha = self.get_branch_tip(&branch_name);
         let mut visited = HashSet::new();
         visited.insert(id.to_string());
         let children = self.get_children_of(id, tip_sha.as_deref().unwrap_or(""));
-        children
-            .into_iter()
-            .find(|child| self.is_child_run_merged(child, &mut visited))
+        for child in children {
+            if self.is_child_run_merged(&child, &mut visited)? {
+                return Ok(Some(child));
+            }
+        }
+        Ok(None)
     }
 
     pub fn check_removable(
@@ -1486,18 +1530,10 @@ impl<'a> CleanContext<'a> {
         let is_res = self.is_research_run(id);
 
         // Rule 2: Discarded (the verdict is redone, or the outcome is no_changes)
-        let verdict_str = if verdict_path.is_file() {
-            std::fs::read_to_string(&verdict_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| {
-                    v.get("verdict")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
+        let verdict_str = match read_verdict_file(&verdict_path) {
+            Ok(Some(v)) => v,
+            Ok(None) => String::new(),
+            Err(err) => return Err(KeptReason::UnreadableVerdict(err)),
         };
 
         if verdict_str == "redone" {
@@ -1557,8 +1593,10 @@ impl<'a> CleanContext<'a> {
 
         // Rule 1: Merged (its work is on the default branch or base branch or follow-up)
         if !is_res {
-            if let Some(reason) = self.check_run_merged(id) {
-                return Ok(reason);
+            match self.check_run_merged(id) {
+                Ok(Some(reason)) => return Ok(reason),
+                Ok(None) => {}
+                Err(err) => return Err(KeptReason::UnreadableChildState(err)),
             }
         }
 
@@ -1917,7 +1955,7 @@ pub fn list_all_run_ids(root: &Path) -> Vec<String> {
 }
 
 /// Finds a follow-up run that makes `<id>` merged.
-pub fn find_merged_followup(root: &Path, id: &str) -> Option<String> {
+pub fn find_merged_followup(root: &Path, id: &str) -> Result<Option<String>, String> {
     let mut ctx = CleanContext::new(root);
     ctx.find_merged_followup(id)
 }
@@ -2099,7 +2137,8 @@ fn check_session_worktree_removable_with_ctx(
     idle_days: u64,
 ) -> Result<RemovalReason, KeptReason> {
     let is_merged = if let Some(ref branch) = wt.branch {
-        ctx.is_branch_merged(branch)
+        ctx.is_branch_merged_checked(branch)
+            .map_err(KeptReason::UnreadableChildState)?
     } else if let Some(ref sha) = wt.head_sha {
         ctx.is_commit_merged(sha)
     } else {
@@ -2234,6 +2273,13 @@ pub fn clean_repo_with_options(
         let wt_path = root.join(".wt").join(&id);
         match ctx.check_removable(&id, older_than_days) {
             Err(kept_reason) => {
+                if matches!(
+                    kept_reason,
+                    KeptReason::UnreadableVerdict(_) | KeptReason::UnreadableChildState(_)
+                ) {
+                    eprintln!("error: {kept_reason}");
+                    had_errors = true;
+                }
                 if !quiet {
                     println!("kept .wt/{id} ({kept_reason})");
                 }
@@ -2250,13 +2296,29 @@ pub fn clean_repo_with_options(
                 let size = dir_size(&wt_path);
                 let branch_name = format!("wip/{id}");
                 let branch_exists = ctx.get_branch_tip(&branch_name).is_some();
-                let is_merged = branch_exists
-                    && (matches!(
-                        removal_reason,
-                        RemovalReason::Merged
-                            | RemovalReason::MergedInto(_)
-                            | RemovalReason::MergedThrough(_)
-                    ) || ctx.check_run_merged(&id).is_some());
+                let is_merged = if !branch_exists {
+                    false
+                } else if matches!(
+                    removal_reason,
+                    RemovalReason::Merged
+                        | RemovalReason::MergedInto(_)
+                        | RemovalReason::MergedThrough(_)
+                ) {
+                    true
+                } else {
+                    match ctx.check_run_merged(&id) {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(err) => {
+                            eprintln!("error: {err}");
+                            had_errors = true;
+                            if !quiet {
+                                println!("kept .wt/{id} (unreadable child state: {err})");
+                            }
+                            continue;
+                        }
+                    }
+                };
 
                 if dry_run {
                     if !quiet {
@@ -2288,8 +2350,27 @@ pub fn clean_repo_with_options(
                     }
 
                     if let Err(reason) = ctx.check_removable(&id, older_than_days) {
+                        if matches!(
+                            reason,
+                            KeptReason::UnreadableVerdict(_) | KeptReason::UnreadableChildState(_)
+                        ) {
+                            eprintln!("error: {reason}");
+                            had_errors = true;
+                        }
                         if !quiet {
                             println!("kept .wt/{id} ({reason})");
+                        }
+                        continue;
+                    }
+
+                    let had_prior_record = crate::removal_record::path(root, &id).exists();
+                    if let Err(err) =
+                        crate::removal_record::record_removal(root, &id, &removal_reason)
+                    {
+                        eprintln!("error: could not write removal record for {id}: {err}");
+                        had_errors = true;
+                        if !quiet {
+                            println!("kept .wt/{id} (removal record write failed)");
                         }
                         continue;
                     }
@@ -2323,8 +2404,13 @@ pub fn clean_repo_with_options(
                                 }
                             }
                         }
-                    } else if !quiet {
-                        println!("kept .wt/{id} (worktree remove failed)");
+                    } else {
+                        if !had_prior_record {
+                            let _ = std::fs::remove_file(crate::removal_record::path(root, &id));
+                        }
+                        if !quiet {
+                            println!("kept .wt/{id} (worktree remove failed)");
+                        }
                     }
                 }
             }
@@ -2371,6 +2457,13 @@ pub fn clean_repo_with_options(
                     session_idle_days,
                 ) {
                     Err(kept_reason) => {
+                        if matches!(
+                            kept_reason,
+                            KeptReason::UnreadableVerdict(_) | KeptReason::UnreadableChildState(_)
+                        ) {
+                            eprintln!("error: {kept_reason}");
+                            had_errors = true;
+                        }
                         if !quiet {
                             println!("kept {display_path} ({kept_reason})");
                         }
@@ -2738,7 +2831,13 @@ fn report_other_worktrees_with_ctx(
         }
 
         let is_merged = if let Some(ref branch) = wt.branch {
-            ctx.is_branch_merged(branch)
+            match ctx.is_branch_merged_checked(branch) {
+                Ok(merged) => merged,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    false
+                }
+            }
         } else if let Some(ref sha) = wt.head_sha {
             ctx.is_commit_merged(sha)
         } else {
@@ -2998,6 +3097,9 @@ pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, Stri
                 | RemovalReason::MergedThrough(_)
                 | RemovalReason::NoChanges),
             ) => r,
+            Err(KeptReason::UnreadableVerdict(err) | KeptReason::UnreadableChildState(err)) => {
+                return Err(err);
+            }
             Ok(
                 RemovalReason::SessionMerged(_)
                 | RemovalReason::Verdict(_)
@@ -3013,13 +3115,24 @@ pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, Stri
             return Ok(None);
         }
 
+        let had_prior_record = crate::removal_record::path(root, id).exists();
+        crate::removal_record::record_removal(root, id, &reason)?;
+
         let wt_rel = format!(".wt/{id}");
         let rm_out = std::process::Command::new("git")
             .args(["worktree", "remove", &wt_rel])
             .current_dir(root)
             .output()
-            .map_err(|e| format!("git worktree remove {wt_rel}: {e}"))?;
+            .map_err(|e| {
+                if !had_prior_record {
+                    let _ = std::fs::remove_file(crate::removal_record::path(root, id));
+                }
+                format!("git worktree remove {wt_rel}: {e}")
+            })?;
         if !rm_out.status.success() {
+            if !had_prior_record {
+                let _ = std::fs::remove_file(crate::removal_record::path(root, id));
+            }
             return Err(format!(
                 "git worktree remove {wt_rel}: {}",
                 String::from_utf8_lossy(&rm_out.stderr).trim()
@@ -3034,10 +3147,17 @@ pub fn remove_finished_run(root: &Path, id: &str) -> Result<Option<String>, Stri
     }
 
     if ctx.get_branch_tip(&branch_name).is_some() {
-        let Some(reason) = ctx.check_run_merged(id) else {
+        let Some(reason) = ctx.check_run_merged(id)? else {
             return Ok(None);
         };
-        delete_wip_branch_strict(root, &branch_name)?;
+        let had_prior_record = crate::removal_record::path(root, id).exists();
+        crate::removal_record::record_removal(root, id, &reason)?;
+        if let Err(err) = delete_wip_branch_strict(root, &branch_name) {
+            if !had_prior_record {
+                let _ = std::fs::remove_file(crate::removal_record::path(root, id));
+            }
+            return Err(err);
+        }
         return Ok(Some(reason.to_string()));
     }
 
@@ -3089,19 +3209,24 @@ pub fn clean_on_review(root: &Path, id: &str) {
     let branch_exists = ctx.get_branch_tip(&branch_name).is_some();
 
     let verdict_path = root.join(".wt").join(format!("{id}.verdict.json"));
-    let verdict_str = std::fs::read_to_string(&verdict_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| {
-            v.get("verdict")
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
+    let verdict_str = match read_verdict_file(&verdict_path) {
+        Ok(Some(v)) => v,
+        Ok(None) => String::new(),
+        Err(err) => {
+            eprintln!("error: {err}");
+            spawn_background_clean(root, Some(id));
+            return;
+        }
+    };
 
     let is_res = ctx.is_research_run(id);
     let removal_reason = match ctx.check_removable(id, 14) {
         Ok(r) if is_res || !has_uncommitted_changes(&wt_path) => Some(r),
+        Err(err @ (KeptReason::UnreadableVerdict(_) | KeptReason::UnreadableChildState(_))) => {
+            eprintln!("error: {err}");
+            spawn_background_clean(root, Some(id));
+            return;
+        }
         _ => None,
     };
 
@@ -3127,6 +3252,13 @@ pub fn clean_on_review(root: &Path, id: &str) {
         }
     }
 
+    let had_prior_record = crate::removal_record::path(root, id).exists();
+    if let Err(err) = crate::removal_record::record_removal(root, id, &removal_reason) {
+        eprintln!("error: could not write removal record for {id}: {err}");
+        spawn_background_clean(root, Some(id));
+        return;
+    }
+
     let removed_ok = if is_res {
         std::fs::remove_dir_all(&wt_path).is_ok()
     } else {
@@ -3142,6 +3274,9 @@ pub fn clean_on_review(root: &Path, id: &str) {
     };
 
     if !removed_ok {
+        if !had_prior_record {
+            let _ = std::fs::remove_file(crate::removal_record::path(root, id));
+        }
         if verdict_str == "accepted" || verdict_str == "fixed" {
             println!("worktree .wt/{id} kept until {branch_name} is merged");
         }
@@ -3150,7 +3285,21 @@ pub fn clean_on_review(root: &Path, id: &str) {
     }
 
     if branch_exists {
-        let is_merged = ctx.check_run_merged(id).is_some();
+        let is_merged = if matches!(
+            removal_reason,
+            RemovalReason::Merged | RemovalReason::MergedInto(_) | RemovalReason::MergedThrough(_)
+        ) {
+            true
+        } else {
+            match ctx.check_run_merged(id) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    false
+                }
+            }
+        };
         if is_merged {
             let del_out = std::process::Command::new("git")
                 .args(["branch", "-D", &branch_name])

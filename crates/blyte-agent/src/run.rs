@@ -472,16 +472,16 @@ impl<'a> Runner<'a> {
     /// The immutable part of the prompt: who the worker is, what it may touch, where it runs.
     ///
     /// Held constant for the whole run so it caches.
-    fn system_prompt(&self, state: &State, goal: &str) -> String {
-        let bins = tools::available_binaries(self.shell, &self.root).join(", ");
+    fn system_prompt(&self, state: &State, goal: &str) -> Result<String, String> {
+        let bins = tools::available_binaries(self.shell, &self.root)?.join(", ");
         let where_ = self.shell.describe();
 
         if let Some(text) = &state.brief.instructions {
-            return format!(
+            return Ok(format!(
                 "{text}## Your user's first request\n{goal}\n\n\
                  ## Environment\n{where_}\nAvailable: {bins}\n\n\
                  {CONVERSATION_FIXED}",
-            );
+            ));
         }
 
         let rules = crate::rules::prompt_section(&self.root);
@@ -507,7 +507,7 @@ impl<'a> Runner<'a> {
                  command will pass, and you will be told."
             )
         };
-        format!(
+        Ok(format!(
             "You are a software engineer working in a repository.\n\n\
              ## Goal\n{goal}\n\n\
              ## How completion is decided\n\
@@ -526,7 +526,7 @@ impl<'a> Runner<'a> {
             where_ = where_,
             bins = bins,
             rules = rules,
-        )
+        ))
     }
 
     /// Run the verification command. Runtime-only: nothing in the tool surface reaches this.
@@ -840,7 +840,18 @@ impl<'a> Runner<'a> {
             Some(g) => g.as_str(),
             None => state.brief.goal.as_str(),
         };
-        let system = self.system_prompt(state, goal);
+        let system = match self.system_prompt(state, goal) {
+            Ok(s) => s,
+            Err(err) => {
+                if let BaseCheck::Polled(handle) = self.base_check {
+                    handle.stop();
+                }
+                if state.runtime.conversation.is_some() {
+                    state.runtime.conversation = Some(history);
+                }
+                return (Outcome::Error(err), RunReport::default());
+            }
+        };
 
         let mut seen_names = HashSet::new();
         if self.research {

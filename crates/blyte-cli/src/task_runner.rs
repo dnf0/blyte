@@ -409,6 +409,54 @@ pub fn check_network_mode(config: &TaskConfig) -> Result<(), String> {
     Ok(())
 }
 
+pub fn write_watchdog_report<F, W: Write>(
+    config: &TaskConfig,
+    progress: &Progress,
+    msg: &str,
+    elapsed: std::time::Duration,
+    resolve_model: F,
+    err_out: &mut W,
+) -> Result<Option<crate::report::RunRecord>, String>
+where
+    F: FnOnce(Option<&str>) -> Result<String, String>,
+{
+    let Some(path) = &config.report else {
+        return Ok(None);
+    };
+    let mut record = crate::report::RunRecord::from_error(config, msg, elapsed);
+    record.turns = progress.turns;
+    record.gate_attempts = progress.gate_attempts;
+    record.usage = crate::report::UsageRecord {
+        input: progress.usage.input,
+        cached: progress.usage.cached,
+        output: progress.usage.output,
+        thinking: progress.usage.thinking,
+    };
+    let model_id = match resolve_model(config.model.as_deref()) {
+        Ok(id) if !id.is_empty() => Some(id),
+        Ok(_) => {
+            let _ = writeln!(
+                err_out,
+                "blyte: watchdog warning: provider returned empty model id"
+            );
+            config.model.clone().filter(|m| !m.is_empty())
+        }
+        Err(err) => {
+            let _ = writeln!(
+                err_out,
+                "blyte: watchdog warning: could not resolve provider for cost lookup: {err}"
+            );
+            config.model.clone().filter(|m| !m.is_empty())
+        }
+    };
+    if let Some(id) = model_id {
+        record.cost_usd = blyte_provider::pricing(&id).map(|pr| pr.cost(&progress.usage));
+        record.model_id = Some(id);
+    }
+    crate::report::write(path, &record)?;
+    Ok(Some(record))
+}
+
 /// Executes an autonomous solver run using the provided task configuration and live stdout.
 ///
 /// Configures the AI provider, context strategy, execution environment (local or container),
@@ -466,24 +514,20 @@ pub fn run_task(
                     p.turns
                 )
             };
-            if let Some(path) = &watchdog_config.report {
-                let mut record =
-                    crate::report::RunRecord::from_error(&watchdog_config, &msg, started.elapsed());
-                record.turns = p.turns;
-                record.gate_attempts = p.gate_attempts;
-                record.usage = crate::report::UsageRecord {
-                    input: p.usage.input,
-                    cached: p.usage.cached,
-                    output: p.usage.output,
-                    thinking: p.usage.thinking,
-                };
-                let model_id = blyte_provider::resolve_provider(watchdog_config.model.as_deref())
-                    .map(|pr| pr.model_id())
-                    .ok()
-                    .or_else(|| watchdog_config.model.clone())
-                    .unwrap_or_default();
-                record.cost_usd = blyte_provider::pricing(&model_id).map(|pr| pr.cost(&p.usage));
-                let _ = crate::report::write(path, &record);
+            let mut stderr = std::io::stderr();
+            if let Err(err) = write_watchdog_report(
+                &watchdog_config,
+                &p,
+                &msg,
+                started.elapsed(),
+                |m| {
+                    blyte_provider::resolve_provider(m)
+                        .map(|pr| pr.model_id())
+                        .map_err(|e| e.to_string())
+                },
+                &mut stderr,
+            ) {
+                eprintln!("blyte: watchdog failed to write report: {err}");
             }
             eprintln!("blyte: {msg}");
             std::process::exit(1);
@@ -1023,5 +1067,112 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn test_task_config(root: &Path, report: Option<PathBuf>, model: Option<String>) -> TaskConfig {
+        TaskConfig {
+            prompt: "test".to_string(),
+            gate: Some("true".to_string()),
+            context_strategy: "folded".to_string(),
+            model,
+            container: None,
+            max_turns: 10,
+            max_gates: 3,
+            rollback: false,
+            root: root.to_path_buf(),
+            container_workdir: "/workspace".to_string(),
+            max_seconds: Some(10),
+            max_cost_usd: None,
+            report,
+            fold_budget: None,
+            sandbox: "off".to_string(),
+            network: "on".to_string(),
+            allow_read: Vec::new(),
+            pass_env: Vec::new(),
+            research: false,
+            claim_check: false,
+            base_check: false,
+            base_check_dir: None,
+            converse: false,
+            dispatch_cmd: None,
+        }
+    }
+
+    #[test]
+    fn watchdog_report_write_failure_names_path_and_model_id_is_never_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let report_dir = dir.path().join("unwritable.report.json");
+        std::fs::create_dir_all(&report_dir).unwrap();
+
+        let cfg = test_task_config(dir.path(), Some(report_dir.clone()), None);
+        let progress = Progress {
+            turns: 2,
+            gate_attempts: 1,
+            in_gate: false,
+            gate_wait_ms: 0,
+            usage: blyte_provider::Usage {
+                input: 1000,
+                cached: 0,
+                output: 500,
+                thinking: 0,
+            },
+        };
+        let mut err_buf = Vec::new();
+        let err = write_watchdog_report(
+            &cfg,
+            &progress,
+            "stopped past --max-seconds",
+            std::time::Duration::from_secs(5),
+            |_| Err("missing API key".to_string()),
+            &mut err_buf,
+        )
+        .expect_err("writing watchdog report to a directory must fail");
+
+        assert!(
+            err.contains(&report_dir.display().to_string()),
+            "write error must name report path, got: {err}"
+        );
+        let warning = String::from_utf8(err_buf).unwrap();
+        assert!(
+            warning.contains("missing API key"),
+            "provider resolution error must be logged, got: {warning}"
+        );
+
+        let ok_report = dir.path().join("ok.report.json");
+        let ok_cfg = test_task_config(dir.path(), Some(ok_report.clone()), None);
+        let mut ok_err = Vec::new();
+        let rec = write_watchdog_report(
+            &ok_cfg,
+            &progress,
+            "stopped past --max-seconds",
+            std::time::Duration::from_secs(5),
+            |_| Ok("gemini-3.8-flash-high".to_string()),
+            &mut ok_err,
+        )
+        .expect("writing watchdog report to file must succeed")
+        .expect("record must be returned");
+
+        assert_eq!(rec.model_id.as_deref(), Some("gemini-3.8-flash-high"));
+        assert!(rec.cost_usd.is_some());
+
+        let fallback_report = dir.path().join("fallback.report.json");
+        let fallback_cfg = test_task_config(dir.path(), Some(fallback_report), None);
+        let mut fallback_err = Vec::new();
+        let fallback_rec = write_watchdog_report(
+            &fallback_cfg,
+            &progress,
+            "stopped past --max-seconds",
+            std::time::Duration::from_secs(5),
+            |_| Err("no provider".to_string()),
+            &mut fallback_err,
+        )
+        .expect("writing watchdog report must succeed")
+        .expect("record must be returned");
+
+        assert_ne!(fallback_rec.model_id.as_deref(), Some(""));
+        assert_eq!(fallback_rec.model_id, None);
+        assert!(String::from_utf8(fallback_err)
+            .unwrap()
+            .contains("no provider"));
     }
 }

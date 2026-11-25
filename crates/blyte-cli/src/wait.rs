@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+const PARTIAL_WRITE_WINDOW: Duration = Duration::from_secs(2);
 
 pub fn run(ids: &[String], any: bool, timeout_secs: u64) -> i32 {
     let root = match crate::clean::find_repo_root() {
@@ -23,18 +25,57 @@ pub fn run(ids: &[String], any: bool, timeout_secs: u64) -> i32 {
     )
 }
 
-fn try_read_summary(wt: &Path, id: &str) -> Option<serde_json::Value> {
-    let path = wt.join(format!("{id}.json"));
-    let s = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&s).ok()
+enum SummaryState {
+    Absent,
+    InProgress,
+    Ready(serde_json::Value),
+    Corrupt(String),
 }
 
-fn read_start_pid(path: &Path) -> Option<libc::pid_t> {
-    let s = std::fs::read_to_string(path).ok()?;
-    let val: serde_json::Value = serde_json::from_str(&s).ok()?;
-    val.get("pid")
+fn is_recently_modified(path: &Path, window: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    match SystemTime::now().duration_since(mtime) {
+        Ok(age) => age < window,
+        Err(_) => true,
+    }
+}
+
+fn read_summary(path: &Path) -> SummaryState {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SummaryState::Absent,
+        Err(e) => return SummaryState::Corrupt(format!("cannot read {}: {e}", path.display())),
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(val) => SummaryState::Ready(val),
+        Err(e) => {
+            if is_recently_modified(path, PARTIAL_WRITE_WINDOW) {
+                SummaryState::InProgress
+            } else {
+                SummaryState::Corrupt(format!("cannot parse {}: {e}", path.display()))
+            }
+        }
+    }
+}
+
+fn read_start_pid(path: &Path) -> Result<Option<libc::pid_t>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let val: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    let pid = val
+        .get("pid")
         .and_then(|v| v.as_i64())
-        .map(|v| v as libc::pid_t)
+        .ok_or_else(|| format!("{} is missing integer field \"pid\"", path.display()))?;
+    Ok(Some(pid as libc::pid_t))
 }
 
 fn is_pid_alive(pid: libc::pid_t) -> bool {
@@ -49,11 +90,18 @@ fn is_pid_alive(pid: libc::pid_t) -> bool {
     }
 }
 
-fn format_summary_line(id: &str, summary: &serde_json::Value) -> String {
+fn format_summary_line(
+    path: &Path,
+    id: &str,
+    summary: &serde_json::Value,
+) -> Result<String, String> {
+    if !summary.is_object() {
+        return Err(format!("{} is not a JSON object", path.display()));
+    }
     let outcome = summary
         .get("outcome")
         .and_then(|v| v.as_str())
-        .unwrap_or("?");
+        .ok_or_else(|| format!("{} is missing string field \"outcome\"", path.display()))?;
     let turns = summary
         .get("turns")
         .and_then(|v| {
@@ -61,12 +109,12 @@ fn format_summary_line(id: &str, summary: &serde_json::Value) -> String {
                 .map(|t| t.to_string())
                 .or_else(|| v.as_u64().map(|t| t.to_string()))
         })
-        .unwrap_or_else(|| "?".to_string());
+        .ok_or_else(|| format!("{} is missing integer field \"turns\"", path.display()))?;
     let cost = match summary.get("cost_usd").and_then(|v| v.as_f64()) {
         Some(c) => format!("${:.2}", c),
         None => "-".to_string(),
     };
-    format!("{id} {outcome} {turns} {cost}")
+    Ok(format!("{id} {outcome} {turns} {cost}"))
 }
 
 enum IdStatus {
@@ -74,39 +122,46 @@ enum IdStatus {
     Running,
     LooksDead,
     Unknown,
+    Corrupt(String),
 }
 
 fn check_id_status(wt: &Path, id: &str) -> IdStatus {
-    // 1. finished: wt/<id>.json exists and parses as JSON
-    if let Some(summary) = try_read_summary(wt, id) {
-        return IdStatus::Finished(format_summary_line(id, &summary));
+    let summary_path = wt.join(format!("{id}.json"));
+    match read_summary(&summary_path) {
+        SummaryState::Ready(summary) => match format_summary_line(&summary_path, id, &summary) {
+            Ok(line) => return IdStatus::Finished(line),
+            Err(e) => return IdStatus::Corrupt(e),
+        },
+        SummaryState::Corrupt(e) => return IdStatus::Corrupt(e),
+        SummaryState::InProgress => return IdStatus::Running,
+        SummaryState::Absent => {}
     }
 
-    // 2. running: wt/<id>.start.json exists, its pid is > 0 and alive
     let start_path = wt.join(format!("{id}.start.json"));
-    if start_path.exists() {
-        if let Some(pid) = read_start_pid(&start_path) {
+    match read_start_pid(&start_path) {
+        Ok(Some(pid)) => {
             if is_pid_alive(pid) {
                 return IdStatus::Running;
             }
+            match read_summary(&summary_path) {
+                SummaryState::Ready(summary) => {
+                    match format_summary_line(&summary_path, id, &summary) {
+                        Ok(line) => IdStatus::Finished(line),
+                        Err(e) => IdStatus::Corrupt(e),
+                    }
+                }
+                SummaryState::Corrupt(e) => IdStatus::Corrupt(e),
+                SummaryState::InProgress => IdStatus::Running,
+                SummaryState::Absent => IdStatus::LooksDead,
+            }
         }
-
-        // 3. dead: otherwise, if wt/<id>.start.json exists. Before declaring a run dead, check
-        // wt/<id>.json once more (the run may have written its summary and exited between the two checks);
-        // if it now exists the run is finished.
-        if let Some(summary) = try_read_summary(wt, id) {
-            return IdStatus::Finished(format_summary_line(id, &summary));
-        }
-        return IdStatus::LooksDead;
+        Ok(None) => IdStatus::Unknown,
+        Err(e) => IdStatus::Corrupt(e),
     }
-
-    IdStatus::Unknown
 }
 
 fn is_known(wt: &Path, id: &str) -> bool {
-    let has_summary = try_read_summary(wt, id).is_some();
-    let has_start = wt.join(format!("{id}.start.json")).exists();
-    has_summary || has_start
+    wt.join(format!("{id}.json")).exists() || wt.join(format!("{id}.start.json")).exists()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -168,6 +223,11 @@ pub fn wait_in(
                 }
                 IdStatus::Unknown => {
                     first_dead[i] = None;
+                }
+                IdStatus::Corrupt(msg) => {
+                    let _ = writeln!(err, "error: {msg}");
+                    let _ = err.flush();
+                    return 1;
                 }
             }
         }
@@ -801,5 +861,134 @@ mod tests {
         );
 
         assert!(Cli::try_parse_from(["blyte", "wait"]).is_err());
+    }
+
+    fn set_older_than_window(path: &Path) {
+        let old_time = SystemTime::now() - Duration::from_secs(10);
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(old_time).unwrap();
+    }
+
+    #[test]
+    fn missing_outcome_in_summary_exits_1_and_names_file_and_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let path = wt.join("X.json");
+        std::fs::write(&path, r#"{"id":"X"}"#).unwrap();
+        set_older_than_window(&path);
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["X".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            &mut out,
+            &mut err,
+        );
+        let out_str = String::from_utf8(out).unwrap();
+        let err_str = String::from_utf8(err).unwrap();
+        assert_eq!(code, 1, "stdout={out_str:?} stderr={err_str:?}");
+        assert!(!out_str.contains('?'), "stdout={out_str:?}");
+        assert!(!err_str.contains('?'), "stderr={err_str:?}");
+        assert!(
+            err_str.contains(&path.display().to_string()),
+            "stderr={err_str:?}"
+        );
+        assert!(err_str.contains("outcome"), "stderr={err_str:?}");
+    }
+
+    #[test]
+    fn missing_turns_in_summary_exits_1_and_names_file_and_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let path = wt.join("X.json");
+        std::fs::write(&path, r#"{"id":"X","outcome":"verified"}"#).unwrap();
+        set_older_than_window(&path);
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["X".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            &mut out,
+            &mut err,
+        );
+        let out_str = String::from_utf8(out).unwrap();
+        let err_str = String::from_utf8(err).unwrap();
+        assert_eq!(code, 1, "stdout={out_str:?} stderr={err_str:?}");
+        assert!(!out_str.contains('?'), "stdout={out_str:?}");
+        assert!(!err_str.contains('?'), "stderr={err_str:?}");
+        assert!(
+            err_str.contains(&path.display().to_string()),
+            "stderr={err_str:?}"
+        );
+        assert!(err_str.contains("turns"), "stderr={err_str:?}");
+    }
+
+    #[test]
+    fn old_corrupt_summary_json_exits_1_and_names_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let path = wt.join("X.json");
+        std::fs::write(&path, r#"{"outc"#).unwrap();
+        set_older_than_window(&path);
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["X".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            &mut out,
+            &mut err,
+        );
+        let out_str = String::from_utf8(out).unwrap();
+        let err_str = String::from_utf8(err).unwrap();
+        assert_eq!(code, 1, "stdout={out_str:?} stderr={err_str:?}");
+        assert!(out_str.is_empty(), "stdout={out_str:?}");
+        assert!(
+            err_str.contains(&path.display().to_string()),
+            "stderr={err_str:?}"
+        );
+    }
+
+    #[test]
+    fn corrupt_start_json_exits_1_and_names_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let start_path = wt.join("X.start.json");
+        std::fs::write(&start_path, "{broken").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = wait_in(
+            wt,
+            &["X".to_string()],
+            false,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            &mut out,
+            &mut err,
+        );
+        let out_str = String::from_utf8(out).unwrap();
+        let err_str = String::from_utf8(err).unwrap();
+        assert_eq!(code, 1, "stdout={out_str:?} stderr={err_str:?}");
+        assert!(out_str.is_empty(), "stdout={out_str:?}");
+        assert!(
+            err_str.contains(&start_path.display().to_string()),
+            "stderr={err_str:?}"
+        );
     }
 }

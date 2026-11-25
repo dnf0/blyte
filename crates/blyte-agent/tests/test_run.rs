@@ -47,8 +47,12 @@ impl Shell for StubShell {
         String::new()
     }
 
-    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
-        vec!["git".into()]
+    fn available_binaries(
+        &self,
+        _cwd: &Path,
+        _candidates: &[&'static str],
+    ) -> Result<Vec<String>, String> {
+        Ok(vec!["git".into()])
     }
 }
 
@@ -77,8 +81,12 @@ impl Shell for FastShell {
         String::new()
     }
 
-    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
-        vec!["git".into()]
+    fn available_binaries(
+        &self,
+        _cwd: &Path,
+        _candidates: &[&'static str],
+    ) -> Result<Vec<String>, String> {
+        Ok(vec!["git".into()])
     }
 }
 
@@ -437,8 +445,12 @@ impl Shell for FailingResetShell {
         String::new()
     }
 
-    fn available_binaries(&self, _cwd: &Path, _candidates: &[&'static str]) -> Vec<String> {
-        vec!["git".into()]
+    fn available_binaries(
+        &self,
+        _cwd: &Path,
+        _candidates: &[&'static str],
+    ) -> Result<Vec<String>, String> {
+        Ok(vec!["git".into()])
     }
 }
 
@@ -478,4 +490,61 @@ fn a_failed_rollback_exec_error_ends_the_run_with_an_error() {
     }
     assert_eq!(st.runtime.rollbacks, 0);
     assert_eq!(p.seen.lock().unwrap().len(), 1);
+}
+
+struct FailingProbeShell {
+    outcome: Result<Output, String>,
+}
+
+impl Shell for FailingProbeShell {
+    fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+        self.outcome.clone()
+    }
+
+    fn describe(&self) -> String {
+        "broken shell".into()
+    }
+}
+
+#[test]
+fn a_failed_environment_probe_spawn_error_ends_the_run_with_an_error() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ScriptedProvider::new(vec![says("should not run")]);
+    let shell = FailingProbeShell {
+        outcome: Err("cannot run command `docker`: No such file or directory".into()),
+    };
+    let mut st = State::new("g", "true");
+    let (outcome, _) = runner(&p, &shell, d.path(), &Conversational, false).run(&mut st);
+    match outcome {
+        Outcome::Error(msg) => {
+            assert!(msg.contains("command -v"), "{msg}");
+            assert!(msg.contains("No such file or directory"), "{msg}");
+        }
+        other => panic!("expected Outcome::Error, got {other:?}"),
+    }
+    assert!(p.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_environment_probe_nonzero_exit_ends_the_run_with_an_error() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ScriptedProvider::new(vec![says("should not run")]);
+    let shell = FailingProbeShell {
+        outcome: Ok(Output {
+            stdout: String::new(),
+            stderr: "container is not running\n".into(),
+            exit_code: 125,
+        }),
+    };
+    let mut st = State::new("g", "true");
+    let (outcome, _) = runner(&p, &shell, d.path(), &Conversational, false).run(&mut st);
+    match outcome {
+        Outcome::Error(msg) => {
+            assert!(msg.contains("command -v"), "{msg}");
+            assert!(msg.contains("125"), "{msg}");
+            assert!(msg.contains("container is not running"), "{msg}");
+        }
+        other => panic!("expected Outcome::Error, got {other:?}"),
+    }
+    assert!(p.seen.lock().unwrap().is_empty());
 }

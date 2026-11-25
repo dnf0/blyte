@@ -206,3 +206,215 @@ fn test_6_end_to_end_setup_failure_blocks_dispatch() {
         ".wt/S1x.log must not exist (implementer never started)"
     );
 }
+
+#[test]
+fn test_7_failing_setup_preserves_stdout_and_stderr_tails_and_full_log_path() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("setup.log");
+    let env = BTreeMap::new();
+
+    let script = "\
+for i in $(seq 1 29); do echo \"out-line-$i\"; done; \
+echo \"ROOT_CAUSE_ON_STDOUT_30\"; \
+for i in $(seq 1 29); do echo \"err-line-$i\" >&2; done; \
+echo \"LAST_STDERR_LINE_30\" >&2; \
+exit 1";
+
+    let err = run_setup(
+        script,
+        wt.path(),
+        main.path(),
+        &env,
+        &log_path,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+
+    assert!(
+        err.contains("stdout:\n"),
+        "expected stdout: label in error:\n{err}"
+    );
+    assert!(
+        err.contains("stderr:\n"),
+        "expected stderr: label in error:\n{err}"
+    );
+    assert!(
+        err.contains("ROOT_CAUSE_ON_STDOUT_30"),
+        "expected stdout cause line in error:\n{err}"
+    );
+    assert!(
+        !err.contains("out-line-10\n"),
+        "expected only last 20 stdout lines:\n{err}"
+    );
+    assert!(
+        err.contains("out-line-11"),
+        "expected stdout line 11 in error:\n{err}"
+    );
+    assert!(
+        err.contains("LAST_STDERR_LINE_30"),
+        "expected last stderr line in error:\n{err}"
+    );
+    assert!(
+        !err.contains("err-line-10\n"),
+        "expected only last 20 stderr lines:\n{err}"
+    );
+    assert!(
+        err.contains("err-line-11"),
+        "expected stderr line 11 in error:\n{err}"
+    );
+    let expected_footer = format!("full log: {}", log_path.display());
+    assert_eq!(
+        err.lines().last(),
+        Some(expected_footer.as_str()),
+        "expected trailing full log line, got:\n{err}"
+    );
+}
+
+#[test]
+fn test_8_failing_setup_omits_empty_stream_labels() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let env = BTreeMap::new();
+
+    let only_stdout_log = log_dir.path().join("stdout-only.log");
+    let err_out = run_setup(
+        "echo only-stdout; exit 2",
+        wt.path(),
+        main.path(),
+        &env,
+        &only_stdout_log,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+    assert!(err_out.contains("stdout:\n"), "{err_out}");
+    assert!(!err_out.contains("stderr:\n"), "{err_out}");
+
+    let only_stderr_log = log_dir.path().join("stderr-only.log");
+    let err_err = run_setup(
+        "echo only-stderr >&2; exit 2",
+        wt.path(),
+        main.path(),
+        &env,
+        &only_stderr_log,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+    assert!(!err_err.contains("stdout:\n"), "{err_err}");
+    assert!(err_err.contains("stderr:\n"), "{err_err}");
+}
+
+#[test]
+fn test_9_unwritable_setup_log_reports_error_on_success_and_failure() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let dir_as_log = tempfile::tempdir().unwrap();
+    let env = BTreeMap::new();
+
+    let err_ok = run_setup(
+        "echo ok",
+        wt.path(),
+        main.path(),
+        &env,
+        dir_as_log.path(),
+        SETUP_TIMEOUT,
+    )
+    .expect_err("succeeded setup with unwritable log must error");
+    assert!(
+        err_ok.contains(&dir_as_log.path().display().to_string()),
+        "error must name log path: {err_ok}"
+    );
+
+    let err_fail = run_setup(
+        "echo boom; exit 4",
+        wt.path(),
+        main.path(),
+        &env,
+        dir_as_log.path(),
+        SETUP_TIMEOUT,
+    )
+    .expect_err("failed setup with unwritable log must error");
+    assert!(
+        err_fail.contains("setup failed (exit 4)"),
+        "error must include setup failure: {err_fail}"
+    );
+    assert!(
+        err_fail.contains(&dir_as_log.path().display().to_string()),
+        "error must name unwritable log path: {err_fail}"
+    );
+    assert!(
+        !err_fail.contains("full log:"),
+        "error must not advertise nonexistent log: {err_fail}"
+    );
+}
+
+fn relative_path_from(base: &Path, target: &Path) -> std::path::PathBuf {
+    let base_components: Vec<_> = base.components().collect();
+    let target_components: Vec<_> = target.components().collect();
+    let common = base_components
+        .iter()
+        .zip(&target_components)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rel = std::path::PathBuf::new();
+    for _ in common..base_components.len() {
+        rel.push("..");
+    }
+    for comp in &target_components[common..] {
+        rel.push(comp.as_os_str());
+    }
+    rel
+}
+
+#[test]
+fn test_10_failing_setup_converts_relative_log_path_to_absolute_in_footer() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let abs_target = log_dir.path().join("nested").join("setup.log");
+    let cwd = std::env::current_dir().unwrap();
+    let rel_log_path = relative_path_from(&cwd, &abs_target);
+    assert!(
+        !rel_log_path.is_absolute(),
+        "test requires a relative log_path, got: {}",
+        rel_log_path.display()
+    );
+    let env = BTreeMap::new();
+
+    let err = run_setup(
+        "echo relative-failure; exit 2",
+        wt.path(),
+        main.path(),
+        &env,
+        &rel_log_path,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+
+    let footer = err.lines().last().expect("error must have a footer line");
+    let reported = footer
+        .strip_prefix("full log: ")
+        .unwrap_or_else(|| panic!("expected 'full log: <path>' footer, got: {footer}"));
+    let reported_path = Path::new(reported);
+    assert!(
+        reported_path.is_absolute(),
+        "full log path must be absolute, got: {reported}"
+    );
+    assert_eq!(
+        reported_path,
+        cwd.join(&rel_log_path),
+        "full log path must be cwd joined with relative log_path"
+    );
+    assert_eq!(
+        std::fs::canonicalize(reported_path).unwrap(),
+        std::fs::canonicalize(&abs_target).unwrap(),
+        "reported log path must resolve to the written log file"
+    );
+    let log_content = std::fs::read_to_string(reported_path).unwrap();
+    assert!(
+        log_content.contains("relative-failure"),
+        "log file must contain setup output: {log_content}"
+    );
+}

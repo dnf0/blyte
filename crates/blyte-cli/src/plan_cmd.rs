@@ -62,48 +62,63 @@ fn paths_match(root: &Path, start_plan: &str, plan_rel: &str) -> bool {
 #[derive(Debug, Clone)]
 struct StartRecord {
     run_id: String,
-    started_at: u64,
+    started_at: Option<u64>,
     plan: Option<String>,
     plan_task: Option<String>,
     pid: Option<libc::pid_t>,
 }
 
-fn read_start_files(root: &Path) -> Vec<StartRecord> {
+fn read_start_files(root: &Path) -> Result<Vec<StartRecord>, String> {
     let wt_dir = root.join(".wt");
     let entries = match std::fs::read_dir(&wt_dir) {
         Ok(e) => e,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", wt_dir.display())),
     };
     let mut records = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", wt_dir.display()))?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if let Some(run_id) = name_str.strip_suffix(".start.json") {
             let path = entry.path();
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let val: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let started_at = val
-                .get("started_at")
-                .and_then(|v| {
+            let content =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let val: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| format!("{}: {e}", path.display()))?;
+            let obj = val
+                .as_object()
+                .ok_or_else(|| format!("{}: expected JSON object", path.display()))?;
+            let started_at = match obj.get("started_at") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(v) => Some(
                     v.as_u64()
                         .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                })
-                .unwrap_or(0);
-            let plan = val.get("plan").and_then(|v| v.as_str()).map(String::from);
-            let plan_task = val
-                .get("plan_task")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let pid = val
-                .get("pid")
-                .and_then(|v| v.as_i64())
-                .map(|p| p as libc::pid_t);
+                        .ok_or_else(|| format!("{}: invalid 'started_at' field", path.display()))?,
+                ),
+            };
+            let plan = match obj.get("plan") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(format!("{}: invalid 'plan' field", path.display()));
+                }
+            };
+            let plan_task = match obj.get("plan_task") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(format!("{}: invalid 'plan_task' field", path.display()));
+                }
+            };
+            let pid = match obj.get("pid") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(v) => Some(
+                    v.as_i64()
+                        .ok_or_else(|| format!("{}: invalid 'pid' field", path.display()))?
+                        as libc::pid_t,
+                ),
+            };
             records.push(StartRecord {
                 run_id: run_id.to_string(),
                 started_at,
@@ -113,7 +128,7 @@ fn read_start_files(root: &Path) -> Vec<StartRecord> {
             });
         }
     }
-    records
+    Ok(records)
 }
 
 fn check_is_ancestor(root: &Path, run_id: &str) -> bool {
@@ -139,27 +154,59 @@ fn check_branch_exists(root: &Path, run_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn read_verdict(root: &Path, run_id: &str) -> Option<String> {
+fn read_verdict(root: &Path, run_id: &str) -> Result<Option<String>, String> {
     let verdict_file = root.join(".wt").join(format!("{run_id}.verdict.json"));
-    std::fs::read_to_string(&verdict_file)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("verdict").and_then(|x| x.as_str()).map(String::from))
+    let content = match std::fs::read_to_string(&verdict_file) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", verdict_file.display())),
+    };
+    let val: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("{}: {e}", verdict_file.display()))?;
+    let verdict = val
+        .get("verdict")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{}: missing or invalid 'verdict' string",
+                verdict_file.display()
+            )
+        })?;
+    Ok(Some(verdict.to_string()))
 }
 
-fn read_summary(root: &Path, run_id: &str) -> Option<(Option<String>, bool)> {
+fn read_summary(root: &Path, run_id: &str) -> Result<Option<(String, bool)>, String> {
     let summary_file = root.join(".wt").join(format!("{run_id}.json"));
-    std::fs::read_to_string(&summary_file)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .map(|v| {
-            let outcome = v.get("outcome").and_then(|x| x.as_str()).map(String::from);
-            let has_commits = v
-                .get("commits")
-                .and_then(|x| x.as_array())
-                .is_some_and(|a| !a.is_empty());
-            (outcome, has_commits)
-        })
+    let content = match std::fs::read_to_string(&summary_file) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", summary_file.display())),
+    };
+    let val: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("{}: {e}", summary_file.display()))?;
+    let outcome = val
+        .get("outcome")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{}: missing or invalid 'outcome' string",
+                summary_file.display()
+            )
+        })?
+        .to_string();
+    let has_commits = match val.get("commits") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Array(a)) => !a.is_empty(),
+        Some(_) => {
+            return Err(format!(
+                "{}: 'commits' must be an array",
+                summary_file.display()
+            ));
+        }
+    };
+    Ok(Some((outcome, has_commits)))
 }
 
 struct TaskIntermediate {
@@ -173,9 +220,9 @@ struct TaskIntermediate {
 }
 
 /// `root` is the main checkout (holds `.wt/`), `plan_rel` the plan path relative to it, as dispatch takes it.
-pub fn statuses(root: &Path, plan_rel: &str, text: &str) -> Vec<TaskStatus> {
+pub fn statuses(root: &Path, plan_rel: &str, text: &str) -> Result<Vec<TaskStatus>, String> {
     let doc = crate::plans::parse_plan(text);
-    let start_files = read_start_files(root);
+    let start_files = read_start_files(root)?;
 
     let all_task_ids: Vec<String> = doc.tasks.iter().map(|t| t.id.clone()).collect();
     let mut intermediates = Vec::new();
@@ -216,36 +263,32 @@ pub fn statuses(root: &Path, plan_rel: &str, text: &str) -> Vec<TaskStatus> {
         let mut verdict_out = None;
 
         if let Some(run) = matched_run {
-            let is_ancestor = check_is_ancestor(root, &run.run_id);
             let branch_exists = check_branch_exists(root, &run.run_id);
-            let verdict_opt = read_verdict(root, &run.run_id);
-            let summary = read_summary(root, &run.run_id);
+            let verdict_opt = read_verdict(root, &run.run_id)?;
+            let summary = read_summary(root, &run.run_id)?;
             let has_commits = summary.as_ref().is_some_and(|(_, c)| *c);
-            let is_merged = (has_commits && is_ancestor)
-                || (!branch_exists && matches!(verdict_opt.as_deref(), Some("accepted" | "fixed")));
+            let is_merged = if branch_exists {
+                has_commits && check_is_ancestor(root, &run.run_id)
+            } else {
+                crate::plans::is_merged_when_branch_gone(root, &run.run_id, verdict_opt.as_deref())?
+            };
 
             if summary.is_none() && run.pid.map(is_pid_alive).unwrap_or(false) {
-                // Rule 1: running
                 state = Some("running".to_string());
                 run_out = Some(run.run_id.clone());
                 verdict_out = verdict_opt;
             } else if is_merged {
-                // Rule 2: merged
                 state = Some("merged".to_string());
                 run_out = Some(run.run_id.clone());
-                outcome_out = summary.and_then(|(o, _)| o);
+                outcome_out = summary.map(|(o, _)| o);
                 verdict_out = verdict_opt;
             } else if verdict_opt.as_deref() == Some("redone") {
-                // Rule 3: A run with verdict redone is not review: treat the task as if no run matched (go on to rule 5).
-                // Leave state as None, run_out as None
             } else if let Some((outcome, _)) = summary {
-                // Rule 3: review
                 state = Some("review".to_string());
                 run_out = Some(run.run_id.clone());
-                outcome_out = outcome;
+                outcome_out = Some(outcome);
                 verdict_out = verdict_opt;
             } else {
-                // Rule 4: dead
                 state = Some("dead".to_string());
                 run_out = Some(run.run_id.clone());
                 verdict_out = verdict_opt;
@@ -269,14 +312,12 @@ pub fn statuses(root: &Path, plan_rel: &str, text: &str) -> Vec<TaskStatus> {
         .map(|item| item.task.id.clone())
         .collect();
 
-    intermediates
+    Ok(intermediates
         .into_iter()
         .map(|item| {
             let (state, waiting_on, command) = if let Some(st) = item.state {
                 (st, Vec::new(), None)
             } else {
-                // Rule 5: ready when every dep is merged (deps that are not tasks in this plan count as merged),
-                // else waiting with waiting_on = the deps not merged, in plan order.
                 let waiting_on: Vec<String> =
                     doc_task_order(&all_task_ids, &item.task.deps, &merged_task_ids);
                 if waiting_on.is_empty() {
@@ -307,7 +348,7 @@ pub fn statuses(root: &Path, plan_rel: &str, text: &str) -> Vec<TaskStatus> {
                 problem: item.problem,
             }
         })
-        .collect()
+        .collect())
 }
 
 fn doc_task_order(
@@ -322,7 +363,7 @@ fn doc_task_order(
         .collect()
 }
 
-pub fn render(plan_rel: &str, rows: &[TaskStatus]) -> String {
+pub fn render(plan_rel: &str, rows: &[TaskStatus]) -> Result<String, String> {
     let mut counts = Vec::new();
     let n_merged = rows.iter().filter(|r| r.state == "merged").count();
     if n_merged > 0 {
@@ -361,60 +402,69 @@ pub fn render(plan_rel: &str, rows: &[TaskStatus]) -> String {
     lines.push(first_line);
 
     for r in rows {
-        let detail = match r.state.as_str() {
-            "merged" => {
-                if let Some(ref problem) = r.problem {
-                    format!("PROBLEM: {problem}")
-                } else {
-                    r.heading.clone()
+        let detail =
+            match r.state.as_str() {
+                "merged" => {
+                    if let Some(ref problem) = r.problem {
+                        format!("PROBLEM: {problem}")
+                    } else {
+                        r.heading.clone()
+                    }
                 }
-            }
-            "waiting" => {
-                if let Some(ref problem) = r.problem {
-                    format!("PROBLEM: {problem}")
-                } else if r.waiting_on.is_empty() {
-                    r.heading.clone()
-                } else {
-                    format!("{}  (waiting on {})", r.heading, r.waiting_on.join(", "))
+                "waiting" => {
+                    if let Some(ref problem) = r.problem {
+                        format!("PROBLEM: {problem}")
+                    } else if r.waiting_on.is_empty() {
+                        r.heading.clone()
+                    } else {
+                        format!("{}  (waiting on {})", r.heading, r.waiting_on.join(", "))
+                    }
                 }
-            }
-            "review" => {
-                if let Some(ref problem) = r.problem {
-                    format!("PROBLEM: {problem}")
-                } else {
-                    let outcome = r.outcome.as_deref().unwrap_or("unknown");
-                    let run = r.run.as_deref().unwrap_or("");
-                    format!("{outcome}, run {run}: blyte review {run}")
+                "review" => {
+                    if let Some(ref problem) = r.problem {
+                        format!("PROBLEM: {problem}")
+                    } else {
+                        let outcome = r.outcome.as_deref().ok_or_else(|| {
+                            format!("task {}: state 'review' missing outcome", r.id)
+                        })?;
+                        let run = r.run.as_deref().ok_or_else(|| {
+                            format!("task {}: state 'review' missing run id", r.id)
+                        })?;
+                        format!("{outcome}, run {run}: blyte review {run}")
+                    }
                 }
-            }
-            "running" | "dead" => {
-                if let Some(ref problem) = r.problem {
-                    format!("PROBLEM: {problem}")
-                } else {
-                    let run = r.run.as_deref().unwrap_or("");
-                    format!("run {run}: blyte status {run}")
+                "running" | "dead" => {
+                    if let Some(ref problem) = r.problem {
+                        format!("PROBLEM: {problem}")
+                    } else {
+                        let run = r.run.as_deref().ok_or_else(|| {
+                            format!("task {}: state '{}' missing run id", r.id, r.state)
+                        })?;
+                        format!("run {run}: blyte status {run}")
+                    }
                 }
-            }
-            "ready" => {
-                if let Some(ref problem) = r.problem {
-                    format!("PROBLEM: {problem}")
-                } else {
-                    r.command.clone().unwrap_or_default()
+                "ready" => {
+                    if let Some(ref problem) = r.problem {
+                        format!("PROBLEM: {problem}")
+                    } else {
+                        r.command.clone().ok_or_else(|| {
+                            format!("task {}: state 'ready' missing command", r.id)
+                        })?
+                    }
                 }
-            }
-            _ => {
-                if let Some(ref problem) = r.problem {
-                    format!("PROBLEM: {problem}")
-                } else {
-                    r.heading.clone()
+                _ => {
+                    if let Some(ref problem) = r.problem {
+                        format!("PROBLEM: {problem}")
+                    } else {
+                        r.heading.clone()
+                    }
                 }
-            }
-        };
+            };
 
         lines.push(format!("{:<max_id_len$}  {:<7}  {detail}", r.id, r.state));
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn compute_plan_rel(root: &Path, plan: &Path, full_plan_path: &Path) -> String {
@@ -463,14 +513,30 @@ pub fn run(plan: &Path, json: bool) -> i32 {
     }
 
     let plan_rel = compute_plan_rel(&root, plan, &full_plan_path);
-    let rows = statuses(&root, &plan_rel, &text);
+    let rows = match statuses(&root, &plan_rel, &text) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
 
     if json {
-        let json_str = serde_json::to_string_pretty(&rows).unwrap_or_default();
-        println!("{json_str}");
+        match serde_json::to_string_pretty(&rows) {
+            Ok(json_str) => println!("{json_str}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
     } else {
-        let rendered = render(&plan_rel, &rows);
-        println!("{rendered}");
+        match render(&plan_rel, &rows) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
     }
 
     0
@@ -570,7 +636,7 @@ Do task B.
     #[test]
     fn test_1_plan_dependencies_no_runs() {
         let repo = setup_test_repo();
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
 
         assert_eq!(rows.len(), 2);
         let a = &rows[0];
@@ -597,7 +663,7 @@ Do task B.
         let pid = std::process::id();
         write_start_json(repo.path(), "A", "docs/p.md", "Task A", pid, 100);
 
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows[0].id, "A");
         assert_eq!(rows[0].state, "running");
         assert_eq!(rows[0].run.as_deref(), Some("A"));
@@ -609,7 +675,7 @@ Do task B.
         let repo = setup_test_repo();
         write_start_json(repo.path(), "A", "docs/p.md", "Task A", 999999, 100);
 
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows[0].id, "A");
         assert_eq!(rows[0].state, "dead");
         assert_eq!(rows[0].run.as_deref(), Some("A"));
@@ -622,7 +688,7 @@ Do task B.
         write_start_json(repo.path(), "A", "docs/p.md", "Task A", 999999, 100);
         write_summary_json(repo.path(), "A", "verified");
 
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows[0].id, "A");
         assert_eq!(rows[0].state, "review");
         assert_eq!(rows[0].run.as_deref(), Some("A"));
@@ -642,7 +708,7 @@ Do task B.
         )
         .unwrap();
 
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows[0].id, "A");
         assert_eq!(rows[0].state, "merged");
         assert_eq!(rows[0].run.as_deref(), Some("A1"));
@@ -662,7 +728,7 @@ Do task B.
         write_start_json(repo.path(), "A", "docs/p.md", "Task A", 999999, 100);
         write_verdict_json(repo.path(), "A", "accepted");
 
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows[0].id, "A");
         assert_eq!(rows[0].state, "merged");
 
@@ -670,7 +736,7 @@ Do task B.
         write_summary_json(repo.path(), "A", "gate_failed");
         write_verdict_json(repo.path(), "A", "redone");
 
-        let rows2 = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows2 = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows2[0].id, "A");
         assert_eq!(rows2[0].state, "ready");
         assert_eq!(
@@ -692,7 +758,7 @@ Do task B.
             100,
         );
 
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows[0].id, "A");
         assert_eq!(rows[0].state, "ready");
     }
@@ -707,7 +773,7 @@ Do task B.
         // A2 has later started_at and is alive
         write_start_json(repo.path(), "A2", "docs/p.md", "Task A", pid, 200);
 
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
         assert_eq!(rows[0].id, "A");
         assert_eq!(rows[0].state, "running");
         assert_eq!(rows[0].run.as_deref(), Some("A2"));
@@ -729,7 +795,7 @@ Do task B.
 Do setup.
 "#;
         let repo = setup_test_repo();
-        let rows = statuses(repo.path(), "docs/p.md", plan);
+        let rows = statuses(repo.path(), "docs/p.md", plan).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "T1");
         assert_eq!(rows[0].state, "ready");
@@ -748,7 +814,7 @@ Do setup.
         // Therefore parse_plan parses the task, but extract fails to find it.
         let plan = "~~~\n### Task A: fenced\n~~~\n";
         let repo = setup_test_repo();
-        let rows = statuses(repo.path(), "docs/p.md", plan);
+        let rows = statuses(repo.path(), "docs/p.md", plan).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "A");
         assert!(rows[0].command.is_none());
@@ -760,8 +826,8 @@ Do setup.
     #[test]
     fn test_11_render_output() {
         let repo = setup_test_repo();
-        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN);
-        let rendered = render("docs/p.md", &rows);
+        let rows = statuses(repo.path(), "docs/p.md", TWO_TASK_PLAN).unwrap();
+        let rendered = render("docs/p.md", &rows).unwrap();
         let lines: Vec<&str> = rendered.lines().collect();
 
         assert_eq!(lines[0], "docs/p.md: 2 tasks (1 ready, 1 waiting)");
@@ -775,5 +841,50 @@ Do setup.
         let missing = repo.path().join("does_not_exist.md");
         let code = run(&missing, false);
         assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn render_errors_on_missing_required_fields() {
+        let missing_outcome = TaskStatus {
+            id: "A".to_string(),
+            heading: "Task A: one".to_string(),
+            deps: Vec::new(),
+            state: "review".to_string(),
+            run: Some("A".to_string()),
+            outcome: None,
+            verdict: None,
+            waiting_on: Vec::new(),
+            command: None,
+            problem: None,
+        };
+        assert!(render("docs/p.md", &[missing_outcome]).is_err());
+
+        let missing_run_review = TaskStatus {
+            id: "A".to_string(),
+            heading: "Task A: one".to_string(),
+            deps: Vec::new(),
+            state: "review".to_string(),
+            run: None,
+            outcome: Some("verified".to_string()),
+            verdict: None,
+            waiting_on: Vec::new(),
+            command: None,
+            problem: None,
+        };
+        assert!(render("docs/p.md", &[missing_run_review]).is_err());
+
+        let missing_run_dead = TaskStatus {
+            id: "A".to_string(),
+            heading: "Task A: one".to_string(),
+            deps: Vec::new(),
+            state: "dead".to_string(),
+            run: None,
+            outcome: None,
+            verdict: None,
+            waiting_on: Vec::new(),
+            command: None,
+            problem: None,
+        };
+        assert!(render("docs/p.md", &[missing_run_dead]).is_err());
     }
 }

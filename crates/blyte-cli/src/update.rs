@@ -171,15 +171,27 @@ fn prev_path(exe: &Path) -> PathBuf {
     exe.with_file_name("blyte.prev")
 }
 
-fn version_of(bin: &Path) -> Option<String> {
-    let out = Command::new(bin).arg("--version").output().ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+fn version_of(bin: &Path) -> Result<String, String> {
+    let out = Command::new(bin)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("failed to run --version: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(format!("--version exited with {}", out.status));
+        }
+        return Err(format!("--version exited with {}: {stderr}", out.status));
+    }
+    let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if ver.is_empty() {
+        return Err("--version produced empty output".to_string());
+    }
+    Ok(ver)
 }
 
 /// Swap `exe` and `blyte.prev`.
-fn rollback(exe: &Path) -> Result<String, String> {
+pub fn rollback(exe: &Path) -> Result<String, String> {
     let prev = prev_path(exe);
     if !prev.is_file() {
         return Err(format!(
@@ -191,7 +203,12 @@ fn rollback(exe: &Path) -> Result<String, String> {
     std::fs::rename(exe, &swap).map_err(|e| format!("rollback failed: {e}"))?;
     std::fs::rename(&prev, exe).map_err(|e| format!("rollback failed: {e}"))?;
     std::fs::rename(&swap, &prev).map_err(|e| format!("rollback failed: {e}"))?;
-    Ok(version_of(exe).unwrap_or_else(|| "blyte (version unknown)".into()))
+    version_of(exe).map_err(|e| {
+        format!(
+            "rollback binary at {} could not be verified: {e}",
+            exe.display()
+        )
+    })
 }
 
 /// Refresh every installed skill copy with `new_exe` when unedited, keeping whether blyte is the default.
@@ -364,7 +381,7 @@ fn update(check: bool) -> Result<(), String> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("could not make the download executable: {e}"))?;
     }
-    let Some(new_version) = version_of(&tmp) else {
+    let Ok(new_version) = version_of(&tmp) else {
         let _ = std::fs::remove_file(&tmp);
         return Err("the downloaded binary does not run; the installed blyte is unchanged".into());
     };
@@ -425,5 +442,23 @@ mod tests {
         );
         assert_eq!(parse_repo("https://gitlab.com/acme/blyte"), None);
         assert_eq!(repo(), parse_repo(env!("CARGO_PKG_REPOSITORY")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_errors_when_version_check_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("blyte");
+        let prev = dir.path().join("blyte.prev");
+        std::fs::write(&exe, "#!/bin/sh\necho 'blyte 2.0.0'\n").unwrap();
+        std::fs::write(&prev, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&prev, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = rollback(&exe).unwrap_err();
+        assert!(err.contains("could not be verified"), "{err}");
+        assert!(err.contains(&exe.display().to_string()), "{err}");
     }
 }

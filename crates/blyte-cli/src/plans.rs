@@ -13,6 +13,30 @@ type IsMergedKey = (PathBuf, String, String);
 type IsMergedCache = LazyLock<RwLock<HashMap<IsMergedKey, bool>>>;
 
 static IS_MERGED_CACHE: IsMergedCache = LazyLock::new(|| RwLock::new(HashMap::new()));
+static REPORTED_REMOVAL_ERRORS: LazyLock<RwLock<HashSet<String>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
+
+fn report_removal_record_error_with(err: &str, emit: impl FnOnce(&str)) {
+    let should_print = match REPORTED_REMOVAL_ERRORS.write() {
+        Ok(mut seen) => seen.insert(err.to_string()),
+        Err(_) => true,
+    };
+    if should_print {
+        emit(err);
+    }
+}
+
+pub(crate) fn is_merged_when_branch_gone(
+    root: &Path,
+    id: &str,
+    verdict: Option<&str>,
+) -> Result<bool, String> {
+    let removed_as_merged = crate::removal_record::read(root, id)?
+        .is_some_and(|rec| crate::removal_record::is_merged(&rec));
+    let accepted_or_fixed = verdict
+        .is_some_and(|v| v.eq_ignore_ascii_case("accepted") || v.eq_ignore_ascii_case("fixed"));
+    Ok(accepted_or_fixed || removed_as_merged)
+}
 
 pub fn is_merged_git_call_count() -> usize {
     IS_MERGED_GIT_CALLS.load(Ordering::SeqCst)
@@ -870,7 +894,7 @@ pub fn is_merged(root: &Path, branch: &str, head: &str) -> bool {
     merged
 }
 
-fn is_job_merged(job: &Job) -> bool {
+fn is_job_merged_with_error_reporter(job: &Job, emit_error: impl FnOnce(&str)) -> bool {
     let Some(ref root) = job.root else {
         return false;
     };
@@ -881,26 +905,33 @@ fn is_job_merged(job: &Job) -> bool {
         }
     }
 
-    let is_accepted_or_fixed = job
-        .verdict
-        .as_deref()
-        .is_some_and(|v| v.eq_ignore_ascii_case("accepted") || v.eq_ignore_ascii_case("fixed"));
-
-    if is_accepted_or_fixed && !job.id.is_empty() {
-        let branch_ref = format!("refs/heads/wip/{}", job.id);
-        let Ok(output) = std::process::Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", &branch_ref])
-            .current_dir(root)
-            .output()
-        else {
-            return false;
-        };
-        if !output.status.success() {
-            return true;
-        }
+    if job.id.is_empty() {
+        return false;
     }
 
-    false
+    let branch_ref = format!("refs/heads/wip/{}", job.id);
+    let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &branch_ref])
+        .current_dir(root)
+        .output()
+    else {
+        return false;
+    };
+    if output.status.success() {
+        return false;
+    }
+
+    match is_merged_when_branch_gone(root, &job.id, job.verdict.as_deref()) {
+        Ok(merged) => merged,
+        Err(e) => {
+            report_removal_record_error_with(&e, emit_error);
+            false
+        }
+    }
+}
+
+fn is_job_merged(job: &Job) -> bool {
+    is_job_merged_with_error_reporter(job, |e| eprintln!("blyte: {e}"))
 }
 
 fn choose_task_job<'a>(jobs: &[&'a Job]) -> Option<&'a Job> {
@@ -1963,5 +1994,138 @@ Depends on: Task X9
                 );
             }
         }
+    }
+
+    fn make_test_job(root: PathBuf, id: &str, verdict: Option<&str>) -> Job {
+        Job {
+            problems: Vec::new(),
+            key: format!("app/{id}"),
+            id: id.to_string(),
+            repo: "app".to_string(),
+            status: "verified".to_string(),
+            gate_running: false,
+            title: id.to_string(),
+            task: String::new(),
+            plan: None,
+            now: String::new(),
+            started_at: Some(100),
+            finished_at: Some(200),
+            elapsed_s: Some(100),
+            cost_usd: None,
+            turns: 1,
+            gate_attempts: 1,
+            gate_failures: Vec::new(),
+            model: None,
+            last_tool: None,
+            worktree: None,
+            worktree_exists: Some(false),
+            log: String::new(),
+            commits: Vec::new(),
+            changed_files: Vec::new(),
+            tags: Vec::new(),
+            verdict: verdict.map(String::from),
+            root: Some(root),
+            plan_file: None,
+            plan_task: None,
+            request: None,
+            task_file: None,
+            research: false,
+            start_plan: None,
+            file_tags: Vec::new(),
+            verdict_notes: None,
+            verdict_ts: None,
+            log_mtime: None,
+        }
+    }
+
+    #[test]
+    fn job_without_verdict_branch_gone_merged_only_with_merged_removal_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run_git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        run_git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "hello\n").unwrap();
+        run_git(&["add", "."]);
+        run_git(&["commit", "-qm", "init", "--no-gpg-sign"]);
+
+        let job = make_test_job(root.to_path_buf(), "J1", None);
+        assert!(!is_job_merged(&job));
+
+        for reason in ["merged", "merged_into", "merged_through", "session_merged"] {
+            let rec = crate::removal_record::RemovalRecord {
+                id: "J1".to_string(),
+                reason: reason.to_string(),
+                detail: None,
+                removed_at: 1_795_000_000,
+            };
+            crate::removal_record::write(root, &rec).unwrap();
+            assert!(is_job_merged(&job), "reason {reason} should be merged");
+        }
+
+        for reason in ["no_changes", "older_than", "verdict"] {
+            let rec = crate::removal_record::RemovalRecord {
+                id: "J1".to_string(),
+                reason: reason.to_string(),
+                detail: None,
+                removed_at: 1_795_000_000,
+            };
+            crate::removal_record::write(root, &rec).unwrap();
+            assert!(!is_job_merged(&job), "reason {reason} should not be merged");
+        }
+
+        let corrupt_path = crate::removal_record::path(root, "J1");
+        std::fs::write(&corrupt_path, "{corrupt").unwrap();
+        let mut reported = Vec::new();
+        assert!(!is_job_merged_with_error_reporter(&job, |e| {
+            reported.push(e.to_string());
+        }));
+        assert_eq!(reported.len(), 1);
+        assert!(
+            reported[0].contains(&corrupt_path.display().to_string()),
+            "expected error naming {}, got: {}",
+            corrupt_path.display(),
+            reported[0]
+        );
+        assert!(!is_job_merged_with_error_reporter(&job, |e| {
+            reported.push(e.to_string());
+        }));
+        assert_eq!(
+            reported.len(),
+            1,
+            "corrupt removal record error should be reported only once"
+        );
+
+        let job2 = make_test_job(root.to_path_buf(), "J2", None);
+        let corrupt_path2 = crate::removal_record::path(root, "J2");
+        std::fs::write(&corrupt_path2, "{corrupt").unwrap();
+        assert!(!is_job_merged(&job2));
+        assert!(
+            REPORTED_REMOVAL_ERRORS
+                .read()
+                .unwrap()
+                .iter()
+                .any(|msg| msg.contains(&corrupt_path2.display().to_string())),
+            "expected is_job_merged to record error naming {}",
+            corrupt_path2.display()
+        );
+
+        let rec = crate::removal_record::RemovalRecord {
+            id: "J1".to_string(),
+            reason: "merged".to_string(),
+            detail: None,
+            removed_at: 1_795_000_000,
+        };
+        crate::removal_record::write(root, &rec).unwrap();
+        run_git(&["branch", "wip/J1"]);
+        assert!(!is_job_merged(&job));
     }
 }

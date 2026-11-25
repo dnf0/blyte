@@ -124,6 +124,14 @@ impl Shell for RecordingShell {
         "recording shell".into()
     }
 
+    fn available_binaries(
+        &self,
+        _cwd: &Path,
+        _candidates: &[&'static str],
+    ) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
     fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
         if command.contains("__BLYTE_IN_GATE") {
             self.exec_timeouts.lock().unwrap().push(timeout);

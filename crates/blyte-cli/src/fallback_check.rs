@@ -147,8 +147,8 @@ pub fn flags_for_review(
         return vec![format_not_judged_why(candidates.len(), "no review")];
     };
     if mr.is_failed() {
-        let why = mr.error.as_deref().unwrap_or("unknown error");
-        return vec![format_not_judged_why(candidates.len(), why)];
+        let why = mr.failure_detail();
+        return vec![format_not_judged_why(candidates.len(), &why)];
     }
 
     let mut confirmed = Vec::new();
@@ -577,4 +577,33 @@ fn matches_shell_param_default(content: &str) -> bool {
         search = after;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_review::ModelReviewResult;
+
+    #[test]
+    fn flags_for_review_rejects_malformed_result_without_unknown_error_placeholder() {
+        let candidates = vec![Finding {
+            file: "src/lib.rs".to_string(),
+            line: 10,
+            pattern: "unwrap_or",
+            text: "x.unwrap_or(0)".to_string(),
+        }];
+        let malformed = ModelReviewResult {
+            status: "error".to_string(),
+            model: Some("test-model".to_string()),
+            cost_usd: None,
+            concerns: Vec::new(),
+            fallbacks: Vec::new(),
+            error: None,
+        };
+        let flags = flags_for_review(&candidates, Some(&malformed));
+        assert_eq!(flags.len(), 1);
+        assert!(!flags[0].contains("unknown error"), "flag={}", flags[0]);
+        assert!(!flags[0].contains('?'), "flag={}", flags[0]);
+        assert!(flags[0].contains("test-model"), "flag={}", flags[0]);
+    }
 }

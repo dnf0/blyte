@@ -211,23 +211,44 @@ pub trait Shell: Send + Sync {
     fn describe(&self) -> String;
 
     /// Which binaries exist **in the execution environment**, not on the conversation model's host.
-    fn available_binaries(&self, cwd: &Path, candidates: &[&'static str]) -> Vec<String> {
+    fn available_binaries(
+        &self,
+        cwd: &Path,
+        candidates: &[&'static str],
+    ) -> Result<Vec<String>, String> {
         // One probe rather than N: a remote or containerised shell pays a round trip per call,
         // and sixteen of them before the first turn is a poor way to start.
-        let probe = candidates
-            .iter()
-            .map(|b| format!("command -v {b} >/dev/null 2>&1 && echo {b}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        match self.exec(&probe, cwd, Duration::from_secs(30)) {
-            Ok(o) => o
-                .stdout
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect(),
-            Err(_) => Vec::new(),
+        let probe = if candidates.is_empty() {
+            "true".to_string()
+        } else {
+            candidates
+                .iter()
+                .map(|b| format!("if command -v {b} >/dev/null 2>&1; then echo {b}; fi"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let o = self
+            .exec(&probe, cwd, Duration::from_secs(30))
+            .map_err(|e| format!("environment probe `{probe}` failed: {e}"))?;
+        if o.exit_code != 0 {
+            let detail = o.stderr.trim();
+            return Err(if detail.is_empty() {
+                format!(
+                    "environment probe `{probe}` failed with exit status {}",
+                    o.exit_code
+                )
+            } else {
+                format!(
+                    "environment probe `{probe}` failed with exit status {}: {detail}",
+                    o.exit_code
+                )
+            });
         }
+        Ok(o.stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
     }
 }
 
@@ -361,9 +382,10 @@ fn exec_command_cancellable(
         cmd.process_group(0);
     }
 
+    let program = cmd.get_program().to_string_lossy().into_owned();
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("cannot run command: {e}"))?;
+        .map_err(|e| format!("cannot run command `{program}`: {e}"))?;
 
     if let Some(handle) = cancel {
         if !handle.register_pgid(child.id() as i32) {
@@ -1468,5 +1490,78 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.exit_code, 0);
         assert_eq!(recovered.stdout, "ok\n");
+    }
+
+    struct FailingExecShell {
+        outcome: Result<Output, String>,
+    }
+
+    impl Shell for FailingExecShell {
+        fn exec(&self, _command: &str, _cwd: &Path, _timeout: Duration) -> Result<Output, String> {
+            self.outcome.clone()
+        }
+
+        fn describe(&self) -> String {
+            "failing".into()
+        }
+    }
+
+    struct UnspawnableShell;
+
+    impl Shell for UnspawnableShell {
+        fn exec(&self, command: &str, cwd: &Path, timeout: Duration) -> Result<Output, String> {
+            let mut cmd = Command::new("/nonexistent-blyte-probe-binary");
+            cmd.arg("-c").arg(command).current_dir(cwd);
+            exec_command(cmd, timeout)
+        }
+
+        fn describe(&self) -> String {
+            "unspawnable".into()
+        }
+    }
+
+    #[test]
+    fn available_binaries_returns_err_when_probe_cannot_be_spawned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = UnspawnableShell
+            .available_binaries(tmp.path(), &["git", "cargo"])
+            .unwrap_err();
+        assert!(err.contains("command -v git"), "got: {err}");
+        assert!(
+            err.contains("/nonexistent-blyte-probe-binary"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn available_binaries_returns_err_when_probe_exits_nonzero() {
+        let shell = FailingExecShell {
+            outcome: Ok(Output {
+                stdout: String::new(),
+                stderr: "Error response from daemon: container is not running\n".into(),
+                exit_code: 125,
+            }),
+        };
+        let err = shell
+            .available_binaries(Path::new("."), &["git", "cargo"])
+            .unwrap_err();
+        assert!(err.contains("command -v git"), "got: {err}");
+        assert!(err.contains("125"), "got: {err}");
+        assert!(err.contains("container is not running"), "got: {err}");
+    }
+
+    #[test]
+    fn available_binaries_succeeds_when_all_candidates_are_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bins = LocalShell
+            .available_binaries(
+                tmp.path(),
+                &[
+                    "blyte_nonexistent_probe_binary_a",
+                    "blyte_nonexistent_probe_binary_b",
+                ],
+            )
+            .expect("missing candidates must not fail the probe");
+        assert!(bins.is_empty(), "got: {bins:?}");
     }
 }

@@ -35,6 +35,14 @@ fn write(p: &Path, text: &str) {
     std::fs::write(p, text).unwrap();
 }
 
+fn init_repo(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    git(dir, &["init", "-q", "-b", "main"]);
+    write(&dir.join("README.md"), "init\n");
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-qm", "init", "--no-gpg-sign"]);
+}
+
 #[test]
 fn running_only_returns_exactly_the_running_plan_and_equals_unfiltered_entry() {
     let t = tempfile::tempdir().unwrap();
@@ -317,7 +325,7 @@ fn plan_cmd_running_and_no_commits_are_not_merged() {
         .to_string(),
     );
 
-    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text);
+    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text).unwrap();
     assert_eq!(rows[0].state, "running");
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["plan", plan_rel])
@@ -355,7 +363,7 @@ fn plan_cmd_running_and_no_commits_are_not_merged() {
         .to_string(),
     );
 
-    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text);
+    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text).unwrap();
     assert_eq!(rows[0].state, "review");
     assert_eq!(rows[0].outcome.as_deref(), Some("no_changes"));
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
@@ -388,7 +396,7 @@ fn plan_cmd_running_and_no_commits_are_not_merged() {
         .to_string(),
     );
 
-    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text);
+    let rows = blyte_cli::plan_cmd::statuses(&r1, plan_rel, plan_text).unwrap();
     assert_eq!(rows[0].state, "merged");
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .args(["plan", plan_rel])
@@ -398,4 +406,232 @@ fn plan_cmd_running_and_no_commits_are_not_merged() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("merged"), "expected merged, got:\n{stdout}");
+}
+
+#[test]
+fn blyte_plan_removal_record_reasons_determine_merged_and_ready() {
+    let plan_rel = "docs/plans/two.md";
+    let plan_text = "\
+# Two Task Plan
+
+### Task A: first
+
+Do A.
+
+### Task B: second
+
+**Depends on:** A
+
+Do B.
+";
+
+    for reason in ["merged", "merged_into", "merged_through", "session_merged"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let r1 = tmp.path().join("r1");
+        init_repo(&r1);
+        write(&r1.join(plan_rel), plan_text);
+        let wt = r1.join(".wt");
+        write(
+            &wt.join("A.start.json"),
+            &serde_json::json!({
+                "id": "A",
+                "pid": 999_999,
+                "started_at": 1_700_000_000u64,
+                "plan": plan_rel,
+                "plan_task": "Task A",
+            })
+            .to_string(),
+        );
+        write(
+            &wt.join("A.json"),
+            &serde_json::json!({
+                "id": "A",
+                "outcome": "verified",
+                "commits": [{"sha": "abc1234", "subject": "work"}],
+            })
+            .to_string(),
+        );
+        write(
+            &wt.join("A.removed.json"),
+            &serde_json::json!({
+                "id": "A",
+                "reason": reason,
+                "detail": serde_json::Value::Null,
+                "removed_at": 1_795_000_000u64,
+            })
+            .to_string(),
+        );
+
+        let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+            .args(["plan", plan_rel, "--json"])
+            .current_dir(&r1)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "reason {reason}: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(rows[0]["id"], "A", "reason {reason}");
+        assert_eq!(rows[0]["state"], "merged", "reason {reason}");
+        assert_eq!(rows[1]["id"], "B", "reason {reason}");
+        assert_eq!(rows[1]["state"], "ready", "reason {reason}");
+
+        let text_out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+            .args(["plan", plan_rel])
+            .current_dir(&r1)
+            .output()
+            .unwrap();
+        assert!(text_out.status.success());
+        let stdout = String::from_utf8_lossy(&text_out.stdout);
+        assert!(
+            stdout.contains("A  merged") && stdout.contains("B  ready"),
+            "reason {reason}, got:\n{stdout}"
+        );
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let r1 = tmp.path().join("r1");
+    init_repo(&r1);
+    write(&r1.join(plan_rel), plan_text);
+    let wt = r1.join(".wt");
+    write(
+        &wt.join("A.start.json"),
+        &serde_json::json!({
+            "id": "A",
+            "pid": 999_999,
+            "started_at": 1_700_000_000u64,
+            "plan": plan_rel,
+            "plan_task": "Task A",
+        })
+        .to_string(),
+    );
+    write(
+        &wt.join("A.json"),
+        &serde_json::json!({
+            "id": "A",
+            "outcome": "verified",
+            "commits": [{"sha": "abc1234", "subject": "work"}],
+        })
+        .to_string(),
+    );
+    write(
+        &wt.join("A.removed.json"),
+        &serde_json::json!({
+            "id": "A",
+            "reason": "older_than",
+            "detail": "14",
+            "removed_at": 1_795_000_000u64,
+        })
+        .to_string(),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["plan", plan_rel, "--json"])
+        .current_dir(&r1)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(rows[0]["id"], "A");
+    assert_eq!(rows[0]["state"], "review");
+    assert_eq!(rows[1]["id"], "B");
+    assert_ne!(rows[1]["state"], "ready");
+    assert_eq!(rows[1]["state"], "waiting");
+}
+
+#[test]
+fn blyte_plan_fails_on_corrupt_run_files_and_works_without_wt_dir() {
+    let plan_rel = "docs/plans/two.md";
+    let plan_text = "\
+# Two Task Plan
+
+### Task A: first
+
+Do A.
+
+### Task B: second
+
+**Depends on:** A
+
+Do B.
+";
+
+    let tmp_empty = tempfile::tempdir().unwrap();
+    let r_empty = tmp_empty.path().join("r_empty");
+    init_repo(&r_empty);
+    write(&r_empty.join(plan_rel), plan_text);
+    assert!(!r_empty.join(".wt").exists());
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["plan", plan_rel, "--json"])
+        .current_dir(&r_empty)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(rows[0]["state"], "ready");
+    assert_eq!(rows[1]["state"], "waiting");
+
+    let tmp_wt_file = tempfile::tempdir().unwrap();
+    let r_wt_file = tmp_wt_file.path().join("r_wt_file");
+    init_repo(&r_wt_file);
+    write(&r_wt_file.join(plan_rel), plan_text);
+    write(&r_wt_file.join(".wt"), "not a directory");
+    let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["plan", plan_rel])
+        .current_dir(&r_wt_file)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        ".wt as regular file: expected non-zero exit, stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(".wt"),
+        ".wt as regular file: expected stderr to name .wt, got:\n{stderr}"
+    );
+
+    let valid_start = serde_json::json!({
+        "id": "X",
+        "pid": 999_999,
+        "started_at": 1_700_000_000u64,
+        "plan": plan_rel,
+        "plan_task": "Task A",
+    })
+    .to_string();
+
+    for corrupt_name in ["X.start.json", "X.verdict.json", "X.json", "X.removed.json"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = tmp.path().join("r");
+        init_repo(&r);
+        write(&r.join(plan_rel), plan_text);
+        let wt = r.join(".wt");
+        if corrupt_name != "X.start.json" {
+            write(&wt.join("X.start.json"), &valid_start);
+        }
+        write(&wt.join(corrupt_name), "{not valid json");
+
+        let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+            .args(["plan", plan_rel])
+            .current_dir(&r)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{corrupt_name}: expected non-zero exit, stdout={}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(corrupt_name),
+            "{corrupt_name}: expected stderr to name file, got:\n{stderr}"
+        );
+    }
 }

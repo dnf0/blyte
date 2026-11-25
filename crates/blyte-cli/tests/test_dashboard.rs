@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use blyte_cli::dashboard::{collect, route, Sources};
+use blyte_cli::dashboard::{collect, collect_jobs, route, Sources};
 
 fn now() -> u64 {
     SystemTime::now()
@@ -248,4 +248,318 @@ fn dispatch_tags_are_accepted() {
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("--tag"));
+}
+
+#[test]
+fn corrupt_report_records_problem_and_keeps_other_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let wt = d.path().join("repos").join("alpha").join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let t = now();
+
+    std::fs::write(
+        wt.join("X.start.json"),
+        serde_json::json!({
+            "id": "X",
+            "started_at": t - 60,
+            "pid": 999_999
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let bad_report = wt.join("X.report.json");
+    std::fs::write(&bad_report, "not json").unwrap();
+
+    let bare_bad_report = wt.join("BARE.report.json");
+    std::fs::write(&bare_bad_report, "not json").unwrap();
+
+    std::fs::write(
+        wt.join("Y.start.json"),
+        serde_json::json!({
+            "id": "Y",
+            "started_at": t - 50,
+            "pid": 999_998
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        wt.join("Y.report.json"),
+        serde_json::json!({
+            "outcome": "accepted",
+            "turns": 2,
+            "gate_attempts": 0
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let src = Sources {
+        roots: vec![d.path().join("repos")],
+        runs_dirs: vec![],
+        hours: 24,
+    };
+    let jobs = collect_jobs(&src, t);
+    let by_id: std::collections::HashMap<_, _> =
+        jobs.into_iter().map(|j| (j.id.clone(), j)).collect();
+
+    assert!(
+        by_id.contains_key("Y"),
+        "other run Y should still be listed"
+    );
+    assert!(by_id["Y"].problems.is_empty(), "{:?}", by_id["Y"].problems);
+
+    let x = by_id
+        .get("X")
+        .expect("corrupt run X should still be listed");
+    assert_ne!(x.status, "stopped");
+    assert!(
+        x.problems
+            .iter()
+            .any(|p| p.contains(&bad_report.display().to_string())),
+        "expected problem naming {}, got {:?}",
+        bad_report.display(),
+        x.problems
+    );
+
+    let bare = by_id
+        .get("BARE")
+        .expect("bare corrupt report BARE should still be listed");
+    assert!(
+        bare.problems
+            .iter()
+            .any(|p| p.contains(&bare_bad_report.display().to_string())),
+        "expected problem naming {}, got {:?}",
+        bare_bad_report.display(),
+        bare.problems
+    );
+}
+
+#[test]
+fn report_without_outcome_records_problem_and_is_not_unknown() {
+    let d = tempfile::tempdir().unwrap();
+    let wt = d.path().join("repos").join("alpha").join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let t = now();
+
+    std::fs::write(
+        wt.join("Z.start.json"),
+        serde_json::json!({
+            "id": "Z",
+            "started_at": t - 60,
+            "pid": 999_999
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let report = wt.join("Z.report.json");
+    std::fs::write(
+        &report,
+        serde_json::json!({
+            "turns": 4,
+            "gate_failures": ["ok", 42]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let src = Sources {
+        roots: vec![d.path().join("repos")],
+        runs_dirs: vec![],
+        hours: 24,
+    };
+    let jobs = collect_jobs(&src, t);
+    let z = jobs.iter().find(|j| j.id == "Z").expect("job Z missing");
+    assert_ne!(z.status, "unknown");
+    assert!(
+        z.problems
+            .iter()
+            .any(|p| p.contains(&report.display().to_string()) && p.contains("outcome")),
+        "expected problem naming {} and 'outcome', got {:?}",
+        report.display(),
+        z.problems
+    );
+    assert!(
+        z.problems
+            .iter()
+            .any(|p| p.contains(&report.display().to_string()) && p.contains("gate_failures")),
+        "expected problem for non-string gate_failures entry, got {:?}",
+        z.problems
+    );
+}
+
+#[test]
+fn corrupt_run_artifacts_record_problems() {
+    let d = tempfile::tempdir().unwrap();
+    let wt = d.path().join("repos").join("alpha").join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+
+    let bad_start = wt.join("S1.start.json");
+    std::fs::write(&bad_start, "{not valid json").unwrap();
+    let bad_verdict = wt.join("S1.verdict.json");
+    std::fs::write(&bad_verdict, "corrupt verdict").unwrap();
+    let bad_log = wt.join("S1.log");
+    std::fs::write(&bad_log, [0xff_u8, 0xfe, 0xfd]).unwrap();
+    std::fs::write(
+        wt.join("S1.report.json"),
+        serde_json::json!({"outcome": "accepted"}).to_string(),
+    )
+    .unwrap();
+
+    let runs_repo = d.path().join("runs").join("beta");
+    std::fs::create_dir_all(&runs_repo).unwrap();
+    let bad_agy = runs_repo.join("R1.json");
+    std::fs::write(&bad_agy, "not json").unwrap();
+    std::fs::write(runs_repo.join("R1.log"), "turn 1\n").unwrap();
+
+    let src = Sources {
+        roots: vec![d.path().join("repos")],
+        runs_dirs: vec![d.path().join("runs")],
+        hours: 24,
+    };
+    let jobs = collect_jobs(&src, now());
+    let by_id: std::collections::HashMap<_, _> =
+        jobs.into_iter().map(|j| (j.id.clone(), j)).collect();
+
+    let s1 = by_id.get("S1").expect("job S1 missing");
+    assert!(
+        s1.problems
+            .iter()
+            .any(|p| p.contains(&bad_start.display().to_string())),
+        "missing start.json problem: {:?}",
+        s1.problems
+    );
+    assert!(
+        s1.problems
+            .iter()
+            .any(|p| p.contains(&bad_verdict.display().to_string())),
+        "missing verdict.json problem: {:?}",
+        s1.problems
+    );
+    assert!(
+        s1.problems
+            .iter()
+            .any(|p| p.contains(&bad_log.display().to_string())),
+        "missing log problem: {:?}",
+        s1.problems
+    );
+
+    let r1 = by_id.get("R1").expect("job R1 missing");
+    assert!(
+        r1.problems
+            .iter()
+            .any(|p| p.contains(&bad_agy.display().to_string())),
+        "missing agy json problem: {:?}",
+        r1.problems
+    );
+}
+
+#[test]
+fn dashboard_html_renders_job_problems() {
+    let html = include_str!("../assets/dashboard/index.html");
+    assert!(html.contains("job.problems"));
+    assert!(html.contains("row-problems"));
+}
+
+#[test]
+fn report_missing_or_invalid_turns_and_gate_attempts_record_problems() {
+    let d = tempfile::tempdir().unwrap();
+    let wt = d.path().join("repos").join("alpha").join(".wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let t = now();
+
+    std::fs::write(
+        wt.join("M1.start.json"),
+        serde_json::json!({
+            "id": "M1",
+            "started_at": t - 60,
+            "pid": 999_999
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(wt.join("M1.log"), "[Turn 7] \n✓ Gate passed (attempt 1)\n").unwrap();
+    let missing_report = wt.join("M1.report.json");
+    std::fs::write(
+        &missing_report,
+        serde_json::json!({
+            "outcome": "verified"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    std::fs::write(
+        wt.join("M2.start.json"),
+        serde_json::json!({
+            "id": "M2",
+            "started_at": t - 50,
+            "pid": 999_998
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(wt.join("M2.log"), "[Turn 5] \n✓ Gate passed (attempt 1)\n").unwrap();
+    let invalid_report = wt.join("M2.report.json");
+    std::fs::write(
+        &invalid_report,
+        serde_json::json!({
+            "outcome": "verified",
+            "turns": "five",
+            "gate_attempts": -1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let src = Sources {
+        roots: vec![d.path().join("repos")],
+        runs_dirs: vec![],
+        hours: 24,
+    };
+    let jobs = collect_jobs(&src, t);
+    let by_id: std::collections::HashMap<_, _> =
+        jobs.into_iter().map(|j| (j.id.clone(), j)).collect();
+
+    let m1 = by_id.get("M1").expect("job M1 missing");
+    assert_eq!(m1.turns, 0);
+    assert_eq!(m1.gate_attempts, 0);
+    assert!(
+        m1.problems
+            .iter()
+            .any(|p| p.contains(&missing_report.display().to_string()) && p.contains("turns")),
+        "expected missing turns problem for {}, got {:?}",
+        missing_report.display(),
+        m1.problems
+    );
+    assert!(
+        m1.problems
+            .iter()
+            .any(|p| p.contains(&missing_report.display().to_string())
+                && p.contains("gate_attempts")),
+        "expected missing gate_attempts problem for {}, got {:?}",
+        missing_report.display(),
+        m1.problems
+    );
+
+    let m2 = by_id.get("M2").expect("job M2 missing");
+    assert_eq!(m2.turns, 0);
+    assert_eq!(m2.gate_attempts, 0);
+    assert!(
+        m2.problems
+            .iter()
+            .any(|p| p.contains(&invalid_report.display().to_string()) && p.contains("turns")),
+        "expected invalid turns problem for {}, got {:?}",
+        invalid_report.display(),
+        m2.problems
+    );
+    assert!(
+        m2.problems
+            .iter()
+            .any(|p| p.contains(&invalid_report.display().to_string())
+                && p.contains("gate_attempts")),
+        "expected invalid gate_attempts problem for {}, got {:?}",
+        invalid_report.display(),
+        m2.problems
+    );
 }

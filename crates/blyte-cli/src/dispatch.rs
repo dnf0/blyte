@@ -469,25 +469,68 @@ where
         eprintln!("blyte: warning: {msg}; the machine may sleep during this run");
     }
 
-    let _ = child.wait();
+    child
+        .wait()
+        .map_err(|e| format!("error waiting for child process (pid {pid}): {e}"))?;
 
-    if !cfg.left_out.is_empty() {
-        if let Ok(report_str) = std::fs::read_to_string(report_path) {
-            if let Ok(mut report_val) = serde_json::from_str::<serde_json::Value>(&report_str) {
-                let formatted: Vec<String> = cfg
-                    .left_out
-                    .iter()
-                    .map(|(cmd_name, reason)| format!("{cmd_name} ({reason})"))
-                    .collect();
-                report_val["gate_left_out"] = serde_json::json!(formatted);
-                if let Ok(updated) = serde_json::to_string_pretty(&report_val) {
-                    let _ = std::fs::write(report_path, updated + "\n");
-                }
-            }
-        }
-    }
+    patch_report_gate_left_out(report_path, cfg.left_out)?;
 
     Ok(())
+}
+
+pub fn patch_report_gate_left_out(
+    report_path: &Path,
+    left_out: &[(String, String)],
+) -> Result<(), String> {
+    if left_out.is_empty() {
+        return Ok(());
+    }
+    let report_str = match std::fs::read_to_string(report_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read {}: {e}", report_path.display())),
+    };
+    let mut report_val: serde_json::Value = serde_json::from_str(&report_str)
+        .map_err(|e| format!("cannot parse {}: {e}", report_path.display()))?;
+    let obj = report_val
+        .as_object_mut()
+        .ok_or_else(|| format!("expected JSON object in {}", report_path.display()))?;
+    let formatted: Vec<String> = left_out
+        .iter()
+        .map(|(cmd_name, reason)| format!("{cmd_name} ({reason})"))
+        .collect();
+    obj.insert("gate_left_out".to_string(), serde_json::json!(formatted));
+    let updated = serde_json::to_string_pretty(&report_val)
+        .map_err(|e| format!("cannot serialize {}: {e}", report_path.display()))?;
+    std::fs::write(report_path, updated + "\n")
+        .map_err(|e| format!("cannot write {}: {e}", report_path.display()))?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct GateDriftCheck {
+    pub left_out: Vec<(String, String)>,
+    pub warning: Option<String>,
+}
+
+pub fn load_gate_drift(
+    root: &Path,
+    toml_path: &Path,
+    gate: &str,
+) -> Result<GateDriftCheck, String> {
+    let toml_content = std::fs::read_to_string(toml_path)
+        .map_err(|e| format!("cannot read {}: {e}", toml_path.display()))?;
+    let left_out = crate::gate_drift::left_out_steps(&toml_content);
+    if gate.trim().is_empty() {
+        let mut msg = "the gate in blyte.toml is empty; every step was left out. Fix the steps blyte init named, or pass --gate.".to_string();
+        for (cmd, reason) in &left_out {
+            msg.push_str(&format!("\n  {cmd}: {reason}"));
+        }
+        return Err(msg);
+    }
+    let missing = crate::gate_drift::missing_ci_steps(root, gate, &toml_content);
+    let warning = crate::gate_drift::format_gate_drift_warning(&missing);
+    Ok(GateDriftCheck { left_out, warning })
 }
 
 fn parse_pass_report(report_path: &Path, default_sandbox: &str) -> Result<PassReport, String> {
@@ -1194,19 +1237,15 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         } else {
             start_dir.join("blyte.toml")
         };
-        let toml_content = std::fs::read_to_string(&toml_path).unwrap_or_default();
-        left_out = crate::gate_drift::left_out_steps(&toml_content);
-        if g.trim().is_empty() {
-            eprintln!(
-                "error: the gate in blyte.toml is empty; every step was left out. Fix the steps blyte init named, or pass --gate."
-            );
-            for (cmd, reason) in &left_out {
-                eprintln!("  {cmd}: {reason}");
+        let drift = match load_gate_drift(&root, &toml_path, g) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
             }
-            return 2;
-        }
-        let missing = crate::gate_drift::missing_ci_steps(&root, g, &toml_content);
-        if let Some(warning) = crate::gate_drift::format_gate_drift_warning(&missing) {
+        };
+        left_out = drift.left_out;
+        if let Some(warning) = drift.warning {
             eprintln!("{warning}");
         }
         if !left_out.is_empty() {
@@ -2006,7 +2045,11 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     model: None,
                     seconds: 0,
                     sandbox: args.sandbox.clone(),
-                    log: setup_log_path.display().to_string(),
+                    log: if setup_log_path.is_file() {
+                        setup_log_path.display().to_string()
+                    } else {
+                        String::new()
+                    },
                     report: "".to_string(),
                     gate_source,
                     research_report: None,
@@ -3122,21 +3165,21 @@ pub fn run_status(id: &str, json: bool) -> i32 {
     };
 
     let start_path = root.join(".wt").join(format!("{id}.start.json"));
-    if !start_path.exists() {
-        eprintln!("no dispatch {id} here");
-        return 2;
-    }
-
-    let start_record: serde_json::Value = match std::fs::read_to_string(&start_path) {
-        Ok(s) => match serde_json::from_str(&s) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error parsing {}: {e}", start_path.display());
-                return 2;
-            }
-        },
+    let start_raw = match std::fs::read_to_string(&start_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("no dispatch {id} here");
+            return 2;
+        }
         Err(e) => {
             eprintln!("error reading {}: {e}", start_path.display());
+            return 2;
+        }
+    };
+    let start_record: serde_json::Value = match serde_json::from_str(&start_raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error parsing {}: {e}", start_path.display());
             return 2;
         }
     };
@@ -3145,10 +3188,13 @@ pub fn run_status(id: &str, json: bool) -> i32 {
         .get("pid")
         .and_then(|v| v.as_i64())
         .map(|v| v as libc::pid_t);
-    let started_at = start_record
-        .get("started_at")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let Some(started_at) = start_record.get("started_at").and_then(|v| v.as_u64()) else {
+        eprintln!(
+            "error: missing or invalid \"started_at\" in {}",
+            start_path.display()
+        );
+        return 2;
+    };
 
     let is_alive = if let Some(pid) = pid {
         if pid > 0 {
@@ -3166,9 +3212,29 @@ pub fn run_status(id: &str, json: bool) -> i32 {
     };
 
     let report_path = root.join(".wt").join(format!("{id}.report.json"));
-    let report_exists = report_path.exists();
+    let report_json: Option<serde_json::Value> = match std::fs::read_to_string(&report_path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(v) if v.is_object() => Some(v),
+            Ok(_) => {
+                eprintln!(
+                    "error parsing {}: expected a JSON object",
+                    report_path.display()
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error parsing {}: {e}", report_path.display());
+                return 2;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("error reading {}: {e}", report_path.display());
+            return 2;
+        }
+    };
 
-    let state = if report_exists {
+    let state = if report_json.is_some() {
         "finished"
     } else if is_alive {
         "running"
@@ -3181,26 +3247,18 @@ pub fn run_status(id: &str, json: bool) -> i32 {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let (outcome, cost_usd, final_message, report_duration) = if state == "finished" {
-        if let Ok(content) = std::fs::read_to_string(&report_path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                let outcome = v.get("outcome").and_then(|x| x.as_str()).map(String::from);
-                let cost_usd = v.get("cost_usd").and_then(|x| x.as_f64());
-                let final_message = v.get("final_message").and_then(|x| x.as_str()).map(|s| {
-                    if s.chars().count() > 500 {
-                        s.chars().take(500).collect()
-                    } else {
-                        s.to_string()
-                    }
-                });
-                let duration = v.get("duration_seconds").and_then(|x| x.as_f64());
-                (outcome, cost_usd, final_message, duration)
+    let (outcome, cost_usd, final_message, report_duration) = if let Some(ref v) = report_json {
+        let outcome = v.get("outcome").and_then(|x| x.as_str()).map(String::from);
+        let cost_usd = v.get("cost_usd").and_then(|x| x.as_f64());
+        let final_message = v.get("final_message").and_then(|x| x.as_str()).map(|s| {
+            if s.chars().count() > 500 {
+                s.chars().take(500).collect()
             } else {
-                (None, None, None, None)
+                s.to_string()
             }
-        } else {
-            (None, None, None, None)
-        }
+        });
+        let duration = v.get("duration_seconds").and_then(|x| x.as_f64());
+        (outcome, cost_usd, final_message, duration)
     } else {
         (None, None, None, None)
     };
@@ -3214,7 +3272,14 @@ pub fn run_status(id: &str, json: bool) -> i32 {
     };
 
     let log_path = root.join(".wt").join(format!("{id}.log"));
-    let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let log_content = match std::fs::read_to_string(&log_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!("error reading {}: {e}", log_path.display());
+            return 2;
+        }
+    };
     let progress = parse_log(&log_content);
 
     if json {
