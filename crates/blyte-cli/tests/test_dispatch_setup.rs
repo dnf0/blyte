@@ -349,3 +349,72 @@ fn test_9_unwritable_setup_log_reports_error_on_success_and_failure() {
         "error must not advertise nonexistent log: {err_fail}"
     );
 }
+
+fn relative_path_from(base: &Path, target: &Path) -> std::path::PathBuf {
+    let base_components: Vec<_> = base.components().collect();
+    let target_components: Vec<_> = target.components().collect();
+    let common = base_components
+        .iter()
+        .zip(&target_components)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rel = std::path::PathBuf::new();
+    for _ in common..base_components.len() {
+        rel.push("..");
+    }
+    for comp in &target_components[common..] {
+        rel.push(comp.as_os_str());
+    }
+    rel
+}
+
+#[test]
+fn test_10_failing_setup_converts_relative_log_path_to_absolute_in_footer() {
+    let wt = tempfile::tempdir().unwrap();
+    let main = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let abs_target = log_dir.path().join("nested").join("setup.log");
+    let cwd = std::env::current_dir().unwrap();
+    let rel_log_path = relative_path_from(&cwd, &abs_target);
+    assert!(
+        !rel_log_path.is_absolute(),
+        "test requires a relative log_path, got: {}",
+        rel_log_path.display()
+    );
+    let env = BTreeMap::new();
+
+    let err = run_setup(
+        "echo relative-failure; exit 2",
+        wt.path(),
+        main.path(),
+        &env,
+        &rel_log_path,
+        SETUP_TIMEOUT,
+    )
+    .expect_err("expected setup failure");
+
+    let footer = err.lines().last().expect("error must have a footer line");
+    let reported = footer
+        .strip_prefix("full log: ")
+        .unwrap_or_else(|| panic!("expected 'full log: <path>' footer, got: {footer}"));
+    let reported_path = Path::new(reported);
+    assert!(
+        reported_path.is_absolute(),
+        "full log path must be absolute, got: {reported}"
+    );
+    assert_eq!(
+        reported_path,
+        cwd.join(&rel_log_path),
+        "full log path must be cwd joined with relative log_path"
+    );
+    assert_eq!(
+        std::fs::canonicalize(reported_path).unwrap(),
+        std::fs::canonicalize(&abs_target).unwrap(),
+        "reported log path must resolve to the written log file"
+    );
+    let log_content = std::fs::read_to_string(reported_path).unwrap();
+    assert!(
+        log_content.contains("relative-failure"),
+        "log file must contain setup output: {log_content}"
+    );
+}

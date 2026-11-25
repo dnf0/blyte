@@ -12,13 +12,19 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-fn absolute_log_path(log_path: &Path) -> PathBuf {
+fn absolute_log_path(
+    log_path: &Path,
+    get_cwd: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<PathBuf, String> {
     if log_path.is_absolute() {
-        log_path.to_path_buf()
+        Ok(log_path.to_path_buf())
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(log_path))
-            .unwrap_or_else(|_| log_path.to_path_buf())
+        get_cwd().map(|cwd| cwd.join(log_path)).map_err(|e| {
+            format!(
+                "failed to resolve absolute setup log path for {} (current working directory unavailable): {e}",
+                log_path.display()
+            )
+        })
     }
 }
 
@@ -72,6 +78,28 @@ pub fn run_setup(
     log_path: &Path,
     timeout: Duration,
 ) -> Result<(), String> {
+    run_setup_with_cwd(
+        setup,
+        worktree,
+        main_checkout,
+        env,
+        log_path,
+        timeout,
+        std::env::current_dir,
+    )
+}
+
+fn run_setup_with_cwd(
+    setup: &str,
+    worktree: &Path,
+    main_checkout: &Path,
+    env: &BTreeMap<String, String>,
+    log_path: &Path,
+    timeout: Duration,
+    get_cwd: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<(), String> {
+    let abs_log_path = absolute_log_path(log_path, get_cwd)?;
+
     let mut script = String::new();
     script.push_str(&format!(
         "export BLYTE_MAIN_CHECKOUT={}\n",
@@ -82,7 +110,6 @@ pub fn run_setup(
     }
     script.push_str(setup);
 
-    let abs_log_path = absolute_log_path(log_path);
     let shell = blyte_agent::shell::LocalShell::new();
     let res = shell.exec(&script, worktree, timeout);
 
@@ -125,4 +152,85 @@ pub fn run_setup(
     parts.push(footer);
 
     Err(parts.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_log_path_errors_when_current_dir_fails_for_relative_path() {
+        let rel = Path::new("relative/setup.log");
+        let err = absolute_log_path(rel, || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "current directory removed",
+            ))
+        })
+        .expect_err("relative log path with failing current_dir must error");
+
+        assert!(
+            err.contains("relative/setup.log"),
+            "error must name the relative log path: {err}"
+        );
+        assert!(
+            err.contains("current working directory"),
+            "error must name the missing current working directory: {err}"
+        );
+        assert!(
+            err.contains("current directory removed"),
+            "error must include the cause: {err}"
+        );
+    }
+
+    #[test]
+    fn absolute_log_path_keeps_already_absolute_path_without_calling_cwd() {
+        let abs = Path::new("/tmp/already-abs/setup.log");
+        let resolved = absolute_log_path(abs, || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "should not be called",
+            ))
+        })
+        .expect("absolute path should not need current_dir");
+        assert_eq!(resolved, abs);
+    }
+
+    #[test]
+    fn run_setup_errors_when_current_dir_fails_for_relative_log_path() {
+        let wt = tempfile::tempdir().unwrap();
+        let main = tempfile::tempdir().unwrap();
+        let env = BTreeMap::new();
+        let marker = wt.path().join("ran.txt");
+
+        let err = run_setup_with_cwd(
+            "echo ran > ran.txt",
+            wt.path(),
+            main.path(),
+            &env,
+            Path::new("nested/setup.log"),
+            SETUP_TIMEOUT,
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "cwd gone",
+                ))
+            },
+        )
+        .expect_err("run_setup with unresolvable relative log path must fail");
+
+        assert!(
+            err.contains("nested/setup.log"),
+            "error must name log path: {err}"
+        );
+        assert!(
+            err.contains("current working directory"),
+            "error must name missing current working directory: {err}"
+        );
+        assert!(err.contains("cwd gone"), "error must include cause: {err}");
+        assert!(
+            !marker.exists(),
+            "setup command must not run when log path cannot be resolved"
+        );
+    }
 }
