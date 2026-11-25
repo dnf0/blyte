@@ -1,3 +1,9 @@
+## v0.64.0 (2026-11-25)
+
+### Feat
+
+- every blyte start is its own surface, and each surface owns its runs (#425)
+
 ## v0.63.2 (2026-11-25)
 
 ### Fix
