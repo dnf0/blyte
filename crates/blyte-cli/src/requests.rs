@@ -607,6 +607,77 @@ fn record_runs_match_tips(record: &CombineRecord, current_runs: &[CombinedRun]) 
     sorted_runs(record.runs.clone()) == current_runs
 }
 
+enum CombinedRunBranchState {
+    Gone,
+    AtRecordedTip,
+    Changed,
+}
+
+fn check_recorded_run_branch(
+    root: &Path,
+    wt_dir: &Path,
+    run: &CombinedRun,
+) -> Result<CombinedRunBranchState, String> {
+    let branch = run_branch(wt_dir, &run.id)?;
+    if !git_branch_exists(root, &run.id, &branch)? {
+        return Ok(CombinedRunBranchState::Gone);
+    }
+    let rev = format!("refs/heads/{branch}^{{commit}}");
+    let sha = git_rev_parse(root, &rev).map_err(|e| {
+        format!(
+            "run {}: branch {branch} does not resolve to a commit: {e}",
+            run.id
+        )
+    })?;
+    if sha == run.tip {
+        Ok(CombinedRunBranchState::AtRecordedTip)
+    } else {
+        Ok(CombinedRunBranchState::Changed)
+    }
+}
+
+fn active_request_run_ids(root: &Path, request: &str) -> Result<Vec<String>, String> {
+    let wt_dir = root.join(".wt");
+    let entries = list_start_files(&wt_dir)?;
+    let mut run_ids = Vec::new();
+    for path in entries {
+        let info = parse_start_file(&wt_dir, &path)?;
+        if info.is_research || info.request.as_deref() != Some(request) {
+            continue;
+        }
+        if crate::combine::is_run_left_out(root, &info.id)? {
+            continue;
+        }
+        run_ids.push(info.id);
+    }
+    Ok(run_ids)
+}
+
+fn request_is_done(root: &Path, request: &str, rec: &CombineRecord) -> Result<bool, String> {
+    if rec.state != CombineState::Combined {
+        return Ok(false);
+    }
+    let active_runs = active_request_run_ids(root, request)?;
+    if active_runs.is_empty() {
+        return Ok(false);
+    }
+    let recorded_by_id: HashMap<&str, &CombinedRun> =
+        rec.runs.iter().map(|run| (run.id.as_str(), run)).collect();
+    let wt_dir = root.join(".wt");
+    let mut any_branch_gone = false;
+    for run_id in &active_runs {
+        let Some(&recorded_run) = recorded_by_id.get(run_id.as_str()) else {
+            return Ok(false);
+        };
+        match check_recorded_run_branch(root, &wt_dir, recorded_run)? {
+            CombinedRunBranchState::Gone => any_branch_gone = true,
+            CombinedRunBranchState::AtRecordedTip => {}
+            CombinedRunBranchState::Changed => return Ok(false),
+        }
+    }
+    Ok(any_branch_gone)
+}
+
 fn check_record_combined_for_request(
     root: &Path,
     request: &str,
@@ -624,20 +695,11 @@ fn check_record_combined_for_request(
         if !run_ids.contains(&run.id.as_str()) {
             continue;
         }
-        let branch = run_branch(&wt_dir, &run.id)?;
-        if !git_branch_exists(root, &run.id, &branch)? {
-            combined.insert(run.id.clone());
-            continue;
-        }
-        let rev = format!("refs/heads/{branch}^{{commit}}");
-        let sha = git_rev_parse(root, &rev).map_err(|e| {
-            format!(
-                "run {}: branch {branch} does not resolve to a commit: {e}",
-                run.id
-            )
-        })?;
-        if sha == run.tip {
-            combined.insert(run.id.clone());
+        match check_recorded_run_branch(root, &wt_dir, run)? {
+            CombinedRunBranchState::Gone | CombinedRunBranchState::AtRecordedTip => {
+                combined.insert(run.id.clone());
+            }
+            CombinedRunBranchState::Changed => {}
         }
     }
     Ok(combined)
@@ -854,6 +916,12 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
     match request_readiness(&surface.root, request)? {
         Readiness::Waiting { .. } => return Ok(false),
         Readiness::Ready => {}
+    }
+
+    if let Some(rec) = load_combine_record(&surface.root, request)? {
+        if request_is_done(&surface.root, request, &rec)? {
+            return Ok(false);
+        }
     }
 
     let current_runs = resolve_current_run_tips(&surface.root, request)?;
@@ -1212,6 +1280,21 @@ fn build_request_status(
             status
         }
         Ok(Readiness::Ready) => {
+            if let Some(ref rec) = record {
+                match request_is_done(&surface.root, &request, rec) {
+                    Ok(true) => {
+                        status.state = "done".to_string();
+                        populate_record_metadata(&surface.root, rec, &mut status);
+                        return status;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        status.state = "error".to_string();
+                        status.error = Some(e);
+                        return status;
+                    }
+                }
+            }
             let current_runs = match resolve_current_run_tips(&surface.root, &request) {
                 Ok(t) => t,
                 Err(e) => {
@@ -1312,6 +1395,11 @@ pub fn push_request(surface: &Surface, request: &str) -> Result<(), RequestActio
             record.state
         )));
     }
+    if request_is_done(&surface.root, request, &record).map_err(RequestActionError::Internal)? {
+        return Err(RequestActionError::Conflict(format!(
+            "request {request} is done: its branches were already merged and removed"
+        )));
+    }
 
     let mut published =
         load_published_record(&surface.root, request).map_err(RequestActionError::Internal)?;
@@ -1373,6 +1461,11 @@ pub fn open_request_pull_request(
         return Err(RequestActionError::Conflict(format!(
             "request {request} is not combined (state: {:?})",
             record.state
+        )));
+    }
+    if request_is_done(&surface.root, request, &record).map_err(RequestActionError::Internal)? {
+        return Err(RequestActionError::Conflict(format!(
+            "request {request} is done: its branches were already merged and removed"
         )));
     }
 

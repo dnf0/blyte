@@ -2961,3 +2961,91 @@ fn a_second_finished_run_not_in_the_record_is_not_marked() {
     assert_eq!(sr1["combined"], true);
     assert_eq!(sr2["combined"], false);
 }
+
+#[test]
+fn polling_a_done_request_records_no_session_error_and_refuses_push_and_pr() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("done-request-serve-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "DR1", "req-done", "dr1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-done").unwrap());
+    surface.requests.wait_for_idle("req-done");
+
+    assert!(Command::new("git")
+        .args(["branch", "-D", "wip/DR1"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let poll1 = route(&surface, &get(&surface, "/api/requests", vec![]), now + 1);
+    assert_eq!(poll1.status, 200);
+    let body1 = parse_json(&poll1);
+    assert_eq!(body1[0]["request"], "req-done");
+    assert_eq!(body1[0]["state"], "done");
+    assert!(body1[0]["error"].is_null());
+
+    let poll2 = route(&surface, &get(&surface, "/api/requests", vec![]), now + 2);
+    assert_eq!(poll2.status, 200);
+    let body2 = parse_json(&poll2);
+    assert_eq!(body2[0]["request"], "req-done");
+    assert_eq!(body2[0]["state"], "done");
+    assert!(body2[0]["error"].is_null());
+
+    let runs_poll = route(&surface, &get(&surface, "/api/runs", vec![]), now + 3);
+    assert_eq!(runs_poll.status, 200);
+
+    let events_resp = route(
+        &surface,
+        &get(&surface, "/api/session/events", vec![("after", "0")]),
+        now + 4,
+    );
+    assert_eq!(events_resp.status, 200);
+    let events = parse_json(&events_resp);
+    let error_entries: Vec<&serde_json::Value> = events["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "error")
+        .collect();
+    assert!(
+        error_entries.is_empty(),
+        "expected no session errors, got: {error_entries:?}"
+    );
+
+    let push_resp = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/requests/req-done/push",
+            &serde_json::json!({}),
+        ),
+        now + 5,
+    );
+    assert_eq!(push_resp.status, 409);
+    let push_body = String::from_utf8_lossy(&push_resp.body);
+    assert!(
+        push_body.contains("already merged and removed"),
+        "push body: {push_body}"
+    );
+
+    let pr_resp = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/requests/req-done/pull-request",
+            &serde_json::json!({"title": "PR title", "body": "PR body"}),
+        ),
+        now + 6,
+    );
+    assert_eq!(pr_resp.status, 409);
+    let pr_body = String::from_utf8_lossy(&pr_resp.body);
+    assert!(
+        pr_body.contains("already merged and removed"),
+        "pr body: {pr_body}"
+    );
+}

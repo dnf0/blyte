@@ -2291,6 +2291,10 @@
       border-left-color: var(--pass);
     }
 
+    .request-card.request-state-done {
+      border-left-color: var(--merged);
+    }
+
     .request-card.request-state-conflict,
     .request-card.request-state-check_failed,
     .request-card.request-state-error {
@@ -2313,6 +2317,11 @@
     .outcome-pill.request-combining {
       background: var(--brand-rust-soft);
       border-color: var(--brand-rust);
+    }
+
+    .outcome-pill.request-done {
+      background: var(--merged-soft);
+      border-color: var(--merged);
     }
 
     .request-runs {
@@ -5210,6 +5219,33 @@
             errors.push("missing or invalid field: suggested_body");
           }
           break;
+        case "done":
+          if (hasOwn(req, "branch") && req.branch !== null && (typeof req.branch !== "string" || req.branch.length === 0)) {
+            errors.push("missing or invalid field: branch");
+          }
+          if (hasOwn(req, "commits")) {
+            if (!Array.isArray(req.commits)) {
+              errors.push("missing or invalid field: commits");
+            } else {
+              for (const c of req.commits) {
+                if (!isPlainObject(c) || typeof c.sha !== "string" || c.sha.length === 0) {
+                  errors.push("missing or invalid field: commits.sha");
+                  break;
+                }
+                if (typeof c.subject !== "string") {
+                  errors.push("missing or invalid field: commits.subject");
+                  break;
+                }
+              }
+            }
+          }
+          if (hasOwn(req, "pushed") && typeof req.pushed !== "boolean") {
+            errors.push("missing or invalid field: pushed");
+          }
+          if (hasOwn(req, "pull_request_url") && req.pull_request_url !== null && typeof req.pull_request_url !== "string") {
+            errors.push("missing or invalid field: pull_request_url");
+          }
+          break;
         case "conflict":
           if (!hasOwn(req, "conflicting_run") || typeof req.conflicting_run !== "string" || req.conflicting_run.length === 0) {
             errors.push("missing or invalid field: conflicting_run");
@@ -5268,6 +5304,7 @@
 
       let pillClass = "outcome-pill";
       let cardStateClass = "request-state-error";
+      let stateLabel = stateName;
       if (stateName === "waiting") {
         pillClass += " request-waiting";
         cardStateClass = "request-state-waiting";
@@ -5277,6 +5314,10 @@
       } else if (stateName === "combined") {
         pillClass += " verified";
         cardStateClass = "request-state-combined";
+      } else if (stateName === "done") {
+        pillClass += " request-done";
+        cardStateClass = "request-state-done";
+        stateLabel = "Done";
       } else if (stateName === "conflict" || stateName === "check_failed" || stateName === "error") {
         pillClass += " failed";
         cardStateClass = "request-state-" + stateName;
@@ -5284,7 +5325,7 @@
 
       const headerHtml = '<div class="request-top">' +
         (reqId ? '<span class="run-id request-id">' + escapeHtml(reqId) + '</span>' : '<span class="run-id request-id">invalid request</span>') +
-        '<span class="' + pillClass + '">' + escapeHtml(stateName) + '</span>' +
+        '<span class="' + pillClass + '">' + escapeHtml(stateLabel) + '</span>' +
       '</div>';
 
       const runsHtml = validRuns !== null
@@ -5356,6 +5397,24 @@
             prControlHtml +
           '</div>' +
           prFormHtml;
+      } else if (stateName === "done") {
+        const metaRowHtml = typeof req.branch === "string" && req.branch.length > 0
+          ? '<div class="request-meta-row"><span class="request-branch mono">' + escapeHtml(req.branch) + '</span></div>'
+          : "";
+        const commitsHtml = Array.isArray(req.commits) && req.commits.length > 0
+          ? '<div class="request-commits">' +
+              req.commits.map(c =>
+                '<div class="request-commit">' +
+                  '<span class="request-sha mono">' + escapeHtml(c.sha.slice(0, 7)) + '</span>' +
+                  '<span class="request-subject">' + escapeHtml(c.subject) + '</span>' +
+                '</div>'
+              ).join("") +
+            '</div>'
+          : "";
+        const prLinkHtml = typeof req.pull_request_url === "string" && req.pull_request_url.length > 0
+          ? '<div class="row-actions request-actions">' + renderPullRequestLink(req.pull_request_url) + '</div>'
+          : "";
+        bodyHtml = metaRowHtml + commitsHtml + prLinkHtml;
       } else if (stateName === "conflict") {
         const filesHtml = '<ul class="details-list">' +
             req.conflicting_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") +
@@ -5418,7 +5477,12 @@
         }
         return html;
       }
-      const cardsHtml = requests.map(req => {
+      const ordered = requests.slice().sort((a, b) => {
+        const aDone = isPlainObject(a) && a.state === "done" ? 1 : 0;
+        const bDone = isPlainObject(b) && b.state === "done" ? 1 : 0;
+        return aDone - bDone;
+      });
+      const cardsHtml = ordered.map(req => {
         const reqId = isPlainObject(req) && typeof req.request === "string" ? req.request : "";
         return renderRequestCard(req, {
           pushInFlight: hasStateEntry(state.pushInFlight, reqId),

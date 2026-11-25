@@ -2300,3 +2300,146 @@ fn a_check_failed_record_without_output_is_reported_as_an_error_naming_the_field
     assert!(err.contains("output_tail"), "err: {err}");
     assert!(err.contains(".wt/combined/req-bad-cf.json"), "err: {err}");
 }
+
+#[test]
+fn a_combined_request_with_all_branches_deleted_is_done() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "DN1", &base, "dn1.txt", "one\n", "feat: dn1");
+    write_start_file(root, "DN1", Some("req-done-all"), &base, now, false);
+    write_summary(root, "DN1", "verified", Some("wip/DN1"));
+    write_checks(root, "DN1", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/1"));
+    assert!(maybe_combine(&surface, "req-done-all").unwrap());
+    surface.requests.wait_for_idle("req-done-all");
+
+    git(root, &["branch", "-D", "wip/DN1"]);
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-done-all");
+    assert_eq!(arr[0]["state"], "done");
+    assert!(arr[0]["error"].is_null());
+    assert_eq!(arr[0]["branch"], "blyte/req-done-all");
+    assert_eq!(arr[0]["base"], base);
+    assert_eq!(arr[0]["check"], "ran");
+    assert_eq!(arr[0]["commits"].as_array().unwrap().len(), 1);
+    assert!(!maybe_combine(&surface, "req-done-all").unwrap());
+}
+
+#[test]
+fn a_combined_request_with_one_of_two_branches_deleted_is_done() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "DP1", &base, "dp1.txt", "one\n", "feat: dp1");
+    create_run_branch(root, "DP2", &base, "dp2.txt", "two\n", "feat: dp2");
+    write_start_file(root, "DP1", Some("req-done-part"), &base, now, false);
+    write_start_file(root, "DP2", Some("req-done-part"), &base, now + 1, false);
+    write_summary(root, "DP1", "verified", Some("wip/DP1"));
+    write_summary(root, "DP2", "verified", Some("wip/DP2"));
+    write_checks(root, "DP1", &[]);
+    write_checks(root, "DP2", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/2"));
+    assert!(maybe_combine(&surface, "req-done-part").unwrap());
+    surface.requests.wait_for_idle("req-done-part");
+
+    git(root, &["branch", "-D", "wip/DP1"]);
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 2));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-done-part");
+    assert_eq!(arr[0]["state"], "done");
+    assert!(arr[0]["error"].is_null());
+    assert_eq!(arr[0]["branch"], "blyte/req-done-part");
+    assert!(!maybe_combine(&surface, "req-done-part").unwrap());
+}
+
+#[test]
+fn a_combined_request_with_an_unlisted_runs_branch_deleted_is_an_error() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "UL1", &base, "ul1.txt", "one\n", "feat: ul1");
+    write_start_file(root, "UL1", Some("req-unlisted"), &base, now, false);
+    write_summary(root, "UL1", "verified", Some("wip/UL1"));
+    write_checks(root, "UL1", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/3"));
+    assert!(maybe_combine(&surface, "req-unlisted").unwrap());
+    surface.requests.wait_for_idle("req-unlisted");
+
+    create_run_branch(root, "UL2", &base, "ul2.txt", "two\n", "feat: ul2");
+    write_start_file(root, "UL2", Some("req-unlisted"), &base, now + 1, false);
+    write_summary(root, "UL2", "verified", Some("wip/UL2"));
+    write_checks(root, "UL2", &[]);
+    git(root, &["branch", "-D", "wip/UL2"]);
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 2));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-unlisted");
+    assert_eq!(arr[0]["state"], "error");
+    let err = arr[0]["error"].as_str().unwrap();
+    assert!(err.contains("UL2"), "err: {err}");
+    assert!(err.contains("wip/UL2"), "err: {err}");
+}
+
+#[test]
+fn a_request_without_a_combine_record_and_a_deleted_branch_is_an_error() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "NR1", &base, "nr1.txt", "one\n", "feat: nr1");
+    write_start_file(root, "NR1", Some("req-no-rec"), &base, now, false);
+    write_summary(root, "NR1", "verified", Some("wip/NR1"));
+    write_checks(root, "NR1", &[]);
+    git(root, &["branch", "-D", "wip/NR1"]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/4"));
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-no-rec");
+    assert_eq!(arr[0]["state"], "error");
+    let err = arr[0]["error"].as_str().unwrap();
+    assert!(err.contains("NR1"), "err: {err}");
+    assert!(err.contains("wip/NR1"), "err: {err}");
+}
+
+#[test]
+fn a_combined_request_with_no_branch_deleted_stays_combined() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "KC1", &base, "kc1.txt", "one\n", "feat: kc1");
+    write_start_file(root, "KC1", Some("req-keep-comb"), &base, now, false);
+    write_summary(root, "KC1", "verified", Some("wip/KC1"));
+    write_checks(root, "KC1", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/5"));
+    assert!(maybe_combine(&surface, "req-keep-comb").unwrap());
+    surface.requests.wait_for_idle("req-keep-comb");
+
+    let reqs = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 1));
+    let arr = reqs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request"], "req-keep-comb");
+    assert_eq!(arr[0]["state"], "combined");
+    assert!(arr[0]["error"].is_null());
+}

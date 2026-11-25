@@ -1755,3 +1755,53 @@ fn a_user_message_keeps_its_line_breaks() {
         ".msg-line.user rule must contain white-space: pre-wrap:\n{rule}"
     );
 }
+
+#[test]
+fn a_done_request_renders_done_without_actions_after_waiting_and_bogus_is_rejected() {
+    let harness = r#"
+const assert = require("assert");
+
+const doneReq = {
+  request: "req-done",
+  runs: ["D1"],
+  state: "done",
+  branch: "blyte/req-done",
+  commits: [{ sha: "abcdef1234567", subject: "feat: merged work" }],
+  pushed: true,
+  pull_request_url: null,
+};
+
+const waitingReq = {
+  request: "req-waiting",
+  runs: ["W1"],
+  state: "waiting",
+  waiting_reasons: ["W1: needs review"],
+};
+
+const doneHtml = renderRequestCard(doneReq);
+assert.ok(doneHtml.includes(">Done</span>"), doneHtml);
+assert.ok(doneHtml.includes("request-state-done"), doneHtml);
+assert.ok(!doneHtml.includes("request-state-error"), doneHtml);
+assert.ok(!doneHtml.includes("request-validation-error"), doneHtml);
+assert.ok(!doneHtml.includes("failed"), doneHtml);
+assert.ok(!doneHtml.includes("<button"), doneHtml);
+assert.ok(!doneHtml.includes("data-request-push"), doneHtml);
+assert.ok(!doneHtml.includes("data-request-open-pr"), doneHtml);
+
+const listHtml = renderRequestsList([doneReq, waitingReq], {});
+const waitingPos = listHtml.indexOf('data-request-id="req-waiting"');
+const donePos = listHtml.indexOf('data-request-id="req-done"');
+assert.ok(waitingPos !== -1, listHtml);
+assert.ok(donePos !== -1, listHtml);
+assert.ok(waitingPos < donePos, "expected waiting before done: " + listHtml);
+
+const bogusHtml = renderRequestCard({
+  request: "req-bogus",
+  runs: ["B1"],
+  state: "bogus",
+});
+assert.ok(bogusHtml.includes("request-validation-error"), bogusHtml);
+assert.ok(bogusHtml.includes("unknown state: bogus"), bogusHtml);
+"#;
+    run_surface_script(harness);
+}
