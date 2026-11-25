@@ -3,13 +3,15 @@
 # for confirmation at the terminal, squash-merge, then remove the local branch and worktree.
 #
 # Usage: scripts/land.sh <pr number>            run the checks, ask, merge
+#        scripts/land.sh --yes <pr number>      run the checks, merge without asking
 #        scripts/land.sh --check <pr number>    run the checks only
 #
 # Run it from a checkout of the pull request's branch, with nothing uncommitted and the branch
 # pushed: the checks run on exactly the commit that will be merged.
 #
-# The merge needs a person: the script reads the confirmation from the terminal and refuses to
-# merge without one, so it cannot merge from a pipe, a background job or a model's shell.
+# Without --yes the script asks at the terminal before merging and refuses to merge when there
+# is none. --yes is for a shell with no terminal, such as an assistant asked to land the pull
+# request: naming the number with --yes is the confirmation.
 set -euo pipefail
 
 TITLE_TYPES='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
@@ -20,11 +22,18 @@ die() {
 }
 
 check_only=false
-if [ "${1:-}" = "--check" ]; then
+assume_yes=false
+case "${1:-}" in
+--check)
     check_only=true
     shift
-fi
-[ $# -eq 1 ] || die "usage: scripts/land.sh [--check] <pr number>"
+    ;;
+--yes)
+    assume_yes=true
+    shift
+    ;;
+esac
+[ $# -eq 1 ] || die "usage: scripts/land.sh [--check | --yes] <pr number>"
 pr="$1"
 case "$pr" in
 '' | *[!0-9]*) die "the pull request must be a number, got: $pr" ;;
@@ -32,8 +41,8 @@ esac
 for tool in gh jq cargo cargo-deny python3 mkdocs; do
     command -v "$tool" >/dev/null || die "$tool is not installed; a check needs it"
 done
-if ! $check_only; then
-    [ -t 0 ] || die "no terminal: run this yourself, it asks before merging (or pass --check)"
+if ! $check_only && ! $assume_yes; then
+    [ -t 0 ] || die "no terminal to ask at: pass --yes to merge without asking, or --check for the checks only"
 fi
 
 info="$(gh pr view "$pr" --json state,isDraft,title,headRefName,headRefOid,baseRefName,mergeable)" ||
@@ -86,9 +95,11 @@ $(git status --porcelain)"
 echo "land: every check passed on #$pr at ${head_sha:0:8} (macOS only; Linux tests run on GitHub after the merge)"
 $check_only && exit 0
 
-printf 'land: type %s to squash-merge it into %s: ' "$pr" "$base"
-read -r answer
-[ "$answer" = "$pr" ] || die "not merged"
+if ! $assume_yes; then
+    printf 'land: type %s to squash-merge it into %s: ' "$pr" "$base"
+    read -r answer
+    [ "$answer" = "$pr" ] || die "not merged"
+fi
 
 # --match-head-commit: GitHub refuses if the branch moved since the checks ran.
 gh pr merge "$pr" --squash --match-head-commit "$head_sha"
