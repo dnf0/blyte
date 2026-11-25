@@ -1563,7 +1563,10 @@ fn format_dispatch_failure(output: &std::process::Output) -> String {
     } else if !stderr_str.trim().is_empty() {
         stderr_str.trim_end().to_string()
     } else {
-        format!("exit {}", output.status.code().unwrap_or(1))
+        match output.status.code() {
+            Some(code) => format!("exit {code}"),
+            None => format!("terminated without exit code ({})", output.status),
+        }
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() {

@@ -871,3 +871,31 @@ fn dispatch_tool_reports_the_command_failure_when_it_exits_before_reading() {
         r.content
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn dispatch_tool_reports_signal_termination_without_fabricating_exit_code() {
+    let _lock = DISPATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ResetDispatch;
+    blyte_agent::tools::set_dispatch_cmd(Some("cat >/dev/null; kill -9 $$".into()));
+
+    let d = ws();
+    let r = execute(
+        d.path(),
+        &LocalShell,
+        &LocalFs,
+        "dispatch",
+        &json!({"task": "killed", "gate": "false"}),
+    );
+    assert!(r.is_error, "expected error, got {r:?}");
+    assert!(
+        r.content.contains("without exit code") && r.content.contains("signal"),
+        "expected signal termination without exit code, got: {:?}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("exit 1"),
+        "must not fabricate exit 1 for a signal-killed process, got: {:?}",
+        r.content
+    );
+}
