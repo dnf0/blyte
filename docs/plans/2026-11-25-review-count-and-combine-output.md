@@ -11,7 +11,7 @@ Two defects in the surface, found in use and confirmed by research run RS7 (2026
 | What does a failed combine show? | The same cut of the failing step's output that a run's own check failure shows (`blyte_agent::run::cut_gate_output`), for every failing step. |
 | Missing fields in a failure record | An error naming the field and the record file. No placeholder text. |
 
-Not in this plan (noted for later): `requests.rs` uses the current runs when a combine exits 0 without a record; a `waiting` request status carries failure fields from an earlier combine; `setup.rs` keeps the last 20 lines of a failed setup (the full log is on disk); `run_gate_step` bounds a step's output to 400 lines before any cut.
+Not in this plan (noted for later): `requests.rs` uses the current runs when a combine exits 0 without a record; a `waiting` request status carries failure fields from an earlier combine; `setup.rs` keeps the last 20 lines of a failed setup (the full log is on disk).
 
 ### Task RV: combined runs leave the Review count and list
 
@@ -66,7 +66,7 @@ Run: `python3 scripts/test-changed.py`.
 
 **Goal.** When the check fails on a combined request, the surface and the conversation model get the failing output. Today `combine.rs` keeps the last 50 lines of the first failing step's output; a step's output is stdout followed by stderr (`Output::merged`), so for `cargo test` those 50 lines are stderr progress lines and the failing test, printed on stdout, is cut off. Later failing steps are dropped, and the message in the thread loses its line breaks.
 
-**Files.** `crates/blyte-cli/src/combine.rs`, `crates/blyte-cli/src/requests.rs`, `crates/blyte-cli/assets/surface/index.html`, `crates/blyte-cli/tests/test_requests.rs`, `crates/blyte-cli/tests/test_surface_page.rs`.
+**Files.** `crates/blyte-cli/src/combine.rs`, `crates/blyte-cli/src/requests.rs`, `crates/blyte-cli/assets/surface/index.html`, `crates/blyte-cli/tests/test_requests.rs`, `crates/blyte-cli/tests/test_surface_page.rs`, `crates/blyte-agent/src/run.rs`, `crates/blyte-agent/tests/test_gate_failures.rs`.
 
 **What to build.**
 
@@ -81,6 +81,12 @@ Run: `python3 scripts/test-changed.py`.
    - `Combined`: `Err` ("not a failure record"); remove the empty string.
    - Remove `"unknown"`, `"(none listed)"` and the variant without output.
    - The caller in `maybe_combine`: on `Err(e)`, report it the way the neighbouring error arm does (`AttemptResult::Error`, `Some(e)`, `format_error_failure`).
+4. `crates/blyte-agent/src/run.rs` `run_gate_step`: failing lines must survive the 400-line bound. Today the step's output is `tools::bound_output(o.merged().trim_end())`, which keeps the first 266 and last 134 lines, and only afterwards does `cut_gate_output` look for failing lines (`summary_lines`), so a failure in the dropped middle is lost. Change, for a step that exits non-zero only:
+   - Collect `summary_lines` from the full `o.merged()` before bounding.
+   - Keep those that are not a line of the bounded body. If there are any, the step's output is `exit <code>` (and the `gate ran out of time` line where it applies today), then a block `Failing, in lines blyte left out:` with one line each, then a blank line, then the bounded body as today.
+   - If none were dropped, the output is exactly what it is today. A step that passes is unchanged.
+   - `summary_lines` keeps its limit of 40 lines. Do not raise `OUTPUT_LINE_BUDGET` or change `bound_output`, `distil` or `cut_gate_output`.
+   This changes what a run's own check failure shows as well as a combine's; that is intended.
 3. `index.html`:
    - `.msg-line.user`: add `white-space: pre-wrap;` so a queued failure message keeps its lines in the thread.
    - `validateRequestCard`: on `conflict`, an empty `conflicting_files` is a validation error naming the field; on `check_failed`, an empty `output_tail` likewise. Remove the "No conflicting files listed." text.
@@ -93,6 +99,11 @@ No fallbacks anywhere in this task: where a field is missing, the error names it
   - `a_failure_on_stdout_survives_many_stderr_lines`: gate `echo "test thing ... FAILED"; i=0; while [ $i -lt 120 ]; do echo "Running tests/t$i" >&2; i=$((i+1)); done; exit 1`. The record's `output_tail` contains `test thing ... FAILED`. (Fails on current code: verify that first.)
   - `every_failing_step_is_named`: a two-line gate where both steps fail with different output: `failing_step` contains both steps, `output_tail` contains both outputs.
   - A short failure is kept whole (the existing test still passes unmodified).
+- `crates/blyte-agent/tests/test_gate_failures.rs` (through `run_gate_steps` with a real shell, as its other tests do):
+  - `a_failure_in_the_dropped_middle_is_kept`: a step that prints 300 lines, then `test middle ... FAILED`, then 300 more lines, and exits 1. The failure's output contains `Failing, in lines blyte left out:` and `test middle ... FAILED`. (Fails on current code: verify that first.)
+  - `a_failure_within_the_kept_lines_adds_no_block`: 10 lines, `test near ... FAILED`, exit 1: the output has no `Failing, in lines blyte left out:` and equals today's output.
+  - `a_long_passing_step_adds_no_block`: 700 lines including `test x ... FAILED` as plain text, exit 0: no block.
+  - `the_cut_still_names_a_failure_from_the_dropped_middle`: `cut_gate_output` of the first test's output contains `test middle ... FAILED`.
 - `test_requests.rs`:
   - `a_conflict_record_without_files_is_reported_as_an_error_naming_the_field`: hand-written record, state `conflict`, `conflicting_files: []`: the queued message and the attempt record carry an error containing `conflicting_files` and the record path, and not `(none listed)`.
   - `a_check_failed_record_without_output_is_reported_as_an_error_naming_the_field`: likewise for `output_tail`.
@@ -104,10 +115,10 @@ No fallbacks anywhere in this task: where a field is missing, the error names it
 
 Run: `python3 scripts/test-changed.py`.
 
-**Constraints.** The `CombineRecord` fields and their names do not change. `cut_gate_output` is used as it is, not copied.
+**Constraints.** Existing tests in `crates/blyte-agent/tests` pass unmodified. The `CombineRecord` fields and their names do not change. `cut_gate_output` is used as it is, not copied.
 
 **Depends on:** RV (both change `requests.rs`, `index.html` and `test_surface_page.rs`). Dispatch with `--base wip/RV`.
 
 **Siblings.** Task RV's `run_is_combined`, the `combined` field and `isUndecided` are already in this worktree; leave them as they are.
 
-**Commit message:** `fix(surface): a failed combine shows the failing output and names every failing step`
+**Commit messages** (two commits): `fix(agent): failing lines survive the 400-line bound on a check step's output` for item 4 and its tests, then `fix(surface): a failed combine shows the failing output and names every failing step` for the rest.
