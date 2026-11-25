@@ -1955,13 +1955,13 @@ fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
 
 fn ensure_isolated_state_home() {
     static STATE_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let dir = STATE_HOME.get_or_init(|| {
+    STATE_HOME.get_or_init(|| {
         let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("test-requests-state-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("XDG_STATE_HOME", &base);
         base
     });
-    std::env::set_var("XDG_STATE_HOME", dir);
 }
 
 fn start_stoppable_surface(

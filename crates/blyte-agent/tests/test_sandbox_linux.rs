@@ -2,17 +2,22 @@
 //! (#91) left Linux runs able to write anywhere the user can (2026-09-27).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use blyte_agent::sandbox::{conversation_profile, default_profile, read_allowed, Profile};
 
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn a_string_profile_is_a_seatbelt_profile() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let p: Profile = String::from("(version 1)").into();
     assert_eq!(p, Profile::Seatbelt("(version 1)".into()));
 }
 
 #[test]
 fn the_default_profile_matches_the_platform() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let d = tempfile::tempdir().unwrap();
     let p = default_profile(d.path(), &[]);
     if cfg!(target_os = "macos") {
@@ -38,6 +43,7 @@ fn the_default_profile_matches_the_platform() {
 
 #[test]
 fn conversation_profile_allows_only_wt_tasks_for_writes() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let d = tempfile::tempdir_in(tmp_base).unwrap();
@@ -104,6 +110,7 @@ fn conversation_profile_allows_only_wt_tasks_for_writes() {
 
 #[test]
 fn read_allowed_excludes_blyte_state_and_config_dirs() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = Path::new("/home/someone");
     let allowed = read_allowed(Some(home), &[]);
     let state_dir = home.join(".local/state/blyte");
@@ -121,7 +128,6 @@ fn read_allowed_excludes_blyte_state_and_config_dirs() {
 mod linux {
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::Mutex;
     use std::time::Duration;
 
     use blyte_agent::sandbox::{
@@ -130,7 +136,7 @@ mod linux {
     };
     use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::ENV_LOCK;
 
     struct EnvGuard {
         home: Option<OsString>,

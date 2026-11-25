@@ -52,6 +52,7 @@ impl Drop for EnvGuard {
 
 #[test]
 fn the_deny_list_covers_the_usual_credential_stores() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = Path::new("/Users/someone");
     let denied = read_denied(home);
     for sub in [
@@ -128,6 +129,7 @@ fn read_tool_refuses_surface_token_path() {
 
 #[test]
 fn the_read_rules_follow_the_write_profile_and_grants_come_last() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ws = Path::new("/nonexistent/ws");
     let write = [ws.to_path_buf()];
     let p = profile_with(
@@ -160,6 +162,7 @@ fn the_read_rules_follow_the_write_profile_and_grants_come_last() {
 
 #[test]
 fn dot_env_outside_temp_folders_and_workspace_stays_denied_in_profile() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ws = Path::new("/nonexistent/ws");
     let p = profile_with(ws, &[ws.to_path_buf()], &[], &[]);
     assert!(
@@ -218,6 +221,7 @@ mod macos {
 
     #[test]
     fn a_denied_file_and_a_dot_env_cannot_be_read_but_other_files_can() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ws = tempfile::tempdir().unwrap();
         let secret = tempfile::tempdir().unwrap();
         std::fs::write(secret.path().join("key"), "s3cret").unwrap();
@@ -247,6 +251,7 @@ mod macos {
 
     #[test]
     fn a_dot_env_in_a_separate_temp_folder_can_be_read_while_workspace_dot_env_cannot() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ws = tempfile::tempdir().unwrap();
         let other_tmp = tempfile::tempdir().unwrap();
         std::fs::write(ws.path().join(".env"), "WS_SECRET=1").unwrap();
@@ -268,6 +273,7 @@ mod macos {
 
     #[test]
     fn an_allow_read_grant_overrides_the_deny_list() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ws = tempfile::tempdir().unwrap();
         let secret = tempfile::tempdir().unwrap();
         std::fs::write(secret.path().join("key"), "s3cret").unwrap();
