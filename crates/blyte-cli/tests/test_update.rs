@@ -193,3 +193,25 @@ fn an_edited_skill_is_not_touched() {
     assert!(text.contains("has been edited"), "{text}");
     assert!(!e.log.exists());
 }
+
+#[test]
+fn rollback_fails_when_restored_binary_exits_nonzero_on_version() {
+    let e = setup("v9.9.9", false);
+    let prev = e.bin.with_file_name("blyte.prev");
+    {
+        let _guard = EXEC_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        exe(&prev, "#!/bin/sh\necho 'broken binary' >&2\nexit 1\n");
+    }
+    let (code, text) = run(&e, &["--rollback"]);
+    assert_ne!(code, 0, "expected non-zero exit, got 0: {text}");
+    assert!(
+        text.contains("could not be verified"),
+        "expected verification failure message, got: {text}"
+    );
+    let canonical_bin = e.bin.canonicalize().unwrap_or_else(|_| e.bin.clone());
+    assert!(
+        text.contains(&canonical_bin.display().to_string()),
+        "expected binary path {} in error: {text}",
+        canonical_bin.display()
+    );
+}

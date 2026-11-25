@@ -569,6 +569,21 @@
       gap: 6px;
     }
 
+    .row-problems {
+      padding: 0 16px 10px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .row-problem-line {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--status-red-label);
+      word-break: break-word;
+    }
+
     .tag-pill {
       min-height: 24px;
       padding: 0 8px;
@@ -1216,6 +1231,7 @@
         const cost = formatCost(job.cost_usd);
         const turns = job.turns != null ? job.turns : "—";
         const tags = Array.isArray(job.tags) ? job.tags : [];
+        const problems = Array.isArray(job.problems) ? job.problems : [];
 
         const taskSnippet = (job.task || "").slice(0, 600) + ((job.task || "").length > 600 ? "…" : "");
         const plan = job.plan || null;
@@ -1246,6 +1262,11 @@
               <div class="col-cost tabular-nums font-mono">${escapeHtml(cost)}</div>
               <div class="col-turns tabular-nums font-mono">${escapeHtml(String(turns))}</div>
             </button>
+            ${problems.length > 0 ? `
+              <div class="row-problems" role="alert">
+                ${problems.map(p => `<div class="row-problem-line">${escapeHtml(p)}</div>`).join('')}
+              </div>
+            ` : ''}
             ${tags.length > 0 ? `
               <div class="row-tags-wrapper">
                 ${tags.map(tag => `

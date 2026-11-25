@@ -139,6 +139,7 @@ pub struct Job {
     pub changed_files: Vec<String>,
     pub tags: Vec<String>,
     pub verdict: Option<String>,
+    pub problems: Vec<String>,
     pub root: Option<PathBuf>,
     pub plan_file: Option<String>,
     pub plan_task: Option<String>,
@@ -406,14 +407,52 @@ struct LogInfo {
     mtime: Option<u64>,
 }
 
-fn parse_log(path: &Path) -> LogInfo {
+enum OptionalFile<T> {
+    Missing,
+    Ok(T),
+    Err,
+}
+
+fn read_optional_string(path: &Path, problems: &mut Vec<String>) -> OptionalFile<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => OptionalFile::Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OptionalFile::Missing,
+        Err(e) => {
+            problems.push(format!("{}: {e}", path.display()));
+            OptionalFile::Err
+        }
+    }
+}
+
+fn read_optional_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    problems: &mut Vec<String>,
+) -> OptionalFile<T> {
+    let raw = match read_optional_string(path, problems) {
+        OptionalFile::Missing => return OptionalFile::Missing,
+        OptionalFile::Err => return OptionalFile::Err,
+        OptionalFile::Ok(s) => s,
+    };
+    match serde_json::from_str(&raw) {
+        Ok(v) => OptionalFile::Ok(v),
+        Err(e) => {
+            problems.push(format!("{}: {e}", path.display()));
+            OptionalFile::Err
+        }
+    }
+}
+
+fn parse_log(path: &Path, problems: &mut Vec<String>) -> LogInfo {
     let mtime = std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs());
 
-    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let raw = match read_optional_string(path, problems) {
+        OptionalFile::Ok(s) => s,
+        OptionalFile::Missing | OptionalFile::Err => String::new(),
+    };
     let text = strip_ansi(&raw);
 
     let mut max_turn = 0u64;
@@ -471,18 +510,6 @@ fn file_mtime(path: &Path) -> Option<u64> {
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-}
-
-fn regular_file_mtime(path: &Path) -> Option<u64> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    meta.modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()
         .map(|d| d.as_secs())
 }
 
@@ -671,6 +698,8 @@ struct RawJob {
     summary_final_msg: Option<String>,
     is_runs_dir: bool,
     agy_summary_path: Option<PathBuf>,
+    problems: Vec<String>,
+    problem_mtime: Option<u64>,
 }
 
 pub fn repo_name(checkout: &Path) -> String {
@@ -745,7 +774,14 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
         if let Ok(entries) = std::fs::read_dir(wt_dir) {
             for entry in entries.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if let Some(id) = fname.strip_suffix(".start.json") {
+                let id = if let Some(id) = fname.strip_suffix(".start.json") {
+                    Some(id)
+                } else if let Some(id) = fname.strip_suffix(".report.json") {
+                    (!id.ends_with(".fix") && !id.is_empty()).then_some(id)
+                } else {
+                    None
+                };
+                if let Some(id) = id {
                     let id = id.to_string();
                     let key = format!("{repo}/{id}");
                     if !seen_keys.insert(key) {
@@ -754,7 +790,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
 
                     let report_path = wt_dir.join(format!("{id}.report.json"));
                     let log_path = wt_dir.join(format!("{id}.log"));
-                    let report_mtime = regular_file_mtime(&report_path);
+                    let report_mtime = file_mtime(&report_path);
                     let log_mtime = file_mtime(&log_path);
                     if report_mtime.is_some_and(|m| m < cutoff)
                         && log_mtime.is_none_or(|m| m < cutoff)
@@ -762,17 +798,23 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         continue;
                     }
 
+                    let mut problems = Vec::new();
                     let start_path = wt_dir.join(format!("{id}.start.json"));
-                    let start_val = std::fs::read_to_string(&start_path)
-                        .ok()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                    let start_val =
+                        match read_optional_json::<serde_json::Value>(&start_path, &mut problems) {
+                            OptionalFile::Ok(v) => Some(v),
+                            OptionalFile::Missing | OptionalFile::Err => None,
+                        };
+                    let start_mtime = file_mtime(&start_path);
                     let pid = start_val.as_ref().and_then(|v| v["pid"].as_i64());
 
                     if report_mtime.is_none() && log_mtime.is_none_or(|m| m < cutoff) {
+                        let has_recent_problem =
+                            !problems.is_empty() && start_mtime.is_some_and(|m| m >= cutoff);
                         let is_alive = pid.is_some_and(|p| {
                             p > 0 && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
                         });
-                        if !is_alive {
+                        if !is_alive && !has_recent_problem {
                             continue;
                         }
                     }
@@ -802,10 +844,13 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         .as_ref()
                         .and_then(|v| v["task_file"].as_str())
                         .map(|s| s.to_string());
-                    let task = task_file
-                        .as_deref()
-                        .and_then(|p| std::fs::read_to_string(p).ok())
-                        .unwrap_or_default();
+                    let task = match task_file.as_deref() {
+                        Some(p) => match read_optional_string(Path::new(p), &mut problems) {
+                            OptionalFile::Ok(s) => s,
+                            OptionalFile::Missing | OptionalFile::Err => String::new(),
+                        },
+                        None => String::new(),
+                    };
                     let mut file_tags = Vec::new();
                     if let Some(tags_arr) = start_val.as_ref().and_then(|v| v["tags"].as_array()) {
                         for t in tags_arr {
@@ -831,33 +876,30 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                     let mut changed_files = Vec::new();
                     let mut summary_final_msg = None;
                     let mut worktree = None;
-                    if summary_path.is_file() {
-                        if let Ok(content) = std::fs::read_to_string(&summary_path) {
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                                if let Some(arr) = val["commits"].as_array() {
-                                    for c in arr {
-                                        if let (Some(sha), Some(subject)) =
-                                            (c["sha"].as_str(), c["subject"].as_str())
-                                        {
-                                            commits.push(CommitRecord {
-                                                sha: sha.to_string(),
-                                                subject: subject.to_string(),
-                                            });
-                                        }
-                                    }
+                    if let OptionalFile::Ok(val) =
+                        read_optional_json::<serde_json::Value>(&summary_path, &mut problems)
+                    {
+                        if let Some(arr) = val["commits"].as_array() {
+                            for c in arr {
+                                if let (Some(sha), Some(subject)) =
+                                    (c["sha"].as_str(), c["subject"].as_str())
+                                {
+                                    commits.push(CommitRecord {
+                                        sha: sha.to_string(),
+                                        subject: subject.to_string(),
+                                    });
                                 }
-                                if let Some(arr) = val["changed_files"].as_array() {
-                                    for f in arr {
-                                        if let Some(s) = f.as_str() {
-                                            changed_files.push(s.to_string());
-                                        }
-                                    }
-                                }
-                                summary_final_msg =
-                                    val["final_message"].as_str().map(|s| s.to_string());
-                                worktree = val["worktree"].as_str().map(|s| s.to_string());
                             }
                         }
+                        if let Some(arr) = val["changed_files"].as_array() {
+                            for f in arr {
+                                if let Some(s) = f.as_str() {
+                                    changed_files.push(s.to_string());
+                                }
+                            }
+                        }
+                        summary_final_msg = val["final_message"].as_str().map(|s| s.to_string());
+                        worktree = val["worktree"].as_str().map(|s| s.to_string());
                     }
 
                     raw_jobs.push(RawJob {
@@ -883,6 +925,8 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         summary_final_msg,
                         is_runs_dir: false,
                         agy_summary_path: None,
+                        problems,
+                        problem_mtime: start_mtime,
                     });
                 }
             }
@@ -914,8 +958,8 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                 let report_path = repo_path.join(format!("{id}.report.json"));
                                 let agy_path = repo_path.join(format!("{id}.json"));
                                 let log_path = repo_path.join(format!("{id}.log"));
-                                let report_mtime = regular_file_mtime(&report_path);
-                                let agy_mtime = regular_file_mtime(&agy_path);
+                                let report_mtime = file_mtime(&report_path);
+                                let agy_mtime = file_mtime(&agy_path);
                                 let log_mtime = file_mtime(&log_path);
 
                                 if report_mtime.is_some_and(|m| m < cutoff)
@@ -931,16 +975,31 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     continue;
                                 }
 
+                                let mut problems = Vec::new();
                                 let pid_path = repo_path.join(format!("{id}.pid"));
-                                let (pid, started_at) = if pid_path.is_file() {
-                                    let pid_text =
-                                        std::fs::read_to_string(&pid_path).unwrap_or_default();
-                                    let pid = pid_text.trim().parse::<i64>().ok();
-                                    let mtime = file_mtime(&pid_path);
-                                    (pid, mtime)
-                                } else {
-                                    (None, None)
-                                };
+                                let (pid, started_at) =
+                                    match read_optional_string(&pid_path, &mut problems) {
+                                        OptionalFile::Ok(pid_text) => {
+                                            let trimmed = pid_text.trim();
+                                            let pid = if trimmed.is_empty() {
+                                                None
+                                            } else {
+                                                match trimmed.parse::<i64>() {
+                                                    Ok(p) => Some(p),
+                                                    Err(e) => {
+                                                        problems.push(format!(
+                                                            "{}: {e}",
+                                                            pid_path.display()
+                                                        ));
+                                                        None
+                                                    }
+                                                }
+                                            };
+                                            let mtime = file_mtime(&pid_path);
+                                            (pid, mtime)
+                                        }
+                                        OptionalFile::Missing | OptionalFile::Err => (None, None),
+                                    };
 
                                 if report_mtime.is_none()
                                     && agy_mtime.is_none()
@@ -957,21 +1016,24 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                 }
 
                                 let prompt_path = repo_path.join(format!("{id}.prompt"));
-                                let task = if prompt_path.is_file() {
-                                    std::fs::read_to_string(&prompt_path).unwrap_or_default()
-                                } else {
-                                    String::new()
+                                let task = match read_optional_string(&prompt_path, &mut problems) {
+                                    OptionalFile::Ok(s) => s,
+                                    OptionalFile::Missing | OptionalFile::Err => String::new(),
                                 };
 
                                 let worktree_path = repo_path.join(format!("{id}.worktree"));
-                                let worktree = if worktree_path.is_file() {
-                                    std::fs::read_to_string(&worktree_path)
-                                        .ok()
-                                        .map(|s| s.trim().to_string())
-                                        .filter(|s| !s.is_empty())
-                                } else {
-                                    None
-                                };
+                                let worktree =
+                                    match read_optional_string(&worktree_path, &mut problems) {
+                                        OptionalFile::Ok(s) => {
+                                            let trimmed = s.trim().to_string();
+                                            if trimmed.is_empty() {
+                                                None
+                                            } else {
+                                                Some(trimmed)
+                                            }
+                                        }
+                                        OptionalFile::Missing | OptionalFile::Err => None,
+                                    };
 
                                 let root = worktree.as_ref().and_then(|wt_str| {
                                     let p = Path::new(wt_str.trim_end_matches('/'));
@@ -1016,12 +1078,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     Some(p.to_path_buf())
                                 });
 
-                                let agy_summary_path = if agy_mtime.is_some() || agy_path.is_file()
-                                {
-                                    Some(agy_path)
-                                } else {
-                                    None
-                                };
+                                let agy_summary_path = Some(agy_path);
 
                                 raw_jobs.push(RawJob {
                                     id: id.clone(),
@@ -1046,6 +1103,8 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     summary_final_msg: None,
                                     is_runs_dir: true,
                                     agy_summary_path,
+                                    problems,
+                                    problem_mtime: log_mtime,
                                 });
                             }
                         }
@@ -1089,15 +1148,15 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             raw.task.clone()
         };
 
+        let mut problems = raw.problems;
+
         let mut file_tags = raw.file_tags.clone();
-        if raw.tags_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&raw.tags_path) {
-                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
-                    for t in arr {
-                        if !file_tags.contains(&t) {
-                            file_tags.push(t);
-                        }
-                    }
+        if let OptionalFile::Ok(arr) =
+            read_optional_json::<Vec<String>>(&raw.tags_path, &mut problems)
+        {
+            for t in arr {
+                if !file_tags.contains(&t) {
+                    file_tags.push(t);
                 }
             }
         }
@@ -1115,49 +1174,37 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             }
         }
 
-        let (verdict, verdict_notes, verdict_ts) = if raw.verdict_path.is_file() {
-            let val = std::fs::read_to_string(&raw.verdict_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-            let v = val
-                .as_ref()
-                .and_then(|obj| obj["verdict"].as_str().map(|s| s.to_string()));
-            let notes = val
-                .as_ref()
-                .and_then(|obj| obj["notes"].as_str().map(|s| s.to_string()));
-            let ts = val
-                .as_ref()
-                .and_then(|obj| obj["ts"].as_u64())
-                .or_else(|| file_mtime(&raw.verdict_path));
-            (v, notes, ts)
-        } else {
-            (None, None, None)
-        };
+        let (verdict, verdict_notes, verdict_ts) =
+            match read_optional_json::<serde_json::Value>(&raw.verdict_path, &mut problems) {
+                OptionalFile::Ok(val) => {
+                    let v = val["verdict"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    if v.is_none() {
+                        problems.push(format!(
+                            "{}: missing required field 'verdict'",
+                            raw.verdict_path.display()
+                        ));
+                    }
+                    let notes = val["notes"].as_str().map(|s| s.to_string());
+                    let ts = val["ts"].as_u64().or_else(|| file_mtime(&raw.verdict_path));
+                    (v, notes, ts)
+                }
+                OptionalFile::Missing | OptionalFile::Err => (None, None, None),
+            };
 
-        let log_info = parse_log(&raw.log_path);
+        let log_info = parse_log(&raw.log_path, &mut problems);
 
-        let report_json = if raw.report_path.is_file() {
-            std::fs::read_to_string(&raw.report_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        } else {
-            None
-        };
+        let report_state = read_optional_json::<serde_json::Value>(&raw.report_path, &mut problems);
+        let report_mtime = file_mtime(&raw.report_path);
 
-        let report_mtime = if raw.report_path.is_file() {
-            file_mtime(&raw.report_path)
-        } else {
-            None
-        };
-
-        let agy_summary = if report_json.is_none() {
-            raw.agy_summary_path.as_ref().and_then(|p| {
-                std::fs::read_to_string(p)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<AgySummary>(&s).ok())
-            })
-        } else {
-            None
+        let agy_state = match report_state {
+            OptionalFile::Missing => match raw.agy_summary_path.as_ref() {
+                Some(p) => read_optional_json::<AgySummary>(p, &mut problems),
+                None => OptionalFile::Missing,
+            },
+            OptionalFile::Ok(_) | OptionalFile::Err => OptionalFile::Missing,
         };
 
         let (
@@ -1171,174 +1218,248 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             finished_at,
             elapsed_s,
             now_str,
-        ) = if let Some(ref report) = report_json {
-            let outcome = report["outcome"].as_str().unwrap_or("unknown").to_string();
-            let cost = report["cost_usd"].as_f64();
-            let turns = report["turns"].as_u64().unwrap_or(log_info.turns);
-            let gate_attempts = report["gate_attempts"]
-                .as_u64()
-                .unwrap_or(log_info.gate_attempts);
-            let model = report["model_id"].as_str().map(|s| s.to_string());
+        ) = match (report_state, agy_state) {
+            (OptionalFile::Ok(report), _) => {
+                let outcome = match report.get("outcome") {
+                    Some(v) => match v.as_str() {
+                        Some(s) if !s.is_empty() => s.to_string(),
+                        _ => {
+                            problems.push(format!(
+                                "{}: invalid 'outcome' field (expected non-empty string)",
+                                raw.report_path.display()
+                            ));
+                            "error".to_string()
+                        }
+                    },
+                    None => {
+                        problems.push(format!(
+                            "{}: missing required field 'outcome'",
+                            raw.report_path.display()
+                        ));
+                        "error".to_string()
+                    }
+                };
+                let cost = report["cost_usd"].as_f64();
+                let turns = report["turns"].as_u64().unwrap_or(log_info.turns);
+                let gate_attempts = report["gate_attempts"]
+                    .as_u64()
+                    .unwrap_or(log_info.gate_attempts);
+                let model = report["model_id"].as_str().map(|s| s.to_string());
 
-            let gate_failures = report["gate_failures"]
-                .as_array()
-                .map(|arr| {
-                    let skip = arr.len().saturating_sub(2);
-                    arr.iter()
-                        .skip(skip)
-                        .map(|v| {
-                            let s = v.as_str().unwrap_or("");
-                            let count = s.chars().count();
-                            if count > 1500 {
-                                s.chars().skip(count - 1500).collect()
-                            } else {
-                                s.to_string()
+                let gate_failures = match report.get("gate_failures") {
+                    None | Some(serde_json::Value::Null) => Vec::new(),
+                    Some(serde_json::Value::Array(arr)) => {
+                        let skip = arr.len().saturating_sub(2);
+                        let mut failures = Vec::new();
+                        for (idx, v) in arr.iter().enumerate() {
+                            match v.as_str() {
+                                Some(s) => {
+                                    if idx >= skip {
+                                        let count = s.chars().count();
+                                        if count > 1500 {
+                                            failures.push(s.chars().skip(count - 1500).collect());
+                                        } else {
+                                            failures.push(s.to_string());
+                                        }
+                                    }
+                                }
+                                None => {
+                                    problems.push(format!(
+                                        "{}: gate_failures[{idx}] is not a string",
+                                        raw.report_path.display()
+                                    ));
+                                }
                             }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+                        }
+                        failures
+                    }
+                    Some(_) => {
+                        problems.push(format!(
+                            "{}: invalid 'gate_failures' field (expected array)",
+                            raw.report_path.display()
+                        ));
+                        Vec::new()
+                    }
+                };
 
-            let finished_at = report_mtime;
-            let elapsed_s = if let Some(dur) = report["duration_seconds"].as_f64() {
-                Some(dur.round() as u64)
-            } else if let (Some(fin), Some(st)) = (finished_at, raw.started_at) {
-                if fin >= st {
-                    Some(fin - st)
+                let finished_at = report_mtime;
+                let elapsed_s = if let Some(dur) = report["duration_seconds"].as_f64() {
+                    Some(dur.round() as u64)
+                } else if let (Some(fin), Some(st)) = (finished_at, raw.started_at) {
+                    if fin >= st {
+                        Some(fin - st)
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            let report_final_msg = report["final_message"].as_str();
-            let now_from_msg = raw
-                .summary_final_msg
-                .as_deref()
-                .or(report_final_msg)
-                .map(extract_now_from_final_message)
-                .filter(|s| !s.is_empty());
-            let now_str = if let Some(s) = now_from_msg {
-                s
-            } else if let Some(ref tool) = log_info.last_tool {
-                tool.clone()
-            } else {
-                String::new()
-            };
-
-            (
-                outcome,
-                false,
-                cost,
-                turns,
-                gate_attempts,
-                gate_failures,
-                model,
-                finished_at,
-                elapsed_s,
-                now_str,
-            )
-        } else if let Some(ref agy) = agy_summary {
-            let status = if agy.status.as_deref() == Some("ERROR") {
-                "error".to_string()
-            } else {
-                "finished".to_string()
-            };
-            let cost = None;
-            let turns = agy.num_turns.unwrap_or(log_info.turns);
-            let gate_attempts = log_info.gate_attempts;
-            let gate_failures = Vec::new();
-            let model = None;
-            let finished_at = raw.agy_summary_path.as_ref().and_then(|p| file_mtime(p));
-            let elapsed_s = agy.duration_seconds.map(|d| d.round() as u64);
-            let now_str = if status == "error" {
-                let err = agy.error.as_deref().unwrap_or("");
-                let s = extract_now_from_final_message(err);
-                if !s.is_empty() {
+                let report_final_msg = report["final_message"].as_str();
+                let now_from_msg = raw
+                    .summary_final_msg
+                    .as_deref()
+                    .or(report_final_msg)
+                    .map(extract_now_from_final_message)
+                    .filter(|s| !s.is_empty());
+                let now_str = if let Some(s) = now_from_msg {
                     s
+                } else if let Some(ref tool) = log_info.last_tool {
+                    tool.clone()
                 } else {
-                    err.lines().next().unwrap_or("").chars().take(200).collect()
-                }
-            } else {
-                let resp = agy.response.as_deref().unwrap_or("");
-                let s = extract_now_from_final_message(resp);
-                if !s.is_empty() {
-                    s
+                    String::new()
+                };
+
+                (
+                    outcome,
+                    false,
+                    cost,
+                    turns,
+                    gate_attempts,
+                    gate_failures,
+                    model,
+                    finished_at,
+                    elapsed_s,
+                    now_str,
+                )
+            }
+            (OptionalFile::Err, _) => {
+                let finished_at = report_mtime;
+                let elapsed_s = match (finished_at, raw.started_at) {
+                    (Some(fin), Some(st)) if fin >= st => Some(fin - st),
+                    _ => None,
+                };
+                let now_str = log_info.last_tool.clone().unwrap_or_default();
+                (
+                    "error".to_string(),
+                    false,
+                    None,
+                    log_info.turns,
+                    log_info.gate_attempts,
+                    Vec::new(),
+                    None,
+                    finished_at,
+                    elapsed_s,
+                    now_str,
+                )
+            }
+            (OptionalFile::Missing, OptionalFile::Ok(agy)) => {
+                let status = if agy.status.as_deref() == Some("ERROR") {
+                    "error".to_string()
                 } else {
-                    resp.lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(200)
-                        .collect()
-                }
-            };
+                    "finished".to_string()
+                };
+                let cost = None;
+                let turns = agy.num_turns.unwrap_or(log_info.turns);
+                let gate_attempts = log_info.gate_attempts;
+                let gate_failures = Vec::new();
+                let model = None;
+                let finished_at = raw.agy_summary_path.as_ref().and_then(|p| file_mtime(p));
+                let elapsed_s = agy.duration_seconds.map(|d| d.round() as u64);
+                let now_str = if status == "error" {
+                    let err = agy.error.as_deref().unwrap_or("");
+                    let s = extract_now_from_final_message(err);
+                    if !s.is_empty() {
+                        s
+                    } else {
+                        err.lines().next().unwrap_or("").chars().take(200).collect()
+                    }
+                } else {
+                    let resp = agy.response.as_deref().unwrap_or("");
+                    let s = extract_now_from_final_message(resp);
+                    if !s.is_empty() {
+                        s
+                    } else {
+                        resp.lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(200)
+                            .collect()
+                    }
+                };
 
-            (
-                status,
-                false,
-                cost,
-                turns,
-                gate_attempts,
-                gate_failures,
-                model,
-                finished_at,
-                elapsed_s,
-                now_str,
-            )
-        } else {
-            // A live PID is this job's only if that process started with the job, not after it.
-            // Only runs-dir jobs are checked: their PID files outlive the job for days, and the
-            // dispatch layout's test fixture fakes a start time before its own process.
-            let is_alive = raw.pid.is_some_and(|p| {
-                p > 0
-                    && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
-                    && (!raw.is_runs_dir || started_with_job(p, raw.started_at, now))
-            });
-            let status = if is_alive {
-                "running".to_string()
-            } else {
-                "stopped".to_string()
-            };
-            let gate_running = if status == "running" {
-                log_info.gate_running
-            } else {
-                false
-            };
-            let cost = None;
-            let turns = log_info.turns;
-            let gate_attempts = log_info.gate_attempts;
-            let gate_failures = Vec::new();
-            let model = None;
-            let finished_at = None;
-            let elapsed_s = if status == "running" {
-                raw.started_at.map(|s| now.saturating_sub(s))
-            } else {
-                None
-            };
-            let now_str = log_info.last_tool.clone().unwrap_or_default();
+                (
+                    status,
+                    false,
+                    cost,
+                    turns,
+                    gate_attempts,
+                    gate_failures,
+                    model,
+                    finished_at,
+                    elapsed_s,
+                    now_str,
+                )
+            }
+            (OptionalFile::Missing, OptionalFile::Err) => {
+                let finished_at = raw.agy_summary_path.as_ref().and_then(|p| file_mtime(p));
+                let now_str = log_info.last_tool.clone().unwrap_or_default();
+                (
+                    "error".to_string(),
+                    false,
+                    None,
+                    log_info.turns,
+                    log_info.gate_attempts,
+                    Vec::new(),
+                    None,
+                    finished_at,
+                    None,
+                    now_str,
+                )
+            }
+            (OptionalFile::Missing, OptionalFile::Missing) => {
+                let is_alive = raw.pid.is_some_and(|p| {
+                    p > 0
+                        && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
+                        && (!raw.is_runs_dir || started_with_job(p, raw.started_at, now))
+                });
+                let status = if is_alive {
+                    "running".to_string()
+                } else {
+                    "stopped".to_string()
+                };
+                let gate_running = if status == "running" {
+                    log_info.gate_running
+                } else {
+                    false
+                };
+                let cost = None;
+                let turns = log_info.turns;
+                let gate_attempts = log_info.gate_attempts;
+                let gate_failures = Vec::new();
+                let model = None;
+                let finished_at = None;
+                let elapsed_s = if status == "running" {
+                    raw.started_at.map(|s| now.saturating_sub(s))
+                } else {
+                    None
+                };
+                let now_str = log_info.last_tool.clone().unwrap_or_default();
 
-            (
-                status,
-                gate_running,
-                cost,
-                turns,
-                gate_attempts,
-                gate_failures,
-                model,
-                finished_at,
-                elapsed_s,
-                now_str,
-            )
+                (
+                    status,
+                    gate_running,
+                    cost,
+                    turns,
+                    gate_attempts,
+                    gate_failures,
+                    model,
+                    finished_at,
+                    elapsed_s,
+                    now_str,
+                )
+            }
         };
 
-        // Rule 7: Kept: every running job, and any other job whose finished_at (or, with no
-        // report, the log's modified time) is within hours of now.
         let keep = if status == "running" {
             true
         } else {
-            let effective_finished = finished_at.or(log_info.mtime);
+            let effective_finished = finished_at.or(log_info.mtime).or(if !problems.is_empty() {
+                raw.problem_mtime
+            } else {
+                None
+            });
             if let Some(fin) = effective_finished {
                 fin >= cutoff
             } else {
@@ -1378,6 +1499,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             changed_files: raw.changed_files,
             tags,
             verdict,
+            problems,
             root: raw.root,
             plan_file,
             plan_task,
