@@ -1,6 +1,8 @@
 # Independent surfaces that can message each other
 
-Date: 2026-11-25. Status: decisions agreed with the user; not yet planned.
+Date: 2026-11-25. Status: decisions agreed with the user; planned in
+`docs/plans/2026-11-25-independent-surfaces.md`. The section "Changes after checking the code"
+at the end overrides the text above it where they differ.
 
 ## Why
 
@@ -167,3 +169,33 @@ run. Step 5 depends on 4.
 - That appends to `usage.jsonl` from several processes are one write per line.
 - Where a request records who started it, so a peer-started request can be labelled in the
   page and counted against the limit.
+
+## Changes after checking the code
+
+A research run (RS11) and a read of `serve.rs` on v0.63.2 changed five details. None changes
+a decision.
+
+1. **The token stays in the state directory.** Since #420 the surface token is not under
+   `.wt/`; it is in `<state dir>/surface/`, a directory no model can read on macOS or Linux.
+   A surface's token is `<state dir>/surface/<id>.token` and its message credential is
+   `<state dir>/surface/<id>.message`. The surface directory `.wt/surfaces/<id>/` holds only
+   `surface.json` and `entries.jsonl`, so no new sandbox rule is needed.
+2. **Task files stay in the shared `.wt/tasks/`.** Run ids are already per checkout, and a
+   second dispatch of an existing id fails. A per-surface task directory would change the
+   sandbox's write rules for little gain.
+3. **A surface started in a linked worktree works in the main checkout**, and says so when
+   it starts. Today such a surface sees no runs at all, because runs are recorded under the
+   main checkout. The model's file tools are confined to one root, and its task files must be
+   under the main checkout, so one root is the working choice. This replaces step 1 of the
+   order of work: the token defect disappears with the per-surface paths in step 2, and a
+   separate fix would rewrite the same lines twice. Follow-up, not planned: let the model
+   read and branch from the linked worktree while its records stay in the main checkout.
+4. **A start record naming a surface with no directory is reported by the finishing run**
+   (on its error output, as a failed notification). Showing it in `blyte dashboard` waits for
+   the registry step.
+5. **Names are unique among the running surfaces of one checkout** until the registry
+   exists; the registry step widens that to the machine.
+
+`blyte clean` does not remove the token a crashed surface left behind unless it removes that
+surface's directory: a surface that is still starting looks stopped, and its token must not
+be deleted under it. A leftover token opens nothing, because no process accepts it.
