@@ -977,6 +977,8 @@ fn make_idle_surface(root: PathBuf) -> Surface {
         .to_string();
     let session = Session::start(Box::new(IdleRunner), "test-model".to_string());
     Surface {
+        surface_id: "surface-direct-edit-test".to_string(),
+        surface_name: repo.clone(),
         root,
         repo,
         session,

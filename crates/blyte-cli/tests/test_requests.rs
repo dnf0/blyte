@@ -372,6 +372,8 @@ fn make_surface_with_session(
         .unwrap_or("repo")
         .to_string();
     Surface {
+        surface_id: "surface-req-test".to_string(),
+        surface_name: repo.clone(),
         root,
         repo,
         session,
@@ -1980,6 +1982,8 @@ fn start_stoppable_surface(
             port: 0,
             no_open: true,
             days: 14,
+            name: Some("test-surface".to_string()),
+            ..Default::default()
         };
         let mut out = SharedBuf(out_bg);
         let mut err = SharedBuf(err_bg);
@@ -1997,10 +2001,10 @@ fn start_stoppable_surface(
     let deadline = Instant::now() + Duration::from_secs(5);
     let url = loop {
         let s = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
-        if let Some(rest) = s.split("blyte: surface at ").nth(1) {
-            if let Some(line) = rest.lines().next() {
-                if !line.trim().is_empty() {
-                    break line.trim().to_string();
+        if let Some(line) = s.lines().find(|l| l.starts_with("blyte: surface ")) {
+            if let Some((_, url)) = line.split_once(" at ") {
+                if !url.trim().is_empty() {
+                    break url.trim().to_string();
                 }
             }
         }

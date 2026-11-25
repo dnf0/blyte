@@ -5,8 +5,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use blyte_agent::sandbox::surface_token_path;
+use blyte_agent::sandbox::surface_token_path_for_id;
 use blyte_cli::serve::TOKEN_HEADER;
+use blyte_cli::surface_dir::{write_record, SurfaceRecord};
 use blyte_cli::surface_notify::{notify_runs_changed, report, NotifyOutcome};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -41,15 +42,34 @@ fn write_file(path: &Path, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
-fn write_surface_files(root: &Path, port: u16, token: &str) {
+fn write_start_record(root: &Path, id: &str, surface: Option<&str>) {
+    let val = match surface {
+        Some(sid) => serde_json::json!({ "id": id, "surface": sid }),
+        None => serde_json::json!({ "id": id, "surface": serde_json::Value::Null }),
+    };
     write_file(
-        &root.join(".wt/surface.json"),
-        &format!(
-            r#"{{"pid":12345,"port":{port},"session_id":"surface-test","started_at":1700000000}}"#
-        ),
+        &root.join(".wt").join(format!("{id}.start.json")),
+        &val.to_string(),
     );
-    let token_path = surface_token_path(root).unwrap();
-    write_file(&token_path, &format!("{token}\n"));
+}
+
+fn write_surface_files(root: &Path, sid: &str, name: &str, port: u16, token: Option<&str>) {
+    write_record(
+        root,
+        &SurfaceRecord {
+            id: sid.to_string(),
+            name: name.to_string(),
+            pid: 12345,
+            port,
+            session_id: format!("session-{sid}"),
+            started_at: 1_700_000_000,
+        },
+    )
+    .unwrap();
+    if let Some(tok) = token {
+        let token_path = surface_token_path_for_id(sid).unwrap();
+        write_file(&token_path, &format!("{tok}\n"));
+    }
 }
 
 fn spawn_single_response_listener(
@@ -85,10 +105,12 @@ fn spawn_single_response_listener(
 }
 
 #[test]
-fn no_surface_files_is_silent() {
+fn start_record_with_null_surface_is_no_surface() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
+    write_start_record(dir.path(), "T1", None);
+
     let outcome = notify_runs_changed(dir.path(), "T1");
     assert_eq!(outcome, NotifyOutcome::NoSurface);
 
@@ -98,13 +120,33 @@ fn no_surface_files_is_silent() {
 }
 
 #[test]
+fn missing_start_record_is_failed() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+
+    let outcome = notify_runs_changed(dir.path(), "T_MISSING");
+    match outcome {
+        NotifyOutcome::Failed(msg) => {
+            assert!(
+                msg.contains("cannot read"),
+                "expected cannot read in message: {msg}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_running_surface_is_told() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
+    let sid = "s0123456789abcdef";
     let token = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
     let (port, recorded, handle) = spawn_single_response_listener("HTTP/1.1 202 Accepted", "{}");
-    write_surface_files(dir.path(), port, token);
+    write_start_record(dir.path(), "T2", Some(sid));
+    write_surface_files(dir.path(), sid, "demo", port, Some(token));
 
     let outcome = notify_runs_changed(dir.path(), "T2");
     handle.join().unwrap();
@@ -134,6 +176,81 @@ fn a_running_surface_is_told() {
 }
 
 #[test]
+fn two_surfaces_only_the_owner_is_told() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+
+    let sid1 = "s1111111111111111";
+    let sid2 = "s2222222222222222";
+    let tok1 = "1111111111111111111111111111111111111111111111111111111111111111";
+    let tok2 = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    let listener1 = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener1.set_nonblocking(true).unwrap();
+    let port1 = listener1.local_addr().unwrap().port();
+    let (port2, recorded2, handle2) = spawn_single_response_listener("HTTP/1.1 202 Accepted", "{}");
+
+    write_surface_files(dir.path(), sid1, "demo", port1, Some(tok1));
+    write_surface_files(dir.path(), sid2, "demo-2", port2, Some(tok2));
+    write_start_record(dir.path(), "T_TWO", Some(sid2));
+
+    let outcome = notify_runs_changed(dir.path(), "T_TWO");
+    handle2.join().unwrap();
+
+    assert_eq!(outcome, NotifyOutcome::Told);
+    assert!(
+        listener1.accept().is_err(),
+        "first surface listener must not receive a connection"
+    );
+    let raw_req = recorded2
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("second surface listener did not receive a request");
+    let expected_header = format!("{TOKEN_HEADER}: {tok2}");
+    assert!(
+        raw_req
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case(&expected_header)),
+        "expected second surface token in request, got: {raw_req}"
+    );
+}
+
+#[test]
+fn start_record_naming_missing_surface_directory_is_failed() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let sid = "sdeadbeefcafebabe";
+    write_start_record(dir.path(), "T_NODIR", Some(sid));
+
+    let outcome = notify_runs_changed(dir.path(), "T_NODIR");
+    let msg = match outcome {
+        NotifyOutcome::Failed(m) => m,
+        other => panic!("expected Failed, got {other:?}"),
+    };
+    assert!(
+        msg.contains("has no directory"),
+        "expected 'has no directory' in message: {msg}"
+    );
+    assert!(msg.contains(sid), "expected surface id in message: {msg}");
+}
+
+#[test]
+fn record_present_without_token_file_is_no_surface() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = StateHomeGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let sid = "sabcdef0123456789";
+    write_start_record(dir.path(), "T_STOPPED", Some(sid));
+    write_surface_files(dir.path(), sid, "demo", 12345, None);
+
+    let outcome = notify_runs_changed(dir.path(), "T_STOPPED");
+    assert_eq!(outcome, NotifyOutcome::NoSurface);
+}
+
+#[test]
 fn a_dead_surface_is_reported_not_fatal() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
@@ -142,8 +259,10 @@ fn a_dead_surface_is_reported_not_fatal() {
     let dead_port = listener.local_addr().unwrap().port();
     drop(listener);
 
+    let sid = "sfedcba9876543210";
     let secret_token = "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567";
-    write_surface_files(dir.path(), dead_port, secret_token);
+    write_start_record(dir.path(), "RUN-DEAD-1", Some(sid));
+    write_surface_files(dir.path(), sid, "demo", dead_port, Some(secret_token));
 
     let outcome = notify_runs_changed(dir.path(), "RUN-DEAD-1");
     let msg = match &outcome {
@@ -179,7 +298,13 @@ fn an_unreadable_surface_file_is_reported() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
-    let surface_path = dir.path().join(".wt/surface.json");
+    let sid = "saaaa1111bbbb2222";
+    write_start_record(dir.path(), "T3", Some(sid));
+    let surface_path = dir
+        .path()
+        .join(".wt/surfaces")
+        .join(sid)
+        .join("surface.json");
     write_file(&surface_path, "not json");
 
     let outcome = notify_runs_changed(dir.path(), "T3");
@@ -203,10 +328,12 @@ fn a_wrong_token_is_reported() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
     let dir = tempfile::tempdir().unwrap();
+    let sid = "scccc3333dddd4444";
     let secret_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let (port, _recorded, handle) =
         spawn_single_response_listener("HTTP/1.1 403 Forbidden", r#"{"error":"forbidden"}"#);
-    write_surface_files(dir.path(), port, secret_token);
+    write_start_record(dir.path(), "T4", Some(sid));
+    write_surface_files(dir.path(), sid, "demo", port, Some(secret_token));
 
     let outcome = notify_runs_changed(dir.path(), "T4");
     handle.join().unwrap();
@@ -229,19 +356,4 @@ fn a_wrong_token_is_reported() {
         !msg.contains(secret_token),
         "token must never appear in error message: {msg}"
     );
-}
-
-#[test]
-fn leftover_wt_surface_token_alone_gives_no_surface() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
-    write_file(
-        &dir.path().join(".wt/surface.json"),
-        r#"{"pid":12345,"port":12345,"session_id":"surface-test","started_at":1700000000}"#,
-    );
-    write_file(&dir.path().join(".wt/surface.token"), "stale-token\n");
-
-    let outcome = notify_runs_changed(dir.path(), "T5");
-    assert_eq!(outcome, NotifyOutcome::NoSurface);
 }

@@ -147,6 +147,8 @@ fn make_surface(root: PathBuf) -> (Surface, Arc<Mutex<Vec<String>>>) {
         .unwrap_or("repo")
         .to_string();
     let surface = Surface {
+        surface_id: "surface-run-results-test".to_string(),
+        surface_name: repo.clone(),
         root,
         repo,
         session,

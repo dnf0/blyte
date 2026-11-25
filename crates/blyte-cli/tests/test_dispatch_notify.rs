@@ -125,16 +125,21 @@ fn state_home() -> &'static Path {
         .path()
 }
 
-fn write_surface_files(repo_dir: &Path, port: u16, token: &str) {
+fn write_surface_files(repo_dir: &Path, surface_id: &str, port: u16, token: &str) {
     let _ = state_home();
-    let wt_dir = repo_dir.join(".wt");
-    std::fs::create_dir_all(&wt_dir).unwrap();
-    std::fs::write(
-        wt_dir.join("surface.json"),
-        format!("{{\"port\": {port}}}\n"),
+    blyte_cli::surface_dir::write_record(
+        repo_dir,
+        &blyte_cli::surface_dir::SurfaceRecord {
+            id: surface_id.to_string(),
+            name: "demo".to_string(),
+            pid: std::process::id(),
+            port,
+            session_id: format!("session-{surface_id}"),
+            started_at: 1_700_000_000,
+        },
     )
     .unwrap();
-    let token_path = blyte_agent::sandbox::surface_token_path(repo_dir).unwrap();
+    let token_path = blyte_agent::sandbox::surface_token_path_for_id(surface_id).unwrap();
     std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
     std::fs::write(&token_path, format!("{token}\n")).unwrap();
 }
@@ -228,7 +233,12 @@ fn init_repo(dir: &Path) {
     copy_dir_all(base_repo_template(), dir);
 }
 
-fn run_verified_dispatch(repo_dir: &Path, home: &Path, id: &str) -> std::process::Output {
+fn run_verified_dispatch(
+    repo_dir: &Path,
+    home: &Path,
+    id: &str,
+    surface: Option<&str>,
+) -> std::process::Output {
     let task_file = repo_dir.join("task.md");
     std::fs::write(&task_file, "Make a small change").unwrap();
 
@@ -240,18 +250,20 @@ fn run_verified_dispatch(repo_dir: &Path, home: &Path, id: &str) -> std::process
         }
     });
 
-    dispatch_command(repo_dir, home, model_port)
-        .args([
-            "dispatch",
-            id,
-            task_file.to_str().unwrap(),
-            "--gate",
-            "exit 0",
-            "--sandbox",
-            "off",
-        ])
-        .output()
-        .unwrap()
+    let mut cmd = dispatch_command(repo_dir, home, model_port);
+    cmd.args([
+        "dispatch",
+        id,
+        task_file.to_str().unwrap(),
+        "--gate",
+        "exit 0",
+        "--sandbox",
+        "off",
+    ]);
+    if let Some(sid) = surface {
+        cmd.args(["--surface", sid]);
+    }
+    cmd.output().unwrap()
 }
 
 #[test]
@@ -262,11 +274,12 @@ fn dispatch_tells_the_surface_when_it_finishes() {
     init_repo(repo_dir);
 
     let id = "T_NOTIFY_OK";
+    let sid = "sa1b2c3d4e5f60718";
     let summary_path = repo_dir.join(".wt").join(format!("{id}.json"));
     let (surface_port, recorded) = surface_listener(summary_path);
-    write_surface_files(repo_dir, surface_port, "secret-token-123");
+    write_surface_files(repo_dir, sid, surface_port, "secret-token-123");
 
-    let out = run_verified_dispatch(repo_dir, home.path(), id);
+    let out = run_verified_dispatch(repo_dir, home.path(), id, Some(sid));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
@@ -297,7 +310,7 @@ fn dispatch_without_a_surface_prints_nothing_about_it() {
     let repo_dir = temp.path();
     init_repo(repo_dir);
 
-    let out = run_verified_dispatch(repo_dir, home.path(), "T_NO_SURFACE");
+    let out = run_verified_dispatch(repo_dir, home.path(), "T_NO_SURFACE", None);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
@@ -321,7 +334,7 @@ fn a_dead_surface_does_not_change_the_result() {
     let plain_temp = tempfile::tempdir().unwrap();
     let plain_home = tempfile::tempdir().unwrap();
     init_repo(plain_temp.path());
-    let plain_out = run_verified_dispatch(plain_temp.path(), plain_home.path(), "T_DEAD_REF");
+    let plain_out = run_verified_dispatch(plain_temp.path(), plain_home.path(), "T_DEAD_REF", None);
     let plain_summary: serde_json::Value = serde_json::from_slice(&plain_out.stdout).unwrap();
 
     let dead_temp = tempfile::tempdir().unwrap();
@@ -329,12 +342,13 @@ fn a_dead_surface_does_not_change_the_result() {
     let dead_repo = dead_temp.path();
     init_repo(dead_repo);
 
+    let sid = "sdead111122223333";
     let closed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
-    write_surface_files(dead_repo, closed_port, "dead-surface-token");
+    write_surface_files(dead_repo, sid, closed_port, "dead-surface-token");
 
-    let dead_out = run_verified_dispatch(dead_repo, dead_home.path(), "T_DEAD_SURFACE");
+    let dead_out = run_verified_dispatch(dead_repo, dead_home.path(), "T_DEAD_SURFACE", Some(sid));
     let dead_stdout = String::from_utf8_lossy(&dead_out.stdout);
     let dead_stderr = String::from_utf8_lossy(&dead_out.stderr);
     let dead_summary: serde_json::Value = serde_json::from_str(&dead_stdout).unwrap_or_else(|e| {
@@ -364,9 +378,10 @@ fn a_blocked_run_tells_the_surface_too() {
     init_repo(repo_dir);
 
     let id = "T_BLOCKED_NOTIFY";
+    let sid = "sb10c4ed000001234";
     let summary_path = repo_dir.join(".wt").join(format!("{id}.json"));
     let (surface_port, recorded) = surface_listener(summary_path);
-    write_surface_files(repo_dir, surface_port, "blocked-token-456");
+    write_surface_files(repo_dir, sid, surface_port, "blocked-token-456");
 
     let task_file = repo_dir.join("task.md");
     std::fs::write(&task_file, "Do something").unwrap();
@@ -381,6 +396,8 @@ fn a_blocked_run_tells_the_surface_too() {
             "exit 3",
             "--sandbox",
             "off",
+            "--surface",
+            sid,
         ])
         .output()
         .unwrap();

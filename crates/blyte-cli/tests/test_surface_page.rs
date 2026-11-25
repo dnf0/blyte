@@ -1805,3 +1805,48 @@ assert.ok(bogusHtml.includes("unknown state: bogus"), bogusHtml);
 "#;
     run_surface_script(harness);
 }
+
+#[test]
+fn page_sets_document_title_from_surface_name() {
+    let html = include_str!("../assets/surface/index.html");
+    assert!(
+        html.contains("data.surface_name") && html.contains("document.title"),
+        "expected page source to set document.title from surface_name"
+    );
+    let harness = r#"
+const assert = require("assert");
+const elements = Object.create(null);
+global.document = {
+  title: "blyte",
+  getElementById(id) {
+    if (!elements[id]) {
+      elements[id] = {
+        textContent: "",
+        innerHTML: "",
+        disabled: false,
+        style: {},
+        classList: { toggle() {}, add() {}, remove() {} },
+        setAttribute() {},
+      };
+    }
+    return elements[id];
+  },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+};
+applySessionState({
+  session_id: "s1",
+  surface_name: "demo-2",
+  repo: "demo",
+  started_at: 1000,
+  model: "m1",
+  effort: null,
+  effort_supported: false,
+  busy: false,
+  queued: 0,
+  last_seq: 0,
+}, false);
+assert.strictEqual(document.title, "demo-2 - blyte");
+"#;
+    run_surface_script(harness);
+}

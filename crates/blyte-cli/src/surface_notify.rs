@@ -17,8 +17,8 @@ pub enum NotifyOutcome {
 }
 
 #[derive(Deserialize)]
-struct SurfaceInfo {
-    port: u16,
+struct StartSurface {
+    surface: Option<String>,
 }
 
 fn format_notify_failure(port: u16, id: &str, reason: &str) -> NotifyOutcome {
@@ -94,24 +94,37 @@ fn post_runs_changed(port: u16, token: &str) -> Result<u16, String> {
 }
 
 pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
-    let wt_dir = main_checkout.join(".wt");
-    let surface_path = wt_dir.join("surface.json");
-
-    let surface_raw = match std::fs::read_to_string(&surface_path) {
+    let start_path = main_checkout.join(".wt").join(format!("{id}.start.json"));
+    let start_raw = match std::fs::read_to_string(&start_path) {
         Ok(s) => s,
-        Err(e) if e.kind() == ErrorKind::NotFound => return NotifyOutcome::NoSurface,
         Err(e) => {
-            return NotifyOutcome::Failed(format!("cannot read {}: {e}", surface_path.display()));
+            return NotifyOutcome::Failed(format!("cannot read {}: {e}", start_path.display()));
         }
     };
-    let info: SurfaceInfo = match serde_json::from_str(&surface_raw) {
+    let start: StartSurface = match serde_json::from_str(&start_raw) {
         Ok(v) => v,
         Err(e) => {
-            return NotifyOutcome::Failed(format!("cannot parse {}: {e}", surface_path.display()));
+            return NotifyOutcome::Failed(format!("cannot parse {}: {e}", start_path.display()));
         }
     };
+    let Some(sid) = start.surface else {
+        return NotifyOutcome::NoSurface;
+    };
+    if let Err(e) = blyte_agent::sandbox::validate_surface_id(&sid) {
+        return NotifyOutcome::Failed(e);
+    }
+    if !crate::surface_dir::surface_dir(main_checkout, &sid).is_dir() {
+        return NotifyOutcome::Failed(format!(
+            "run {id} belongs to surface {sid}, which has no directory under {}",
+            crate::surface_dir::surfaces_dir(main_checkout).display()
+        ));
+    }
+    let record = match crate::surface_dir::read_record(main_checkout, &sid) {
+        Ok(r) => r,
+        Err(e) => return NotifyOutcome::Failed(e),
+    };
 
-    let token_path = match blyte_agent::sandbox::surface_token_path(main_checkout) {
+    let token_path = match blyte_agent::sandbox::surface_token_path_for_id(&sid) {
         Ok(p) => p,
         Err(e) => return NotifyOutcome::Failed(e),
     };
@@ -131,12 +144,12 @@ pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
         return NotifyOutcome::Failed(format!("invalid token in {}", token_path.display()));
     }
 
-    match post_runs_changed(info.port, token) {
+    match post_runs_changed(record.port, token) {
         Ok(202) => NotifyOutcome::Told,
         Ok(status) => {
-            format_notify_failure(info.port, id, &format!("unexpected HTTP status {status}"))
+            format_notify_failure(record.port, id, &format!("unexpected HTTP status {status}"))
         }
-        Err(reason) => format_notify_failure(info.port, id, &reason),
+        Err(reason) => format_notify_failure(record.port, id, &reason),
     }
 }
 

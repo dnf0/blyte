@@ -3168,6 +3168,9 @@
       if (typeof document === "undefined") return;
       const repoEl = document.getElementById("repo-name");
       if (repoEl) repoEl.textContent = data.repo;
+      if (typeof data.surface_name === "string" && data.surface_name) {
+        document.title = data.surface_name + " - blyte";
+      }
       renderModelsSelect();
       const effortEl = document.getElementById("effort-select");
       if (effortEl) {

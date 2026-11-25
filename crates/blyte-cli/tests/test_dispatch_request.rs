@@ -322,6 +322,8 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
     let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
     let now = now_secs();
     let surface = Surface {
+        surface_id: "surface-req-test".to_string(),
+        surface_name: "repo".to_string(),
         root: repo.clone(),
         repo: "repo".to_string(),
         session: session.clone(),
@@ -464,6 +466,8 @@ impl PromptRunner for NoopRunner {
 fn make_test_surface(repo: &Path, now: u64) -> Surface {
     let session = Session::start(Box::new(NoopRunner), "gemini-4-neon".to_string());
     Surface {
+        surface_id: "surface-test".to_string(),
+        surface_name: "repo".to_string(),
         root: repo.to_path_buf(),
         repo: "repo".to_string(),
         session,
