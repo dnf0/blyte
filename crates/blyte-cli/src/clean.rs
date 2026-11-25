@@ -2586,11 +2586,217 @@ pub fn clean_repo_with_options(
         report_other_worktrees_with_ctx(root, &mut ctx, &all_worktrees);
     }
 
+    if !is_linked {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match clean_surfaces(root, older_than_days, dry_run, now_secs) {
+            Ok(lines) => {
+                if !quiet {
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("blyte: {err}");
+                had_errors = true;
+            }
+        }
+    }
+
     CleanRepoStats {
         removed_worktrees,
         freed_bytes,
         had_errors,
     }
+}
+
+const LEGACY_SURFACE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[derive(serde::Deserialize)]
+struct LegacySurfaceFile {
+    port: u16,
+    session_id: String,
+}
+
+fn is_legacy_surface_running(port: u16, expected_session_id: &str) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = match std::net::TcpStream::connect_timeout(&addr, LEGACY_SURFACE_PROBE_TIMEOUT)
+    {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(LEGACY_SURFACE_PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(LEGACY_SURFACE_PROBE_TIMEOUT));
+    let req =
+        format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if std::io::Write::write_all(&mut stream, req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut raw = Vec::new();
+    if std::io::Read::read_to_end(&mut stream, &mut raw).is_err() {
+        return false;
+    }
+    let text = match std::str::from_utf8(&raw) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let (head, body) = match text.split_once("\r\n\r\n") {
+        Some(parts) => parts,
+        None => return false,
+    };
+    let status_line = head.lines().next().unwrap_or("");
+    if !(status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")) {
+        return false;
+    }
+    let val: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    val.get("session_id").and_then(|v| v.as_str()) == Some(expected_session_id)
+}
+
+fn path_present(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("failed to inspect {}: {e}", path.display())),
+    }
+}
+
+fn remove_file_if_present(
+    path: &Path,
+    label: &str,
+    dry_run: bool,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    if !path_present(path)? {
+        return Ok(());
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    if !dry_run {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("failed to remove {}: {e}", path.display()))?;
+    }
+    lines.push(format!("{verb} {label}"));
+    Ok(())
+}
+
+fn remove_dir_if_present(
+    path: &Path,
+    label: &str,
+    dry_run: bool,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    if !path_present(path)? {
+        return Ok(());
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    if !dry_run {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("failed to remove {}: {e}", path.display()))?;
+    }
+    lines.push(format!("{verb} {label}"));
+    Ok(())
+}
+
+fn newest_file_mtime_in(
+    dir: &Path,
+    newest: &mut Option<std::time::SystemTime>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("failed to inspect {}: {e}", path.display()))?;
+        if meta.is_dir() {
+            newest_file_mtime_in(&path, newest)?;
+        } else {
+            let mtime = meta
+                .modified()
+                .map_err(|e| format!("failed to read modified time of {}: {e}", path.display()))?;
+            if newest.is_none_or(|cur| mtime > cur) {
+                *newest = Some(mtime);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn newest_file_mtime(dir: &Path) -> Result<std::time::SystemTime, String> {
+    let mut newest = None;
+    newest_file_mtime_in(dir, &mut newest)?;
+    newest.ok_or_else(|| format!("surface directory {} contains no files", dir.display()))
+}
+
+/// Returns one line per thing removed (or, with dry_run, that would be removed).
+pub fn clean_surfaces(
+    main_checkout: &Path,
+    older_than_days: u64,
+    dry_run: bool,
+    now_secs: u64,
+) -> Result<Vec<String>, String> {
+    let mut lines = Vec::new();
+    let wt_dir = main_checkout.join(".wt");
+    let old_surface_path = wt_dir.join("surface.json");
+    let old_sessions_dir = wt_dir.join("sessions");
+
+    match std::fs::read_to_string(&old_surface_path) {
+        Ok(raw) => {
+            let info: LegacySurfaceFile = serde_json::from_str(&raw)
+                .map_err(|e| format!("failed to parse {}: {e}", old_surface_path.display()))?;
+            if !is_legacy_surface_running(info.port, &info.session_id) {
+                let token_path = blyte_agent::sandbox::surface_token_path(main_checkout)?;
+                let token_label = token_path.display().to_string();
+                remove_file_if_present(&old_surface_path, ".wt/surface.json", dry_run, &mut lines)?;
+                remove_dir_if_present(&old_sessions_dir, ".wt/sessions/", dry_run, &mut lines)?;
+                remove_file_if_present(&token_path, &token_label, dry_run, &mut lines)?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            remove_dir_if_present(&old_sessions_dir, ".wt/sessions/", dry_run, &mut lines)?;
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to read {}: {e}",
+                old_surface_path.display()
+            ));
+        }
+    }
+
+    let records = crate::surface_dir::list_records(main_checkout)?;
+    let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now_secs);
+    let max_age = std::time::Duration::from_secs(older_than_days.saturating_mul(86_400));
+
+    for record in records {
+        if crate::surface_dir::is_running(&record) {
+            continue;
+        }
+        let dir = crate::surface_dir::surface_dir(main_checkout, &record.id);
+        let newest = newest_file_mtime(&dir)?;
+        let is_older = match now.duration_since(newest) {
+            Ok(age) => age > max_age,
+            Err(_) => false,
+        };
+        if !is_older {
+            continue;
+        }
+        let token_path = blyte_agent::sandbox::surface_token_path_for_id(&record.id)?;
+        let dir_label = format!(".wt/surfaces/{}", record.id);
+        let token_label = token_path.display().to_string();
+        remove_dir_if_present(&dir, &dir_label, dry_run, &mut lines)?;
+        remove_file_if_present(&token_path, &token_label, dry_run, &mut lines)?;
+    }
+
+    Ok(lines)
 }
 
 #[derive(Debug)]
