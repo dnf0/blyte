@@ -529,6 +529,7 @@
       color: var(--color-strong);
       align-self: flex-end;
       max-width: 85%;
+      white-space: pre-wrap;
     }
 
     .msg-line.assistant {
@@ -5216,6 +5217,7 @@
           if (
             !hasOwn(req, "conflicting_files") ||
             !Array.isArray(req.conflicting_files) ||
+            req.conflicting_files.length === 0 ||
             req.conflicting_files.some(f => typeof f !== "string")
           ) {
             errors.push("missing or invalid field: conflicting_files");
@@ -5225,7 +5227,7 @@
           if (!hasOwn(req, "failing_step") || typeof req.failing_step !== "string" || req.failing_step.length === 0) {
             errors.push("missing or invalid field: failing_step");
           }
-          if (!hasOwn(req, "output_tail") || typeof req.output_tail !== "string") {
+          if (!hasOwn(req, "output_tail") || typeof req.output_tail !== "string" || req.output_tail.length === 0) {
             errors.push("missing or invalid field: output_tail");
           }
           break;
@@ -5355,11 +5357,9 @@
           '</div>' +
           prFormHtml;
       } else if (stateName === "conflict") {
-        const filesHtml = req.conflicting_files.length > 0
-          ? '<ul class="details-list">' +
-              req.conflicting_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") +
-            '</ul>'
-          : '<div class="request-muted mono">No conflicting files listed.</div>';
+        const filesHtml = '<ul class="details-list">' +
+            req.conflicting_files.map(f => '<li>' + escapeHtml(f) + '</li>').join("") +
+          '</ul>';
         bodyHtml = '<div class="request-detail-line">' +
             '<span class="details-label">Conflicting run</span>' +
             '<span class="run-id">' + escapeHtml(req.conflicting_run) + '</span>' +

@@ -1692,3 +1692,66 @@ fn a_runs_payload_without_combined_is_an_error() {
     );
     run_surface_script(&script);
 }
+
+#[test]
+fn a_conflict_card_without_files_is_a_validation_error() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderRequestCard({
+  request: "req-empty-conf",
+  runs: ["T1"],
+  state: "conflict",
+  conflicting_run: "T1",
+  conflicting_files: [],
+});
+assert.ok(html.includes("request-validation-error"), html);
+assert.ok(html.includes("conflicting_files"), html);
+assert.ok(!html.includes("No conflicting files listed."), html);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn a_check_failed_card_without_output_is_a_validation_error() {
+    let harness = r#"
+const assert = require("assert");
+
+const emptyHtml = renderRequestCard({
+  request: "req-empty-out",
+  runs: ["T1"],
+  state: "check_failed",
+  failing_step: "cargo test",
+  output_tail: "",
+});
+assert.ok(emptyHtml.includes("request-validation-error"), emptyHtml);
+assert.ok(emptyHtml.includes("output_tail"), emptyHtml);
+
+const missingHtml = renderRequestCard({
+  request: "req-missing-out",
+  runs: ["T1"],
+  state: "check_failed",
+  failing_step: "cargo test",
+});
+assert.ok(missingHtml.includes("request-validation-error"), missingHtml);
+assert.ok(missingHtml.includes("output_tail"), missingHtml);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn a_user_message_keeps_its_line_breaks() {
+    let html = load_surface_html();
+    let start = html
+        .find(".msg-line.user {")
+        .expect("surface page must define .msg-line.user CSS rule");
+    let rest = &html[start..];
+    let end = rest
+        .find('}')
+        .expect(".msg-line.user CSS rule must close with }");
+    let rule = &rest[..=end];
+    assert!(
+        rule.contains("white-space: pre-wrap"),
+        ".msg-line.user rule must contain white-space: pre-wrap:\n{rule}"
+    );
+}

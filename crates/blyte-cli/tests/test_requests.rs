@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use blyte_cli::cli::{ReviewVerdict, SurfaceArgs};
-use blyte_cli::combine::{CombineRecord, CombineState};
+use blyte_cli::combine::{CombineCheck, CombineRecord, CombineState, CombinedRun};
 use blyte_cli::http::{Request, Response};
 use blyte_cli::queue_actions::{decide, record_verdict, set_hold, Action};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::requests::{
     load_attempt_record, load_published_record, maybe_combine, request_readiness,
-    write_attempt_record, AttemptResult, Publisher, Readiness, RealPublisher, RequestsState,
+    write_attempt_record, AttemptRecord, AttemptResult, Publisher, Readiness, RealPublisher,
+    RequestsState,
 };
 use blyte_cli::serve::{generate_token, route, run_with_hooks, Surface, TOKEN_HEADER};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
@@ -2166,4 +2167,136 @@ fn the_timer_thread_ends_with_the_server() {
 
     assert!(!root.join(".wt/combined/req-after-stop.json").exists());
     assert!(!branch_exists(root, "blyte/req-after-stop"));
+}
+
+#[test]
+fn a_conflict_record_without_files_is_reported_as_an_error_naming_the_field() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+
+    let tip = create_run_branch(root, "CFN1", &base, "a.txt", "v1\n", "feat: cfn1");
+    write_start_file(root, "CFN1", Some("req-bad-conflict"), &base, 100, false);
+    write_summary(root, "CFN1", "verified", Some("wip/CFN1"));
+    write_checks(root, "CFN1", &[]);
+
+    let runs = vec![CombinedRun {
+        id: "CFN1".to_string(),
+        tip,
+    }];
+    let record = CombineRecord {
+        request: "req-bad-conflict".to_string(),
+        state: CombineState::Conflict,
+        branch: "blyte/req-bad-conflict".to_string(),
+        base,
+        runs: runs.clone(),
+        commits: Vec::new(),
+        check: CombineCheck::Ran,
+        conflicting_run: Some("CFN1".to_string()),
+        conflicting_files: Vec::new(),
+        failing_step: None,
+        output_tail: None,
+    };
+    let rec_path = root.join(".wt/combined/req-bad-conflict.json");
+    std::fs::create_dir_all(rec_path.parent().unwrap()).unwrap();
+    std::fs::write(&rec_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+    write_attempt_record(
+        root,
+        "req-bad-conflict",
+        &AttemptRecord {
+            runs,
+            result: AttemptResult::Conflict,
+            error: None,
+            reported: false,
+        },
+    )
+    .unwrap();
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&surface, "req-bad-conflict").unwrap());
+    wait_for_idle_entries(&surface.session, 1);
+
+    let captured = prompts.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let msg = &captured[0];
+    assert!(msg.contains("conflicting_files"), "msg: {msg}");
+    assert!(
+        msg.contains(".wt/combined/req-bad-conflict.json"),
+        "msg: {msg}"
+    );
+    assert!(!msg.contains("(none listed)"), "msg: {msg}");
+
+    let attempt = load_attempt_record(root, "req-bad-conflict")
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.result, AttemptResult::Error);
+    assert!(attempt.reported);
+    let err = attempt.error.as_deref().unwrap_or("");
+    assert!(err.contains("conflicting_files"), "err: {err}");
+    assert!(
+        err.contains(".wt/combined/req-bad-conflict.json"),
+        "err: {err}"
+    );
+    assert!(!err.contains("(none listed)"), "err: {err}");
+}
+
+#[test]
+fn a_check_failed_record_without_output_is_reported_as_an_error_naming_the_field() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+
+    let tip = create_run_branch(root, "CFO1", &base, "a.txt", "v1\n", "feat: cfo1");
+    write_start_file(root, "CFO1", Some("req-bad-cf"), &base, 100, false);
+    write_summary(root, "CFO1", "verified", Some("wip/CFO1"));
+    write_checks(root, "CFO1", &[]);
+
+    let runs = vec![CombinedRun {
+        id: "CFO1".to_string(),
+        tip,
+    }];
+    let record = CombineRecord {
+        request: "req-bad-cf".to_string(),
+        state: CombineState::CheckFailed,
+        branch: "blyte/req-bad-cf".to_string(),
+        base,
+        runs: runs.clone(),
+        commits: Vec::new(),
+        check: CombineCheck::Ran,
+        conflicting_run: None,
+        conflicting_files: Vec::new(),
+        failing_step: Some("cargo test".to_string()),
+        output_tail: Some(String::new()),
+    };
+    let rec_path = root.join(".wt/combined/req-bad-cf.json");
+    std::fs::create_dir_all(rec_path.parent().unwrap()).unwrap();
+    std::fs::write(&rec_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+    write_attempt_record(
+        root,
+        "req-bad-cf",
+        &AttemptRecord {
+            runs,
+            result: AttemptResult::CheckFailed,
+            error: None,
+            reported: false,
+        },
+    )
+    .unwrap();
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&surface, "req-bad-cf").unwrap());
+    wait_for_idle_entries(&surface.session, 1);
+
+    let captured = prompts.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let msg = &captured[0];
+    assert!(msg.contains("output_tail"), "msg: {msg}");
+    assert!(msg.contains(".wt/combined/req-bad-cf.json"), "msg: {msg}");
+
+    let attempt = load_attempt_record(root, "req-bad-cf").unwrap().unwrap();
+    assert_eq!(attempt.result, AttemptResult::Error);
+    assert!(attempt.reported);
+    let err = attempt.error.as_deref().unwrap_or("");
+    assert!(err.contains("output_tail"), "err: {err}");
+    assert!(err.contains(".wt/combined/req-bad-cf.json"), "err: {err}");
 }

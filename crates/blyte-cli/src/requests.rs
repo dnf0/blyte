@@ -681,36 +681,61 @@ fn branch_matches_record(root: &Path, record: &CombineRecord) -> bool {
     git_rev_parse(root, &rev).is_ok_and(|actual| actual == expected)
 }
 
-fn format_record_failure(record: &CombineRecord) -> String {
+fn format_record_failure(record: &CombineRecord, record_path: &Path) -> Result<String, String> {
     match record.state {
         CombineState::Conflict => {
-            let run = record.conflicting_run.as_deref().unwrap_or("unknown");
-            let files = if record.conflicting_files.is_empty() {
-                "(none listed)".to_string()
-            } else {
-                record.conflicting_files.join(", ")
-            };
-            format!(
+            let run = record
+                .conflicting_run
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "combine record {} has state conflict with missing conflicting_run",
+                        record_path.display()
+                    )
+                })?;
+            if record.conflicting_files.is_empty() {
+                return Err(format!(
+                    "combine record {} has state conflict with empty conflicting_files",
+                    record_path.display()
+                ));
+            }
+            let files = record.conflicting_files.join(", ");
+            Ok(format!(
                 "Combine failed for request {} (state: conflict).\nConflicting run: {run}\nConflicting files: {files}",
                 record.request
-            )
+            ))
         }
         CombineState::CheckFailed => {
-            let step = record.failing_step.as_deref().unwrap_or("unknown");
-            let tail = record.output_tail.as_deref().unwrap_or("");
-            if tail.is_empty() {
-                format!(
-                    "Combine failed for request {} (state: check_failed).\nFailing step: {step}",
-                    record.request
-                )
-            } else {
-                format!(
-                    "Combine failed for request {} (state: check_failed).\nFailing step: {step}\nOutput tail:\n{tail}",
-                    record.request
-                )
-            }
+            let step = record
+                .failing_step
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "combine record {} has state check_failed with missing failing_step",
+                        record_path.display()
+                    )
+                })?;
+            let tail = record
+                .output_tail
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "combine record {} has state check_failed with missing or empty output_tail",
+                        record_path.display()
+                    )
+                })?;
+            Ok(format!(
+                "Combine failed for request {} (state: check_failed).\nFailing step: {step}\nOutput tail:\n{tail}",
+                record.request
+            ))
         }
-        CombineState::Combined => String::new(),
+        CombineState::Combined => Err(format!(
+            "combine record {} has state combined: not a failure record",
+            record_path.display()
+        )),
     }
 }
 
@@ -745,7 +770,9 @@ fn retry_failure_message(
                 AttemptResult::Combined | AttemptResult::Error => unreachable!(),
             };
             match load_combine_record(root, request)? {
-                Some(rec) if rec.state == expected_state => Ok(format_record_failure(&rec)),
+                Some(rec) if rec.state == expected_state => {
+                    format_record_failure(&rec, &combine_record_path(root, request))
+                }
                 _ => Err(format!(
                     "attempt file {} has result {:?} without a matching combine record",
                     path.display(),
@@ -839,16 +866,29 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
         if let Some(mut attempt) = load_attempt_record(&surface.root, request)? {
             if attempt.runs == current_runs {
                 if attempt.result != AttemptResult::Combined && !attempt.reported {
-                    let msg = retry_failure_message(&surface.root, request, &attempt)?;
-                    match surface.session.queue_for_request(request, &msg) {
-                        Ok(_) => {
-                            attempt.reported = true;
-                            write_attempt_record(&surface.root, request, &attempt)?;
-                        }
+                    match retry_failure_message(&surface.root, request, &attempt) {
+                        Ok(msg) => match surface.session.queue_for_request(request, &msg) {
+                            Ok(_) => {
+                                attempt.reported = true;
+                                write_attempt_record(&surface.root, request, &attempt)?;
+                            }
+                            Err(e) => {
+                                surface.session.record_error(&format!(
+                                    "failed to queue combine failure for {request}: {e}"
+                                ));
+                            }
+                        },
                         Err(e) => {
-                            surface.session.record_error(&format!(
-                                "failed to queue combine failure for {request}: {e}"
-                            ));
+                            let msg = format_error_failure(request, &e);
+                            record_and_report_failure(
+                                &surface.root,
+                                &surface.session,
+                                request,
+                                attempt.runs,
+                                AttemptResult::Error,
+                                Some(e),
+                                &msg,
+                            );
                         }
                     }
                 }
@@ -909,16 +949,32 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
                         CombineState::Combined => unreachable!(),
                     };
                     let runs = sorted_runs(rec.runs.clone());
-                    let msg = format_record_failure(&rec);
-                    record_and_report_failure(
-                        &root,
-                        &session,
-                        &request_owned,
-                        runs,
-                        result,
-                        None,
-                        &msg,
-                    );
+                    let rec_path = combine_record_path(&root, &request_owned);
+                    match format_record_failure(&rec, &rec_path) {
+                        Ok(msg) => {
+                            record_and_report_failure(
+                                &root,
+                                &session,
+                                &request_owned,
+                                runs,
+                                result,
+                                None,
+                                &msg,
+                            );
+                        }
+                        Err(e) => {
+                            let msg = format_error_failure(&request_owned, &e);
+                            record_and_report_failure(
+                                &root,
+                                &session,
+                                &request_owned,
+                                runs,
+                                AttemptResult::Error,
+                                Some(e),
+                                &msg,
+                            );
+                        }
+                    }
                 }
                 Ok(_) => {
                     let err_text = String::from_utf8_lossy(&err).trim().to_string();
