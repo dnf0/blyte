@@ -187,3 +187,161 @@ Run: `cargo test -p blyte-agent --test test_sandbox_read_deny --test test_sandbo
 fallbacks. Do not change which network destinations the sandbox allows (a separate decision).
 
 **Commit message:** `fix(sandbox): model-run commands cannot read the surface token or blyte's API key file`
+
+### Task HT
+
+**Goal.** Tests that coordinate a mock model server with a background base check through named pipes
+can block for ever, because every wait is unbounded. Make every wait bounded so a broken handshake
+fails the test within seconds with a message saying which step did not happen.
+
+**Depends on:** none. **Siblings:** TK, BD, CL and MR run separately and are not in this worktree.
+
+**Files (tests only):** `crates/blyte-cli/tests/test_dispatch_base_check.rs`,
+`crates/blyte-cli/tests/test_passed_trees.rs`. No change under `src/`.
+
+**What to build.**
+
+1. A helper in each file (or one shared test-support module if these tests already share one) that
+   replaces the blocking `std::fs::read_to_string(fifo)` and `std::fs::write(fifo, ..)` calls made
+   inside the mock server's handler: wait at most 15 s for the peer (regular marker files polled every
+   20 ms, or a non-blocking FIFO open with a deadline) and panic with a message naming the step
+   ("base check never reached its gate step", "base check never took the release") on timeout. The
+   gate shell command changes to match the helper.
+2. The mock servers (`model_server_with`, and the `TcpListener` loop in `test_passed_trees.rs`) set a
+   10 s read timeout on each accepted stream.
+3. `dispatch_command` in `test_dispatch_base_check.rs` sets `BLYTE_MODEL_TIMEOUT_SECS=10` and
+   `BLYTE_RETRY_DELAY_MS=10` and the dispatch calls in these tests pass `--max-seconds 60`, if those
+   settings exist in `src/` under those names (check; if a name differs use the real one and say so in
+   the final message).
+4. In `test_dispatch_failing_base_check_when_change_passes_verifies_with_notice_and_skips_base_record`
+   the handler's `else` branch that releases the base check becomes `else if n == 2`, with a plain
+   `else` returning the done body, so a third request cannot wait on the pipe again.
+5. Applies to: `test_dispatch_first_model_call_happens_before_base_check_ends`,
+   `test_dispatch_failing_parallel_base_gate_blocks_and_cleans_up`,
+   `test_dispatch_pending_base_check_stopped_without_orphan_process_and_removes_base_wt`,
+   `test_dispatch_failing_base_check_when_change_passes_verifies_with_notice_and_skips_base_record`,
+   and `dispatch_runs_base_check_when_base_tree_not_recorded`.
+
+**Tests.** Each of the five still asserts what it asserted before (do not weaken an assertion). Run
+each file 5 times in a row: `for i in 1 2 3 4 5; do cargo test -p blyte-cli --test test_dispatch_base_check --test test_passed_trees || exit 1; done`.
+
+**Commit message:** `test: bound every wait in the base-check handshake tests`
+
+### Task BD
+
+**Goal.** When the conversation model starts `blyte dispatch` in the background (the `blyte` tool in
+`crates/blyte-agent/src/tools.rs`, the `if background` branch), a dispatch that fails straight away
+(bad arguments, plan task not found, no API key, id already used) is reported as "started": its output
+goes to `/dev/null` and its exit status is dropped. Report early failures, and keep the output of late
+ones.
+
+**Depends on:** none. **Siblings:** TK, HT, CL and MR run separately and are not in this worktree.
+
+**Files:** `crates/blyte-agent/src/tools.rs` and its tests.
+
+**What to build.**
+
+1. The background child's stdout and stderr go to one file, `<root>/.wt/<id>.dispatch.out` (created
+   with truncate; if `.wt` cannot be created or the file cannot be opened, return an error naming the
+   path: no fallback to `/dev/null`).
+2. After spawning, wait up to 2 s for the child (poll `try_wait` every 50 ms). If it exits within that
+   time with a non-zero status, return `ToolOutcome::err` with `dispatch <id> failed to start (exit N)`
+   followed by the file's content bounded by the existing output bound. If it exits 0 within that time,
+   return ok with `dispatch <id> finished` and the bounded content. Otherwise return the existing
+   "started <id> in the background; use wait to learn when it ends" message, extended with the path of
+   the output file, and keep the reaper thread.
+3. No fallbacks: an error from `try_wait` is returned as an error.
+
+**Tests** (in the tools tests, using a stub executable the way existing tests of this tool stub `blyte`;
+if none do, add a test-only way to set the executable path):
+
+- stub exits 3 after printing `no API key` to stderr: outcome is an error containing `exit 3` and
+  `no API key`; `.wt/<id>.dispatch.out` contains `no API key`.
+- stub sleeps 5 s then exits 0: outcome is ok, contains `started` and the output file path, and returns
+  in under 4 s.
+- stub prints `ok` and exits 0 at once: outcome is ok and contains `finished`.
+- `.wt` is a regular file (so the output file cannot be created): outcome is an error naming the path.
+
+Run: `cargo test -p blyte-agent`.
+
+**Commit message:** `fix(agent): a background dispatch that fails to start is reported, and its output is kept`
+
+### Task CL
+
+**Goal.** Recording a verdict removed a run's worktree and branch although its commit was on no other
+branch. Find the cause in `crates/blyte-cli/src/clean.rs` (the merged test: `check_run_merged`,
+`decide_run_merged`, `resolve_base_targets`, and the verdict path that prints
+`removed .wt/<id>; branch wip/<id> deleted`) and fix it: a run is removed as merged only when its own
+commits are in the default branch or in the branch it was dispatched from.
+
+**Depends on:** none. **Siblings:** TK, HT, BD and MR run separately and are not in this worktree.
+
+**Files:** `crates/blyte-cli/src/clean.rs` and its tests. Nothing else unless the cause is elsewhere;
+then say so in the final message.
+
+**The case that went wrong (reproduce it as a test first; it must fail before the fix).**
+
+1. Default branch `main`. Branch `F` is created from `main`.
+2. Run `A` is dispatched with base `F` (its start file records `"base": "F"`) and commits `a` on `wip/A`.
+3. `git cherry-pick -x a` onto `F`. Recording `A`'s verdict removes `.wt/A` and `wip/A` (correct:
+   merged into `F`).
+4. Run `B` is dispatched with base `wip/A` (start file `"base": "wip/A"`) and commits `b` on `wip/B`
+   with parent `a`. `b` is cherry-picked nowhere.
+5. Recording `B`'s verdict `accepted` must print `worktree .wt/B kept until wip/B is merged` and leave
+   `wip/B`. It removed both.
+
+If this exact case does not fail on the current code, vary it (for example `A`'s verdict `fixed`, `A`'s
+worktree removed but start file present, `B`'s start file base as a commit id) until the removal
+reproduces, and state in the final message which variation did. If none does after an honest attempt,
+stop and say so; do not change the merged test without a failing test.
+
+**Also test:** after `git cherry-pick -x b` onto `F`, recording `B`'s verdict removes it; and the
+existing clean tests pass unchanged.
+
+Run: `cargo test -p blyte-cli clean`.
+
+**Commit message:** `fix(clean): a run whose base branch is gone is not removed until its own commits are merged`
+
+### Task MR
+
+**Goal.** A request whose work was combined and then merged and cleaned up (its runs' `wip/` branches
+removed by blyte's cleanup) shows in the surface's Requests view as `error` for ever ("branch ... does
+not resolve to a commit"), and an error is recorded on every poll. Give such a request a settled state.
+
+**Depends on:** none. **Siblings:** TK changes the surface token code in `serve.rs`; HT, BD and CL are
+elsewhere. None are in this worktree. Keep changes to `serve.rs` to what this task needs.
+
+**Files:** `crates/blyte-cli/src/requests.rs`, `crates/blyte-cli/assets/surface/index.html`, tests in
+`crates/blyte-cli/tests/test_requests.rs`, `test_serve.rs`, `test_surface_page.rs`.
+
+**What to build.**
+
+1. In the request status computation (the `Readiness::Ready` arm that calls
+   `resolve_current_run_tips`, and any other place a request's status needs its runs' tips): before
+   resolving tips, if the request has a combine record in state `combined` and every run of the request
+   is combined by the existing per-run rule (`run_is_combined` / `combined_run_ids`: listed in the
+   record, and its branch is gone or still at the recorded tip) and at least one of its branches is
+   gone, the state is `done`: no error, no combine attempt, no error recorded for the session. The
+   status carries the record's metadata as the `combined` state does.
+2. Anything else stays loud: a missing branch for a run that the record does not list, or a request
+   with no `combined` record, is still an `error` naming the run and branch. No fallbacks.
+3. A `done` request offers no push or pull-request action: the push and pull-request routes refuse it
+   with a message saying the request's branches were already merged and removed.
+4. Page: `done` is a known state, labelled `Done`, shown without an error style, with no Combine, Push
+   or Pull request buttons, and sorted after requests in every other state. An unknown state is still
+   rejected by the page's validation as now.
+
+**Tests.**
+
+- `test_requests.rs`: combined record, all branches deleted -> `done`, `error` is `None`. Combined
+  record, one of two branches deleted and the other at its recorded tip -> `done`. Combined record, a
+  branch deleted for a run the record does not list -> `error` naming that run. No record, branch
+  deleted -> `error` as now. Combined record, no branch deleted -> unchanged from now.
+- `test_serve.rs`: polling `/api/requests` twice for a `done` request records no session error; push
+  and pull-request on it are refused with the message above.
+- `test_surface_page.rs`: a `done` request renders the label `Done`, no action buttons, after a
+  `waiting` request; a request with state `bogus` is still rejected.
+
+Run: `cargo test -p blyte-cli --test test_requests --test test_serve --test test_surface_page`.
+
+**Commit message:** `fix(surface): a request whose branches were merged and removed shows as done, not as an error`
