@@ -33,6 +33,7 @@ pub mod provenance;
 pub mod publish;
 pub mod queue_actions;
 pub mod registry;
+pub mod removal_record;
 pub mod repl;
 pub mod replay;
 pub mod report;
