@@ -540,6 +540,28 @@
       max-width: 85%;
     }
 
+    .msg-line.peer {
+      background: var(--research-soft);
+      border-color: var(--research);
+      border-left: 3px solid var(--research);
+      color: var(--color-strong);
+      align-self: flex-start;
+      max-width: 85%;
+      white-space: pre-wrap;
+    }
+
+    .msg-held-note {
+      margin-top: 6px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: var(--amber-soft);
+      border: 1px solid var(--amber);
+      color: var(--amber);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      white-space: normal;
+    }
+
     .msg-meta {
       font-family: var(--font-mono);
       font-size: 10px;
@@ -2334,6 +2356,12 @@
       color: var(--color-muted);
     }
 
+    .request-started-by {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
     .request-run-id {
       padding: 1px 6px;
       border-radius: 3px;
@@ -3323,6 +3351,34 @@
             reportsHtml +
             '</div>';
         }
+        case "peer_message": {
+          if (typeof entry.from_name !== "string" || entry.from_name.length === 0) {
+            return renderEntryError(entry.seq, "peer_message entry missing or invalid field from_name");
+          }
+          if (typeof entry.from_repository !== "string" || entry.from_repository.length === 0) {
+            return renderEntryError(entry.seq, "peer_message entry missing or invalid field from_repository");
+          }
+          if (typeof entry.text !== "string") {
+            return renderEntryError(entry.seq, "peer_message entry missing or invalid field text");
+          }
+          if (typeof entry.queued !== "boolean") {
+            return renderEntryError(entry.seq, "peer_message entry missing or invalid field queued");
+          }
+          if (typeof entry.held !== "boolean") {
+            return renderEntryError(entry.seq, "peer_message entry missing or invalid field held");
+          }
+          const stillQueued = (opts && typeof opts.stillQueued === "boolean") ? opts.stillQueued : entry.queued;
+          const queuedBadge = stillQueued ? '<span class="msg-queued-badge">queued</span>' : "";
+          const heldHtml = entry.held
+            ? '<div class="msg-held-note">held: this surface has run five turns from other surfaces since you last wrote. It runs after your next message.</div>'
+            : "";
+          const heading = "from surface " + entry.from_name + " (" + entry.from_repository + ")";
+          return '<div class="entry msg-line peer" data-seq="' + seqAttr + '">' +
+            '<div class="msg-meta">' + escapeHtml(heading) + queuedBadge + '</div>' +
+            '<div>' + escapeHtml(entry.text) + '</div>' +
+            heldHtml +
+            '</div>';
+        }
         case "turn":
           return renderTurn(entry);
         case "tool_started": {
@@ -3654,6 +3710,21 @@
           }
           sessionBusy = true;
           updateWorkingState();
+        } else if (
+          entry.kind === "peer_message" &&
+          typeof entry.from_name === "string" && entry.from_name.length > 0 &&
+          typeof entry.from_repository === "string" && entry.from_repository.length > 0 &&
+          typeof entry.text === "string" &&
+          typeof entry.queued === "boolean" &&
+          typeof entry.held === "boolean"
+        ) {
+          if (!entry.held) {
+            if (entry.queued && hasValidSeq) {
+              queuedUserSeqs.push(entry.seq);
+            }
+            sessionBusy = true;
+            updateWorkingState();
+          }
         } else if (entry.kind === "idle" && typeof entry.turns === "number") {
           if (queuedUserSeqs.length > 0) {
             const startedSeq = queuedUserSeqs.shift();
@@ -5174,6 +5245,12 @@
       if (!hasOwn(req, "runs") || !Array.isArray(req.runs) || req.runs.some(r => typeof r !== "string")) {
         errors.push("missing or invalid field: runs");
       }
+      if (
+        !hasOwn(req, "started_by") ||
+        (req.started_by !== null && (typeof req.started_by !== "string" || req.started_by.length === 0))
+      ) {
+        errors.push("missing or invalid field: started_by");
+      }
       if (!hasOwn(req, "state") || typeof req.state !== "string" || req.state.length === 0) {
         errors.push("missing or invalid field: state");
         return errors;
@@ -5331,6 +5408,10 @@
         '<span class="' + pillClass + '">' + escapeHtml(stateLabel) + '</span>' +
       '</div>';
 
+      const startedByHtml = isPlainObject(req) && typeof req.started_by === "string" && req.started_by.length > 0
+        ? '<div class="request-started-by">started by surface ' + escapeHtml(req.started_by) + '</div>'
+        : "";
+
       const runsHtml = validRuns !== null
         ? '<div class="request-runs"><span>runs</span>' +
             validRuns.map(id => '<span class="request-run-id">' + escapeHtml(id) + '</span>').join("") +
@@ -5446,6 +5527,7 @@
 
       return '<article class="request-card ' + cardStateClass + '" data-request-id="' + escapeHtml(reqId) + '">' +
         headerHtml +
+        startedByHtml +
         runsHtml +
         bodyHtml +
         actionErrorHtml +
