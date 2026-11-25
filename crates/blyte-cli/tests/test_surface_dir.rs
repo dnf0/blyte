@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::thread;
+use std::time::Duration;
 
 use blyte_agent::sandbox::validate_surface_id;
 use blyte_cli::surface_dir::{
@@ -24,17 +25,54 @@ fn spawn_health_server(body: String) -> (u16, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf);
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes());
-            let _ = stream.flush();
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut req_bytes = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !req_bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            req_bytes.extend_from_slice(&buf[..n]);
         }
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes()).unwrap();
+        stream.flush().unwrap();
+
+        let request = String::from_utf8(req_bytes).unwrap();
+        let (head, _) = request
+            .split_once("\r\n\r\n")
+            .unwrap_or_else(|| panic!("incomplete HTTP request: {request:?}"));
+        let mut lines = head.split("\r\n");
+        assert_eq!(
+            lines.next(),
+            Some("GET /api/health HTTP/1.1"),
+            "unexpected request: {request:?}"
+        );
+        let headers: Vec<(String, String)> = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        let expected_host = format!("127.0.0.1:{port}");
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "host" && *v == expected_host),
+            "missing or unexpected Host header in request: {request:?}"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "connection" && v.eq_ignore_ascii_case("close")),
+            "missing Connection: close header in request: {request:?}"
+        );
     });
     (port, handle)
 }
