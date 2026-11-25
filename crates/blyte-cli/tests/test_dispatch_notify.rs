@@ -99,6 +99,15 @@ fn surface_listener(summary_path: PathBuf) -> (u16, Arc<Mutex<Vec<RecordedNotify
                     None
                 }
             });
+            // `blyte dispatch` cleans up first, and that asks each recorded surface
+            // for its health; only what is posted afterwards is a notification.
+            if request_line.starts_with("GET /api/health ") {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                continue;
+            }
             let summary_existed = summary_path.exists();
             recorded_for_thread.lock().unwrap().push(RecordedNotify {
                 request_line,
