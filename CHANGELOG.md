@@ -1,3 +1,9 @@
+## v0.63.0 (2026-11-25)
+
+### Feat
+
+- rename the orchestrator to the conversation model (#418)
+
 ## v0.62.0 (2026-11-24)
 
 ### Feat
