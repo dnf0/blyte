@@ -2863,3 +2863,101 @@ fn an_unreadable_combine_record_is_a_500_naming_the_file() {
         bad_path.display()
     );
 }
+
+#[test]
+fn a_combined_run_whose_branch_was_removed_is_still_marked() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("removed-branch-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "RB1", "req-rb", "rb1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-rb").unwrap());
+    surface.requests.wait_for_idle("req-rb");
+
+    assert!(Command::new("git")
+        .args(["branch", "-D", "wip/RB1"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 1);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "RB1");
+    assert_eq!(runs[0]["combined"], true);
+}
+
+#[test]
+fn a_new_run_in_a_combined_request_does_not_break_the_runs_list() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("new-run-in-combined-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "NR1", "req-nr", "nr1.txt", "one\n", now);
+
+    let (surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&surface, "req-nr").unwrap());
+    surface.requests.wait_for_idle("req-nr");
+
+    write_file(&repo.join(".wt/tasks/NR2.md"), "# Task NR2\n");
+    write_file(
+        &repo.join(".wt/NR2.start.json"),
+        &format!(
+            r#"{{"id":"NR2","pid":{},"started_at":{},"base_sha":"{base_sha}","task_file":".wt/tasks/NR2.md","research":false,"request":"req-nr"}}"#,
+            std::process::id(),
+            now + 1
+        ),
+    );
+
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 2);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], "NR1");
+    assert_eq!(runs[0]["combined"], true);
+}
+
+#[test]
+fn a_second_finished_run_not_in_the_record_is_not_marked() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("second-run-unrecorded-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
+    let now = now_secs();
+    create_verified_request_run(&repo, &base_sha, "SR1", "req-sr", "sr1.txt", "one\n", now);
+
+    let (combine_surface, _calls) = make_surface(repo.clone(), vec![]);
+    assert!(blyte_cli::requests::maybe_combine(&combine_surface, "req-sr").unwrap());
+    combine_surface.requests.wait_for_idle("req-sr");
+
+    create_verified_request_run(
+        &repo,
+        &base_sha,
+        "SR2",
+        "req-sr",
+        "sr2.txt",
+        "two\n",
+        now + 1,
+    );
+
+    let (surface, handle) = make_busy_surface(repo.clone());
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), now + 2);
+    let _ = handle.release.send(());
+
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    let sr1 = runs.iter().find(|r| r["id"] == "SR1").unwrap();
+    let sr2 = runs.iter().find(|r| r["id"] == "SR2").unwrap();
+    assert_eq!(sr1["combined"], true);
+    assert_eq!(sr2["combined"], false);
+}
