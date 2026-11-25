@@ -13,8 +13,9 @@ use blyte_cli::http::{Request, Response};
 use blyte_cli::queue_actions::{decide, record_verdict, set_hold, Action};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::requests::{
-    load_attempt_record, load_published_record, maybe_combine, request_readiness,
-    write_attempt_record, AttemptRecord, AttemptResult, Publisher, Readiness, RealPublisher,
+    list_requests, load_attempt_record, load_published_record, maybe_combine,
+    open_request_pull_request, push_request, request_readiness, write_attempt_record,
+    AttemptRecord, AttemptResult, Publisher, Readiness, RealPublisher, RequestActionError,
     RequestsState,
 };
 use blyte_cli::serve::{generate_token, route, run_with_hooks, Surface, TOKEN_HEADER};
@@ -300,12 +301,36 @@ fn write_start_file_with_base(
     started_at: u64,
     research: bool,
 ) {
+    write_start_file_with_surface(
+        root,
+        id,
+        request,
+        base_ref,
+        base_sha,
+        started_at,
+        research,
+        Value::String("s00000000000000aa".to_string()),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_start_file_with_surface(
+    root: &Path,
+    id: &str,
+    request: Option<&str>,
+    base_ref: &str,
+    base_sha: &str,
+    started_at: u64,
+    research: bool,
+    surface: Value,
+) {
     let mut obj = json!({
         "id": id,
         "base": base_ref,
         "base_sha": base_sha,
         "started_at": started_at,
         "research": research,
+        "surface": surface,
     });
     if let Some(req) = request {
         obj["request"] = Value::String(req.to_string());
@@ -372,7 +397,7 @@ fn make_surface_with_session(
         .unwrap_or("repo")
         .to_string();
     Surface {
-        surface_id: "surface-req-test".to_string(),
+        surface_id: "s00000000000000aa".to_string(),
         surface_name: repo.clone(),
         root,
         repo,
@@ -1970,6 +1995,15 @@ fn start_stoppable_surface(
     repo: &Path,
 ) -> (u16, String, Arc<AtomicBool>, std::thread::JoinHandle<i32>) {
     ensure_isolated_state_home();
+    let rec = blyte_cli::surface_dir::SurfaceRecord {
+        id: "s00000000000000aa".to_string(),
+        name: "test-surface".to_string(),
+        pid: 0,
+        port: 0,
+        session_id: "sess-test-surface".to_string(),
+        started_at: 1_700_000_000,
+    };
+    blyte_cli::surface_dir::write_record(repo, &rec).unwrap();
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -1982,7 +2016,7 @@ fn start_stoppable_surface(
             port: 0,
             no_open: true,
             days: 14,
-            name: Some("test-surface".to_string()),
+            resume: Some("test-surface".to_string()),
             ..Default::default()
         };
         let mut out = SharedBuf(out_bg);
@@ -2458,4 +2492,216 @@ fn a_combined_request_with_no_branch_deleted_stays_combined() {
     assert_eq!(arr[0]["request"], "req-keep-comb");
     assert_eq!(arr[0]["state"], "combined");
     assert!(arr[0]["error"].is_null());
+}
+
+#[test]
+fn list_requests_returns_only_owned_requests() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "OAA", &base, "aa.txt", "aa\n", "feat: aa");
+    create_run_branch(root, "OBB", &base, "bb.txt", "bb\n", "feat: bb");
+    create_run_branch(root, "OUN", &base, "un.txt", "un\n", "feat: un");
+
+    write_start_file_with_surface(
+        root,
+        "OAA",
+        Some("req-aa"),
+        "main",
+        &base,
+        now,
+        false,
+        Value::String("s00000000000000aa".to_string()),
+    );
+    write_start_file_with_surface(
+        root,
+        "OBB",
+        Some("req-bb"),
+        "main",
+        &base,
+        now + 1,
+        false,
+        Value::String("s00000000000000bb".to_string()),
+    );
+    write_start_file_with_surface(
+        root,
+        "OUN",
+        Some("req-unowned"),
+        "main",
+        &base,
+        now + 2,
+        false,
+        Value::Null,
+    );
+    for id in ["OAA", "OBB", "OUN"] {
+        write_summary(root, id, "verified", Some(&format!("wip/{id}")));
+        write_checks(root, id, &[]);
+    }
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/aa"));
+    let reqs = list_requests(&surface).unwrap();
+    let names: Vec<&str> = reqs.iter().map(|r| r.request.as_str()).collect();
+    assert_eq!(names, vec!["req-aa"]);
+}
+
+#[test]
+fn maybe_combine_skips_request_owned_by_another_surface() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "CBB", &base, "cbb.txt", "bb\n", "feat: bb");
+    write_start_file_with_surface(
+        root,
+        "CBB",
+        Some("req-bb-ready"),
+        "main",
+        &base,
+        now,
+        false,
+        Value::String("s00000000000000bb".to_string()),
+    );
+    write_summary(root, "CBB", "verified", Some("wip/CBB"));
+    write_checks(root, "CBB", &[]);
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/bb"));
+    assert!(!maybe_combine(&surface, "req-bb-ready").unwrap());
+    surface.requests.wait_all_idle();
+    assert!(!root.join(".wt/combined").exists());
+}
+
+#[test]
+fn push_and_pr_refuse_other_surface_request_and_mixed_owner_request() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "PBB", &base, "pbb.txt", "bb\n", "feat: pbb");
+    write_start_file_with_surface(
+        root,
+        "PBB",
+        Some("req-bb-pub"),
+        "main",
+        &base,
+        now,
+        false,
+        Value::String("s00000000000000bb".to_string()),
+    );
+    write_summary(root, "PBB", "verified", Some("wip/PBB"));
+    write_checks(root, "PBB", &[]);
+
+    let (mut surface_bb, _) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/bb"));
+    surface_bb.surface_id = "s00000000000000bb".to_string();
+    assert!(maybe_combine(&surface_bb, "req-bb-pub").unwrap());
+    surface_bb.requests.wait_for_idle("req-bb-pub");
+
+    let pub_aa = FakePublisher::ok("https://example/aa");
+    let (surface_aa, _) = make_surface(
+        root.to_path_buf(),
+        Arc::clone(&pub_aa) as Arc<dyn Publisher>,
+    );
+
+    let push_err = push_request(&surface_aa, "req-bb-pub").unwrap_err();
+    assert_eq!(
+        push_err,
+        RequestActionError::NotOwned("request req-bb-pub belongs to another surface".to_string())
+    );
+    assert!(pub_aa.push_calls.lock().unwrap().is_empty());
+
+    let pr_err = open_request_pull_request(&surface_aa, "req-bb-pub", "Title", "Body").unwrap_err();
+    assert_eq!(
+        pr_err,
+        RequestActionError::NotOwned("request req-bb-pub belongs to another surface".to_string())
+    );
+    assert!(pub_aa.pr_calls.lock().unwrap().is_empty());
+
+    let push_http = route(
+        &surface_aa,
+        &post_json_with_token(
+            "/api/requests/req-bb-pub/push",
+            Some(&surface_aa.token),
+            &json!({}),
+        ),
+        now + 1,
+    );
+    assert_eq!(push_http.status, 403);
+    assert_eq!(
+        parse_json(&push_http)["error"],
+        "request req-bb-pub belongs to another surface"
+    );
+
+    let pr_http = route(
+        &surface_aa,
+        &post_json_with_token(
+            "/api/requests/req-bb-pub/pull-request",
+            Some(&surface_aa.token),
+            &json!({ "title": "Title", "body": "Body" }),
+        ),
+        now + 1,
+    );
+    assert_eq!(pr_http.status, 403);
+    assert_eq!(
+        parse_json(&pr_http)["error"],
+        "request req-bb-pub belongs to another surface"
+    );
+
+    create_run_branch(root, "MX1", &base, "mx1.txt", "1\n", "feat: mx1");
+    create_run_branch(root, "MX2", &base, "mx2.txt", "2\n", "feat: mx2");
+    write_start_file_with_surface(
+        root,
+        "MX1",
+        Some("req-mixed"),
+        "main",
+        &base,
+        now + 2,
+        false,
+        Value::String("s00000000000000aa".to_string()),
+    );
+    write_start_file_with_surface(
+        root,
+        "MX2",
+        Some("req-mixed"),
+        "main",
+        &base,
+        now + 3,
+        false,
+        Value::String("s00000000000000bb".to_string()),
+    );
+
+    let mixed_err = push_request(&surface_aa, "req-mixed").unwrap_err();
+    match mixed_err {
+        RequestActionError::BadRequest(msg) => {
+            assert!(msg.contains("more than one surface"), "msg={msg}");
+        }
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+    assert!(pub_aa.push_calls.lock().unwrap().is_empty());
+    assert!(pub_aa.pr_calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn non_string_surface_in_start_record_returns_error_naming_file() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    write_start_file_with_surface(
+        root,
+        "BADSURF",
+        Some("req-badsurf"),
+        "main",
+        &base,
+        now,
+        false,
+        json!(5),
+    );
+
+    let (surface, _prompts) =
+        make_surface(root.to_path_buf(), FakePublisher::ok("https://example/bad"));
+    let err = list_requests(&surface).unwrap_err();
+    assert!(err.contains("BADSURF.start.json"), "err={err}");
 }

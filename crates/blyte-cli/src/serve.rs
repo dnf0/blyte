@@ -380,7 +380,7 @@ fn handle_post_approval(surface: &Surface, id: &str, req: &Request) -> Response 
     }
 }
 
-fn reconcile_runs(
+pub fn reconcile_runs(
     surface: &Surface,
     now: u64,
 ) -> Result<(crate::live_runs::LiveRuns, Vec<String>), String> {
@@ -388,10 +388,11 @@ fn reconcile_runs(
         .reconcile_lock
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let owned = crate::requests::owned_run_ids(surface)?;
     let mut live = crate::live_runs::collect(&surface.root, now, surface.days)?;
     let mut any_written = false;
     for run in &live.runs {
-        if run.checks_recorded {
+        if !owned.contains(&run.id) || run.checks_recorded {
             continue;
         }
         if crate::queue_actions::ensure_checks(&surface.root, &run.id)? {
@@ -401,6 +402,8 @@ fn reconcile_runs(
     if any_written {
         live = crate::live_runs::collect(&surface.root, now, surface.days)?;
     }
+    live.running.retain(|run| owned.contains(&run.id));
+    live.runs.retain(|run| owned.contains(&run.id));
 
     let mut errors = Vec::new();
     if let Err(e) = crate::run_results::report_finished_runs(surface) {
@@ -481,11 +484,20 @@ fn handle_run_diff(surface: &Surface, id: &str) -> Response {
     }
     let wt_dir = surface.root.join(".wt");
     let wt = wt_dir.join(id);
+    let start = wt_dir.join(format!("{id}.start.json"));
     let summary = wt_dir.join(format!("{id}.json"));
     let report_json = wt_dir.join(format!("{id}.report.json"));
     let report_md = wt_dir.join(format!("{id}.report.md"));
-    if !wt.exists() && !summary.exists() && !report_json.exists() && !report_md.exists() {
+    if !wt.exists()
+        && !start.exists()
+        && !summary.exists()
+        && !report_json.exists()
+        && !report_md.exists()
+    {
         return json_error(404, format!("unknown run: {id}"));
+    }
+    if let Err(err) = crate::requests::run_owner_check(surface, id) {
+        return request_action_error_response(err);
     }
     match crate::queue_actions::compute_review(&surface.root, id, true) {
         Ok(data) => {
@@ -540,6 +552,19 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
         Some(serde_json::Value::String(s)) => Some(s.clone()),
         Some(_) => return json_error(400, "field note must be a string or null"),
     };
+
+    let wt_dir = surface.root.join(".wt");
+    let run_exists = is_valid_run_id(id)
+        && (wt_dir.join(id).exists()
+            || wt_dir.join(format!("{id}.start.json")).exists()
+            || wt_dir.join(format!("{id}.json")).exists()
+            || wt_dir.join(format!("{id}.report.json")).exists()
+            || wt_dir.join(format!("{id}.report.md")).exists());
+    if run_exists {
+        if let Err(err) = crate::requests::run_owner_check(surface, id) {
+            return request_action_error_response(err);
+        }
+    }
 
     let decision =
         match crate::queue_actions::decide(&surface.root, id, action, note.as_deref(), now) {
@@ -605,6 +630,7 @@ fn handle_requests(surface: &Surface) -> Response {
 fn request_action_error_response(err: RequestActionError) -> Response {
     match err {
         RequestActionError::BadRequest(msg) => json_error(400, msg),
+        RequestActionError::NotOwned(msg) => json_error(403, msg),
         RequestActionError::Conflict(msg) => json_error(409, msg),
         RequestActionError::Internal(msg) => json_error(500, msg),
     }

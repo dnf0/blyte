@@ -977,7 +977,7 @@ fn make_idle_surface(root: PathBuf) -> Surface {
         .to_string();
     let session = Session::start(Box::new(IdleRunner), "test-model".to_string());
     Surface {
-        surface_id: "surface-direct-edit-test".to_string(),
+        surface_id: "s00000000000000aa".to_string(),
         surface_name: repo.clone(),
         root,
         repo,
@@ -1136,6 +1136,8 @@ fn edit_finish_surface_maybe_combine_combines_request_branch() {
             "e-surf",
             "--request",
             "req-surf",
+            "--surface",
+            "s00000000000000aa",
             "--message",
             "feat: surface combine commit",
         ],

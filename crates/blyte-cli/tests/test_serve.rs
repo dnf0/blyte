@@ -147,7 +147,7 @@ fn write_finished_run_summary(
     write_file(
         &wt.join(format!("{id}.start.json")),
         &format!(
-            r#"{{"id":"{id}","pid":999999,"started_at":{started_at},"base_sha":"{base_sha}","task_file":"{}","research":false}}"#,
+            r#"{{"id":"{id}","pid":999999,"started_at":{started_at},"base_sha":"{base_sha}","task_file":"{}","research":false,"surface":"s00000000000000aa"}}"#,
             task_file.display()
         ),
     );
@@ -203,7 +203,7 @@ fn make_surface(
     let (runner, calls) = ScriptedRunner::new(responses);
     let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
     let surface = Surface {
-        surface_id: "s0123456789abcdef".to_string(),
+        surface_id: "s00000000000000aa".to_string(),
         surface_name: repo.clone(),
         root,
         repo,
@@ -671,7 +671,7 @@ fn runs_carry_hold_and_checks() {
     write_file(
         &wt.join("T1.start.json"),
         &format!(
-            r#"{{"id":"T1","pid":999999,"started_at":{},"base_sha":"{base_sha}","task_file":"{}","research":false}}"#,
+            r#"{{"id":"T1","pid":999999,"started_at":{},"base_sha":"{base_sha}","task_file":"{}","research":false,"surface":"s00000000000000aa"}}"#,
             t - 600,
             task_file.display()
         ),
@@ -857,6 +857,10 @@ fn decision_errors() {
     init_git_repo(&repo);
     let t = now_secs();
     write_file(
+        &repo.join(".wt/T1.start.json"),
+        &format!(r#"{{"id":"T1","started_at":{t},"surface":"s00000000000000aa"}}"#),
+    );
+    write_file(
         &repo.join(".wt/T1.json"),
         r#"{"outcome":"verified","seconds":10}"#,
     );
@@ -930,6 +934,10 @@ fn send_back_reaches_the_conversation() {
     let repo = d.path().join("demo-repo");
     init_git_repo(&repo);
     let t = now_secs();
+    write_file(
+        &repo.join(".wt/T1.start.json"),
+        &format!(r#"{{"id":"T1","started_at":{t},"surface":"s00000000000000aa"}}"#),
+    );
     write_file(
         &repo.join(".wt/T1.json"),
         r#"{"outcome":"verified","seconds":10}"#,
@@ -1538,6 +1546,10 @@ fn post_endpoints_reject_missing_and_wrong_token() {
     let repo = d.path().join("demo-repo");
     init_git_repo(&repo);
     let t = now_secs();
+    write_file(
+        &repo.join(".wt/T1.start.json"),
+        &format!(r#"{{"id":"T1","started_at":{t},"surface":"s00000000000000aa"}}"#),
+    );
     write_file(
         &repo.join(".wt/T1.json"),
         r#"{"outcome":"verified","seconds":10}"#,
@@ -2659,10 +2671,16 @@ fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
         .success());
 
     let now = now_secs();
+    let surface_id = blyte_cli::surface_dir::list_records(&repo)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("surface record")
+        .id;
     write_file(
         &repo.join(".wt/NC1.start.json"),
         &format!(
-            r#"{{"id":"NC1","pid":999999,"started_at":{now},"base_sha":"{base_sha}","task_file":".wt/tasks/NC1.md","research":false,"request":"req-notify"}}"#
+            r#"{{"id":"NC1","pid":999999,"started_at":{now},"base_sha":"{base_sha}","task_file":".wt/tasks/NC1.md","research":false,"request":"req-notify","surface":"{surface_id}"}}"#
         ),
     );
     write_file(
@@ -2765,7 +2783,7 @@ fn make_busy_surface(root: PathBuf) -> (Surface, BlockingHandle) {
     let (runner, handle) = BlockingRunner::new();
     let session = Session::start(Box::new(runner), "gemini-4-neon".to_string());
     let surface = Surface {
-        surface_id: "sfedcba9876543210".to_string(),
+        surface_id: "s00000000000000aa".to_string(),
         surface_name: repo.clone(),
         root,
         repo,
@@ -2832,7 +2850,7 @@ fn create_verified_request_run(
     write_file(
         &repo.join(format!(".wt/{id}.start.json")),
         &format!(
-            r#"{{"id":"{id}","pid":999999,"started_at":{started_at},"base_sha":"{base_sha}","task_file":".wt/tasks/{id}.md","research":false,"request":"{request}"}}"#
+            r#"{{"id":"{id}","pid":999999,"started_at":{started_at},"base_sha":"{base_sha}","task_file":".wt/tasks/{id}.md","research":false,"request":"{request}","surface":"s00000000000000aa"}}"#
         ),
     );
     write_file(
@@ -3066,7 +3084,7 @@ fn a_new_run_in_a_combined_request_does_not_break_the_runs_list() {
     write_file(
         &repo.join(".wt/NR2.start.json"),
         &format!(
-            r#"{{"id":"NR2","pid":{},"started_at":{},"base_sha":"{base_sha}","task_file":".wt/tasks/NR2.md","research":false,"request":"req-nr"}}"#,
+            r#"{{"id":"NR2","pid":{},"started_at":{},"base_sha":"{base_sha}","task_file":".wt/tasks/NR2.md","research":false,"request":"req-nr","surface":"s00000000000000aa"}}"#,
             std::process::id(),
             now + 1
         ),
@@ -3204,6 +3222,212 @@ fn polling_a_done_request_records_no_session_error_and_refuses_push_and_pr() {
         pr_body.contains("already merged and removed"),
         "pr body: {pr_body}"
     );
+}
+
+#[test]
+fn api_runs_lists_only_owned_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("owned-runs-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    let t = now_secs();
+
+    add_run_worktree(&repo, "RAA");
+    add_run_worktree(&repo, "RBB");
+    add_run_worktree(&repo, "RNULL");
+
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/raa.md"),
+        "RAA",
+        &base_sha,
+        t - 60,
+    );
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/rbb.md"),
+        "RBB",
+        &base_sha,
+        t - 50,
+    );
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/rnull.md"),
+        "RNULL",
+        &base_sha,
+        t - 40,
+    );
+    write_file(
+        &repo.join(".wt/RBB.start.json"),
+        &format!(
+            r#"{{"id":"RBB","pid":999999,"started_at":{},"base_sha":"{base_sha}","task_file":"{}","research":false,"surface":"s00000000000000bb"}}"#,
+            t - 50,
+            d.path().join("tasks/rbb.md").display()
+        ),
+    );
+    write_file(
+        &repo.join(".wt/RNULL.start.json"),
+        &format!(
+            r#"{{"id":"RNULL","pid":999999,"started_at":{},"base_sha":"{base_sha}","task_file":"{}","research":false,"surface":null}}"#,
+            t - 40,
+            d.path().join("tasks/rnull.md").display()
+        ),
+    );
+
+    let (surface, _) = make_surface(repo, Vec::new());
+    let resp = route(&surface, &get(&surface, "/api/runs", vec![]), t);
+    assert_eq!(resp.status, 200);
+    let body = parse_json(&resp);
+    let ids: Vec<&str> = body["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["RAA"]);
+}
+
+#[test]
+fn decision_and_diff_for_another_surfaces_run_return_403_and_write_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("refuse-other-run-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    let t = now_secs();
+
+    add_run_worktree(&repo, "RBB");
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/rbb.md"),
+        "RBB",
+        &base_sha,
+        t - 50,
+    );
+    write_file(
+        &repo.join(".wt/RBB.start.json"),
+        &format!(
+            r#"{{"id":"RBB","pid":999999,"started_at":{},"base_sha":"{base_sha}","task_file":"{}","research":false,"surface":"s00000000000000bb"}}"#,
+            t - 50,
+            d.path().join("tasks/rbb.md").display()
+        ),
+    );
+
+    add_run_worktree(&repo, "RNULL");
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/rnull.md"),
+        "RNULL",
+        &base_sha,
+        t - 40,
+    );
+    write_file(
+        &repo.join(".wt/RNULL.start.json"),
+        &format!(
+            r#"{{"id":"RNULL","pid":999999,"started_at":{},"base_sha":"{base_sha}","task_file":"{}","research":false,"surface":null}}"#,
+            t - 40,
+            d.path().join("tasks/rnull.md").display()
+        ),
+    );
+
+    let (surface, _) = make_surface(repo.clone(), Vec::new());
+
+    let dec_bb = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/runs/RBB/decision",
+            &serde_json::json!({ "action": "accept" }),
+        ),
+        t,
+    );
+    assert_eq!(dec_bb.status, 403);
+    assert_eq!(
+        parse_json(&dec_bb)["error"],
+        "run RBB belongs to another surface"
+    );
+    assert!(!repo.join(".wt/RBB.verdict.json").exists());
+    assert!(!repo.join(".wt/RBB.hold.json").exists());
+
+    let hold_bb = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/runs/RBB/decision",
+            &serde_json::json!({ "action": "hold" }),
+        ),
+        t,
+    );
+    assert_eq!(hold_bb.status, 403);
+    assert!(!repo.join(".wt/RBB.verdict.json").exists());
+    assert!(!repo.join(".wt/RBB.hold.json").exists());
+
+    let diff_bb = route(&surface, &get(&surface, "/api/runs/RBB/diff", vec![]), t);
+    assert_eq!(diff_bb.status, 403);
+    assert_eq!(
+        parse_json(&diff_bb)["error"],
+        "run RBB belongs to another surface"
+    );
+
+    let dec_null = route(
+        &surface,
+        &post_json(
+            &surface,
+            "/api/runs/RNULL/decision",
+            &serde_json::json!({ "action": "accept" }),
+        ),
+        t,
+    );
+    assert_eq!(dec_null.status, 403);
+    assert_eq!(
+        parse_json(&dec_null)["error"],
+        "run RNULL was not started by a surface"
+    );
+    assert!(!repo.join(".wt/RNULL.verdict.json").exists());
+    assert!(!repo.join(".wt/RNULL.hold.json").exists());
+
+    let diff_null = route(&surface, &get(&surface, "/api/runs/RNULL/diff", vec![]), t);
+    assert_eq!(diff_null.status, 403);
+    assert_eq!(
+        parse_json(&diff_null)["error"],
+        "run RNULL was not started by a surface"
+    );
+}
+
+#[test]
+fn reconcile_runs_writes_checks_only_for_owned_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let repo = d.path().join("reconcile-owned-repo");
+    let base_sha = init_repo_with_commit(&repo);
+    let t = now_secs();
+
+    add_run_worktree(&repo, "RAA");
+    add_run_worktree(&repo, "RBB");
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/raa.md"),
+        "RAA",
+        &base_sha,
+        t - 60,
+    );
+    write_finished_run_summary(
+        &repo,
+        &d.path().join("tasks/rbb.md"),
+        "RBB",
+        &base_sha,
+        t - 50,
+    );
+    write_file(
+        &repo.join(".wt/RBB.start.json"),
+        &format!(
+            r#"{{"id":"RBB","pid":999999,"started_at":{},"base_sha":"{base_sha}","task_file":"{}","research":false,"surface":"s00000000000000bb"}}"#,
+            t - 50,
+            d.path().join("tasks/rbb.md").display()
+        ),
+    );
+
+    let (surface, _) = make_surface(repo.clone(), Vec::new());
+    blyte_cli::serve::reconcile_runs(&surface, t).unwrap();
+
+    assert!(repo.join(".wt/RAA.checks.json").is_file());
+    assert!(!repo.join(".wt/RBB.checks.json").exists());
 }
 
 fn assert_no_file_under_contains(dir: &Path, needle: &str) {
