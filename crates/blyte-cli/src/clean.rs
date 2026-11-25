@@ -2586,30 +2586,53 @@ pub fn clean_repo_with_options(
         report_other_worktrees_with_ctx(root, &mut ctx, &all_worktrees);
     }
 
-    if !is_linked {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        match clean_surfaces(root, older_than_days, dry_run, now_secs) {
-            Ok(lines) => {
-                if !quiet {
-                    for line in lines {
-                        println!("{line}");
-                    }
-                }
-            }
-            Err(err) => {
-                eprintln!("blyte: {err}");
-                had_errors = true;
-            }
-        }
+    if !is_linked
+        && run_clean_surfaces_at(
+            root,
+            older_than_days,
+            dry_run,
+            quiet,
+            std::time::SystemTime::now(),
+        )
+    {
+        had_errors = true;
     }
 
     CleanRepoStats {
         removed_worktrees,
         freed_bytes,
         had_errors,
+    }
+}
+
+fn unix_secs_from_system_time(now: std::time::SystemTime) -> Result<u64, String> {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| format!("system clock is before UNIX_EPOCH: {e}"))
+}
+
+fn run_clean_surfaces_at(
+    root: &Path,
+    older_than_days: u64,
+    dry_run: bool,
+    quiet: bool,
+    now: std::time::SystemTime,
+) -> bool {
+    match unix_secs_from_system_time(now)
+        .and_then(|now_secs| clean_surfaces(root, older_than_days, dry_run, now_secs))
+    {
+        Ok(lines) => {
+            if !quiet {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            false
+        }
+        Err(err) => {
+            eprintln!("blyte: {err}");
+            true
+        }
     }
 }
 
@@ -2625,36 +2648,22 @@ fn is_legacy_surface_running(port: u16, expected_session_id: &str) -> bool {
     if port == 0 {
         return false;
     }
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = match std::net::TcpStream::connect_timeout(&addr, LEGACY_SURFACE_PROBE_TIMEOUT)
-    {
-        Ok(s) => s,
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .timeout_read(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .timeout_write(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .timeout(LEGACY_SURFACE_PROBE_TIMEOUT)
+        .redirects(0)
+        .build();
+    let url = format!("http://127.0.0.1:{port}/api/health");
+    let resp = match agent.get(&url).call() {
+        Ok(r) => r,
         Err(_) => return false,
     };
-    let _ = stream.set_read_timeout(Some(LEGACY_SURFACE_PROBE_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(LEGACY_SURFACE_PROBE_TIMEOUT));
-    let req =
-        format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    if std::io::Write::write_all(&mut stream, req.as_bytes()).is_err() {
+    if resp.status() != 200 {
         return false;
     }
-    let mut raw = Vec::new();
-    if std::io::Read::read_to_end(&mut stream, &mut raw).is_err() {
-        return false;
-    }
-    let text = match std::str::from_utf8(&raw) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let (head, body) = match text.split_once("\r\n\r\n") {
-        Some(parts) => parts,
-        None => return false,
-    };
-    let status_line = head.lines().next().unwrap_or("");
-    if !(status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")) {
-        return false;
-    }
-    let val: serde_json::Value = match serde_json::from_str(body) {
+    let val: serde_json::Value = match resp.into_json() {
         Ok(v) => v,
         Err(_) => return false,
     };
@@ -3525,4 +3534,39 @@ pub fn clean_on_review(root: &Path, id: &str) {
     }
 
     spawn_background_clean(root, Some(id));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run_clean_surfaces_at, unix_secs_from_system_time};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn unix_secs_from_system_time_rejects_pre_epoch_time() {
+        let pre_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .expect("pre-epoch SystemTime");
+        let err = unix_secs_from_system_time(pre_epoch)
+            .expect_err("expected error for time before UNIX_EPOCH");
+        assert!(
+            err.contains("UNIX_EPOCH"),
+            "error should name UNIX_EPOCH: {err}"
+        );
+    }
+
+    #[test]
+    fn unix_secs_from_system_time_accepts_post_epoch_time() {
+        let ts = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert_eq!(unix_secs_from_system_time(ts), Ok(1_800_000_000));
+    }
+
+    #[test]
+    fn run_clean_surfaces_at_reports_error_on_pre_epoch_time() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pre_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .expect("pre-epoch SystemTime");
+        let had_errors = run_clean_surfaces_at(tmp.path(), 14, false, true, pre_epoch);
+        assert!(had_errors, "pre-epoch system clock must set had_errors");
+    }
 }

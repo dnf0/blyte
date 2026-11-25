@@ -3,10 +3,10 @@ use blyte_cli::clean::clean_surfaces;
 use blyte_cli::surface_dir::{self, SurfaceRecord};
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
@@ -75,23 +75,67 @@ fn unused_port() -> u16 {
     listener.local_addr().expect("local_addr").port()
 }
 
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn assert_health_request(req: &str) {
+    let request_line = req.lines().next().unwrap_or("");
+    assert!(
+        request_line == "GET /api/health HTTP/1.1" || request_line == "GET /api/health HTTP/1.0",
+        "unexpected health request line: {request_line:?}"
+    );
+}
+
 fn spawn_health_listener(body: String) -> (u16, thread::JoinHandle<()>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind health listener");
     let port = listener.local_addr().expect("local_addr").port();
     let handle = thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf);
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes());
-        }
+        let (mut stream, _) = listener.accept().expect("accept health probe");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let req = read_http_request(&mut stream);
+        assert_health_request(&req);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(resp.as_bytes())
+            .expect("write health response");
+        let _ = stream.flush();
     });
     (port, handle)
+}
+
+fn spawn_held_health_listener(
+    raw_response: String,
+) -> (u16, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind held health listener");
+    let port = listener.local_addr().expect("local_addr").port();
+    let (release_tx, release_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept held health probe");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let req = read_http_request(&mut stream);
+        assert_health_request(&req);
+        stream
+            .write_all(raw_response.as_bytes())
+            .expect("write raw health response");
+        stream.flush().expect("flush raw health response");
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        drop(stream);
+    });
+    (port, release_tx, handle)
 }
 
 fn write_file(path: &Path, content: &str) {
@@ -169,6 +213,98 @@ fn old_running_surface_is_left_alone() {
 }
 
 #[test]
+fn old_surface_with_mismatched_session_id_is_removed() {
+    let _xdg = XdgStateGuard::new();
+    let repo = init_temp_repo();
+    let (port, handle) = spawn_health_listener(r#"{"session_id":"other-sess"}"#.to_string());
+    let surface_file = repo.path().join(".wt/surface.json");
+    let sessions_file = repo.path().join(".wt/sessions/entries.jsonl");
+    let token_path = surface_token_path(repo.path()).expect("token path");
+
+    write_file(
+        &surface_file,
+        &format!(r#"{{"pid":99999,"port":{port},"session_id":"expected-sess","started_at":100}}"#),
+    );
+    write_file(&sessions_file, "{\"type\":\"note\"}\n");
+    write_file(&token_path, "secret-token\n");
+
+    let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
+    handle.join().expect("listener thread");
+
+    assert_eq!(lines.len(), 3, "expected 3 lines, got: {lines:?}");
+    assert!(!surface_file.exists(), ".wt/surface.json should be removed");
+    assert!(
+        !repo.path().join(".wt/sessions").exists(),
+        ".wt/sessions/ should be removed"
+    );
+    assert!(!token_path.exists(), "old token file should be removed");
+}
+
+#[test]
+fn old_running_surface_chunked_response_is_left_alone() {
+    let _xdg = XdgStateGuard::new();
+    let repo = init_temp_repo();
+    let body = r#"{"session_id":"live-chunked"}"#;
+    let raw_response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+        body.len(),
+        body
+    );
+    let (port, release_tx, handle) = spawn_held_health_listener(raw_response);
+    let surface_file = repo.path().join(".wt/surface.json");
+    let sessions_file = repo.path().join(".wt/sessions/entries.jsonl");
+    let token_path = surface_token_path(repo.path()).expect("token path");
+
+    write_file(
+        &surface_file,
+        &format!(r#"{{"pid":99999,"port":{port},"session_id":"live-chunked","started_at":100}}"#),
+    );
+    write_file(&sessions_file, "{\"type\":\"note\"}\n");
+    write_file(&token_path, "secret-token\n");
+
+    let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
+    let _ = release_tx.send(());
+    handle.join().expect("listener thread");
+
+    assert!(lines.is_empty(), "expected no lines, got: {lines:?}");
+    assert!(surface_file.exists(), ".wt/surface.json must stay");
+    assert!(sessions_file.exists(), ".wt/sessions/ must stay");
+    assert!(token_path.exists(), "old token file must stay");
+}
+
+#[test]
+fn old_running_surface_keepalive_connection_is_left_alone() {
+    let _xdg = XdgStateGuard::new();
+    let repo = init_temp_repo();
+    let body = r#"{"session_id":"live-keepalive"}"#;
+    let raw_response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (port, release_tx, handle) = spawn_held_health_listener(raw_response);
+    let surface_file = repo.path().join(".wt/surface.json");
+    let sessions_file = repo.path().join(".wt/sessions/entries.jsonl");
+    let token_path = surface_token_path(repo.path()).expect("token path");
+
+    write_file(
+        &surface_file,
+        &format!(r#"{{"pid":99999,"port":{port},"session_id":"live-keepalive","started_at":100}}"#),
+    );
+    write_file(&sessions_file, "{\"type\":\"note\"}\n");
+    write_file(&token_path, "secret-token\n");
+
+    let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
+    let _ = release_tx.send(());
+    handle.join().expect("listener thread");
+
+    assert!(lines.is_empty(), "expected no lines, got: {lines:?}");
+    assert!(surface_file.exists(), ".wt/surface.json must stay");
+    assert!(sessions_file.exists(), ".wt/sessions/ must stay");
+    assert!(token_path.exists(), "old token file must stay");
+}
+
+#[test]
 fn dry_run_reports_old_surface_removals_without_deleting() {
     let _xdg = XdgStateGuard::new();
     let repo = init_temp_repo();
@@ -223,7 +359,7 @@ fn stopped_surface_older_than_threshold_and_token_are_removed() {
         pid: 99999,
         port: unused_port(),
         session_id: "sess-15d".to_string(),
-        started_at: NOW_SECS - 15 * DAY_SECS,
+        started_at: NOW_SECS - DAY_SECS,
     };
     surface_dir::write_record(repo.path(), &record).expect("write record");
     let entries = surface_dir::entries_path(repo.path(), id);
@@ -231,9 +367,11 @@ fn stopped_surface_older_than_threshold_and_token_are_removed() {
     let token_path = surface_token_path_for_id(id).expect("token path for id");
     write_file(&token_path, "per-surface-token\n");
 
-    let old_ts = NOW_SECS - 15 * DAY_SECS;
-    set_mtime(&surface_dir::record_path(repo.path(), id), old_ts);
-    set_mtime(&entries, old_ts);
+    set_mtime(
+        &surface_dir::record_path(repo.path(), id),
+        NOW_SECS - 16 * DAY_SECS,
+    );
+    set_mtime(&entries, NOW_SECS - 15 * DAY_SECS);
 
     let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
     assert_eq!(lines.len(), 2, "expected 2 lines, got: {lines:?}");
@@ -277,6 +415,43 @@ fn stopped_surface_younger_than_threshold_is_kept_with_token() {
         "young stopped surface directory must stay"
     );
     assert!(token_path.exists(), "young stopped surface token must stay");
+}
+
+#[test]
+fn stopped_surface_with_old_record_and_newer_file_is_kept() {
+    let _xdg = XdgStateGuard::new();
+    let repo = init_temp_repo();
+    let id = "s0123456789abcdef";
+    let record = SurfaceRecord {
+        id: id.to_string(),
+        name: "main".to_string(),
+        pid: 99999,
+        port: unused_port(),
+        session_id: "sess-mixed".to_string(),
+        started_at: NOW_SECS - 20 * DAY_SECS,
+    };
+    surface_dir::write_record(repo.path(), &record).expect("write record");
+    let entries = surface_dir::entries_path(repo.path(), id);
+    write_file(&entries, "{\"type\":\"note\"}\n");
+    let token_path = surface_token_path_for_id(id).expect("token path for id");
+    write_file(&token_path, "per-surface-token\n");
+
+    set_mtime(
+        &surface_dir::record_path(repo.path(), id),
+        NOW_SECS - 15 * DAY_SECS,
+    );
+    set_mtime(&entries, NOW_SECS - 13 * DAY_SECS);
+
+    let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
+    assert!(lines.is_empty(), "expected no lines, got: {lines:?}");
+    assert!(
+        surface_dir::surface_dir(repo.path(), id).exists(),
+        "surface directory with a newer file must stay"
+    );
+    assert!(
+        token_path.exists(),
+        "token for surface directory with a newer file must stay"
+    );
 }
 
 #[test]
