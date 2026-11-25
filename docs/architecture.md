@@ -14,7 +14,7 @@ flowchart TB
         tr["task_runner: headless runs"]
         repl["repl: interactive"]
         disp["dispatch: dispatch, review, status"]
-        skill["skill: orchestrator setup"]
+        skill["skill: conversation model setup"]
         rep["report: run report JSON"]
         cfg["config: blyte.toml"]
     end
@@ -129,7 +129,7 @@ A gated run ends in one of five outcomes: `verified` (the gate passed; the only 
 `gate_failed` (the gate failed `--max-gates` times), `budget_exhausted`, `blocked` (the model says it
 cannot go on, the tree is unchanged since the last gate, and the failing steps also fail at the commit
 the run started from), or `error` (the provider
-or the environment broke, which is distinct from failing work). An ungated run (`--orchestrate`)
+or the environment broke, which is distinct from failing work). An ungated run (`--converse`)
 that stops by itself ends `finished`.
 
 ## The gate
@@ -292,17 +292,17 @@ which is what `--max-cost` and the report's `cost_usd` use.
   the budget, and the gate from `--gate`. The run writes a report (`--report`), the machine-readable
   contract that blyte-eval reads (see [Run reports](reports.md)).
 - **The REPL** sends each prompt through the same task runner, keeping the goal and gate between prompts.
-- **`blyte.toml`** (`blyte init`) stores a repository's gate and dispatch defaults, so an
-  orchestrator doesn't have to repeat them.
+- **`blyte.toml`** (`blyte init`) stores a repository's gate and dispatch defaults, so a
+  conversation model doesn't have to repeat them.
 
-## Dispatch: blyte under an orchestrator
+## Dispatch: blyte under a conversation model
 
 `blyte dispatch <id> <task>` is how a frontier model hands blyte one task
-([the workflow](orchestration.md)):
+([the workflow](workflow.md)):
 
 ```mermaid
 flowchart LR
-    o["orchestrator"] -->|"blyte dispatch T1 task.md"| d["dispatch"]
+    o["conversation model"] -->|"blyte dispatch T1 task.md"| d["dispatch"]
     d --> start[".wt/T1.start.json (written first)"]
     d --> wt["git worktree .wt/T1 on branch wip/T1"]
     d --> child["child blyte in the worktree: task wrapped in the dispatch rules, gate, rollback off, report"]

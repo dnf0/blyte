@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use blyte_cli::cli::Cli;
-use blyte_cli::orchestrator_text::{DEFAULT_PROCESS, REFERENCE};
+use blyte_cli::conversation_text::{DEFAULT_PROCESS, REFERENCE};
 use clap::CommandFactory;
 
 enum Snippet<'a> {
@@ -215,8 +215,8 @@ fn the_check_catches_an_unknown_flag() {
 
 #[test]
 fn reference_describes_unsandboxed_and_no_dev_null_redirect() {
-    assert!(blyte_cli::orchestrator_text::SANDBOX_ON_PARAGRAPH.contains("unsandboxed"));
-    assert!(blyte_cli::orchestrator_text::SANDBOX_ON_PARAGRAPH.contains(
+    assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains("unsandboxed"));
+    assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains(
         "the shell and the write tools can write only in `.wt/tasks` and temporary directories"
     ));
     assert!(!REFERENCE.contains("> /dev/null"));

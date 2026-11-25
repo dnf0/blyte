@@ -4,7 +4,7 @@
 //!
 //! The first file found wins: `.blyte/rules.md` (written for blyte), `.claude/agy-rules.md` (the
 //! implementer rules repositories already keep for headless agents), then `AGENTS.md` (the
-//! cross-tool convention). `CLAUDE.md` is not read: it is written for the orchestrator. Each is
+//! cross-tool convention). `CLAUDE.md` is not read: it is written for the conversation model. Each is
 //! looked for in the working tree, then in the main checkout, since the file may be untracked.
 
 use std::path::{Path, PathBuf};

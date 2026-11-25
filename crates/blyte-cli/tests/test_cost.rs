@@ -28,13 +28,13 @@ fn cost_with_missing_log_exits_zero() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(
         stdout.trim(),
-        "blyte $0.00 (orchestrator $0.00, implementers $0.00 in 0 runs)"
+        "blyte $0.00 (conversation model $0.00, implementers $0.00 in 0 runs)"
     );
 
     let out_json = blyte_cmd(tmp.path(), &["cost", "--json"], Some(&missing_path));
     assert_eq!(out_json.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).unwrap();
-    assert_eq!(v["orchestrator_usd"], 0.0);
+    assert_eq!(v["conversation_usd"], 0.0);
     assert_eq!(v["implementers_usd"], 0.0);
     assert_eq!(v["runs"], 0);
 }
@@ -99,14 +99,14 @@ fn cost_cli_with_entries_and_filters() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap().trim(),
-        "blyte $1.00 (orchestrator $0.15, implementers $0.85 in 2 runs)"
+        "blyte $1.00 (conversation model $0.15, implementers $0.85 in 2 runs)"
     );
 
     // JSON format
     let out = blyte_cmd(tmp.path(), &["cost", "--json"], Some(&log_path));
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!((v["orchestrator_usd"].as_f64().unwrap() - 0.15).abs() < 1e-4);
+    assert!((v["conversation_usd"].as_f64().unwrap() - 0.15).abs() < 1e-4);
     assert!((v["implementers_usd"].as_f64().unwrap() - 0.85).abs() < 1e-4);
     assert_eq!(v["runs"], 2);
 
@@ -119,7 +119,7 @@ fn cost_cli_with_entries_and_filters() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap().trim(),
-        "blyte $0.50 (orchestrator $0.15, implementers $0.35 in 1 runs)"
+        "blyte $0.50 (conversation model $0.15, implementers $0.35 in 1 runs)"
     );
 
     // Filter by since
@@ -127,7 +127,7 @@ fn cost_cli_with_entries_and_filters() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap().trim(),
-        "blyte $0.85 (orchestrator $0.00, implementers $0.85 in 2 runs)"
+        "blyte $0.85 (conversation model $0.00, implementers $0.85 in 2 runs)"
     );
 
     // Filter by repo
@@ -135,7 +135,7 @@ fn cost_cli_with_entries_and_filters() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap().trim(),
-        "blyte $0.50 (orchestrator $0.00, implementers $0.50 in 1 runs)"
+        "blyte $0.50 (conversation model $0.00, implementers $0.50 in 1 runs)"
     );
 
     // Combined filter
@@ -155,7 +155,7 @@ fn cost_cli_with_entries_and_filters() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap().trim(),
-        "blyte $0.35 (orchestrator $0.00, implementers $0.35 in 1 runs)"
+        "blyte $0.35 (conversation model $0.00, implementers $0.35 in 1 runs)"
     );
 }
 
@@ -192,7 +192,7 @@ fn turn_lines_do_not_count_as_runs() {
     let t = blyte_cli::cost::totals(&entries, None, None, None);
     assert_eq!(t.runs, 1);
     assert!((t.implementers_usd - 0.65).abs() < 1e-9);
-    assert_eq!(t.orchestrator_usd, 0.0);
+    assert_eq!(t.conversation_usd, 0.0);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn old_ledger_totals_unchanged() {
     let t = blyte_cli::cost::totals(&entries, None, None, None);
     assert_eq!(t.runs, 2);
     assert!((t.implementers_usd - 0.60).abs() < 1e-9);
-    assert_eq!(t.orchestrator_usd, 0.0);
+    assert_eq!(t.conversation_usd, 0.0);
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn a_killed_run_keeps_its_cost() {
     let t = blyte_cli::cost::totals(&entries, None, None, None);
     assert_eq!(t.runs, 0);
     assert!((t.implementers_usd - 0.40).abs() < 1e-9);
-    assert_eq!(t.orchestrator_usd, 0.0);
+    assert_eq!(t.conversation_usd, 0.0);
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn model_review_rows_add_cost_but_not_runs() {
     let t = blyte_cli::cost::totals(&entries, None, None, None);
     assert_eq!(t.runs, 1);
     assert!((t.implementers_usd - 0.25).abs() < 1e-9);
-    assert_eq!(t.orchestrator_usd, 0.0);
+    assert_eq!(t.conversation_usd, 0.0);
 
     let only_review = vec![ledger_entry("model_review", Some("d2"), Some(0.12))];
     let t2 = blyte_cli::cost::totals(&only_review, None, None, None);
@@ -332,7 +332,7 @@ fn session_filter_selects_only_that_session() {
     assert_eq!(out_a.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out_a.stdout).unwrap().trim(),
-        "blyte $0.18 (orchestrator $0.00, implementers $0.18 in 1 runs)"
+        "blyte $0.18 (conversation model $0.00, implementers $0.18 in 1 runs)"
     );
 
     let out_b = blyte_cmd(
@@ -343,7 +343,7 @@ fn session_filter_selects_only_that_session() {
     assert_eq!(out_b.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out_b.stdout).unwrap().trim(),
-        "blyte $0.60 (orchestrator $0.20, implementers $0.40 in 1 runs)"
+        "blyte $0.60 (conversation model $0.20, implementers $0.40 in 1 runs)"
     );
 
     let out_unknown = blyte_cmd(
@@ -354,7 +354,7 @@ fn session_filter_selects_only_that_session() {
     assert_eq!(out_unknown.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out_unknown.stdout).unwrap().trim(),
-        "blyte $0.00 (orchestrator $0.00, implementers $0.00 in 0 runs)"
+        "blyte $0.00 (conversation model $0.00, implementers $0.00 in 0 runs)"
     );
 
     let out_help = blyte_cmd(dir.path(), &["cost", "--help"], Some(&log_path));
@@ -497,7 +497,7 @@ fn by_session_lists_each_session_and_the_total() {
     assert!(lines[1].contains("$0.40"), "{}", lines[1]);
     assert_eq!(
         lines[2],
-        "blyte $0.70 (orchestrator $0.00, implementers $0.70 in 2 runs)"
+        "blyte $0.70 (conversation model $0.00, implementers $0.70 in 2 runs)"
     );
 
     let out_json = blyte_cmd(
@@ -533,7 +533,7 @@ fn by_session_lists_each_session_and_the_total() {
     assert!((sessions[1]["cost_usd"].as_f64().unwrap() - 0.40).abs() < 1e-9);
     assert_eq!(val["runs"], 2);
     assert!((val["implementers_usd"].as_f64().unwrap() - 0.70).abs() < 1e-9);
-    assert!((val["orchestrator_usd"].as_f64().unwrap() - 0.0).abs() < 1e-9);
+    assert!((val["conversation_usd"].as_f64().unwrap() - 0.0).abs() < 1e-9);
 }
 
 #[test]
@@ -613,7 +613,7 @@ fn rows_without_a_session_are_listed_as_none() {
     assert!(lines[1].contains("$0.10"), "{}", lines[1]);
     assert_eq!(
         lines[2],
-        "blyte $0.40 (orchestrator $0.10, implementers $0.30 in 1 runs)"
+        "blyte $0.40 (conversation model $0.10, implementers $0.30 in 1 runs)"
     );
 
     let out_json = blyte_cmd(

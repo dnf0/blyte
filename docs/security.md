@@ -76,9 +76,9 @@ commands it runs are cut off.
 `--container` (set the container's network instead), or on a Linux kernel without Landlock
 network support. Package installs need the network, so install dependencies before an offline run.
 
-## The orchestrator
+## The conversation model
 
-Under `--orchestrate`, the orchestrator's `bash` shell runs inside the same host sandbox as any
+Under `--converse`, the conversation model's `bash` shell runs inside the same host sandbox as any
 other run, with `--network=off` by default (`--network=on` turns the network back on;
 `--sandbox=off` turns the sandbox off). When started from a linked git worktree, writes are also
 allowed in the main checkout's `.wt/` and the git common directory.

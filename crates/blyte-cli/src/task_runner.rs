@@ -68,9 +68,9 @@ pub struct TaskConfig {
     pub base_check: bool,
     /// Directory containing an untouched checkout of the base commit for background base checks.
     pub base_check_dir: Option<PathBuf>,
-    /// Whether this run is in orchestrate mode (`--orchestrate`).
-    pub orchestrate: bool,
-    /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool (`--dispatch-cmd`).
+    /// Whether this run is in converse mode (`--converse`).
+    pub converse: bool,
+    /// Command to run on the host when the conversation model delegates work via the `dispatch` tool (`--dispatch-cmd`).
     pub dispatch_cmd: Option<String>,
 }
 
@@ -83,9 +83,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
 
         let network = match &cli.network {
             Some(v) => v.clone(),
-            None if cli.orchestrate && cli.sandbox == "on" && cli.container.is_none() => {
-                "off".into()
-            }
+            None if cli.converse && cli.sandbox == "on" && cli.container.is_none() => "off".into(),
             None => "on".into(),
         };
 
@@ -112,7 +110,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             claim_check: cli.claim_check,
             base_check: cli.base_check,
             base_check_dir: cli.base_check_dir.clone(),
-            orchestrate: cli.orchestrate,
+            converse: cli.converse,
             dispatch_cmd: cli.dispatch_cmd.clone(),
         }
     }
@@ -126,8 +124,8 @@ fn build_sandbox_profile_for_root(
     config: &TaskConfig,
     root: &Path,
 ) -> blyte_agent::sandbox::Profile {
-    if config.orchestrate {
-        blyte_agent::sandbox::orchestrator_profile_net(
+    if config.converse {
+        blyte_agent::sandbox::conversation_profile_net(
             root,
             &config.allow_read,
             config.network == "on",
@@ -137,19 +135,19 @@ fn build_sandbox_profile_for_root(
     }
 }
 
-pub fn configure_orchestrate_policy(
-    orchestrate: bool,
+pub fn configure_converse_policy(
+    converse: bool,
     sandbox_on: bool,
     root: &Path,
     approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
     has_conversation: bool,
 ) -> Result<usize, String> {
-    if !orchestrate || !sandbox_on {
+    if !converse || !sandbox_on {
         blyte_agent::tools::set_write_scope(None);
         blyte_agent::tools::set_approval(None);
         return Ok(0);
     }
-    let tasks_dir = blyte_agent::sandbox::orchestrator_tasks_dir(root);
+    let tasks_dir = blyte_agent::sandbox::conversation_tasks_dir(root);
     std::fs::create_dir_all(&tasks_dir)
         .map_err(|e| format!("cannot create {}: {e}", tasks_dir.display()))?;
     let tasks_canon = tasks_dir
@@ -163,7 +161,7 @@ pub fn configure_orchestrate_policy(
         })
         .transpose()?;
     let mut allowed = vec![tasks_canon];
-    for dir in blyte_agent::sandbox::orchestrator_allowed(root) {
+    for dir in blyte_agent::sandbox::conversation_allowed(root) {
         if let Ok(canon) = dir.canonicalize() {
             if !allowed.contains(&canon) {
                 allowed.push(canon);
@@ -362,12 +360,12 @@ pub fn build_local_shell(config: &TaskConfig) -> blyte_agent::shell::PersistentS
             }
             let shell =
                 blyte_agent::shell::PersistentShell::local_sandboxed(config.root.clone(), profile);
-            if config.orchestrate {
+            if config.converse {
                 let root = config.root.clone();
                 let allow_read = config.allow_read.clone();
                 let network = config.network == "on";
                 shell.with_profile_builder(Arc::new(move || {
-                    blyte_agent::sandbox::orchestrator_profile_for_open_edits(
+                    blyte_agent::sandbox::conversation_profile_for_open_edits(
                         &root,
                         &allow_read,
                         network,
@@ -493,7 +491,7 @@ pub fn run_task(
     }
     let verification_cmd = config.gate.as_deref().unwrap_or("");
     let mut state = blyte_agent::state::State::new(&config.prompt, verification_cmd);
-    state.orchestrator.max_cost_usd = config.max_cost_usd;
+    state.brief.max_cost_usd = config.max_cost_usd;
     let mut stdout = std::io::stdout();
     let result =
         run_task_with_state_writer_and_progress(&config, &mut state, &mut stdout, progress);
@@ -715,7 +713,7 @@ fn run_task_with_event_callback(
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
     let started = std::time::Instant::now();
-    if config.orchestrate {
+    if config.converse {
         if std::env::var("BLYTE_SESSION")
             .map(|v| v.is_empty())
             .unwrap_or(true)
@@ -728,15 +726,15 @@ fn run_task_with_event_callback(
             std::env::set_var("BLYTE_SESSION", &id);
         }
         let sandbox_on = config.sandbox == "on";
-        let allowed_count = configure_orchestrate_policy(
+        let allowed_count = configure_converse_policy(
             true,
             sandbox_on,
             &config.root,
             approver,
             state.runtime.conversation.is_some(),
         )?;
-        if state.orchestrator.instructions.is_none() {
-            let lines = crate::orchestrator_text::set_state_instructions(
+        if state.brief.instructions.is_none() {
+            let lines = crate::conversation_text::set_state_instructions(
                 state,
                 config.dispatch_cmd.is_some(),
                 &config.root,
@@ -753,7 +751,7 @@ fn run_task_with_event_callback(
             .map_err(|e| format!("cannot locate blyte executable for the blyte tool: {e}"))?;
         blyte_agent::tools::set_blyte_tool(Some(exe));
     } else {
-        configure_orchestrate_policy(false, false, &config.root, None, false)?;
+        configure_converse_policy(false, false, &config.root, None, false)?;
         blyte_agent::tools::set_blyte_tool(None);
     }
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());
@@ -775,7 +773,7 @@ fn run_task_with_event_callback(
             "--max-cost needs a known price for {model_id}; none is known"
         ));
     }
-    state.orchestrator.max_cost_usd = config.max_cost_usd;
+    state.brief.max_cost_usd = config.max_cost_usd;
 
     // 2. Select context assembly strategy.
     let folded = blyte_agent::context::Folded {
@@ -811,7 +809,7 @@ fn run_task_with_event_callback(
         ),
         None => {
             blyte_agent::shell::set_pass_env(config.pass_env.clone());
-            if !config.orchestrate {
+            if !config.converse {
                 if let Some(r) = blyte_agent::rules::load(&config.root) {
                     eprintln!("blyte: repository rules from {}", r.source.display());
                 }
@@ -860,12 +858,12 @@ fn run_task_with_event_callback(
 
     let bg_base_check = match &config.base_check_dir {
         Some(base_dir)
-            if !blyte_agent::run::gate_steps(&state.orchestrator.verification_cmd).is_empty() =>
+            if !blyte_agent::run::gate_steps(&state.brief.verification_cmd).is_empty() =>
         {
             let deadline = max_duration.map(|d| std::time::Instant::now() + d);
             Some(BackgroundBaseCheck::start(
                 config,
-                state.orchestrator.verification_cmd.clone(),
+                state.brief.verification_cmd.clone(),
                 base_dir.clone(),
                 deadline,
             ))

@@ -2256,7 +2256,7 @@
           <div id="attached-reports" class="attached-reports" hidden></div>
           <form id="conversation-form" class="composer">
             <span id="composer-about" class="composer-about" hidden></span>
-            <input type="text" id="conversation-input" placeholder="Message the orchestrator..." autocomplete="off">
+            <input type="text" id="conversation-input" placeholder="Message the conversation model..." autocomplete="off">
             <button type="submit" class="btn btn-primary">Send</button>
           </form>
         </div>
@@ -2348,7 +2348,7 @@
     const GUIDE_SEEN_KEY = "blyte-mock-guide-seen";
     const NO_FILES_GROUP = "no files changed";
     const RESEARCH_GROUP = "research reports";
-    const FIXED_REPLY = "(mock) the orchestrator would answer here";
+    const FIXED_REPLY = "(mock) the conversation model would answer here";
     const GUIDE_STEPS = [
       {
         id: "replay",
@@ -2362,7 +2362,7 @@
         target: "#conversation",
         tab: null,
         title: "The conversation",
-        text: "Where you talk with the orchestrator. Results do not interrupt you here: they wait in the queue until you reach a stopping point."
+        text: "Where you talk with the conversation model. Results do not interrupt you here: they wait in the queue until you reach a stopping point."
       },
       {
         id: "queue",
@@ -2766,7 +2766,7 @@
       if (focusedGroup === null) {
         aboutEl.hidden = true;
         aboutEl.textContent = "";
-        inputEl.placeholder = "Message the orchestrator...";
+        inputEl.placeholder = "Message the conversation model...";
       } else {
         aboutEl.hidden = false;
         aboutEl.textContent = "about " + focusedGroup;
@@ -4877,7 +4877,7 @@
           seq: ++msgSeq,
           replayTime,
           role: "assistant",
-          meta: "orchestrator",
+          meta: "conversation model",
           text: FIXED_REPLY
         });
         const logEntry = {

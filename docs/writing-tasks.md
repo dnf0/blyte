@@ -1,12 +1,12 @@
 # How tasks are written for blyte
 
 !!! tip "You don't write these tasks yourself"
-    In normal use the **orchestrating agent writes them**: Claude Code (or Codex) plans your change
+    In normal use the **conversation model writes them**: Claude Code (or Codex) plans your change
     and composes one task per piece of work before dispatching it to blyte. The skill that
     `blyte skill install` adds teaches it exactly this format, so you ask for a change as usual and
     the tasks happen behind the scenes. This page explains what the agent writes and why, for when
     you want to check its work, tune the skill, drive `blyte dispatch` yourself, or build another
-    orchestrator.
+    conversation model.
 
 In the plan → delegate → review pattern, the task is where the frontier model's judgement is
 handed over. blyte sees only the task and the repository, nothing from the conversation that

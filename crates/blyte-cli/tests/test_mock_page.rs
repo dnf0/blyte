@@ -174,7 +174,7 @@ fn mock_page_guide_has_ten_steps_in_order() {
         (
             "conversation",
             "The conversation",
-            "Where you talk with the orchestrator. Results do not interrupt you here: they wait in the queue until you reach a stopping point.",
+            "Where you talk with the conversation model. Results do not interrupt you here: they wait in the queue until you reach a stopping point.",
         ),
         (
             "queue",

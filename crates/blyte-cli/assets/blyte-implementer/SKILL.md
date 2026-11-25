@@ -116,7 +116,7 @@ blyte dispatch T2 /abs/task-T2.md > /dev/null &
 wait
 ```
 
-**Under `blyte --orchestrate`** (your commands run in a shell that keeps background jobs alive, but you
+**Under `blyte --converse`** (your commands run in a shell that keeps background jobs alive, but you
 are not told when they exit, and each command times out after 300 s): start each dispatch in the
 background with both outputs redirected, or the command waits for it, then wait with `blyte wait`:
 

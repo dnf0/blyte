@@ -56,7 +56,7 @@ fn cli_source_affects_only_blyte() {
 #[test]
 fn cli_embedded_markdown_affects_blyte() {
     assert_packages(
-        &["crates/blyte-cli/assets/orchestrator/process.md"],
+        &["crates/blyte-cli/assets/conversation/process.md"],
         "packages: blyte",
     );
 }

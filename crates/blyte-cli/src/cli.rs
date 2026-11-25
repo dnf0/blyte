@@ -55,7 +55,7 @@ pub enum Command {
         #[arg(long)]
         rollback: bool,
     },
-    /// Show orchestrator and implementer costs
+    /// Show conversation model and implementer costs
     Cost(CostArgs),
     /// Print Claude Code's status line with blyte costs
     Statusline(StatuslineArgs),
@@ -64,7 +64,7 @@ pub enum Command {
     /// Fail when the working tree adds comments since a base commit
     #[command(hide = true)]
     Comments(CommentsArgs),
-    /// Print the instructions the orchestrator is given
+    /// Print the instructions the conversation model is given
     #[command(hide = true)]
     Instructions(InstructionsArgs),
 }
@@ -464,7 +464,7 @@ pub enum SkillAction {
         #[arg(long)]
         no_autocompact: bool,
 
-        /// Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all
+        /// Which conversation model to set up: claude (Claude Code), codex (Codex CLI) or all
         #[arg(
             long,
             default_value = "claude",
@@ -483,7 +483,7 @@ pub enum SkillAction {
         #[arg(long)]
         project: bool,
 
-        /// Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all
+        /// Which conversation model to set up: claude (Claude Code), codex (Codex CLI) or all
         #[arg(
             long,
             default_value = "claude",
@@ -521,12 +521,12 @@ pub struct Cli {
     #[arg(short, long)]
     pub gate: Option<String>,
 
-    /// Run blyte as the orchestrator: plan, dispatch implementers with `blyte dispatch`, review and merge
+    /// Run blyte as the conversation model: plan, dispatch implementers with `blyte dispatch`, review and merge
     #[arg(long, conflicts_with = "gate")]
-    pub orchestrate: bool,
+    pub converse: bool,
 
-    /// Command to run on the host when the orchestrator delegates work via the `dispatch` tool
-    #[arg(long, requires = "orchestrate")]
+    /// Command to run on the host when the conversation model delegates work via the `dispatch` tool
+    #[arg(long, requires = "converse")]
     pub dispatch_cmd: Option<String>,
 
     /// Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget)
@@ -593,7 +593,7 @@ pub struct Cli {
     )]
     pub sandbox: String,
 
-    /// Let commands blyte runs connect out: 'on' or 'off' (default 'on', or 'off' under --orchestrate). 'off' needs the sandbox
+    /// Let commands blyte runs connect out: 'on' or 'off' (default 'on', or 'off' under --converse). 'off' needs the sandbox
     #[arg(
         long,
         value_parser = ["on", "off"]
@@ -657,9 +657,9 @@ pub struct Cli {
     pub days: Option<u64>,
 }
 
-/// Turn and context defaults for `--orchestrate`. A flag the user gave explicitly wins.
-pub fn apply_orchestrate_defaults(cli: &mut Cli, matches: &clap::ArgMatches) {
-    if !cli.orchestrate {
+/// Turn and context defaults for `--converse`. A flag the user gave explicitly wins.
+pub fn apply_converse_defaults(cli: &mut Cli, matches: &clap::ArgMatches) {
+    if !cli.converse {
         return;
     }
     if matches.value_source("max_turns") == Some(clap::parser::ValueSource::DefaultValue) {

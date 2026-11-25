@@ -55,7 +55,7 @@ fn run_with_state(state: &mut State) -> String {
 #[test]
 fn instructions_replace_the_implementer_framing() {
     let mut state = State::new("build the feature", "true");
-    state.orchestrator.instructions = Some("## How you work\nX\n\n".to_string());
+    state.brief.instructions = Some("## How you work\nX\n\n".to_string());
     let system = run_with_state(&mut state);
 
     assert!(system.starts_with("## How you work\nX"), "{system}");
@@ -75,9 +75,9 @@ fn without_instructions_the_prompt_is_unchanged() {
 }
 
 #[test]
-fn orchestrator_state_serializes_without_instructions() {
+fn conversation_state_serializes_without_instructions() {
     let state = State::new("g", "");
     let val = serde_json::to_value(&state).unwrap();
     assert!(val.get("instructions").is_none());
-    assert!(val["orchestrator"].get("instructions").is_none());
+    assert!(val["brief"].get("instructions").is_none());
 }

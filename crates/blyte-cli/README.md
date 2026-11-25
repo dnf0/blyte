@@ -13,7 +13,7 @@ blyte skill install          # the Claude Code skill for the plan, delegate, rev
 | command | what it does |
 |---|---|
 | `blyte "<task>" --gate "<check>"` | run one task in the current repository until the check passes or a budget runs out |
-| `blyte dispatch <id> <task-file> --gate "<check>"` | run one task in its own worktree (`.wt/<id>`) and print a JSON summary for the orchestrator |
+| `blyte dispatch <id> <task-file> --gate "<check>"` | run one task in its own worktree (`.wt/<id>`) and print a JSON summary for the conversation model |
 | `blyte review <id> [--diff]` | show what a dispatched run did |
 | `blyte skill install [--project]` / `blyte skill print` | install or print the Claude Code skill |
 | `blyte` | the REPL |

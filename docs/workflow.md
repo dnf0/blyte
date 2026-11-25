@@ -37,7 +37,7 @@ sequenceDiagram
   fixing what they report is work a cheaper model does well inside a good harness.
 - **The gate makes the cheap model's work checkable.** blyte cannot declare itself done: the check
   passes or it does not, and every failure comes back to the model at once.
-- **The report tells the orchestrator what to do next.** `outcome`, `gate_failures`, `turns` and
+- **The report tells the conversation model what to do next.** `outcome`, `gate_failures`, `turns` and
   `cost_usd` are enough to decide between merge, follow-up and doing it yourself.
 - **Runs are contained.** Each task has its own worktree, blyte cannot push or merge, and the
   sandbox keeps commands inside the workspace and away from credentials.
@@ -60,7 +60,7 @@ sequenceDiagram
 Delegate a task when a careful engineer could do it from the task description alone, without
 asking anything, and the repository has a check that would catch a wrong result.
 
-Keep it with the orchestrator when it needs a design decision, the requirements are ambiguous,
+Keep it with the conversation model when it needs a design decision, the requirements are ambiguous,
 there is no check, or it touches credentials, deployment or other repositories.
 
 In practice the pattern pays off most when tasks are **specified precisely**: the files involved,
@@ -78,7 +78,7 @@ overall in our own work. See [Evidence](evidence.md#against-claude-doing-the-wor
 ## The workflow
 
 Two commands do the mechanical part: `blyte dispatch` and `blyte review`. The Claude Code skill
-(`blyte skill install`) teaches Claude to use them; any other orchestrator can call them directly.
+(`blyte skill install`) teaches Claude to use them; any other conversation model can call them directly.
 
 **1. Write the task** to a file, one task per file ([how](writing-tasks.md)):
 
@@ -218,27 +218,27 @@ minutes, $0.19). Before the skill named `sandbox_permissions`, Codex ran the dis
 sandbox, where it failed, and then wrote the code itself; `codex exec` also needs
 `--sandbox workspace-write` and `-c approval_policy=on-request` for escalation to be possible.
 
-## blyte as the orchestrator
+## blyte as the conversation model
 
-`blyte --orchestrate -m vertex/gemini-4-argon` runs interactive blyte as the orchestrator.
+`blyte --converse -m vertex/gemini-4-argon` runs interactive blyte as the conversation model.
 It plans the work, dispatches implementers with `blyte dispatch`, reviews their results and merges,
 just as Claude Code does with the skill. Its own interactive shell is unsandboxed so that it can
 create worktrees, run git commands, and launch dispatches; every implementer it dispatches runs in
 its own isolated sandbox.
 
-Because orchestrator sessions span planning, multiple dispatches, and review, `--orchestrate` defaults
+Because conversation model sessions span planning, multiple dispatches, and review, `--converse` defaults
 to 1000 turns and a 100,000-token folded tail budget. You can override either with `--max-turns` and
 `--fold-budget`. The conversation history is kept across prompts so the model remembers the whole plan;
-`/clear` resets the conversation when you start a new feature. You can provide personal orchestration
-rules in `~/.config/blyte/orchestrator.md` (or `$XDG_CONFIG_HOME/blyte/orchestrator.md`). To run parallel
+`/clear` resets the conversation when you start a new feature. You can provide personal process
+rules in `~/.config/blyte/process.md` (or `$XDG_CONFIG_HOME/blyte/process.md`). To run parallel
 tasks, start dispatches in the background redirected to `/dev/null` and use `blyte wait --any` to pick
 up finished runs as they land.
 
-### Headless orchestrate and `--dispatch-cmd`
+### Headless `--converse` and `--dispatch-cmd`
 
-`blyte --orchestrate [flags] -- "<prompt>"` runs unattended: given a prompt, it plans and orchestrates once, writes `--report <path>` if requested, and exits when the model stops calling tools. Orchestrator runs do not take `--gate`, and their outcome is recorded as `finished` (the orchestrator's work is verified through the implementers' gates and the caller).
+`blyte --converse [flags] -- "<prompt>"` runs unattended: given a prompt, it plans, hands work out and reviews once, writes `--report <path>` if requested, and exits when the model stops calling tools. Converse runs do not take `--gate`, and their outcome is recorded as `finished` (the conversation model's work is verified through the implementers' gates and the caller).
 
-With `--dispatch-cmd <cmd>`, the orchestrator delegates tasks through a dedicated `dispatch` tool rather than invoking `blyte dispatch` from its shell. The command runs on the host outside any container or sandbox, with `BLYTE_DISPATCH_PARENT` set to the orchestrator session id, and receives `{ "task": string, "gate": string, "max_seconds": integer }` on stdin.
+With `--dispatch-cmd <cmd>`, the conversation model delegates tasks through a dedicated `dispatch` tool rather than invoking `blyte dispatch` from its shell. The command runs on the host outside any container or sandbox, with `BLYTE_DISPATCH_PARENT` set to the conversation model session id, and receives `{ "task": string, "gate": string, "max_seconds": integer }` on stdin.
 
 ## Watching parallel dispatches
 
@@ -246,7 +246,7 @@ With several dispatches running, and several sessions dispatching in different r
 `blyte dashboard` shows them all on one local page: each job's current step (including "gate
 running"), time, cost and turns, the task's section of its plan, and tags that group a plan's
 tasks or the two halves of an A/B. It reads what `blyte dispatch` writes to `.wt/`, so the
-orchestrator needs to do nothing extra; `blyte dispatch --tag "<text>"` adds a tag of its own.
+conversation model needs to do nothing extra; `blyte dispatch --tag "<text>"` adds a tag of its own.
 See [Dashboard](usage.md#dashboard).
 
 ## Next
@@ -254,4 +254,4 @@ See [Dashboard](usage.md#dashboard).
 - [How tasks are written](writing-tasks.md): what the agent writes for blyte: the template, what to put in, how to check a task
   before sending it, sizing, and what to keep for yourself.
 - [Providers](providers.md#choosing-an-implementer-model): choosing the implementer's model.
-- [Run reports](reports.md): everything in the report the orchestrator reads.
+- [Run reports](reports.md): everything in the report the conversation model reads.

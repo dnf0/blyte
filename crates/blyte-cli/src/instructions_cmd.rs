@@ -5,10 +5,10 @@ use std::process::Command;
 use std::sync::Arc;
 
 use blyte_agent::approval::{ApprovalConfig, NoApprover};
-use blyte_agent::orchestrator::Answers;
-use blyte_agent::run::ORCHESTRATOR_FIXED;
+use blyte_agent::conversation::Answers;
+use blyte_agent::run::CONVERSATION_FIXED;
 
-use crate::orchestrator_text;
+use crate::conversation_text;
 
 pub fn repo_root() -> Result<PathBuf, String> {
     let out = Command::new("git")
@@ -41,7 +41,7 @@ pub fn render_with_sandbox(
     } else {
         0
     };
-    let built = orchestrator_text::build_with_sandbox(
+    let built = conversation_text::build_with_sandbox(
         dispatch_tool,
         answers,
         root,
@@ -62,8 +62,8 @@ pub fn render_with_sandbox(
         out.push('\n');
     }
     out.push_str("## Always sent\n");
-    out.push_str(ORCHESTRATOR_FIXED);
-    if !ORCHESTRATOR_FIXED.ends_with('\n') {
+    out.push_str(CONVERSATION_FIXED);
+    if !CONVERSATION_FIXED.ends_with('\n') {
         out.push('\n');
     }
     out.push('\n');

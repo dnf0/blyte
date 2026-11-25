@@ -4,12 +4,12 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
 use blyte_agent::context::Conversational;
+use blyte_agent::conversation::Answers;
 use blyte_agent::fs::LocalFs;
-use blyte_agent::orchestrator::Answers;
-use blyte_agent::run::{Budget, Runner, ORCHESTRATOR_FIXED};
+use blyte_agent::run::{Budget, Runner, CONVERSATION_FIXED};
 use blyte_agent::shell::LocalShell;
 use blyte_agent::state::State;
-use blyte_cli::orchestrator_text::{build, DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL};
+use blyte_cli::conversation_text::{build, DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL};
 use blyte_cli::repl::{render_banner_to, ReplConfig, ReplSession};
 use blyte_provider::{Provider, ProviderError, Request, Response};
 
@@ -133,7 +133,7 @@ fn instructions_do_not_contain_the_skill_or_the_old_preamble() {
 fn an_empty_user_file_stops_the_start() {
     let root = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let user_file = xdg.path().join("blyte").join("orchestrator.md");
+    let user_file = xdg.path().join("blyte").join("process.md");
     std::fs::create_dir_all(user_file.parent().unwrap()).unwrap();
     std::fs::write(&user_file, "   \n").unwrap();
 
@@ -146,7 +146,7 @@ fn an_empty_user_file_stops_the_start() {
     let out = Command::new(env!("CARGO_BIN_EXE_blyte"))
         .current_dir(root.path())
         .env("XDG_CONFIG_HOME", xdg.path())
-        .args(["--orchestrate", "--", "plan the release"])
+        .args(["--converse", "--", "plan the release"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -171,7 +171,7 @@ fn repository_rules_for_implementers_are_not_given() {
     };
 
     let mut state = State::new("plan the release", "");
-    state.orchestrator.instructions = Some(built.instructions);
+    state.brief.instructions = Some(built.instructions);
     let provider = RecordingProvider {
         seen: Mutex::new(Vec::new()),
     };
@@ -196,14 +196,14 @@ fn repository_rules_for_implementers_are_not_given() {
 
     let system = &provider.seen.lock().unwrap()[0].system;
     assert!(!system.contains(marker), "{system}");
-    assert!(system.contains(ORCHESTRATOR_FIXED), "{system}");
+    assert!(system.contains(CONVERSATION_FIXED), "{system}");
 }
 
 #[test]
 fn interactive_banner_prints_process_and_repo_rules() {
     let root = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let repo_rules = root.path().join(".blyte").join("orchestrator.md");
+    let repo_rules = root.path().join(".blyte").join("process.md");
     std::fs::create_dir_all(repo_rules.parent().unwrap()).unwrap();
     std::fs::write(&repo_rules, "Repo rule.").unwrap();
 
@@ -211,7 +211,7 @@ fn interactive_banner_prints_process_and_repo_rules() {
         let _guard = XdgGuard::set(xdg.path());
         ReplSession::try_new(&ReplConfig {
             repo_root: root.path().to_path_buf(),
-            orchestrate: true,
+            converse: true,
             ..Default::default()
         })
         .unwrap()
@@ -220,7 +220,7 @@ fn interactive_banner_prints_process_and_repo_rules() {
     let mut out = Vec::new();
     render_banner_to(&mut out, &session).unwrap();
     let banner = String::from_utf8(out).unwrap();
-    let mode_pos = banner.find("  Mode       : orchestrator").unwrap();
+    let mode_pos = banner.find("  Mode       : conversation model").unwrap();
     let process_pos = banner.find("  Process    : default (built in)").unwrap();
     let repo_pos = banner
         .find(&format!("  Repo rules : {}", repo_rules.display()))
@@ -244,7 +244,7 @@ fn one_shot_prints_start_lines_and_not_implementer_rules() {
         .env_remove("OPENAI_API_KEY")
         .env_remove("OLLAMA_API_KEY")
         .env_remove("OLLAMA_HOST")
-        .args(["--orchestrate", "--", "plan the release"])
+        .args(["--converse", "--", "plan the release"])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);

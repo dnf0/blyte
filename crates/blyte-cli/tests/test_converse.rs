@@ -1,4 +1,4 @@
-use blyte_cli::cli::{apply_orchestrate_defaults, Cli};
+use blyte_cli::cli::{apply_converse_defaults, Cli};
 use blyte_cli::repl::{
     format_usage_line, handle_repl_command, ReplConfig, ReplControl, ReplSession,
 };
@@ -7,12 +7,12 @@ use blyte_provider::Usage;
 use clap::{CommandFactory, FromArgMatches};
 
 #[test]
-fn orchestrate_sets_defaults() {
+fn converse_sets_defaults() {
     let matches = Cli::command()
-        .try_get_matches_from(["blyte", "--orchestrate"])
+        .try_get_matches_from(["blyte", "--converse"])
         .unwrap();
     let mut cli = Cli::from_arg_matches(&matches).unwrap();
-    apply_orchestrate_defaults(&mut cli, &matches);
+    apply_converse_defaults(&mut cli, &matches);
     assert_eq!(cli.max_turns, 1000);
     assert_eq!(cli.fold_budget, Some(100_000));
     assert_eq!(cli.context, "folded");
@@ -23,7 +23,7 @@ fn explicit_flags_win() {
     let matches = Cli::command()
         .try_get_matches_from([
             "blyte",
-            "--orchestrate",
+            "--converse",
             "--max-turns",
             "30",
             "--fold-budget",
@@ -31,48 +31,48 @@ fn explicit_flags_win() {
         ])
         .unwrap();
     let mut cli = Cli::from_arg_matches(&matches).unwrap();
-    apply_orchestrate_defaults(&mut cli, &matches);
+    apply_converse_defaults(&mut cli, &matches);
     assert_eq!(cli.max_turns, 30);
     assert_eq!(cli.fold_budget, Some(5000));
 }
 
 #[test]
-fn without_orchestrate_nothing_changes() {
+fn without_converse_nothing_changes() {
     let matches = Cli::command().try_get_matches_from(["blyte"]).unwrap();
     let mut cli = Cli::from_arg_matches(&matches).unwrap();
-    apply_orchestrate_defaults(&mut cli, &matches);
+    apply_converse_defaults(&mut cli, &matches);
     assert_eq!(cli.max_turns, 25);
     assert_eq!(cli.fold_budget, None);
 }
 
 #[test]
-fn orchestrate_conflicts_with_gate() {
-    let res = Cli::command().try_get_matches_from(["blyte", "--orchestrate", "--gate", "true"]);
+fn converse_conflicts_with_gate() {
+    let res = Cli::command().try_get_matches_from(["blyte", "--converse", "--gate", "true"]);
     assert!(res.is_err());
 }
 
 #[test]
-fn orchestrate_with_prompt_is_accepted() {
+fn converse_with_prompt_is_accepted() {
     let matches = Cli::command()
-        .try_get_matches_from(["blyte", "--orchestrate", "--", "plan the release"])
+        .try_get_matches_from(["blyte", "--converse", "--", "plan the release"])
         .unwrap();
     let cli = Cli::from_arg_matches(&matches).unwrap();
-    assert!(cli.orchestrate);
+    assert!(cli.converse);
     assert_eq!(cli.prompt.as_deref(), Some("plan the release"));
 }
 
 #[test]
-fn dispatch_cmd_without_orchestrate_is_rejected() {
+fn dispatch_cmd_without_converse_is_rejected() {
     let res = Cli::command().try_get_matches_from(["blyte", "--dispatch-cmd", "echo test"]);
     assert!(res.is_err());
 }
 
 #[test]
-fn dispatch_cmd_with_orchestrate_is_accepted() {
+fn dispatch_cmd_with_converse_is_accepted() {
     let matches = Cli::command()
         .try_get_matches_from([
             "blyte",
-            "--orchestrate",
+            "--converse",
             "--dispatch-cmd",
             "echo test",
             "--",
@@ -80,7 +80,7 @@ fn dispatch_cmd_with_orchestrate_is_accepted() {
         ])
         .unwrap();
     let cli = Cli::from_arg_matches(&matches).unwrap();
-    assert!(cli.orchestrate);
+    assert!(cli.converse);
     assert_eq!(cli.dispatch_cmd.as_deref(), Some("echo test"));
     assert_eq!(cli.prompt.as_deref(), Some("plan the release"));
 }
@@ -90,30 +90,30 @@ fn session_gets_instructions() {
     let tmp = tempfile::tempdir().unwrap();
     let config = ReplConfig {
         repo_root: tmp.path().to_path_buf(),
-        orchestrate: true,
+        converse: true,
         ..Default::default()
     };
     let session = ReplSession::new(&config);
-    let instructions = session.state.orchestrator.instructions.as_deref().unwrap();
+    let instructions = session.state.brief.instructions.as_deref().unwrap();
     assert!(instructions.contains("## blyte reference"));
-    assert!(instructions.contains(blyte_agent::orchestrator::ANSWERS_PERSON));
+    assert!(instructions.contains(blyte_agent::conversation::ANSWERS_PERSON));
     assert!(instructions.contains("blyte wait"));
 
     let config_normal = ReplConfig {
         repo_root: tmp.path().to_path_buf(),
-        orchestrate: false,
+        converse: false,
         ..Default::default()
     };
     let session_normal = ReplSession::new(&config_normal);
-    assert!(session_normal.state.orchestrator.instructions.is_none());
+    assert!(session_normal.state.brief.instructions.is_none());
 }
 
 #[test]
-fn gate_refused_in_orchestrate() {
+fn gate_refused_in_converse() {
     let tmp = tempfile::tempdir().unwrap();
     let config = ReplConfig {
         repo_root: tmp.path().to_path_buf(),
-        orchestrate: true,
+        converse: true,
         ..Default::default()
     };
     let mut session = ReplSession::new(&config);
@@ -121,7 +121,7 @@ fn gate_refused_in_orchestrate() {
     let res = handle_repl_command(&mut session, "/gate true", &mut out).unwrap();
     assert_eq!(res, ReplControl::Handled);
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("No gate in orchestrate mode."));
+    assert!(text.contains("No gate in converse mode."));
     assert_eq!(session.gate, None);
 }
 
@@ -140,8 +140,22 @@ fn usage_line_format() {
 }
 
 #[test]
-fn skill_tells_orchestrator_to_redirect_and_wait() {
-    assert!(SKILL_MD.contains("Under `blyte --orchestrate`"));
+fn skill_tells_conversation_to_redirect_and_wait() {
+    assert!(SKILL_MD.contains("Under `blyte --converse`"));
     assert!(SKILL_MD.contains("> /dev/null 2>&1 &"));
     assert!(SKILL_MD.contains("blyte wait --any"));
+}
+
+#[test]
+fn old_orchestrate_flag_is_rejected_as_unexpected() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .arg("--orchestrate")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unexpected") && stderr.contains("--orchestrate"),
+        "stderr: {stderr}"
+    );
 }

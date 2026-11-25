@@ -36,7 +36,7 @@ fn the_first_rule_file_found_wins() {
 #[test]
 fn claude_md_is_not_read_and_empty_files_are_skipped() {
     let d = tempfile::tempdir().unwrap();
-    write(d.path(), "CLAUDE.md", "orchestrator instructions");
+    write(d.path(), "CLAUDE.md", "conversation model instructions");
     assert_eq!(load(d.path()), None);
     write(d.path(), ".claude/agy-rules.md", "   \n");
     write(d.path(), "AGENTS.md", "agents rules");

@@ -479,7 +479,7 @@ fn search_tools_also_go_through_the_seam() {
 
 #[test]
 fn the_probe_reports_what_the_execution_environment_has_not_the_host() {
-    // A container deployment must not advertise the orchestrator's toolchain. The fake answers
+    // A container deployment must not advertise the host's toolchain. The fake answers
     // every probe affirmatively, so every candidate comes back -- proving the list is built
     // from the seam's reply rather than from the host.
     let d = ws();
@@ -636,7 +636,7 @@ fn edit_reads_and_writes_through_the_same_seam() {
 
 #[test]
 fn the_escape_check_is_evaluated_against_the_seam() {
-    // Canonicalising on the orchestrator's disk says nothing about where a path leads inside a
+    // Canonicalising on the host's disk says nothing about where a path leads inside a
     // container, so the check has to ask the filesystem the write will actually land on.
     let d = ws();
     let fake = FakeFs::default();

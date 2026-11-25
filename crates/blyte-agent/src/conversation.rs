@@ -34,14 +34,14 @@ pub fn user_rules_path() -> Option<PathBuf> {
 
 pub fn user_rules_path_from(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
     if let Some(dir) = xdg.filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(dir).join("blyte").join("orchestrator.md"));
+        return Some(PathBuf::from(dir).join("blyte").join("process.md"));
     }
     home.filter(|v| !v.is_empty())
-        .map(|h| PathBuf::from(h).join(".config/blyte/orchestrator.md"))
+        .map(|h| PathBuf::from(h).join(".config/blyte/process.md"))
 }
 
 pub fn repository_rules_path(root: &Path) -> PathBuf {
-    root.join(".blyte").join("orchestrator.md")
+    root.join(".blyte").join("process.md")
 }
 
 pub fn load_rules_file(path: &Path) -> Result<Option<String>, String> {
@@ -64,11 +64,30 @@ pub fn load_rules_file(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text.to_string()))
 }
 
+fn reject_old_rules_file(new_path: &Path) -> Result<(), String> {
+    if let Some(dir) = new_path.parent() {
+        let old_path = dir.join("orchestrator.md");
+        if std::fs::symlink_metadata(&old_path).is_ok() {
+            return Err(format!(
+                "{} is no longer read: rename it to {}",
+                old_path.display(),
+                new_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn resolve_sources(
     user_path: Option<&Path>,
     root: &Path,
     default_process: Option<&str>,
 ) -> Result<Sources, String> {
+    let repo_path = repository_rules_path(root);
+    if let Some(path) = user_path {
+        reject_old_rules_file(path)?;
+    }
+    reject_old_rules_file(&repo_path)?;
     let user_part = match user_path {
         Some(path) => load_rules_file(path)?.map(|text| Part {
             source: path.display().to_string(),
@@ -82,7 +101,6 @@ pub fn resolve_sources(
             text: text.trim().to_string(),
         })
     });
-    let repo_path = repository_rules_path(root);
     let repository = load_rules_file(&repo_path)?.map(|text| Part {
         source: repo_path.display().to_string(),
         text,
@@ -141,16 +159,13 @@ mod tests {
     #[test]
     fn user_rules_path_prefers_xdg() {
         let p = user_rules_path_from(Some(OsStr::new("/xdg")), Some(OsStr::new("/home/u")));
-        assert_eq!(p, Some(PathBuf::from("/xdg/blyte/orchestrator.md")));
+        assert_eq!(p, Some(PathBuf::from("/xdg/blyte/process.md")));
     }
 
     #[test]
     fn user_rules_path_falls_back_to_home() {
         let p = user_rules_path_from(None, Some(OsStr::new("/home/u")));
-        assert_eq!(
-            p,
-            Some(PathBuf::from("/home/u/.config/blyte/orchestrator.md"))
-        );
+        assert_eq!(p, Some(PathBuf::from("/home/u/.config/blyte/process.md")));
         let p2 = user_rules_path_from(Some(OsStr::new("")), Some(OsStr::new("/home/u")));
         assert_eq!(p2, p);
     }
@@ -170,7 +185,7 @@ mod tests {
     #[test]
     fn load_trims_text() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("orchestrator.md");
+        let path = tmp.path().join("process.md");
         std::fs::write(&path, "\n  plan first\n\n").unwrap();
         assert_eq!(load_rules_file(&path), Ok(Some("plan first".to_string())));
     }
@@ -254,14 +269,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo_file = repository_rules_path(tmp.path());
         std::fs::create_dir_all(repo_file.parent().unwrap()).unwrap();
-        std::fs::write(&repo_file, "Repo specific orchestrator rule.").unwrap();
+        std::fs::write(&repo_file, "Repo specific conversation model rule.").unwrap();
 
         let sources = resolve_sources(None, tmp.path(), Some("Default process.")).unwrap();
         let out = assemble("Ref facts.", Answers::Person, &sources);
         let process_pos = out.find("## Process (from ").unwrap();
         let repo_pos = out.find("## This repository's rules (from ").unwrap();
         assert!(repo_pos > process_pos, "{out}");
-        assert!(out.contains("Repo specific orchestrator rule."), "{out}");
+        assert!(
+            out.contains("Repo specific conversation model rule."),
+            "{out}"
+        );
         assert!(out.contains(&repo_file.display().to_string()), "{out}");
     }
 
@@ -315,7 +333,7 @@ mod tests {
                 text: "p".to_string(),
             }),
             repository: Some(Part {
-                source: "/repo/.blyte/orchestrator.md".to_string(),
+                source: "/repo/.blyte/process.md".to_string(),
                 text: "r".to_string(),
             }),
         };
@@ -323,8 +341,93 @@ mod tests {
             start_lines(&full),
             [
                 "process: default (built in)".to_string(),
-                "repository rules: /repo/.blyte/orchestrator.md".to_string(),
+                "repository rules: /repo/.blyte/process.md".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn repository_old_orchestrator_file_returns_rename_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join(".blyte").join("orchestrator.md");
+        let new = tmp.path().join(".blyte").join("process.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "old rules").unwrap();
+
+        let err = resolve_sources(None, tmp.path(), Some("Default process.")).unwrap_err();
+        assert!(err.contains(&old.display().to_string()), "{err}");
+        assert!(err.contains(&new.display().to_string()), "{err}");
+        assert!(err.contains(".blyte/orchestrator.md"), "{err}");
+        assert!(err.contains(".blyte/process.md"), "{err}");
+    }
+
+    #[test]
+    fn user_old_orchestrator_file_returns_rename_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_dir = tmp.path().join("config").join("blyte");
+        let old = user_dir.join("orchestrator.md");
+        let new = user_dir.join("process.md");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::write(&old, "old user rules").unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let err = resolve_sources(Some(&new), &repo, Some("Default process.")).unwrap_err();
+        assert!(err.contains(&old.display().to_string()), "{err}");
+        assert!(err.contains(&new.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn old_orchestrator_file_still_errors_when_process_md_also_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_old = tmp.path().join(".blyte").join("orchestrator.md");
+        let repo_new = tmp.path().join(".blyte").join("process.md");
+        std::fs::create_dir_all(repo_old.parent().unwrap()).unwrap();
+        std::fs::write(&repo_old, "old repo rules").unwrap();
+        std::fs::write(&repo_new, "new repo rules").unwrap();
+
+        let repo_err = resolve_sources(None, tmp.path(), Some("Default process.")).unwrap_err();
+        assert!(
+            repo_err.contains(&repo_old.display().to_string()),
+            "{repo_err}"
+        );
+        assert!(
+            repo_err.contains(&repo_new.display().to_string()),
+            "{repo_err}"
+        );
+
+        let user_tmp = tempfile::tempdir().unwrap();
+        let user_dir = user_tmp.path().join("blyte");
+        let user_old = user_dir.join("orchestrator.md");
+        let user_new = user_dir.join("process.md");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::write(&user_old, "old user rules").unwrap();
+        std::fs::write(&user_new, "new user rules").unwrap();
+        let clean_repo = user_tmp.path().join("repo");
+        std::fs::create_dir_all(&clean_repo).unwrap();
+
+        let user_err =
+            resolve_sources(Some(&user_new), &clean_repo, Some("Default process.")).unwrap_err();
+        assert!(
+            user_err.contains(&user_old.display().to_string()),
+            "{user_err}"
+        );
+        assert!(
+            user_err.contains(&user_new.display().to_string()),
+            "{user_err}"
+        );
+    }
+
+    #[test]
+    fn repository_process_md_alone_is_loaded_as_repository_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_new = tmp.path().join(".blyte").join("process.md");
+        std::fs::create_dir_all(repo_new.parent().unwrap()).unwrap();
+        std::fs::write(&repo_new, "Repository rules only.").unwrap();
+
+        let sources = resolve_sources(None, tmp.path(), Some("Default process.")).unwrap();
+        let repo = sources.repository.expect("repository rules loaded");
+        assert_eq!(repo.source, repo_new.display().to_string());
+        assert_eq!(repo.text, "Repository rules only.");
     }
 }

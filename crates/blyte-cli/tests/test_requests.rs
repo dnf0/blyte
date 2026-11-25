@@ -701,7 +701,7 @@ fn accept_triggers_combine_and_does_not_queue_combine_message() {
     );
     assert_eq!(resp.status, 200);
     let body = parse_json(&resp);
-    assert!(body["decision"]["orchestrator_message"].is_null());
+    assert!(body["decision"]["conversation_message"].is_null());
 
     surface.requests.wait_for_idle("req-accept");
 
@@ -1004,7 +1004,7 @@ fn push_and_pull_request_routes_and_error_handling() {
 }
 
 #[test]
-fn check_failed_queues_orchestrator_message_with_step_and_output() {
+fn check_failed_queues_conversation_message_with_step_and_output() {
     let (repo, base) = init_repo_with_gate("echo broken-gate-output && false");
     let root = repo.path();
 
@@ -1769,7 +1769,7 @@ fn ready_request_waits_while_session_busy_then_combines_when_idle() {
     assert_eq!(item_busy["state"], "waiting");
     assert_eq!(
         item_busy["waiting_reasons"],
-        json!(["the orchestrator is still working"])
+        json!(["the conversation model is still working"])
     );
 
     handle.release.send(()).unwrap();
@@ -1826,7 +1826,7 @@ fn ready_request_waits_while_session_has_queued_message_then_combines_when_idle(
     assert_eq!(item_queued["state"], "waiting");
     assert_eq!(
         item_queued["waiting_reasons"],
-        json!(["the orchestrator is still working"])
+        json!(["the conversation model is still working"])
     );
 
     start_worker.send(()).unwrap();
@@ -1882,7 +1882,7 @@ fn conflict_failure_message_is_not_queued_while_busy_and_queued_once_after() {
 
     surface
         .session
-        .submit("active orchestrator turn", Vec::new())
+        .submit("active conversation model turn", Vec::new())
         .unwrap();
     handle.entered.recv_timeout(Duration::from_secs(5)).unwrap();
 
@@ -1942,7 +1942,7 @@ fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
         rollback: true,
         model: Some("gemini-4-neon".to_string()),
         container: None,
-        orchestrate: false,
+        converse: false,
         fold_budget: None,
         dispatch_cmd: None,
         sandbox: "on".to_string(),

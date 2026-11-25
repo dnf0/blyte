@@ -25,7 +25,7 @@ pub struct Decision {
     pub run: String,
     pub action: Action,
     pub note: Option<String>,
-    pub orchestrator_message: Option<String>,
+    pub conversation_message: Option<String>,
 }
 
 pub(crate) struct ReviewComputation {
@@ -985,7 +985,7 @@ pub fn decide(
         .filter(|s| !s.is_empty())
         .map(String::from);
 
-    let orchestrator_message = match action {
+    let conversation_message = match action {
         Action::Accept => {
             if is_research {
                 return Err(format!("run {id} is a research run; mark it read"));
@@ -1050,7 +1050,7 @@ pub fn decide(
         run: id.to_string(),
         action,
         note: trimmed_note,
-        orchestrator_message,
+        conversation_message,
     })
 }
 

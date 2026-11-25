@@ -142,11 +142,7 @@ fn rejects_empty_or_disallowed_commands_without_running_executable() {
 
     let expected_err =
         "the blyte tool runs only: dispatch, wait, status, review, plan, init, clean, edit-start, edit-finish";
-    for bad in [
-        json!([]),
-        json!(["comments"]),
-        json!(["--orchestrate", "x"]),
-    ] {
+    for bad in [json!([]), json!(["comments"]), json!(["--converse", "x"])] {
         let out = execute(
             root.path(),
             &LocalShell,

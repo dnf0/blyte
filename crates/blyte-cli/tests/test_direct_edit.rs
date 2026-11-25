@@ -887,7 +887,7 @@ fn edit_finish_reports_hook_stderr_when_git_commit_is_refused() {
 }
 
 #[test]
-fn configure_orchestrate_policy_allows_writes_only_while_direct_edit_is_open() {
+fn configure_converse_policy_allows_writes_only_while_direct_edit_is_open() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let repo = tempfile::tempdir_in(tmp_base).expect("tempdir in target tmpdir");
@@ -900,7 +900,7 @@ fn configure_orchestrate_policy_allows_writes_only_while_direct_edit_is_open() {
     );
     assert!(start_out.status.success());
 
-    let _ = blyte_cli::task_runner::configure_orchestrate_policy(true, true, root, None, false)
+    let _ = blyte_cli::task_runner::configure_converse_policy(true, true, root, None, false)
         .expect("configure policy");
     let scope = blyte_agent::tools::write_scope().expect("write scope set");
     assert_eq!(

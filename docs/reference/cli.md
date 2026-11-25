@@ -1,6 +1,6 @@
 # CLI flags
 
-The output of `blyte --help` and of each subcommand's `--help`. Behaviour is described in [Running tasks](../usage.md), [the workflow](../orchestration.md), [Providers](../providers.md) and [Security](../security.md).
+The output of `blyte --help` and of each subcommand's `--help`. Behaviour is described in [Running tasks](../usage.md), [the workflow](../workflow.md), [Providers](../providers.md) and [Security](../security.md).
 
 ```text
 A lean coding-agent harness with a sealed verification gate
@@ -19,7 +19,7 @@ Commands:
   wait        Wait until dispatched runs finish (all of them, or the first with --any) and print one line per finished run
   skill       Install or print the Claude Code skill for the plan, delegate, review workflow
   update      Replace this binary with the latest release (the old one is kept as blyte.prev)
-  cost        Show orchestrator and implementer costs
+  cost        Show conversation model and implementer costs
   statusline  Print Claude Code's status line with blyte costs
   plan        List a plan's tasks with their state and the command to dispatch each ready one
   help        Print this message or the help of the given subcommand(s)
@@ -30,10 +30,10 @@ Arguments:
 Options:
   -g, --gate <GATE>
           Verification gate command (e.g. 'pytest', 'cargo test'). Several steps may be given one per line: every step runs and all failures are reported together
-      --orchestrate
-          Run blyte as the orchestrator: plan, dispatch implementers with `blyte dispatch`, review and merge
+      --converse
+          Run blyte as the conversation model: plan, dispatch implementers with `blyte dispatch`, review and merge
       --dispatch-cmd <DISPATCH_CMD>
-          Command to run on the host when the orchestrator delegates work via the `dispatch` tool
+          Command to run on the host when the conversation model delegates work via the `dispatch` tool
       --context <CONTEXT>
           Context strategy: 'conversational' (append-all chat) or 'folded' (append-only chat, oldest half folded into digests past a budget) [default: folded] [possible values: conversational, folded]
   -m, --model <MODEL>
@@ -59,7 +59,7 @@ Options:
       --sandbox <SANDBOX>
           Sandbox the commands blyte runs on this machine (macOS Seatbelt, Linux Landlock): 'on' or 'off' [default: on] [possible values: on, off]
       --network <NETWORK>
-          Let commands blyte runs connect out: 'on' or 'off' (default 'on', or 'off' under --orchestrate). 'off' needs the sandbox [possible values: on, off]
+          Let commands blyte runs connect out: 'on' or 'off' (default 'on', or 'off' under --converse). 'off' needs the sandbox [possible values: on, off]
       --allow-read <ALLOW_READ>
           Let sandboxed commands read this path despite the credential deny-list (repeatable)
       --pass-env <PASS_ENV>
@@ -246,7 +246,7 @@ Options:
       --no-default         Install the skill without making blyte the default in CLAUDE.md
       --no-statusline      Do not set Claude Code's status line
       --no-autocompact     Do not set Claude Code's auto-compact window
-      --harness <HARNESS>  Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all [default: claude] [possible values: claude, codex, all]
+      --harness <HARNESS>  Which conversation model to set up: claude (Claude Code), codex (Codex CLI) or all [default: claude] [possible values: claude, codex, all]
       --model <ID>         Default implementer model to write to the env file
   -h, --help               Print help
 ```
@@ -262,7 +262,7 @@ Usage: blyte skill uninstall [OPTIONS]
 
 Options:
       --project            Remove from repository instead of personal ~/.claude
-      --harness <HARNESS>  Which orchestrator to set up: claude (Claude Code), codex (Codex CLI) or all [default: claude] [possible values: claude, codex, all]
+      --harness <HARNESS>  Which conversation model to set up: claude (Claude Code), codex (Codex CLI) or all [default: claude] [possible values: claude, codex, all]
   -h, --help               Print help
 ```
 
@@ -348,7 +348,7 @@ Options:
 ## blyte cost
 
 ```text
-Show orchestrator and implementer costs
+Show conversation model and implementer costs
 
 Usage: blyte cost [OPTIONS]
 

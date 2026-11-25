@@ -112,7 +112,7 @@ fn accept_verified_code_run() {
             run: "T1".to_string(),
             action: Action::Accept,
             note: Some("ship it".to_string()),
-            orchestrator_message: None,
+            conversation_message: None,
         }
     );
 
@@ -200,7 +200,7 @@ fn send_back_records_no_verdict() {
             run: "T5".to_string(),
             action: Action::SendBack,
             note: Some("handle empty input.".to_string()),
-            orchestrator_message: Some(
+            conversation_message: Some(
                 "Send back run T5: handle empty input. Draft a follow-up task for me to confirm."
                     .to_string()
             ),
@@ -221,7 +221,7 @@ fn redo_records_redone() {
             run: "T6".to_string(),
             action: Action::Redo,
             note: None,
-            orchestrator_message: Some("Redo run T6.".to_string()),
+            conversation_message: Some("Redo run T6.".to_string()),
         }
     );
     let v1: serde_json::Value = serde_json::from_str(
@@ -246,7 +246,7 @@ fn redo_records_redone() {
             run: "T6".to_string(),
             action: Action::Redo,
             note: Some("wrong approach".to_string()),
-            orchestrator_message: Some("Redo run T6. Reason: wrong approach".to_string()),
+            conversation_message: Some("Redo run T6. Reason: wrong approach".to_string()),
         }
     );
     let v2: serde_json::Value = serde_json::from_str(
@@ -312,12 +312,12 @@ fn decision_clears_hold() {
     write_research_run(repo.path(), "R2", "verified");
 
     let held = decide(repo.path(), "R2", Action::Hold, Some("read later"), 2000).unwrap();
-    assert_eq!(held.orchestrator_message, None);
+    assert_eq!(held.conversation_message, None);
     assert_eq!(held.note, Some("read later".to_string()));
     assert!(repo.path().join(".wt/R2.hold.json").exists());
 
     let read = decide(repo.path(), "R2", Action::MarkRead, None, 2100).unwrap();
-    assert_eq!(read.orchestrator_message, None);
+    assert_eq!(read.conversation_message, None);
     assert!(!repo.path().join(".wt/R2.hold.json").exists());
     assert_eq!(read_hold(repo.path(), "R2").unwrap(), None);
 }
@@ -334,7 +334,7 @@ fn mark_read_records_accepted_with_note_read() {
             run: "R3".to_string(),
             action: Action::MarkRead,
             note: None,
-            orchestrator_message: None,
+            conversation_message: None,
         }
     );
 

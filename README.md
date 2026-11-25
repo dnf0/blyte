@@ -47,7 +47,7 @@ parallel, and adding blyte agents adds little frontier usage. This is how blyte 
 
 **Get started:** [install blyte](#install) and run `blyte skill install`. From then on Claude Code
 writes the plan and hands the implementation to blyte, independent tasks in parallel, checking each result.
-[The workflow](docs/orchestration.md) explains what happens.
+[The workflow](docs/workflow.md) explains what happens.
 
 | | |
 |---|---|
@@ -109,7 +109,7 @@ each diff with `blyte review` and merges them in order.
 - `blyte skill uninstall` removes the skill, both `CLAUDE.md` blocks, the status line, and the
   `200000` `autoCompactWindow` if blyte set it and it has not been changed.
 - `--harness codex` (or `all`) sets up Codex CLI the same way: skill, `AGENTS.md` block, and
-  rules that let `blyte dispatch` run outside Codex's sandbox. Run end to end with Codex CLI on 2026-09-30. Any other orchestrator can do the same: `blyte dispatch` takes a task
+  rules that let `blyte dispatch` run outside Codex's sandbox. Run end to end with Codex CLI on 2026-09-30. Any other conversation model can do the same: `blyte dispatch` takes a task
 file and a gate and prints JSON, and `blyte skill print` prints the instructions.
 
 ## Watch what's running
@@ -177,8 +177,8 @@ model runs. Details: [docs/providers.md](docs/providers.md).
 | | |
 |---|---|
 | [Getting started](docs/getting-started.md) | install, set up Claude Code, the first delegated task |
-| [blyte as your implementer](docs/orchestration.md) | the plan → delegate → review workflow, and when to use it |
-| [How tasks are written](docs/writing-tasks.md) | what the orchestrating agent writes for blyte, and why |
+| [blyte as your implementer](docs/workflow.md) | the plan → delegate → review workflow, and when to use it |
+| [How tasks are written](docs/writing-tasks.md) | what the conversation model writes for blyte, and why |
 | [Running tasks](docs/usage.md) | the gate, budgets, rollback, containers, standalone runs |
 | [Security and the sandbox](docs/security.md) | what commands can and cannot reach, per platform |
 | [Run reports](docs/reports.md) | every field of `--report` |

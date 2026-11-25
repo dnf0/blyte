@@ -40,7 +40,7 @@ use crate::tools;
 pub enum Outcome {
     /// The verification command exited 0. The only way to succeed.
     Verified,
-    /// The task completed without a verification gate (e.g. orchestrator task).
+    /// The task completed without a verification gate (e.g. conversation model task).
     Finished,
     /// Budget spent without the gate passing.
     BudgetExhausted,
@@ -232,7 +232,7 @@ pub enum Event<'e> {
 /// Retries allowed for one model call before a transient failure ends the run.
 pub const MAX_PROVIDER_RETRIES: u32 = 6;
 
-pub const ORCHESTRATOR_FIXED: &str = "\
+pub const CONVERSATION_FIXED: &str = "\
 Change nothing outside the repository yourself (blyte's own files under `.wt/` and its records are fine).\n\n\
 ## Working efficiently\n\
 Independent reads, searches and commands can be issued as several tool calls in one \
@@ -476,17 +476,17 @@ impl<'a> Runner<'a> {
         let bins = tools::available_binaries(self.shell, &self.root).join(", ");
         let where_ = self.shell.describe();
 
-        if let Some(text) = &state.orchestrator.instructions {
+        if let Some(text) = &state.brief.instructions {
             return format!(
                 "{text}## Your user's first request\n{goal}\n\n\
                  ## Environment\n{where_}\nAvailable: {bins}\n\n\
-                 {ORCHESTRATOR_FIXED}",
+                 {CONVERSATION_FIXED}",
             );
         }
 
         let rules = crate::rules::prompt_section(&self.root);
 
-        let steps = gate_steps(&state.orchestrator.verification_cmd);
+        let steps = gate_steps(&state.brief.verification_cmd);
         // Ungated runs have no check command, so the model must verify the work itself before stopping.
         let completion = if steps.is_empty() {
             "No command checks your work. When you stop, the result is judged by tests you \
@@ -543,7 +543,7 @@ impl<'a> Runner<'a> {
     ) -> (bool, String, u64, Vec<String>) {
         let result = run_gate_steps(
             self.shell,
-            &state.orchestrator.verification_cmd,
+            &state.brief.verification_cmd,
             &self.root,
             last_failed,
             deadline,
@@ -802,32 +802,31 @@ impl<'a> Runner<'a> {
             .map(|c| c.is_empty())
             .unwrap_or(false);
         if is_empty_conversation {
-            state.runtime.conversation_goal = Some(state.orchestrator.goal.clone());
+            state.runtime.conversation_goal = Some(state.brief.goal.clone());
         }
 
         let mut history = match &state.runtime.conversation {
-            None => vec![Message::User(format!("Begin. {}", state.orchestrator.goal))],
+            None => vec![Message::User(format!("Begin. {}", state.brief.goal))],
             Some(prev) if prev.is_empty() => {
-                vec![Message::User(format!("Begin. {}", state.orchestrator.goal))]
+                vec![Message::User(format!("Begin. {}", state.brief.goal))]
             }
             Some(prev) => {
                 let mut h = prev.clone();
-                h.push(Message::User(state.orchestrator.goal.clone()));
+                h.push(Message::User(state.brief.goal.clone()));
                 h
             }
         };
 
         let goal = match &state.runtime.conversation_goal {
             Some(g) => g.as_str(),
-            None => state.orchestrator.goal.as_str(),
+            None => state.brief.goal.as_str(),
         };
         let system = self.system_prompt(state, goal);
 
         let mut seen_names = HashSet::new();
         if self.research {
             seen_names.extend(research_check::identifiers(goal).map(str::to_owned));
-            seen_names
-                .extend(research_check::identifiers(&state.orchestrator.goal).map(str::to_owned));
+            seen_names.extend(research_check::identifiers(&state.brief.goal).map(str::to_owned));
             // Tool results only: restored user messages include gate feedback that names the
             // very identifiers the check flagged.
             for msg in &history {
@@ -955,7 +954,7 @@ impl<'a> Runner<'a> {
         let mut wrap_up_report: Option<String> = None;
 
         if matches!(self.base_check, BaseCheck::BeforeFirstTurn)
-            && !gate_steps(&state.orchestrator.verification_cmd).is_empty()
+            && !gate_steps(&state.brief.verification_cmd).is_empty()
         {
             let bc_start = now();
             let (passed, output, _wait_ms, failing_steps) =
@@ -978,7 +977,7 @@ impl<'a> Runner<'a> {
             if deadline.is_some_and(|d| now() >= d) {
                 return (Outcome::BudgetExhausted, report);
             }
-            if let Some(cap) = state.orchestrator.max_cost_usd {
+            if let Some(cap) = state.brief.max_cost_usd {
                 if let Some(price) = blyte_provider::pricing(&self.provider.model_id()) {
                     if price.cost(&report.usage) >= cap {
                         report.cost_capped = true;
@@ -1056,7 +1055,7 @@ impl<'a> Runner<'a> {
             }
 
             if !self.research
-                && state.orchestrator.instructions.is_none()
+                && state.brief.instructions.is_none()
                 && state.runtime.conversation.is_none()
                 && !progressed
             {
@@ -1520,8 +1519,8 @@ impl<'a> Runner<'a> {
                 }
             }
 
-            if state.orchestrator.verification_cmd.trim().is_empty() {
-                if state.orchestrator.instructions.is_some() {
+            if state.brief.verification_cmd.trim().is_empty() {
+                if state.brief.instructions.is_some() {
                     return (Outcome::Finished, report);
                 }
                 self.finalize_polled_base_check(&mut report);

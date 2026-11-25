@@ -2569,7 +2569,7 @@
           <div id="attached-reports" class="attached-reports" hidden></div>
           <div id="composer-error" class="inline-error composer-error" hidden></div>
           <form id="conversation-form" class="composer">
-            <input type="text" id="conversation-input" placeholder="Message the orchestrator..." autocomplete="off">
+            <input type="text" id="conversation-input" placeholder="Message the conversation model..." autocomplete="off">
             <button type="submit" id="conversation-send" class="btn btn-primary">Send</button>
           </form>
         </div>
@@ -2769,7 +2769,7 @@
         input.disabled = missing;
         input.placeholder = missing
           ? "Open this page from the URL blyte printed to send..."
-          : "Message the orchestrator...";
+          : "Message the conversation model...";
       }
       const sendBtn = document.getElementById("conversation-send");
       if (sendBtn) sendBtn.disabled = missing;
@@ -3032,8 +3032,8 @@
       if (!hasOwn(d, "note") || (d.note !== null && typeof d.note !== "string")) {
         return "decision response missing field decision.note";
       }
-      if (!hasOwn(d, "orchestrator_message") || (d.orchestrator_message !== null && typeof d.orchestrator_message !== "string")) {
-        return "decision response missing field decision.orchestrator_message";
+      if (!hasOwn(d, "conversation_message") || (d.conversation_message !== null && typeof d.conversation_message !== "string")) {
+        return "decision response missing field decision.conversation_message";
       }
       return null;
     }
@@ -3199,7 +3199,7 @@
         return renderEntryError(entry.seq, "turn entry missing or invalid field cost_usd");
       }
       return '<div class="entry msg-line assistant" data-seq="' + escapeHtml(String(entry.seq)) + '">' +
-        '<div class="msg-meta">orchestrator · turn ' + escapeHtml(String(entry.n)) + '</div>' +
+        '<div class="msg-meta">conversation model · turn ' + escapeHtml(String(entry.n)) + '</div>' +
         '<div class="turn-body report-body">' + renderReportMarkdown(entry.text) + '</div>' +
         '</div>';
     }
@@ -3671,7 +3671,7 @@
         }
       }
       if (threadEl.children.length === 0) {
-        threadEl.innerHTML = '<div class="thread-empty">Conversation with the orchestrator will appear here.</div>';
+        threadEl.innerHTML = '<div class="thread-empty">Conversation with the conversation model will appear here.</div>';
       }
       if (atBottom || sawPendingApproval) {
         threadEl.scrollTop = threadEl.scrollHeight;

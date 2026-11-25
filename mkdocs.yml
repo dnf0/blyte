@@ -74,7 +74,7 @@ nav:
   - Home: index.md
   - Guide:
       - Getting started: getting-started.md
-      - "The workflow: plan, delegate, review": orchestration.md
+      - "The workflow: plan, delegate, review": workflow.md
       - How tasks are written: writing-tasks.md
       - Running tasks: usage.md
       - Providers: providers.md

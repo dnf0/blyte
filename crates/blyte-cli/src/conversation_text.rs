@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use blyte_agent::orchestrator::{assemble, resolve_sources, start_lines, user_rules_path, Answers};
+use blyte_agent::conversation::{assemble, resolve_sources, start_lines, user_rules_path, Answers};
 use blyte_agent::state::State;
 
-pub const REFERENCE: &str = include_str!("../assets/orchestrator/reference.md");
+pub const REFERENCE: &str = include_str!("../assets/conversation/reference.md");
 pub const REFERENCE_DISPATCH_TOOL: &str =
-    include_str!("../assets/orchestrator/reference-dispatch-tool.md");
-pub const DEFAULT_PROCESS: &str = include_str!("../assets/orchestrator/process.md");
+    include_str!("../assets/conversation/reference-dispatch-tool.md");
+pub const DEFAULT_PROCESS: &str = include_str!("../assets/conversation/process.md");
 
 pub const SANDBOX_ON_PARAGRAPH: &str = "The shell is sandboxed: the shell and the write tools can write only in `.wt/tasks` and temporary directories,\ncannot read credentials and have no network. The shell and the write tools can also write in the worktree of an\nopen edit started with `blyte edit-start`, until it finishes; `git commit` there is not possible (`edit-finish`\ncommits). A command that must leave the sandbox (for example `git push`) takes `unsandboxed` with a reason and\nruns only when the user approves, and a write or edit outside those directories also needs the user's approval.";
 pub const SANDBOX_OFF_PARAGRAPH: &str = "The shell is not sandboxed.";
@@ -73,6 +73,6 @@ pub fn set_state_instructions(
         Answers::Nobody
     };
     let built = build_with_sandbox(dispatch_tool, answers, root, sandbox_on, allowed_in_advance)?;
-    state.orchestrator.instructions = Some(built.instructions);
+    state.brief.instructions = Some(built.instructions);
     Ok(built.start_lines)
 }

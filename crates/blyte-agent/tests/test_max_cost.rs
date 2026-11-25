@@ -91,7 +91,7 @@ fn run(cap: Option<f64>) -> (Outcome, blyte_agent::run::RunReport, u32) {
         base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut st = State::new("g", "true");
-    st.orchestrator.max_cost_usd = cap;
+    st.brief.max_cost_usd = cap;
     let (outcome, report) = r.run(&mut st);
     let calls = *p.calls.lock().unwrap();
     (outcome, report, calls)

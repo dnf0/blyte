@@ -188,7 +188,7 @@ impl AgentRunner {
         approver: Arc<dyn blyte_agent::approval::Approver>,
     ) -> Self {
         let mut cfg = config.clone();
-        cfg.orchestrate = true;
+        cfg.converse = true;
         let repl = crate::repl::ReplSession::try_new_with_approver(&cfg, Some(approver.clone()))
             .expect("failed to initialize REPL session");
         Self { repl, approver }
@@ -203,9 +203,9 @@ impl PromptRunner for AgentRunner {
         emit: &(dyn Fn(EntryBody) + Sync),
     ) -> Result<(), String> {
         self.repl.model = model.to_string();
-        self.repl.state.orchestrator.goal = prompt.to_string();
+        self.repl.state.brief.goal = prompt.to_string();
         if let Some(ref gate) = self.repl.gate {
-            self.repl.state.orchestrator.verification_cmd = gate.clone();
+            self.repl.state.brief.verification_cmd = gate.clone();
         }
         let task_config = self.repl.task_config_for_prompt(prompt);
         let pricing = blyte_provider::pricing(model);
@@ -880,9 +880,9 @@ impl Session {
         run: &str,
         action: &str,
         note: Option<&str>,
-        orchestrator_message: Option<&str>,
+        conversation_message: Option<&str>,
     ) -> Result<u64, String> {
-        if let Some(msg) = orchestrator_message {
+        if let Some(msg) = conversation_message {
             if msg.trim().is_empty() {
                 return Err("a message needs text".to_string());
             }
@@ -893,7 +893,7 @@ impl Session {
             action: action.to_string(),
             note: note.map(str::to_string),
         });
-        if let Some(msg) = orchestrator_message {
+        if let Some(msg) = conversation_message {
             let queued = state.busy || !state.queue.is_empty();
             state.push_entry(EntryBody::UserMessage {
                 text: msg.to_string(),

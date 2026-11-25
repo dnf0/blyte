@@ -1,4 +1,4 @@
-//! Combined orchestrator and implementer cost reporting.
+//! Combined conversation model and implementer cost reporting.
 //!
 //! Aggregates costs from the machine-wide usage log across interactive REPL sessions
 //! and dispatched worker runs.
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 /// Aggregated spend and run count.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Totals {
-    pub orchestrator_usd: f64,
+    pub conversation_usd: f64,
     pub implementers_usd: f64,
     pub runs: usize,
 }
@@ -18,7 +18,7 @@ pub struct Totals {
 impl Default for Totals {
     fn default() -> Self {
         Self {
-            orchestrator_usd: 0.0,
+            conversation_usd: 0.0,
             implementers_usd: 0.0,
             runs: 0,
         }
@@ -78,7 +78,7 @@ fn matches_filters(
 ///
 /// Entries with `dispatch: Some(_)` count toward `implementers_usd`, and toward `runs` unless
 /// `outcome == "turn"` or `outcome == "model_review"`.
-/// Entries without dispatch count toward `orchestrator_usd`.
+/// Entries without dispatch count toward `conversation_usd`.
 /// An entry with `cost_usd: None` adds 0 to cost totals.
 pub fn totals(
     entries: &[Entry],
@@ -86,7 +86,7 @@ pub fn totals(
     since: Option<u64>,
     repo: Option<&str>,
 ) -> Totals {
-    let mut orchestrator_usd = 0.0;
+    let mut conversation_usd = 0.0;
     let mut implementers_usd = 0.0;
     let mut runs = 0;
 
@@ -102,12 +102,12 @@ pub fn totals(
                 runs += 1;
             }
         } else {
-            orchestrator_usd += cost;
+            conversation_usd += cost;
         }
     }
 
     Totals {
-        orchestrator_usd,
+        conversation_usd,
         implementers_usd,
         runs,
     }
@@ -209,12 +209,12 @@ pub fn format_by_session(rows: &[SessionTotals], totals: &Totals) -> String {
 }
 
 /// Formats the totals into the human-readable summary line:
-/// `blyte $<o+i> (orchestrator $<o>, implementers $<i> in <runs> runs)`
+/// `blyte $<o+i> (conversation model $<o>, implementers $<i> in <runs> runs)`
 pub fn format_totals(totals: &Totals) -> String {
-    let total = totals.orchestrator_usd + totals.implementers_usd;
+    let total = totals.conversation_usd + totals.implementers_usd;
     format!(
-        "blyte ${:.2} (orchestrator ${:.2}, implementers ${:.2} in {} runs)",
-        total, totals.orchestrator_usd, totals.implementers_usd, totals.runs
+        "blyte ${:.2} (conversation model ${:.2}, implementers ${:.2} in {} runs)",
+        total, totals.conversation_usd, totals.implementers_usd, totals.runs
     )
 }
 
@@ -320,56 +320,56 @@ mod tests {
 
         // 1. No filter: all entries included
         let t_all = totals(&entries, None, None, None);
-        assert!((t_all.orchestrator_usd - 0.60).abs() < 1e-6);
+        assert!((t_all.conversation_usd - 0.60).abs() < 1e-6);
         assert!((t_all.implementers_usd - 0.60).abs() < 1e-6);
         assert_eq!(t_all.runs, 3);
 
         // 2. Filter session alone: "sess-1"
         let t_s1 = totals(&entries, Some("sess-1"), None, None);
-        assert!((t_s1.orchestrator_usd - 0.10).abs() < 1e-6);
+        assert!((t_s1.conversation_usd - 0.10).abs() < 1e-6);
         assert!((t_s1.implementers_usd - 0.20).abs() < 1e-6);
         assert_eq!(t_s1.runs, 2);
 
         // Filter session alone: "sess-2"
         let t_s2 = totals(&entries, Some("sess-2"), None, None);
-        assert!((t_s2.orchestrator_usd - 0.50).abs() < 1e-6);
+        assert!((t_s2.conversation_usd - 0.50).abs() < 1e-6);
         assert!((t_s2.implementers_usd - 0.40).abs() < 1e-6);
         assert_eq!(t_s2.runs, 1);
 
         // 3. Filter since alone: 1000 (e1 at 500 excluded)
         let t_since = totals(&entries, None, Some(1000), None);
-        assert!((t_since.orchestrator_usd - 0.50).abs() < 1e-6);
+        assert!((t_since.conversation_usd - 0.50).abs() < 1e-6);
         assert!((t_since.implementers_usd - 0.60).abs() < 1e-6);
         assert_eq!(t_since.runs, 3);
 
         // 4. Filter repo alone: "/repo/alpha" (e1, e2)
         let t_alpha = totals(&entries, None, None, Some("/repo/alpha"));
-        assert!((t_alpha.orchestrator_usd - 0.10).abs() < 1e-6);
+        assert!((t_alpha.conversation_usd - 0.10).abs() < 1e-6);
         assert!((t_alpha.implementers_usd - 0.20).abs() < 1e-6);
         assert_eq!(t_alpha.runs, 1);
 
         // Filter repo alone: "/repo/beta" (e3, e4, e5)
         let t_beta = totals(&entries, None, None, Some("/repo/beta"));
-        assert!((t_beta.orchestrator_usd - 0.50).abs() < 1e-6);
+        assert!((t_beta.conversation_usd - 0.50).abs() < 1e-6);
         assert!((t_beta.implementers_usd - 0.40).abs() < 1e-6);
         assert_eq!(t_beta.runs, 2);
 
         // 5. Combined filters
         // session="sess-1", since=1000, repo="/repo/alpha" -> only e2
         let t_comb1 = totals(&entries, Some("sess-1"), Some(1000), Some("/repo/alpha"));
-        assert!((t_comb1.orchestrator_usd - 0.0).abs() < 1e-6);
+        assert!((t_comb1.conversation_usd - 0.0).abs() < 1e-6);
         assert!((t_comb1.implementers_usd - 0.20).abs() < 1e-6);
         assert_eq!(t_comb1.runs, 1);
 
         // session="sess-1", since=1000, repo="/repo/beta" -> only e3 (cost_usd: None)
         let t_comb2 = totals(&entries, Some("sess-1"), Some(1000), Some("/repo/beta"));
-        assert!((t_comb2.orchestrator_usd - 0.0).abs() < 1e-6);
+        assert!((t_comb2.conversation_usd - 0.0).abs() < 1e-6);
         assert!((t_comb2.implementers_usd - 0.0).abs() < 1e-6);
         assert_eq!(t_comb2.runs, 1);
 
         // session="sess-2", since=1000, repo="/repo/beta" -> e4 and e5
         let t_comb3 = totals(&entries, Some("sess-2"), Some(1000), Some("/repo/beta"));
-        assert!((t_comb3.orchestrator_usd - 0.50).abs() < 1e-6);
+        assert!((t_comb3.conversation_usd - 0.50).abs() < 1e-6);
         assert!((t_comb3.implementers_usd - 0.40).abs() < 1e-6);
         assert_eq!(t_comb3.runs, 1);
 
@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(
             t_none,
             Totals {
-                orchestrator_usd: 0.0,
+                conversation_usd: 0.0,
                 implementers_usd: 0.0,
                 runs: 0,
             }
@@ -388,30 +388,30 @@ mod tests {
     #[test]
     fn test_format_totals() {
         let known = Totals {
-            orchestrator_usd: 1.25,
+            conversation_usd: 1.25,
             implementers_usd: 2.50,
             runs: 3,
         };
         assert_eq!(
             format_totals(&known),
-            "blyte $3.75 (orchestrator $1.25, implementers $2.50 in 3 runs)"
+            "blyte $3.75 (conversation model $1.25, implementers $2.50 in 3 runs)"
         );
         assert_eq!(
             known.to_string(),
-            "blyte $3.75 (orchestrator $1.25, implementers $2.50 in 3 runs)"
+            "blyte $3.75 (conversation model $1.25, implementers $2.50 in 3 runs)"
         );
 
         let zero = Totals::default();
         assert_eq!(
             format_totals(&zero),
-            "blyte $0.00 (orchestrator $0.00, implementers $0.00 in 0 runs)"
+            "blyte $0.00 (conversation model $0.00, implementers $0.00 in 0 runs)"
         );
     }
 
     #[test]
     fn test_totals_json() {
         let t = Totals {
-            orchestrator_usd: 1.25,
+            conversation_usd: 1.25,
             implementers_usd: 2.50,
             runs: 3,
         };

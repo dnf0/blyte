@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use blyte_agent::sandbox::{default_allowed, orchestrator_allowed, profile};
+use blyte_agent::sandbox::{conversation_allowed, default_allowed, profile};
 
 #[test]
 fn the_profile_denies_writes_then_allows_the_listed_paths() {
@@ -38,7 +38,7 @@ fn the_default_allow_list_covers_the_workspace_and_its_git_directory() {
 }
 
 #[test]
-fn orchestrator_allowed_contains_wt_tasks_and_temp_not_root_git_or_wt() {
+fn conversation_allowed_contains_wt_tasks_and_temp_not_root_git_or_wt() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let d = tempfile::tempdir_in(tmp_base).unwrap();
@@ -51,7 +51,7 @@ fn orchestrator_allowed_contains_wt_tasks_and_temp_not_root_git_or_wt() {
     let tasks = d.path().join(".wt/tasks");
     std::fs::create_dir_all(&tasks).unwrap();
 
-    let allowed = orchestrator_allowed(d.path());
+    let allowed = conversation_allowed(d.path());
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let root = canon(d.path());
     let tasks_canon = canon(&tasks);
@@ -77,7 +77,7 @@ fn orchestrator_allowed_contains_wt_tasks_and_temp_not_root_git_or_wt() {
 }
 
 #[test]
-fn orchestrator_allowed_in_linked_worktree_uses_main_wt_tasks() {
+fn conversation_allowed_in_linked_worktree_uses_main_wt_tasks() {
     let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(tmp_base).unwrap();
     let main_repo = tempfile::tempdir_in(tmp_base).unwrap();
@@ -124,7 +124,7 @@ fn orchestrator_allowed_in_linked_worktree_uses_main_wt_tasks() {
     let main_tasks = main_repo.path().join(".wt/tasks");
     std::fs::create_dir_all(&main_tasks).unwrap();
 
-    let allowed = orchestrator_allowed(&linked);
+    let allowed = conversation_allowed(&linked);
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let main_root = canon(main_repo.path());
     let linked_root = canon(&linked);
@@ -162,7 +162,7 @@ mod macos {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use blyte_agent::sandbox::{orchestrator_profile, profile};
+    use blyte_agent::sandbox::{conversation_profile, profile};
     use blyte_agent::shell::{LocalShell, Shell};
 
     #[test]
@@ -195,7 +195,7 @@ mod macos {
     }
 
     #[test]
-    fn orchestrator_profile_writes_only_in_wt_tasks_not_root_git_or_wt_passed() {
+    fn conversation_profile_writes_only_in_wt_tasks_not_root_git_or_wt_passed() {
         let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
         std::fs::create_dir_all(tmp_base).unwrap();
         let repo = tempfile::tempdir_in(tmp_base).unwrap();
@@ -210,7 +210,7 @@ mod macos {
         std::fs::create_dir_all(&tasks).unwrap();
         std::fs::create_dir_all(&passed).unwrap();
 
-        let sh = LocalShell::sandboxed(orchestrator_profile(repo.path(), &[]));
+        let sh = LocalShell::sandboxed(conversation_profile(repo.path(), &[]));
         let ok_file = tasks.join("task.md");
         let ok = sh
             .exec(
