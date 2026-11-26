@@ -328,7 +328,7 @@ fn gate_failed_run_adds_notice_and_queues_one_message_with_last_20_failure_lines
 }
 
 #[test]
-fn ignores_runs_without_request_research_runs_and_unfinished_runs() {
+fn ignores_runs_without_request_and_unfinished_runs() {
     let (repo, base) = init_wt_dir();
     let root = repo.path();
     let now = now_secs();
@@ -347,21 +347,7 @@ fn ignores_runs_without_request_research_runs_and_unfinished_runs() {
         }),
     );
 
-    write_start_file(root, "RES1", Some("req-res"), &base, now + 1, true);
-    write_summary(
-        root,
-        "RES1",
-        &json!({
-            "id": "RES1",
-            "outcome": "verified",
-            "turns": 2,
-            "cost_usd": 0.05,
-            "seconds": 30,
-            "final_message": "research report"
-        }),
-    );
-
-    write_start_file(root, "UNFIN", Some("req-unfin"), &base, now + 2, false);
+    write_start_file(root, "UNFIN", Some("req-unfin"), &base, now + 1, false);
 
     let (surface, prompts) = make_surface(root.to_path_buf());
     report_finished_runs(&surface).unwrap();
@@ -371,7 +357,6 @@ fn ignores_runs_without_request_research_runs_and_unfinished_runs() {
     assert!(!surface.session.info().busy);
     assert!(prompts.lock().unwrap().is_empty());
     assert!(!root.join(".wt/NOREQ.reported.json").exists());
-    assert!(!root.join(".wt/RES1.reported.json").exists());
     assert!(!root.join(".wt/UNFIN.reported.json").exists());
 }
 
@@ -602,4 +587,135 @@ fn report_finished_runs_reports_only_runs_owned_by_this_surface() {
     assert!(!root.join(".wt/RBB.reported.json").exists());
     assert!(!root.join(".wt/RNULL.reported.json").exists());
     assert!(prompts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn verified_research_run_queues_one_message_with_report_path_once() {
+    let (repo, base) = init_wt_dir();
+    let root = repo.path();
+    let now = now_secs();
+
+    write_start_file(root, "RES-OK", Some("req-res-ok"), &base, now, true);
+    write_summary(
+        root,
+        "RES-OK",
+        &json!({
+            "id": "RES-OK",
+            "outcome": "verified",
+            "turns": 8,
+            "cost_usd": 0.25,
+            "seconds": 180,
+            "final_message": "Answered the question.",
+            "gate_failures": []
+        }),
+    );
+
+    let (surface, prompts) = make_surface(root.to_path_buf());
+    report_finished_runs(&surface).unwrap();
+
+    let queued = wait_for_prompts(&prompts, 1);
+    assert_eq!(queued.len(), 1);
+    let msg = &queued[0];
+    assert!(msg.contains("RES-OK"), "{msg}");
+    assert!(msg.contains("verified"), "{msg}");
+    assert!(msg.contains(".wt/RES-OK.report.md"), "{msg}");
+
+    assert!(root.join(".wt/RES-OK.reported.json").exists());
+
+    let entries_before = surface.session.entries_after(0, Duration::ZERO).len();
+    report_finished_runs(&surface).unwrap();
+    assert_eq!(surface.session.info().queued, 0);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+    assert_eq!(
+        surface.session.entries_after(0, Duration::ZERO).len(),
+        entries_before
+    );
+}
+
+#[test]
+fn failed_research_run_queues_one_message_with_outcome_and_log_path_once() {
+    let (repo, base) = init_wt_dir();
+    let root = repo.path();
+    let now = now_secs();
+
+    write_start_file(root, "RES-FAIL", Some("req-res-fail"), &base, now, true);
+    write_summary(
+        root,
+        "RES-FAIL",
+        &json!({
+            "id": "RES-FAIL",
+            "outcome": "budget_exhausted",
+            "turns": 300,
+            "cost_usd": 1.50,
+            "seconds": 1800,
+            "final_message": "Ran out of turns.",
+            "gate_failures": []
+        }),
+    );
+
+    let (surface, prompts) = make_surface(root.to_path_buf());
+    report_finished_runs(&surface).unwrap();
+
+    let queued = wait_for_prompts(&prompts, 1);
+    assert_eq!(queued.len(), 1);
+    let msg = &queued[0];
+    assert!(msg.contains("RES-FAIL"), "{msg}");
+    assert!(msg.contains("budget_exhausted"), "{msg}");
+    assert!(msg.contains(".wt/RES-FAIL.log"), "{msg}");
+    assert!(!msg.contains(".wt/RES-FAIL.report.md"), "{msg}");
+
+    assert!(root.join(".wt/RES-FAIL.reported.json").exists());
+
+    let entries_before = surface.session.entries_after(0, Duration::ZERO).len();
+    report_finished_runs(&surface).unwrap();
+    assert_eq!(surface.session.info().queued, 0);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+    assert_eq!(
+        surface.session.entries_after(0, Duration::ZERO).len(),
+        entries_before
+    );
+}
+
+#[test]
+fn research_run_of_another_surface_produces_no_message() {
+    let (repo, base) = init_wt_dir();
+    let root = repo.path();
+    let now = now_secs();
+
+    let obj = json!({
+        "id": "RES-OTHER",
+        "request": "req-other",
+        "base": "main",
+        "base_sha": base,
+        "started_at": now,
+        "research": true,
+        "surface": "s00000000000000bb",
+    });
+    std::fs::write(
+        root.join(".wt/RES-OTHER.start.json"),
+        serde_json::to_string_pretty(&obj).unwrap() + "\n",
+    )
+    .unwrap();
+    write_summary(
+        root,
+        "RES-OTHER",
+        &json!({
+            "id": "RES-OTHER",
+            "outcome": "verified",
+            "turns": 5,
+            "cost_usd": 0.10,
+            "seconds": 90,
+            "final_message": "Other surface research.",
+            "gate_failures": []
+        }),
+    );
+
+    let (surface, prompts) = make_surface(root.to_path_buf());
+    report_finished_runs(&surface).unwrap();
+
+    assert!(surface.session.entries_after(0, Duration::ZERO).is_empty());
+    assert_eq!(surface.session.info().queued, 0);
+    assert!(!surface.session.info().busy);
+    assert!(prompts.lock().unwrap().is_empty());
+    assert!(!root.join(".wt/RES-OTHER.reported.json").exists());
 }

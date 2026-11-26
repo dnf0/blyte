@@ -66,7 +66,9 @@ Each foreground `blyte` call and shell command times out after 300 s. Calling `b
 {"args": ["dispatch", "T1", ".wt/tasks/T1.md"], "background": true}
 ```
 
-When a run ends, blyte shows the user its report and sends you a message only if it did not pass.
+When a run ends, blyte shows the user its report. For a research run, blyte always sends you a
+message when it ends, naming `.wt/<id>.report.md` if it passed or `.wt/<id>.log` if it did not.
+For an implementer run, blyte sends you a message only if it did not pass.
 
 - `blyte wait --any <ids>` waits until at least one of those runs finishes and prints
   `<id> <outcome> <turns> <cost>` for each finished run, for when you are coordinating split runs
@@ -136,7 +138,9 @@ run: `accepted` (used as it was), `fixed` (used after a change), `redone` (not u
 directory under `.wt/<id>`, reads the repository by absolute path, and cannot change it. It passes
 when it has written a report whose cited lines and quoted code match the files, copied to
 `.wt/<id>.report.md`. The check covers quotes, not conclusions. A report that starts with
-`> **Not verified.**` came from a run that did not pass.
+`> **Not verified.**` came from a run that did not pass. When a research run ends, blyte always
+sends you a message (with `.wt/<id>.report.md` when it passes, or `.wt/<id>.log` when it did not);
+an implementer run messages you only when it did not pass.
 
 - A question has four headed sections, and dispatch warns about one without them (`--research` with
   no file prints the template): `## Objective`, `## Start from`, `## Out of scope`,

@@ -265,3 +265,15 @@ fn default_process_says_when_to_edit_directly() {
         "{DEFAULT_PROCESS}"
     );
 }
+
+#[test]
+fn default_process_gives_five_file_read_rule_for_research() {
+    let normalized = DEFAULT_PROCESS
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized.contains("about five file reads"),
+        "{DEFAULT_PROCESS}"
+    );
+}
