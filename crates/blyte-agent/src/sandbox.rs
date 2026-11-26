@@ -731,6 +731,11 @@ fn git_common_dir(root: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(line))
 }
 
+/// Returns whether `root` is inside a git repository.
+pub fn is_git_repository(root: &Path) -> bool {
+    git_common_dir(root).is_some()
+}
+
 fn canonicalize_or_missing(path: &Path) -> Result<PathBuf, String> {
     match path.canonicalize() {
         Ok(p) => Ok(p),
@@ -862,10 +867,18 @@ pub struct ConversationSandbox {
 /// be removed from the default list.
 pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
     let root_cmp = canonicalize_or_missing(root)?;
-    let main_cmp = main_checkout_root_checked(root)?;
-    let tasks_dir = main_cmp.join(".wt").join("tasks");
+    let common_dir = git_common_dir(root);
+    let is_repo = common_dir.is_some();
+    let main_cmp = match common_dir {
+        Some(ref dir) if dir.file_name() == Some(std::ffi::OsStr::new(".git")) => {
+            match dir.parent() {
+                Some(main_root) => canonicalize_or_missing(main_root)?,
+                None => root_cmp.clone(),
+            }
+        }
+        _ => root_cmp.clone(),
+    };
     let mut raw = vec![
-        tasks_dir,
         PathBuf::from("/private/tmp"),
         PathBuf::from("/private/var/folders"),
         PathBuf::from("/tmp"),
@@ -899,13 +912,12 @@ pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
         }
     }
 
-    let mut allowed = Vec::with_capacity(raw.len() + 1);
+    let mut allowed = Vec::with_capacity(raw.len() + 2);
+    if is_repo {
+        allowed.push(main_cmp.join(".wt").join("tasks"));
+    }
     let mut removed = false;
-    for (idx, entry) in raw.into_iter().enumerate() {
-        if idx == 0 {
-            allowed.push(entry);
-            continue;
-        }
+    for entry in raw {
         let entry_cmp = canonicalize_or_missing(&entry)?;
         if root_cmp.starts_with(&entry_cmp) || main_cmp.starts_with(&entry_cmp) {
             removed = true;
@@ -915,10 +927,41 @@ pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
     }
 
     let (tmpdir, created_tmpdir) = if removed {
-        let private_tmp = root_cmp
-            .join(".wt")
-            .join("tmp")
-            .join(std::process::id().to_string());
+        let private_tmp = if is_repo {
+            root_cmp
+                .join(".wt")
+                .join("tmp")
+                .join(std::process::id().to_string())
+        } else {
+            let mut temp_grants = Vec::new();
+            if let Some(tmp) = std::env::var_os("TMPDIR") {
+                if !tmp.is_empty() {
+                    temp_grants.push(PathBuf::from(tmp));
+                }
+            }
+            temp_grants.push(PathBuf::from("/private/tmp"));
+            temp_grants.push(PathBuf::from("/tmp"));
+            temp_grants.push(PathBuf::from("/var/tmp"));
+
+            let mut chosen = None;
+            for grant in temp_grants {
+                let grant_cmp = canonicalize_or_missing(&grant)?;
+                if root_cmp.starts_with(&grant_cmp) || grant_cmp.starts_with(&root_cmp) {
+                    continue;
+                }
+                if grant_cmp.is_dir() {
+                    chosen = Some(grant_cmp);
+                    break;
+                }
+            }
+            let Some(grant) = chosen else {
+                return Err(format!(
+                    "cannot choose private temp directory for {}: no remaining writable temp directory",
+                    root.display()
+                ));
+            };
+            grant.join(format!("blyte-{}", std::process::id()))
+        };
         let created = create_private_temp_dir(&private_tmp)?;
         allowed.push(private_tmp.clone());
         (Some(private_tmp), created)

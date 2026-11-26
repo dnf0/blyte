@@ -458,7 +458,10 @@ fn blyte_instructions_includes_unsandboxed_and_switches_sandbox_paragraph() {
         !stdout_off.contains("The shell is sandboxed:"),
         "{stdout_off}"
     );
-    assert!(!stdout_off.contains("unsandboxed"), "{stdout_off}");
+    let (before_process, after_process) = stdout_off.split_once("## Process").unwrap();
+    let (_, tool_descriptions) = after_process.split_once("## Tool descriptions").unwrap();
+    assert!(!before_process.contains("unsandboxed"), "{stdout_off}");
+    assert!(!tool_descriptions.contains("unsandboxed"), "{stdout_off}");
 
     let out_global_off = blyte_cmd(root.path(), home.path(), xdg.path())
         .args(["--sandbox", "off", "instructions"])

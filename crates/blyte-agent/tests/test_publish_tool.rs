@@ -66,9 +66,20 @@ impl PublishTool for RecordingPublishTool {
     }
 }
 
+fn git_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+    dir
+}
+
 #[test]
 fn publish_is_not_listed_without_seam_and_listed_with_exact_fields_with_seam() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = git_tempdir();
     {
         let _g = PublishSeamGuard::acquire(None);
         let all = specs();
@@ -126,7 +137,7 @@ fn publish_is_not_listed_without_seam_and_listed_with_exact_fields_with_seam() {
 
 #[test]
 fn publish_refuses_peer_turn_and_invalid_title_or_body() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = git_tempdir();
     let tool = Arc::new(RecordingPublishTool::default());
     let _g = PublishSeamGuard::acquire(Some(tool.clone()));
 

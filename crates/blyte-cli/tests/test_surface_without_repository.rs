@@ -3,9 +3,10 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use blyte_agent::approval::{Approval, Approver};
 use blyte_agent::tools::PeerTools;
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::repl::ReplConfig;
@@ -70,6 +71,8 @@ fn parse_surface_ready_line(line: &str) -> Option<(String, u16, String)> {
     Some((name.to_string(), port, token.to_string()))
 }
 
+static SURFACE_POLICY_LOCK: RwLock<()> = RwLock::new(());
+
 struct RunningSurface {
     name: String,
     port: u16,
@@ -77,6 +80,7 @@ struct RunningSurface {
     stop: Arc<AtomicBool>,
     err_buf: Arc<Mutex<Vec<u8>>>,
     handle: std::thread::JoinHandle<i32>,
+    _policy_guard: std::sync::RwLockReadGuard<'static, ()>,
 }
 
 impl RunningSurface {
@@ -84,11 +88,15 @@ impl RunningSurface {
         self.stop.store(true, Ordering::Relaxed);
         let code = self.handle.join().unwrap();
         let stderr = String::from_utf8_lossy(&self.err_buf.lock().unwrap()).into_owned();
+        drop(self._policy_guard);
         (code, stderr)
     }
 }
 
 fn start_with_hooks(dir: &Path, args: SurfaceArgs) -> RunningSurface {
+    let policy_guard = SURFACE_POLICY_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -103,7 +111,7 @@ fn start_with_hooks(dir: &Path, args: SurfaceArgs) -> RunningSurface {
         let mut opener = |_: &str| {};
         run_with_hooks(&args, cfg, &mut out, &mut err, &mut opener, stop_bg)
     });
-    wait_for_surface(out_buf, err_buf, stop, handle)
+    wait_for_surface(out_buf, err_buf, stop, handle, policy_guard)
 }
 
 fn start_with_runner(
@@ -111,6 +119,9 @@ fn start_with_runner(
     args: SurfaceArgs,
     runner: Box<dyn PromptRunner>,
 ) -> RunningSurface {
+    let policy_guard = SURFACE_POLICY_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -125,7 +136,7 @@ fn start_with_runner(
         let mut opener = |_: &str| {};
         run_with_runner(&args, cfg, &mut out, &mut err, &mut opener, stop_bg, runner)
     });
-    wait_for_surface(out_buf, err_buf, stop, handle)
+    wait_for_surface(out_buf, err_buf, stop, handle, policy_guard)
 }
 
 fn wait_for_surface(
@@ -133,6 +144,7 @@ fn wait_for_surface(
     err_buf: Arc<Mutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<i32>,
+    policy_guard: std::sync::RwLockReadGuard<'static, ()>,
 ) -> RunningSurface {
     let deadline = Instant::now() + Duration::from_secs(5);
     let (name, port, token) = loop {
@@ -154,6 +166,7 @@ fn wait_for_surface(
         stop,
         err_buf,
         handle,
+        _policy_guard: policy_guard,
     }
 }
 
@@ -294,10 +307,24 @@ fn starts_in_a_plain_folder_and_writes_nothing_into_it() {
     assert_eq!(entries, vec!["readme.txt".to_string()]);
 
     let sd = state_dir().unwrap();
-    let store = folder_store(&sd, &folder).unwrap();
-    assert!(store.starts_with(sd.join("folders")));
-    let root_file = std::fs::read_to_string(store.join("root")).unwrap();
-    assert_eq!(PathBuf::from(root_file.trim()), canonical);
+    let folders_dir = sd.join("folders");
+    let mut matched_store = None;
+    for entry in std::fs::read_dir(&folders_dir).unwrap() {
+        let dir = entry.unwrap().path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let root_path = dir.join("root");
+        if !root_path.is_file() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        if Path::new(content.trim()) == canonical {
+            matched_store = Some(dir);
+            break;
+        }
+    }
+    let store = matched_store.expect("expected a folder store with matching root file");
     assert!(store
         .join("surfaces")
         .join(&surface_id)
@@ -308,6 +335,97 @@ fn starts_in_a_plain_folder_and_writes_nothing_into_it() {
         .join(&surface_id)
         .join("entries.jsonl")
         .is_file());
+}
+
+struct RecordingDenyApprover {
+    asked: Mutex<Vec<String>>,
+}
+
+impl Approver for RecordingDenyApprover {
+    fn ask(&self, command: &str, _reason: &str) -> Approval {
+        self.asked.lock().unwrap().push(command.to_string());
+        Approval::Denied
+    }
+}
+
+struct ResetPolicyGuard {
+    private_tmpdir: Option<PathBuf>,
+}
+
+impl Drop for ResetPolicyGuard {
+    fn drop(&mut self) {
+        blyte_agent::tools::set_write_scope(None);
+        blyte_agent::tools::set_approval(None);
+        if let Some(ref dir) = self.private_tmpdir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[test]
+fn a_plain_folder_gets_no_write_scope_over_itself() {
+    let _policy_lock = SURFACE_POLICY_LOCK
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = tmp.path().join("plain-write-scope");
+    std::fs::create_dir_all(&folder).unwrap();
+
+    let approver = Arc::new(RecordingDenyApprover {
+        asked: Mutex::new(Vec::new()),
+    });
+    let policy = blyte_cli::task_runner::configure_converse_policy_with_paths(
+        true,
+        true,
+        &folder,
+        Some(approver.clone()),
+        true,
+    )
+    .expect("configure policy for plain folder");
+    let _reset = ResetPolicyGuard {
+        private_tmpdir: policy.private_tmpdir.clone(),
+    };
+
+    let private_tmpdir = policy
+        .private_tmpdir
+        .as_ref()
+        .expect("plain folder under temp must get a private tmpdir");
+    let scope = blyte_agent::tools::write_scope().expect("write scope set");
+    assert_eq!(scope.edit_worktrees, None);
+    let folder_canon = folder.canonicalize().unwrap();
+    for allowed in &scope.allowed {
+        assert!(
+            !folder_canon.starts_with(allowed),
+            "plain folder {} must not be inside allowed write scope {}",
+            folder_canon.display(),
+            allowed.display()
+        );
+    }
+
+    let fs = blyte_agent::fs::LocalFs;
+    let folder_write = blyte_agent::tools::check_write_scope(&fs, "write", &folder.join("a.txt"));
+    assert!(
+        folder_write.is_err(),
+        "expected approval refusal for plain folder file"
+    );
+    let asked = approver.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1, "expected approval request; got {asked:?}");
+    assert!(asked[0].contains("a.txt"), "asked={asked:?}");
+
+    let tmp_file = private_tmpdir.join("allowed.txt");
+    let tmp_write = blyte_agent::tools::check_write_scope(&fs, "write", &tmp_file);
+    assert!(tmp_write.is_ok(), "unexpected error: {tmp_write:?}");
+    assert_eq!(
+        approver.asked.lock().unwrap().len(),
+        1,
+        "writing in private tmpdir must not ask for approval"
+    );
+
+    let entries: Vec<_> = std::fs::read_dir(&folder).unwrap().collect();
+    assert!(
+        entries.is_empty(),
+        "plain folder must stay empty; found {entries:?}"
+    );
 }
 
 #[test]

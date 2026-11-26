@@ -173,50 +173,31 @@ pub fn configure_converse_policy_with_paths(
             private_tmpdir: None,
         });
     }
-    if !crate::serve::is_repository(root)? {
-        let root_canon = root
-            .canonicalize()
-            .map_err(|e| format!("cannot canonicalize {}: {e}", root.display()))?;
-        blyte_agent::tools::set_write_scope(Some(blyte_agent::tools::WriteScope {
-            allowed: vec![root_canon],
-            edit_worktrees: None,
-        }));
-        let rules = crate::approval_file::load()?;
-        let allowed_count = rules.len();
-        let approver: Arc<dyn blyte_agent::approval::Approver> = match approver {
-            Some(a) => a,
-            None if has_conversation => Arc::new(crate::tty_approver::TtyApprover),
-            None => Arc::new(blyte_agent::approval::NoApprover),
-        };
-        blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
-            rules,
-            approver,
-        }));
-        return Ok(ConversePolicy {
-            allowed_count,
-            private_tmpdir: None,
-        });
-    }
+    let is_repo = crate::serve::is_repository(root)?;
     let paths = blyte_agent::sandbox::conversation_paths(root)?;
     let mut tmp_cleanup = TempDirGuard(if paths.created_tmpdir {
         paths.tmpdir.clone()
     } else {
         None
     });
-    let tasks_dir = blyte_agent::sandbox::conversation_tasks_dir(root);
-    std::fs::create_dir_all(&tasks_dir)
-        .map_err(|e| format!("cannot create {}: {e}", tasks_dir.display()))?;
-    let tasks_canon = tasks_dir
-        .canonicalize()
-        .map_err(|e| format!("cannot canonicalize {}: {e}", tasks_dir.display()))?;
-    let edit_worktrees = tasks_canon
-        .parent()
-        .map(|p| {
-            p.canonicalize()
-                .map_err(|e| format!("cannot canonicalize {}: {e}", p.display()))
-        })
-        .transpose()?;
-    let mut allowed = vec![tasks_canon];
+    let (mut allowed, edit_worktrees) = if is_repo {
+        let tasks_dir = blyte_agent::sandbox::conversation_tasks_dir(root);
+        std::fs::create_dir_all(&tasks_dir)
+            .map_err(|e| format!("cannot create {}: {e}", tasks_dir.display()))?;
+        let tasks_canon = tasks_dir
+            .canonicalize()
+            .map_err(|e| format!("cannot canonicalize {}: {e}", tasks_dir.display()))?;
+        let edit_worktrees = tasks_canon
+            .parent()
+            .map(|p| {
+                p.canonicalize()
+                    .map_err(|e| format!("cannot canonicalize {}: {e}", p.display()))
+            })
+            .transpose()?;
+        (vec![tasks_canon], edit_worktrees)
+    } else {
+        (Vec::new(), None)
+    };
     for dir in paths.allowed {
         match dir.canonicalize() {
             Ok(canon) => {

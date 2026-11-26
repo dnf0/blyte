@@ -255,3 +255,22 @@ fn one_shot_prints_start_lines_and_not_implementer_rules() {
     assert!(stderr.contains("blyte: repository rules: none"), "{stderr}");
     assert!(!stderr.contains("blyte: repository rules from"), "{stderr}");
 }
+
+#[test]
+fn assembled_instructions_explain_working_without_a_git_repository() {
+    let root = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let _guard = XdgGuard::set(xdg.path());
+
+    let built = build(false, Answers::Person, root.path()).unwrap();
+    assert!(
+        built.instructions.contains("git init"),
+        "{}",
+        built.instructions
+    );
+    assert!(
+        built.instructions.contains("not a git repository"),
+        "{}",
+        built.instructions
+    );
+}

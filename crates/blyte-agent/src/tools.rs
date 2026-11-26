@@ -719,7 +719,7 @@ fn append_skipped_line(mut text: String, skipped: usize) -> String {
     text
 }
 
-fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
+pub fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
     let Some(scope) = write_scope() else {
         return Ok(());
     };
@@ -1567,6 +1567,9 @@ fn execute_unbounded(
                     BLYTE_TOOL_COMMANDS.join(", ")
                 ));
             }
+            if !crate::sandbox::is_git_repository(root) {
+                return ToolOutcome::err(NOT_A_GIT_REPOSITORY_ERROR);
+            }
             let background = args
                 .get("background")
                 .and_then(|v| v.as_bool())
@@ -1725,6 +1728,9 @@ fn execute_unbounded(
             let Some(tool) = publish_tool() else {
                 return ToolOutcome::err("the publish tool is not available here");
             };
+            if !crate::sandbox::is_git_repository(root) {
+                return ToolOutcome::err(NOT_A_GIT_REPOSITORY_ERROR);
+            }
             if let Some(started_by) = blyte_started_by() {
                 return ToolOutcome::err(format!(
                     "cannot publish during a turn started by another surface ({started_by})"
@@ -1773,6 +1779,7 @@ fn execute_unbounded(
     }
 }
 
+const NOT_A_GIT_REPOSITORY_ERROR: &str = "this folder is not a git repository, and runs, direct edits and publishing need one. If the user wants that here, ask to run \"git init\" and then a first commit with the bash tool and unsandboxed: true; the user approves each command. Otherwise keep working with read, grep, glob and the shell.";
 const BACKGROUND_STARTUP_WAIT: Duration = Duration::from_secs(2);
 const BACKGROUND_STARTUP_POLL: Duration = Duration::from_millis(50);
 
