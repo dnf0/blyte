@@ -1,3 +1,9 @@
+## v0.68.0 (2026-11-26)
+
+### Feat
+
+- a surface starts in a folder that is not a git repository (#435)
+
 ## v0.67.0 (2026-11-26)
 
 ### Feat
