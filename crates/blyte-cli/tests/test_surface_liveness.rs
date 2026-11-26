@@ -43,7 +43,7 @@ impl HealthListener {
                 let Ok(mut stream) = stream else {
                     break;
                 };
-                accepted_bg.fetch_add(1, Ordering::Relaxed);
+                accepted_bg.fetch_add(1, Ordering::SeqCst);
                 let body = body.clone();
                 workers.push(thread::spawn(move || {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
@@ -80,7 +80,7 @@ impl HealthListener {
     }
 
     fn accepted_count(&self) -> usize {
-        self.accepted.load(Ordering::Relaxed)
+        self.accepted.load(Ordering::SeqCst)
     }
 }
 
@@ -97,6 +97,7 @@ impl Drop for HealthListener {
 struct SilentListener {
     port: u16,
     stop: Arc<AtomicBool>,
+    accepted: Arc<AtomicUsize>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -106,6 +107,8 @@ impl SilentListener {
         let port = listener.local_addr().unwrap().port();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_bg = Arc::clone(&stop);
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_bg = Arc::clone(&accepted);
         let handle = thread::spawn(move || {
             let mut held = Vec::new();
             for stream in listener.incoming() {
@@ -115,6 +118,7 @@ impl SilentListener {
                 let Ok(stream) = stream else {
                     break;
                 };
+                accepted_bg.fetch_add(1, Ordering::SeqCst);
                 held.push(stream);
             }
             drop(held);
@@ -122,8 +126,13 @@ impl SilentListener {
         Self {
             port,
             stop,
+            accepted,
             handle: Some(handle),
         }
+    }
+
+    fn accepted_count(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
     }
 }
 
@@ -183,6 +192,7 @@ fn silent_listener_is_unknown() {
     let result = probe(std::process::id(), silent.port, "abc");
     let elapsed = start.elapsed();
     assert_eq!(result, Liveness::Unknown);
+    assert_eq!(silent.accepted_count(), 2);
     assert!(
         elapsed < Duration::from_secs(6),
         "expected probe to return within 6s, took {elapsed:?}"
@@ -196,6 +206,7 @@ fn slow_answer_is_running() {
         probe(std::process::id(), server.port, "abc"),
         Liveness::Running
     );
+    assert_eq!(server.accepted_count(), 2);
 }
 
 #[test]
