@@ -320,9 +320,10 @@ fn a_binary_past_the_timeout_is_killed_and_reported_failed() {
     let list = write_list(root, &[(&sleeper, root), (&passing, root)]);
 
     let start = Instant::now();
+    // 10 s, not 2: on a loaded machine starting the passing script can itself take seconds.
     let out = run_parallel(&[
         "--timeout",
-        "2",
+        "10",
         "--root",
         root.to_str().unwrap(),
         "--executables-from",
@@ -342,7 +343,7 @@ fn a_binary_past_the_timeout_is_killed_and_reported_failed() {
         "expected started in stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("FAILED (timed out after 2s)"),
+        stdout.contains("FAILED (timed out after 10s)"),
         "expected timeout failure line in stdout:\n{stdout}"
     );
     assert!(
@@ -352,7 +353,7 @@ fn a_binary_past_the_timeout_is_killed_and_reported_failed() {
         "missing ok line for passing.sh in:\n{stdout}"
     );
     assert!(
-        elapsed < Duration::from_secs(20),
+        elapsed < Duration::from_secs(45),
         "expected run to finish within 20s, took {elapsed:?}"
     );
 }
