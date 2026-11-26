@@ -209,11 +209,11 @@ paths or private names in the repository. No new dependencies.
 turn the folder into a repository.
 
 **Depends on:** N1 (both change `crates/blyte-agent/src/tools.rs`); dispatch with
-`--base wip/<N1 run id>` or after N1 is on the branch. **Siblings:** N2 (surface start in
-`crates/blyte-cli/src/serve.rs`) is not in this worktree.
+`--base wip/<N1 run id>` or after N1 is on the branch. N2 is already on the branch.
 
 **Files.** `crates/blyte-agent/src/sandbox.rs`, `crates/blyte-agent/src/tools.rs`,
-`crates/blyte-cli/assets/conversation/process.md`, `reference.md`, tests that quote them, new
+`crates/blyte-cli/assets/conversation/process.md`, `reference.md`, tests that quote them,
+`crates/blyte-cli/src/task_runner.rs`, `crates/blyte-cli/tests/test_surface_without_repository.rs`, new
 `crates/blyte-agent/tests/test_no_repository.rs`.
 
 **What to build.**
@@ -223,9 +223,23 @@ turn the folder into a repository.
   removed as today, and the private temp folder is `<grant>/blyte-<pid>` (mode `0700`) inside
   the first remaining temp grant in the existing order (`$TMPDIR`, then the system temp
   folders); if none remains, return an error that names the root. `created_tmpdir` and removal
-  on exit work as they do now. Callers that create the tasks folder skip it when the root is
-  not a repository (`conversation_tasks_dir` callers in `crates/blyte-cli/src/task_runner.rs`
-  may be changed for this alone).
+  on exit work as they do now.
+- `crates/blyte-cli/src/task_runner.rs`, `configure_converse_policy_with_paths`: N2 added an
+  early return for a non-repository root that sets the write scope to the whole root and
+  returns `private_tmpdir: None`. Remove that early return. The one path through the function
+  calls `conversation_paths(root)` for every root; when the root is not a repository it does
+  not create or add the tasks folder, sets `edit_worktrees: None`, and the write scope's
+  `allowed` is only the canonical `paths.allowed` (never the root itself), so a file-tool write
+  into the folder asks for approval as any write outside the scope does, and
+  `private_tmpdir` is `paths.tmpdir`. No fallbacks: an error from `conversation_paths` is
+  returned, not replaced by a wider scope.
+- In `crates/blyte-cli/tests/test_surface_without_repository.rs`,
+  `starts_in_a_plain_folder_and_writes_nothing_into_it` must read `<state>/folders/*/root`
+  from the directory listing, not through `folder_store` (which creates it). Add
+  `a_plain_folder_gets_no_write_scope_over_itself`: after
+  `configure_converse_policy_with_paths` on a plain folder with the sandbox on,
+  `check_write_scope` (or the public call the other tests use) sends `<folder>/a.txt` to
+  approval, allows a file in the returned private temp folder, and the folder is still empty.
 - The `blyte` tool, for `dispatch`, `wait`, `status`, `review`, `plan`, `init`, `clean`,
   `edit-start`, `edit-finish`, checks first, before creating any file (today a background
   dispatch creates `.wt/<id>.dispatch.out`), and `publish` checks first too; when the root is
