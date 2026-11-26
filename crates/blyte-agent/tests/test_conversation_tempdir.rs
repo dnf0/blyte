@@ -60,6 +60,10 @@ fn conversation_paths_filters_ancestors_and_creates_private_tmpdir() {
         .join(std::process::id().to_string());
 
     assert_eq!(paths.tmpdir.as_ref(), Some(&expected_tmp));
+    assert!(paths.created_tmpdir);
+    let paths_again = conversation_paths(&repo).unwrap();
+    assert_eq!(paths_again.tmpdir.as_ref(), Some(&expected_tmp));
+    assert!(!paths_again.created_tmpdir);
     assert!(expected_tmp.is_dir());
     #[cfg(unix)]
     {
@@ -93,6 +97,7 @@ fn conversation_paths_filters_ancestors_and_creates_private_tmpdir() {
 
     let other_paths = conversation_paths(elsewhere.path()).unwrap();
     assert_eq!(other_paths.tmpdir, None);
+    assert!(!other_paths.created_tmpdir);
     let other_canon = canon(elsewhere.path());
     assert_eq!(other_paths.allowed[0], other_canon.join(".wt/tasks"));
     assert!(other_paths.allowed.contains(&PathBuf::from("/private/tmp")));

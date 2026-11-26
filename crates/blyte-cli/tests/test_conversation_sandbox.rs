@@ -1220,3 +1220,92 @@ fn write_tool_under_temp_dir_asks_for_approval_and_cleans_up_private_tmpdir() {
     blyte_agent::tools::set_write_scope(None);
     blyte_agent::tools::set_approval(None);
 }
+
+#[test]
+fn transient_policy_error_preserves_active_session_private_tmpdir() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root.path())
+        .status()
+        .unwrap()
+        .success());
+    let _env = EnvGuard::set(xdg.path(), home.path());
+
+    let mut session = ReplSession::try_new(&ReplConfig {
+        repo_root: root.path().to_path_buf(),
+        converse: true,
+        sandbox: "on".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let private_tmp = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".wt/tmp")
+        .join(std::process::id().to_string());
+    assert!(private_tmp.is_dir());
+    let sentinel = private_tmp.join("keep.txt");
+    std::fs::write(&sentinel, "active\n").unwrap();
+
+    let bad_approval = xdg.path().join("blyte").join("allow-unsandboxed");
+    std::fs::create_dir_all(&bad_approval).unwrap();
+
+    let cfg = session.task_config_for_prompt("hi");
+    let err = run_task_with_state_and_events(&cfg, &mut session.state, &|_| {}).unwrap_err();
+    assert!(
+        err.contains(&bad_approval.display().to_string()),
+        "expected approval load error, got: {err}"
+    );
+    assert!(
+        private_tmp.is_dir(),
+        "active session private tmpdir {} must survive a transient turn error",
+        private_tmp.display()
+    );
+    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "active\n");
+
+    let fresh_root = tempfile::tempdir().unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(fresh_root.path())
+        .status()
+        .unwrap()
+        .success());
+    let fresh_tmp = fresh_root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".wt/tmp")
+        .join(std::process::id().to_string());
+    let start_err = ReplSession::try_new(&ReplConfig {
+        repo_root: fresh_root.path().to_path_buf(),
+        converse: true,
+        sandbox: "on".to_string(),
+        ..Default::default()
+    })
+    .err()
+    .expect("startup must fail when approval file cannot be read");
+    assert!(
+        start_err.contains(&bad_approval.display().to_string()),
+        "expected approval load error, got: {start_err}"
+    );
+    assert!(
+        !fresh_tmp.exists(),
+        "failed startup must clean up newly created private tmpdir {}",
+        fresh_tmp.display()
+    );
+
+    drop(session);
+    assert!(
+        !private_tmp.exists(),
+        "private tmpdir {} must be removed when the session exits",
+        private_tmp.display()
+    );
+
+    blyte_agent::tools::set_write_scope(None);
+    blyte_agent::tools::set_approval(None);
+}

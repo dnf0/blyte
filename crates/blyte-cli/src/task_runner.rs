@@ -174,7 +174,11 @@ pub fn configure_converse_policy_with_paths(
         });
     }
     let paths = blyte_agent::sandbox::conversation_paths(root)?;
-    let mut tmp_cleanup = TempDirGuard(paths.tmpdir.clone());
+    let mut tmp_cleanup = TempDirGuard(if paths.created_tmpdir {
+        paths.tmpdir.clone()
+    } else {
+        None
+    });
     let tasks_dir = blyte_agent::sandbox::conversation_tasks_dir(root);
     std::fs::create_dir_all(&tasks_dir)
         .map_err(|e| format!("cannot create {}: {e}", tasks_dir.display()))?;

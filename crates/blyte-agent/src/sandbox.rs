@@ -549,7 +549,7 @@ fn main_checkout_root_checked(root: &Path) -> Result<PathBuf, String> {
     canonicalize_or_missing(root)
 }
 
-fn create_private_temp_dir(path: &Path) -> Result<(), String> {
+fn create_private_temp_dir(path: &Path) -> Result<bool, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             format!(
@@ -563,8 +563,8 @@ fn create_private_temp_dir(path: &Path) -> Result<(), String> {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
-        match builder.create(path) {
-            Ok(()) => {}
+        let created = match builder.create(path) {
+            Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let meta = std::fs::metadata(path).map_err(|me| {
                     format!(
@@ -578,6 +578,7 @@ fn create_private_temp_dir(path: &Path) -> Result<(), String> {
                         path.display()
                     ));
                 }
+                false
             }
             Err(e) => {
                 return Err(format!(
@@ -585,24 +586,40 @@ fn create_private_temp_dir(path: &Path) -> Result<(), String> {
                     path.display()
                 ));
             }
-        }
+        };
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
             format!(
                 "cannot set permissions on private temp directory {}: {e}",
                 path.display()
             )
         })?;
+        Ok(created)
     }
     #[cfg(not(unix))]
     {
-        std::fs::create_dir_all(path).map_err(|e| {
-            format!(
+        match std::fs::create_dir(path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = std::fs::metadata(path).map_err(|me| {
+                    format!(
+                        "cannot inspect private temp directory {}: {me}",
+                        path.display()
+                    )
+                })?;
+                if !meta.is_dir() {
+                    return Err(format!(
+                        "cannot create private temp directory {}: path exists and is not a directory",
+                        path.display()
+                    ));
+                }
+                Ok(false)
+            }
+            Err(e) => Err(format!(
                 "cannot create private temp directory {}: {e}",
                 path.display()
-            )
-        })?;
+            )),
+        }
     }
-    Ok(())
 }
 
 /// Returns the `.wt/tasks` directory under the main checkout for `root`.
@@ -616,6 +633,7 @@ pub fn conversation_tasks_dir(root: &Path) -> PathBuf {
 pub struct ConversationPaths {
     pub allowed: Vec<PathBuf>,
     pub tmpdir: Option<PathBuf>,
+    pub created_tmpdir: bool,
 }
 
 /// Sandbox profile and optional private `TMPDIR` for a conversation shell.
@@ -682,19 +700,23 @@ pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
         }
     }
 
-    let tmpdir = if removed {
+    let (tmpdir, created_tmpdir) = if removed {
         let private_tmp = root_cmp
             .join(".wt")
             .join("tmp")
             .join(std::process::id().to_string());
-        create_private_temp_dir(&private_tmp)?;
+        let created = create_private_temp_dir(&private_tmp)?;
         allowed.push(private_tmp.clone());
-        Some(private_tmp)
+        (Some(private_tmp), created)
     } else {
-        None
+        (None, false)
     };
 
-    Ok(ConversationPaths { allowed, tmpdir })
+    Ok(ConversationPaths {
+        allowed,
+        tmpdir,
+        created_tmpdir,
+    })
 }
 
 /// Returns the writable directories allowed for the `--converse` sandboxed shell:
