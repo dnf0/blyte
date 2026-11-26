@@ -90,10 +90,14 @@ fn conversation_allowed_contains_wt_tasks_and_temp_not_root_git_or_wt() {
         allowed.iter().any(|p| canon(p) == tasks_canon),
         "{allowed:?}"
     );
-    assert!(
-        allowed
-            .iter()
-            .any(|p| p == Path::new("/tmp") || p == Path::new("/private/tmp")),
+    // When the checkout itself is under the system temp directory, that directory contains the
+    // repository and must not be writable; anywhere else it stays allowed.
+    let has_system_tmp = allowed
+        .iter()
+        .any(|p| p == Path::new("/tmp") || p == Path::new("/private/tmp"));
+    assert_eq!(
+        has_system_tmp,
+        !root.starts_with("/private/tmp") && !root.starts_with("/tmp"),
         "{allowed:?}"
     );
     assert!(!allowed.iter().any(|p| canon(p) == root), "{allowed:?}");

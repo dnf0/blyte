@@ -96,19 +96,34 @@ fn conversation_paths_filters_ancestors_and_creates_private_tmpdir() {
     );
 
     let other_paths = conversation_paths(elsewhere.path()).unwrap();
-    assert_eq!(other_paths.tmpdir, None);
-    assert!(!other_paths.created_tmpdir);
-    let other_canon = canon(elsewhere.path());
-    assert_eq!(other_paths.allowed[0], other_canon.join(".wt/tasks"));
-    assert!(other_paths.allowed.contains(&PathBuf::from("/private/tmp")));
-    assert!(other_paths
-        .allowed
-        .contains(&PathBuf::from("/private/var/folders")));
-    assert!(other_paths.allowed.contains(&PathBuf::from("/tmp")));
-    assert!(other_paths.allowed.contains(&PathBuf::from("/var/tmp")));
-    assert!(other_paths.allowed.contains(&PathBuf::from("/dev")));
-    assert!(other_paths.allowed.contains(&parent.path().to_path_buf()));
-    assert!(!other_canon.join(".wt/tmp").exists());
+    let other_canon_early = canon(elsewhere.path());
+    if other_canon_early.starts_with("/private/tmp") || other_canon_early.starts_with("/tmp") {
+        // The checkout is under the system temp directory, so this repository is too: it gets
+        // a private temp directory like the first one.
+        assert_eq!(
+            other_paths.tmpdir,
+            Some(
+                other_canon_early
+                    .join(".wt/tmp")
+                    .join(std::process::id().to_string())
+            )
+        );
+        assert!(!other_paths.allowed.contains(&PathBuf::from("/private/tmp")));
+    } else {
+        assert_eq!(other_paths.tmpdir, None);
+        assert!(!other_paths.created_tmpdir);
+        let other_canon = canon(elsewhere.path());
+        assert_eq!(other_paths.allowed[0], other_canon.join(".wt/tasks"));
+        assert!(other_paths.allowed.contains(&PathBuf::from("/private/tmp")));
+        assert!(other_paths
+            .allowed
+            .contains(&PathBuf::from("/private/var/folders")));
+        assert!(other_paths.allowed.contains(&PathBuf::from("/tmp")));
+        assert!(other_paths.allowed.contains(&PathBuf::from("/var/tmp")));
+        assert!(other_paths.allowed.contains(&PathBuf::from("/dev")));
+        assert!(other_paths.allowed.contains(&parent.path().to_path_buf()));
+        assert!(!other_canon.join(".wt/tmp").exists());
+    }
     assert_eq!(
         other_paths.allowed,
         conversation_allowed(elsewhere.path()).unwrap()
