@@ -37,6 +37,7 @@ fn ensure_isolated_state_home() {
     let _ = ISOLATED_STATE.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_STATE_HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
         std::env::set_var("BLYTE_STATE_DIR", dir.path().join("blyte"));
         dir
     });
@@ -364,6 +365,7 @@ impl Drop for ResetPolicyGuard {
 
 #[test]
 fn a_plain_folder_gets_no_write_scope_over_itself() {
+    ensure_isolated_state_home();
     let _policy_lock = SURFACE_POLICY_LOCK
         .write()
         .unwrap_or_else(|e| e.into_inner());

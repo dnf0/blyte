@@ -33,10 +33,17 @@ pub fn build_with_sandbox(
     sandbox_on: bool,
     allowed_in_advance: usize,
 ) -> Result<Built, String> {
+    let sandbox_off_process;
     let (base_reference, default_process) = if dispatch_tool {
         (REFERENCE_DISPATCH_TOOL, None)
-    } else {
+    } else if sandbox_on {
         (REFERENCE, Some(DEFAULT_PROCESS))
+    } else {
+        sandbox_off_process = DEFAULT_PROCESS.replace(
+            "unsandboxed commands the user approves",
+            "commands the user approves",
+        );
+        (REFERENCE, Some(sandbox_off_process.as_str()))
     };
     let sandbox_paragraph = if sandbox_on {
         SANDBOX_ON_PARAGRAPH
