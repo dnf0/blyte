@@ -1,3 +1,9 @@
+## v0.66.1 (2026-11-26)
+
+### Fix
+
+- a reused run id no longer inherits the earlier run's verdict (#431)
+
 ## v0.66.0 (2026-11-25)
 
 ### Feat
