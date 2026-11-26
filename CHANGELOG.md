@@ -1,3 +1,9 @@
+## v0.68.1 (2026-11-26)
+
+### Fix
+
+- the first commit in a new repository is empty, and the Linux test run passes (#437)
+
 ## v0.68.0 (2026-11-26)
 
 ### Feat
