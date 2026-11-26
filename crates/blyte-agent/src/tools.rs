@@ -90,6 +90,37 @@ pub const BLYTE_TOOL_COMMANDS: [&str; 9] = [
     "edit-finish",
 ];
 
+pub const REFUSED_DISPATCH_OPTIONS: [&str; 6] = [
+    "--sandbox",
+    "--network",
+    "--allow-read",
+    "--pass-env",
+    "--gate",
+    "--no-path-check",
+];
+
+pub fn refused_dispatch_option_message(option: &str) -> String {
+    format!("do not pass {option}; only the user can loosen a run's sandbox or replace its checks")
+}
+
+fn refused_dispatch_option(args: &[String]) -> Option<&'static str> {
+    for arg in args.iter().skip(1) {
+        for &opt in &REFUSED_DISPATCH_OPTIONS {
+            if arg == opt
+                || arg
+                    .strip_prefix(opt)
+                    .is_some_and(|rest| rest.starts_with('='))
+            {
+                return Some(opt);
+            }
+        }
+        if arg.starts_with("-g") {
+            return Some("-g");
+        }
+    }
+    None
+}
+
 pub fn set_blyte_request(request: Option<String>) {
     BLYTE_REQUEST.with(|slot| {
         *slot.borrow_mut() = request;
@@ -1440,6 +1471,11 @@ fn execute_unbounded(
                     return ToolOutcome::err(
                         "do not pass --started-by; blyte sets it automatically",
                     );
+                }
+                if first == "dispatch" {
+                    if let Some(opt) = refused_dispatch_option(&cmd_args) {
+                        return ToolOutcome::err(refused_dispatch_option_message(opt));
+                    }
                 }
                 if let Some(req_id) = blyte_request() {
                     if let Some(pos) = exec_args.iter().position(|a| a == "--") {

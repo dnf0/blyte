@@ -1205,3 +1205,170 @@ fn blyte_tool_refuses_a_model_supplied_started_by() {
     );
     assert!(!refused_marker.exists(), "refused command ran executable");
 }
+
+fn assert_dispatch_option_refused(cases: &[serde_json::Value], expected_option: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let refused_marker = root.path().join("sandbox_opt_refused.ran");
+    let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", refused_marker.display()));
+    let _req_reset = RequestReset;
+    let _started_reset = StartedByReset;
+    set_blyte_request(None);
+    set_blyte_surface(None);
+    set_blyte_started_by(None);
+
+    let expected_msg = format!(
+        "do not pass {expected_option}; only the user can loosen a run's sandbox or replace its checks"
+    );
+    for bad_args in cases {
+        let out = execute(root.path(), &LocalShell, &LocalFs, "blyte", bad_args);
+        assert!(out.is_error, "expected error for {bad_args}");
+        assert_eq!(out.content, expected_msg, "unexpected error for {bad_args}");
+    }
+    assert!(!refused_marker.exists(), "refused dispatch ran executable");
+}
+
+#[test]
+fn blyte_tool_refuses_dispatch_sandbox_option() {
+    assert_dispatch_option_refused(
+        &[
+            json!({"args": ["dispatch", "T1", "t.md", "--sandbox", "off"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--sandbox=off"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--sandbox", "on"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--sandbox", "off"], "background": true}),
+        ],
+        "--sandbox",
+    );
+}
+
+#[test]
+fn blyte_tool_refuses_dispatch_network_option() {
+    assert_dispatch_option_refused(
+        &[
+            json!({"args": ["dispatch", "T1", "t.md", "--network", "off"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--network=off"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--network", "on"]}),
+        ],
+        "--network",
+    );
+}
+
+#[test]
+fn blyte_tool_refuses_dispatch_allow_read_option() {
+    assert_dispatch_option_refused(
+        &[
+            json!({"args": ["dispatch", "T1", "t.md", "--allow-read", "/etc"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--allow-read=/etc"]}),
+        ],
+        "--allow-read",
+    );
+}
+
+#[test]
+fn blyte_tool_refuses_dispatch_pass_env_option() {
+    assert_dispatch_option_refused(
+        &[
+            json!({"args": ["dispatch", "T1", "t.md", "--pass-env", "SECRET"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--pass-env=SECRET"]}),
+        ],
+        "--pass-env",
+    );
+}
+
+#[test]
+fn blyte_tool_refuses_dispatch_gate_option() {
+    assert_dispatch_option_refused(
+        &[
+            json!({"args": ["dispatch", "T1", "t.md", "--gate", "true"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--gate=true"]}),
+        ],
+        "--gate",
+    );
+}
+
+#[test]
+fn blyte_tool_refuses_dispatch_short_gate_option() {
+    assert_dispatch_option_refused(
+        &[
+            json!({"args": ["dispatch", "T1", "t.md", "-g", "true"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "-gtrue"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "-g=true"]}),
+        ],
+        "-g",
+    );
+}
+
+#[test]
+fn blyte_tool_refuses_dispatch_no_path_check_option() {
+    assert_dispatch_option_refused(
+        &[
+            json!({"args": ["dispatch", "T1", "t.md", "--no-path-check"]}),
+            json!({"args": ["dispatch", "T1", "t.md", "--no-path-check=true"]}),
+        ],
+        "--no-path-check",
+    );
+}
+
+#[test]
+fn blyte_tool_accepts_model_research_and_other_allowed_dispatch_options() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    let _req_reset = RequestReset;
+    let _started_reset = StartedByReset;
+    set_blyte_request(None);
+    set_blyte_surface(None);
+    set_blyte_started_by(None);
+
+    let out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": ["dispatch", "T1", "t.md", "--model", "x", "--research"]}),
+    );
+    assert!(!out.is_error, "{}", out.content);
+    let lines: Vec<&str> = out.content.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["dispatch", "T1", "t.md", "--model", "x", "--research"]
+    );
+
+    let all_allowed = vec![
+        "dispatch",
+        "T2",
+        "t.md",
+        "--model",
+        "x",
+        "--base",
+        "HEAD",
+        "--plan",
+        "plan.md",
+        "--plan-task",
+        "T2",
+        "--tag",
+        "v1",
+        "--research",
+        "--report-to",
+        "out.md",
+        "--max-seconds",
+        "60",
+        "--max-turns",
+        "10",
+        "--max-cost",
+        "5",
+        "--fold-budget",
+        "1000",
+        "--no-brief-check",
+        "--no-claim-check",
+        "--no-base-check",
+    ];
+    let allowed_out = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "blyte",
+        &json!({"args": all_allowed}),
+    );
+    assert!(!allowed_out.is_error, "{}", allowed_out.content);
+    let allowed_lines: Vec<&str> = allowed_out.content.lines().collect();
+    assert_eq!(allowed_lines, all_allowed);
+}
