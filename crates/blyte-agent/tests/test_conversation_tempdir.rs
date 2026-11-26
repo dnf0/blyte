@@ -166,6 +166,9 @@ fn conversation_paths_removes_symlink_alias_of_real_parent() {
     let under_tmp_canon = canon(under_tmp.path());
     assert!(tmp_paths.tmpdir.is_some());
     assert!(!tmp_paths.allowed.contains(&PathBuf::from("/tmp")));
+    // `/private/tmp` exists only on macOS, where it is what `/tmp` points to; elsewhere it
+    // cannot contain the folder, so nothing removes it and the loop below is the check.
+    #[cfg(target_os = "macos")]
     assert!(!tmp_paths.allowed.contains(&PathBuf::from("/private/tmp")));
     for entry in &tmp_paths.allowed {
         assert!(
