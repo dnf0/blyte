@@ -348,6 +348,28 @@ pub fn surface_message_path_for_id(surface_id: &str) -> Result<PathBuf, String> 
     Ok(dir.join(format!("{surface_id}.message")))
 }
 
+const MAX_SYMLINK_DEPTH: usize = 40;
+
+enum PathPart {
+    Prefix(std::ffi::OsString),
+    RootDir,
+    CurDir,
+    ParentDir,
+    Normal(std::ffi::OsString),
+}
+
+impl From<std::path::Component<'_>> for PathPart {
+    fn from(comp: std::path::Component<'_>) -> Self {
+        match comp {
+            std::path::Component::Prefix(p) => Self::Prefix(p.as_os_str().to_os_string()),
+            std::path::Component::RootDir => Self::RootDir,
+            std::path::Component::CurDir => Self::CurDir,
+            std::path::Component::ParentDir => Self::ParentDir,
+            std::path::Component::Normal(s) => Self::Normal(s.to_os_string()),
+        }
+    }
+}
+
 fn resolve_real_path(path: &Path) -> Result<PathBuf, String> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
@@ -356,35 +378,85 @@ fn resolve_real_path(path: &Path) -> Result<PathBuf, String> {
             .map_err(|e| format!("cannot determine current directory: {e}"))?
             .join(path)
     };
-    let mut probe = abs.as_path();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        match probe.canonicalize() {
-            Ok(mut resolved) => {
-                for part in tail.into_iter().rev() {
-                    resolved.push(part);
-                }
-                return Ok(resolved);
+    match abs.canonicalize() {
+        Ok(resolved) => return Ok(resolved),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
+        Err(e) => return Err(format!("cannot canonicalize {}: {e}", abs.display())),
+    }
+
+    let mut queue: std::collections::VecDeque<PathPart> =
+        abs.components().map(PathPart::from).collect();
+    let mut cur = PathBuf::new();
+    let mut missing = false;
+    let mut symlinks_followed = 0usize;
+
+    while let Some(part) = queue.pop_front() {
+        match part {
+            PathPart::Prefix(p) => cur.push(p),
+            PathPart::RootDir => cur.push(std::path::MAIN_SEPARATOR_STR),
+            PathPart::CurDir => {}
+            PathPart::ParentDir => {
+                cur.pop();
             }
-            Err(e) => {
-                let exists_or_unreadable = match std::fs::symlink_metadata(probe) {
-                    Ok(_) => true,
-                    Err(meta_err) => meta_err.kind() != std::io::ErrorKind::NotFound,
-                };
-                if exists_or_unreadable {
-                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+            PathPart::Normal(name) => {
+                cur.push(&name);
+                if missing {
+                    continue;
                 }
-                let Some(name) = probe.file_name() else {
-                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
-                };
-                tail.push(name.to_os_string());
-                let Some(parent) = probe.parent() else {
-                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
-                };
-                probe = parent;
+                match std::fs::symlink_metadata(&cur) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        symlinks_followed += 1;
+                        if symlinks_followed > MAX_SYMLINK_DEPTH {
+                            return Err(format!(
+                                "cannot canonicalize {}: too many levels of symbolic links",
+                                abs.display()
+                            ));
+                        }
+                        let target = std::fs::read_link(&cur)
+                            .map_err(|e| format!("cannot read link {}: {e}", cur.display()))?;
+                        if target.is_absolute() {
+                            cur.clear();
+                        } else {
+                            cur.pop();
+                        }
+                        for comp in target.components().rev() {
+                            queue.push_front(PathPart::from(comp));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        cur.pop();
+                        if !cur.as_os_str().is_empty() {
+                            cur = cur.canonicalize().map_err(|ce| {
+                                format!("cannot canonicalize {}: {ce}", cur.display())
+                            })?;
+                        }
+                        cur.push(&name);
+                        missing = true;
+                    }
+                    Err(e) => {
+                        return Err(format!("cannot canonicalize {}: {e}", cur.display()));
+                    }
+                }
             }
         }
     }
+
+    if !missing && !cur.as_os_str().is_empty() {
+        if let Ok(resolved) = cur.canonicalize() {
+            return Ok(resolved);
+        }
+    }
+    Ok(cur)
 }
 
 fn resolve_protected_prefix(path: &Path) -> Result<PathBuf, String> {
@@ -455,7 +527,8 @@ pub fn protected_read_paths() -> Result<Vec<PathBuf>, String> {
 
 pub(crate) fn is_protected_read_with(path: &Path, protected: &[PathBuf]) -> Result<bool, String> {
     let real = resolve_real_path(path)?;
-    if real.file_name() == Some(std::ffi::OsStr::new(".env")) {
+    let dot_env = std::ffi::OsStr::new(".env");
+    if path.file_name() == Some(dot_env) || real.file_name() == Some(dot_env) {
         return Ok(true);
     }
     Ok(protected.iter().any(|p| real.starts_with(p)))

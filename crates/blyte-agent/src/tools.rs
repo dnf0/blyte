@@ -1146,10 +1146,12 @@ fn execute_unbounded(
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
-            match crate::sandbox::is_protected_read(&path) {
-                Ok(true) => return ToolOutcome::err(protected_read_refusal("read", &path)),
-                Ok(false) => {}
-                Err(e) => return ToolOutcome::err(e),
+            if fs.is_local() {
+                match crate::sandbox::is_protected_read(&path) {
+                    Ok(true) => return ToolOutcome::err(protected_read_refusal("read", &path)),
+                    Ok(false) => {}
+                    Err(e) => return ToolOutcome::err(e),
+                }
             }
             let body = match fs.read(&path) {
                 Ok(b) => b,

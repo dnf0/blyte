@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use blyte_agent::approval::{Approval, ApprovalConfig, Approver};
-use blyte_agent::fs::LocalFs;
+use blyte_agent::fs::{Fs, LocalFs};
 use blyte_agent::sandbox::{is_protected_read, protected_read_paths, surface_token_path};
 use blyte_agent::shell::LocalShell;
 use blyte_agent::tools::{execute, set_approval, set_read_roots, set_write_scope, WriteScope};
@@ -556,4 +557,254 @@ fn write_into_custom_blyte_state_dir_asks_for_approval() {
     let calls = approver.take_calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].1, "inside blyte's own state or configuration");
+}
+
+#[cfg(unix)]
+#[test]
+fn glob_and_grep_tolerate_dangling_symlinks() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None, None);
+
+    std::fs::write(home.path().join("a.txt"), "NEEDLE_VALUE\n").unwrap();
+    std::os::unix::fs::symlink(
+        "/nonexistent_blyte_target/nowhere",
+        home.path().join("broken_link"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("user@host.12345", home.path().join(".#lock")).unwrap();
+    std::os::unix::fs::symlink(
+        home.path().join(".ssh/missing_key"),
+        home.path().join("broken_ssh"),
+    )
+    .unwrap();
+
+    assert!(!is_protected_read(&home.path().join("broken_link")).unwrap());
+    assert!(!is_protected_read(&home.path().join(".#lock")).unwrap());
+    assert!(is_protected_read(&home.path().join("broken_ssh")).unwrap());
+
+    let shell = LocalShell::new();
+    let fs = LocalFs;
+
+    let glob_out = execute(
+        home.path(),
+        &shell,
+        &fs,
+        "glob",
+        &json!({ "pattern": "**/*" }),
+    );
+    assert!(!glob_out.is_error, "{}", glob_out.content);
+    assert!(glob_out.content.contains("a.txt"), "{}", glob_out.content);
+    assert!(
+        !glob_out.content.contains("broken_ssh"),
+        "{}",
+        glob_out.content
+    );
+    assert!(
+        glob_out.content.contains("(credential paths skipped: 1)"),
+        "{}",
+        glob_out.content
+    );
+
+    let grep_out = execute(
+        home.path(),
+        &shell,
+        &fs,
+        "grep",
+        &json!({ "pattern": "NEEDLE_VALUE" }),
+    );
+    assert!(!grep_out.is_error, "{}", grep_out.content);
+    assert!(grep_out.content.contains("a.txt"), "{}", grep_out.content);
+    assert!(
+        grep_out.content.contains("(credential paths skipped: 1)"),
+        "{}",
+        grep_out.content
+    );
+}
+
+struct FakeRemoteFs {
+    files: HashMap<PathBuf, String>,
+}
+
+impl Fs for FakeRemoteFs {
+    fn read(&self, path: &Path) -> Result<String, String> {
+        self.files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("missing remote file {}", path.display()))
+    }
+
+    fn write(&self, _path: &Path, _content: &str) -> Result<(), String> {
+        Err("read-only".to_string())
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, String> {
+        Ok(path.to_path_buf())
+    }
+}
+
+#[test]
+fn read_with_non_local_fs_does_not_check_host_paths() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None, None);
+
+    std::fs::create_dir_all(home.path().join(".ssh")).unwrap();
+    std::fs::write(home.path().join(".ssh/id_ed25519"), "HOST_SECRET\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(home.path().join("loop_b"), home.path().join("loop_a")).unwrap();
+        std::os::unix::fs::symlink(home.path().join("loop_a"), home.path().join("loop_b")).unwrap();
+    }
+
+    let mut files = HashMap::new();
+    files.insert(
+        home.path().join(".ssh/id_ed25519"),
+        "container ssh content\n".to_string(),
+    );
+    files.insert(
+        home.path().join("loop_a"),
+        "container loop content\n".to_string(),
+    );
+    files.insert(
+        PathBuf::from("/container-only/app.txt"),
+        "container app\n".to_string(),
+    );
+    let remote_fs = FakeRemoteFs { files };
+    let shell = LocalShell::new();
+
+    let out_ssh = execute(
+        home.path(),
+        &shell,
+        &remote_fs,
+        "read",
+        &json!({ "path": ".ssh/id_ed25519" }),
+    );
+    assert!(!out_ssh.is_error, "{}", out_ssh.content);
+    assert!(
+        out_ssh.content.contains("container ssh content"),
+        "{}",
+        out_ssh.content
+    );
+
+    #[cfg(unix)]
+    {
+        let out_loop = execute(
+            home.path(),
+            &shell,
+            &remote_fs,
+            "read",
+            &json!({ "path": "loop_a" }),
+        );
+        assert!(!out_loop.is_error, "{}", out_loop.content);
+        assert!(
+            out_loop.content.contains("container loop content"),
+            "{}",
+            out_loop.content
+        );
+    }
+
+    let out_virtual = execute(
+        Path::new("/container-only"),
+        &shell,
+        &remote_fs,
+        "read",
+        &json!({ "path": "app.txt" }),
+    );
+    assert!(!out_virtual.is_error, "{}", out_virtual.content);
+    assert!(
+        out_virtual.content.contains("container app"),
+        "{}",
+        out_virtual.content
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dot_env_symlink_to_another_filename_is_protected() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None, None);
+
+    std::fs::write(ws.path().join(".env.production"), "PROD_SECRET=123\n").unwrap();
+    std::fs::write(ws.path().join("notes.txt"), "PROD_SECRET=123\n").unwrap();
+    std::os::unix::fs::symlink(ws.path().join(".env.production"), ws.path().join(".env")).unwrap();
+
+    assert!(is_protected_read(&ws.path().join(".env")).unwrap());
+
+    let shell = LocalShell::new();
+    let fs = LocalFs;
+
+    let read_refused = execute(ws.path(), &shell, &fs, "read", &json!({ "path": ".env" }));
+    assert!(read_refused.is_error, "{}", read_refused.content);
+    assert!(
+        read_refused.content.contains("read was not made:"),
+        "{}",
+        read_refused.content
+    );
+    assert!(
+        !read_refused.content.contains("PROD_SECRET"),
+        "{}",
+        read_refused.content
+    );
+
+    let grep_root_refused = execute(
+        ws.path(),
+        &shell,
+        &fs,
+        "grep",
+        &json!({ "pattern": "PROD_SECRET", "path": ".env" }),
+    );
+    assert!(grep_root_refused.is_error, "{}", grep_root_refused.content);
+    assert!(
+        grep_root_refused.content.contains("grep was not made:"),
+        "{}",
+        grep_root_refused.content
+    );
+
+    let glob_out = execute(
+        ws.path(),
+        &shell,
+        &fs,
+        "glob",
+        &json!({ "pattern": "**/*" }),
+    );
+    assert!(!glob_out.is_error, "{}", glob_out.content);
+    assert!(
+        glob_out.content.contains("notes.txt"),
+        "{}",
+        glob_out.content
+    );
+    assert!(
+        !glob_out.content.lines().any(|l| l.trim() == ".env"),
+        "{}",
+        glob_out.content
+    );
+    assert!(
+        glob_out.content.contains("(credential paths skipped: 1)"),
+        "{}",
+        glob_out.content
+    );
+
+    let grep_out = execute(
+        ws.path(),
+        &shell,
+        &fs,
+        "grep",
+        &json!({ "pattern": "PROD_SECRET" }),
+    );
+    assert!(!grep_out.is_error, "{}", grep_out.content);
+    assert!(
+        grep_out.content.contains("notes.txt"),
+        "{}",
+        grep_out.content
+    );
+    assert!(
+        !grep_out.content.contains("./.env:"),
+        "{}",
+        grep_out.content
+    );
+    assert!(
+        grep_out.content.contains("(credential paths skipped: 1)"),
+        "{}",
+        grep_out.content
+    );
 }
