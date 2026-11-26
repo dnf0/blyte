@@ -25,9 +25,11 @@ credentials, deployment or other repositories.
 
 This folder may not be a git repository. When it is not a git repository, there are no runs, direct
 edits or publishing, and files in it are read-only without approval. To work with runs there, ask to
-run `git init` and a first commit (`git add -A && git commit -m "chore: first commit"`) as
+run `git init` and an empty first commit (`git commit --allow-empty -m "chore: first commit"`) as
 unsandboxed commands the user approves, and only when the user wants the folder to become a
-repository, never in the user's home folder without their saying so.
+repository, never in the user's home folder without their saying so. After that, add only the
+files the user names, never `git add -A` or `git add .`: the folder may hold credentials and
+private files.
 
 ### Direct edits
 

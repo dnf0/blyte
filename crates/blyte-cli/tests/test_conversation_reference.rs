@@ -160,6 +160,8 @@ fn check_flags(text: &str, cli: &clap::Command) -> Vec<String> {
                     }
                 }
             }
+            // A `git ...` snippet names git's own flags, not blyte's.
+            Snippet::Backtick(s) if s.starts_with("git ") => {}
             Snippet::Backtick(s) if !s.contains("blyte") => {
                 for flag in extract_flags(s) {
                     if !all_sub_flags.contains(&flag) {

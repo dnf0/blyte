@@ -1779,7 +1779,7 @@ fn execute_unbounded(
     }
 }
 
-const NOT_A_GIT_REPOSITORY_ERROR: &str = "this folder is not a git repository, and runs, direct edits and publishing need one. If the user wants that here, ask to run \"git init\" and then a first commit with the bash tool and unsandboxed: true; the user approves each command. Otherwise keep working with read, grep, glob and the shell.";
+const NOT_A_GIT_REPOSITORY_ERROR: &str = "this folder is not a git repository, and runs, direct edits and publishing need one. If the user wants that here, ask to run \"git init\" and then an empty first commit (git commit --allow-empty) with the bash tool and unsandboxed: true; the user approves each command. Add only the files the user names afterwards, never \"git add -A\": the folder may hold credentials. Otherwise keep working with read, grep, glob and the shell.";
 const BACKGROUND_STARTUP_WAIT: Duration = Duration::from_secs(2);
 const BACKGROUND_STARTUP_POLL: Duration = Duration::from_millis(50);
 
