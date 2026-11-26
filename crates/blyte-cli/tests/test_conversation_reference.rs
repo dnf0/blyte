@@ -284,3 +284,26 @@ fn default_process_gives_five_file_read_rule_for_research() {
         "{DEFAULT_PROCESS}"
     );
 }
+
+#[test]
+fn instructions_describe_publish_tool_instead_of_no_command() {
+    assert!(DEFAULT_PROCESS.contains("`publish`"), "{DEFAULT_PROCESS}");
+    assert!(REFERENCE.contains("`publish`"), "{REFERENCE}");
+    assert!(
+        !DEFAULT_PROCESS.contains("You have no command for either"),
+        "{DEFAULT_PROCESS}"
+    );
+    assert!(
+        !REFERENCE.contains("You have no command for either"),
+        "{REFERENCE}"
+    );
+    let normalized_process = DEFAULT_PROCESS
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized_process
+            .contains("Do not say a request is combined, pushed or merged unless blyte said so."),
+        "{DEFAULT_PROCESS}"
+    );
+}
