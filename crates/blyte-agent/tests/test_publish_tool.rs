@@ -96,7 +96,15 @@ fn publish_is_not_listed_without_seam_and_listed_with_exact_fields_with_seam() {
         let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
         keys.sort();
         assert_eq!(keys, vec!["body", "request", "title"]);
-        assert_eq!(publish.parameters["additionalProperties"], json!(false));
+        // Gemini rejects a tool whose parameters carry `additionalProperties` (400 on every
+        // turn), so no listed tool may have it; unknown fields are refused when the tool runs.
+        for tool in &all {
+            assert!(
+                !tool.parameters.to_string().contains("additionalProperties"),
+                "{} must not declare additionalProperties",
+                tool.name
+            );
+        }
 
         let extra = execute(
             dir.path(),

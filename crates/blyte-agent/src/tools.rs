@@ -997,8 +997,7 @@ pub fn specs() -> Vec<ToolSpec> {
                         "description": "Pull request body"
                     }
                 },
-                "required": ["request", "title", "body"],
-                "additionalProperties": false
+                "required": ["request", "title", "body"]
             }),
         });
     }
