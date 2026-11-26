@@ -209,7 +209,12 @@ pub(crate) fn glob_paths_checked(
         let candidate = root.join(pattern);
         match std::fs::symlink_metadata(&candidate) {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
                 return Ok(Some(SearchOutput {
                     hits: Vec::new(),
                     skipped: 0,
@@ -242,7 +247,12 @@ pub(crate) fn glob_paths_checked(
         .fold(root.to_path_buf(), |p, c| p.join(c));
     match std::fs::symlink_metadata(&base) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
             return Ok(Some(SearchOutput {
                 hits: Vec::new(),
                 skipped: 0,

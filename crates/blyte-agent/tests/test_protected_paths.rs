@@ -808,3 +808,21 @@ fn dot_env_symlink_to_another_filename_is_protected() {
         grep_out.content
     );
 }
+
+#[test]
+fn a_regular_file_where_a_credential_folder_would_be_does_not_break_reads() {
+    // `~/.docker` as a regular file makes `~/.docker/config.json` "not a directory"; that must
+    // count as a path that does not exist, not as an error that refuses every read.
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".docker"), "x").unwrap();
+    std::fs::write(home.path().join("notes.txt"), "hello").unwrap();
+    let old = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+    let got = blyte_agent::sandbox::is_protected_read(&home.path().join("notes.txt"));
+    match old {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    assert_eq!(got, Ok(false));
+}

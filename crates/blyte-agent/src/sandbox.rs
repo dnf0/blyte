@@ -480,7 +480,9 @@ fn resolve_protected_prefix(path: &Path) -> Result<PathBuf, String> {
             Err(e)
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::NotADirectory
+                        | std::io::ErrorKind::PermissionDenied
                 ) =>
             {
                 let Some(name) = probe.file_name() else {
